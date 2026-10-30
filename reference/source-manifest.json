@@ -1,0 +1,67 @@
+{
+  "files": [
+    {
+      "path": "src-tauri/src/lyra/provider.rs",
+      "sha256": "7EE92C855ABAFF3B9779D557B39F10BA47EC3265EBCF5361A2E34B52DA4C42A3"
+    },
+    {
+      "path": "src-tauri/src/lyra/config.rs",
+      "sha256": "028DE4A99FAFA9B949973AE4EB88017F67D3988AB68D11EA9296E28F1933D4F1"
+    },
+    {
+      "path": "src-tauri/src/lyra/response_state.rs",
+      "sha256": "166AC7EE9820D93C1C781ACC5B370EEA610F79CA03AE030CAB148349C0454E07"
+    },
+    {
+      "path": "src-tauri/src/lyra/local_auth.rs",
+      "sha256": "DAA10D79081032EDB05E33734F4D7C9B60A0F8E20D3378251522C1C0A3874D68"
+    },
+    {
+      "path": "src-tauri/src/lyra/local_provider.rs",
+      "sha256": "0C6813A437EAB2D56D12D4AE5612D6EE6C8819BD6CC2A1888407FEFB912BC58B"
+    },
+    {
+      "path": "src-tauri/src/lyra/codebuddy_provider.rs",
+      "sha256": "B10351F78CC505D46D782CACBB41C03F049B2747F854B59BDB5CE8E840C402A3"
+    },
+    {
+      "path": "src-tauri/src/lyra/devin_provider.rs",
+      "sha256": "4BBEF4813D3274F0BF2AFA63FED54E38A2F03FD5B4A1B041B76E84C98C42155A"
+    },
+    {
+      "path": "src-tauri/src/lyra/scene.rs",
+      "sha256": "0EEDD9A08E1F3C4894E6FCBE4E4D892ACA5432F1079BB30DBB4CE04CA8ACC3CB"
+    },
+    {
+      "path": "src-tauri/src/lyra/turn.rs",
+      "sha256": "F74B633BAE164B633504B4125DE2AAE86F5E96C7A239213C767FAA4B2CCB0A38"
+    },
+    {
+      "path": "src-tauri/src/native_browser.rs",
+      "sha256": "5C891D5B8222BEEEBD270AC86C94280388872A90C987D9EFCBC2157EE489B24E"
+    },
+    {
+      "path": "src-tauri/src/chrome_browser.rs",
+      "sha256": "4B8DDD356A6B9EC2F99BE0148F07084F1CFBECEB3BFA82B1A56A24631117C888"
+    },
+    {
+      "path": "src-tauri/src/tool_experience.rs",
+      "sha256": "A204AF86623D3261D0A8F232D7C2B561CEF753F1AC03EBFDED1CA9EFDCEA155B"
+    },
+    {
+      "path": "src-tauri/src/altair_run.rs",
+      "sha256": "15949F398A4D118E02D12C18C07DED943E18D707E9EF85CB018DBAD8F62942D6"
+    },
+    {
+      "path": "src-tauri/src/employee.rs",
+      "sha256": "FBC71EC0C2298548388318B3D143C4A5F68A2F6DA702706D4DAC19F8FEFBF6FA"
+    },
+    {
+      "path": "src-tauri/src/vault.rs",
+      "sha256": "D5BC2703AC95F15CB9CC093E8F91CBB12994BE9410A3CB7F3FEEBCAB51C831A2"
+    }
+  ],
+  "commit": "70435a97747086c0e4517d9116b6f6ccd59b15e0",
+  "source": "D:\\code\\nova-client-master",
+  "backup": "D:\\code\\vega-go-backup-20261030-202628"
+}

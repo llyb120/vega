@@ -1,0 +1,74 @@
+{
+  "purpose": "Lyra mechanism gap audit; implementation notes in parity-audit.md",
+  "commit": "70435a97747086c0e4517d9116b6f6ccd59b15e0",
+  "files": [
+    {
+      "sha256": "46396435888F877BAFFE0F1A0DEF8D983E169ABB42710CCFC90E9BBD033D3C08",
+      "path": "src-tauri/src/lyra/context/acp.rs"
+    },
+    {
+      "sha256": "3A9F965FB446F1D4B89E3548A41CDCBE0AF3B9FB8FE9EB0CDC86739DCEF27DBF",
+      "path": "src-tauri/src/lyra/context.rs"
+    },
+    {
+      "sha256": "F74B633BAE164B633504B4125DE2AAE86F5E96C7A239213C767FAA4B2CCB0A38",
+      "path": "src-tauri/src/lyra/turn.rs"
+    },
+    {
+      "sha256": "EF7E62F7FE729CA5334DC953B8D924A405F1C43BB3009340C039B4318A17ADE8",
+      "path": "src-tauri/src/lyra/history.rs"
+    },
+    {
+      "sha256": "34E428E15794CDADA2A05222A96DA498A9342BC9F2D10B37829AE29A5E99DD2E",
+      "path": "src-tauri/src/lyra/tokens.rs"
+    },
+    {
+      "sha256": "0EEDD9A08E1F3C4894E6FCBE4E4D892ACA5432F1079BB30DBB4CE04CA8ACC3CB",
+      "path": "src-tauri/src/lyra/scene.rs"
+    },
+    {
+      "sha256": "2E0BC88CE42227FA3AF411118B3046C21AC28330D01A5C6A6325A6C5F73EDECF",
+      "path": "src-tauri/src/lyra/rollout.rs"
+    },
+    {
+      "sha256": "1A716350E3E3B125B1ABE2DFFC9B8E4FC6B0158D5E73BFC949F20043FAA88EB0",
+      "path": "src-tauri/src/lyra/runtime.rs"
+    },
+    {
+      "sha256": "77A9F413089E468E7C3FBE04ACF160D6793A1A5359724AB904D637FA600157E0",
+      "path": "src-tauri/src/lyra/prompt.rs"
+    },
+    {
+      "sha256": "028DE4A99FAFA9B949973AE4EB88017F67D3988AB68D11EA9296E28F1933D4F1",
+      "path": "src-tauri/src/lyra/config.rs"
+    },
+    {
+      "sha256": "7EE92C855ABAFF3B9779D557B39F10BA47EC3265EBCF5361A2E34B52DA4C42A3",
+      "path": "src-tauri/src/lyra/provider.rs"
+    },
+    {
+      "sha256": "8B734453CF531B7001CF8C207A3FA74CE5B652E5019A6077EFD065C20616D88E",
+      "path": "src-tauri/src/lyra/read.rs"
+    },
+    {
+      "sha256": "8815CBE54EDD4F5C47418035CF8ECEA1A38F9DDE2F0F0C67706FB67CC3DD8F11",
+      "path": "src-tauri/src/lyra/edit.rs"
+    },
+    {
+      "sha256": "E3A25607BED4DB37004904587D2CA8A0D2E820A88F8D48445FF800F0CEEBA6DD",
+      "path": "src-tauri/src/lyra/mcp.rs"
+    },
+    {
+      "sha256": "2C2087A9BA1786DA98D0D43B3B2CB18067B9DB954563293F49E4A8C69F2D9814",
+      "path": "src-tauri/src/skills.rs"
+    },
+    {
+      "sha256": "4D00D2E1096209889D65AB54D74EDC7EDD032300B249EC80C3DBBB2CA3641033",
+      "path": "src/builtinPrompts.ts"
+    },
+    {
+      "sha256": "4A706CA1FC7757B91D92A58A847A6C81DF47BD0D97D635397CB6638B1B4E1C98",
+      "path": "src/store.ts"
+    }
+  ]
+}

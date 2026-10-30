@@ -1,0 +1,46 @@
+[
+  {
+    "path": "server/assets/browser/browser-page.js",
+    "sha256": "1C88D701E46ED4C59BB50DDC8CF1859F60B81F97EF22137B208902A17A2ECBB6"
+  },
+  {
+    "path": "shared/chrome-tool.json",
+    "sha256": "AF1A953D0EED9366CF3CFFB774196DC8F8FE07314DF7CC5CB48F7D4BC7A70663"
+  },
+  {
+    "path": "shared/employee-tool.json",
+    "sha256": "034C29424451F26299ED7ED74534BCB1D1770C94B174632EC0FA673DBFC6ED02"
+  },
+  {
+    "path": "shared/image-tools.json",
+    "sha256": "4AFC090621484B2262B8F9E4A6B14179CCE614576F980646AFB77BA9384733A5"
+  },
+  {
+    "path": "shared/agent-tools.json",
+    "sha256": "A3A6FB5B29BC7B8073B099070D409223ECAF489F2DE4FFDB8038CCD366B7F1FA"
+  },
+  {
+    "path": "scripts/workbuddy-login.cjs",
+    "sha256": "31C488CA6F528F786C2FDD1FB8997CC46B492065B91AD8E514FDD803F1D9E4EF"
+  },
+  {
+    "path": "extensions/nova-chrome/worker.js",
+    "sha256": "FF5799A9D968B2B39B14A162304FBF6783F82716572F2A8DFAD82142F19A0A2E"
+  },
+  {
+    "path": "extensions/nova-chrome/content.js",
+    "sha256": "580B8FCCE2E7A68AD3D8B1336E96DAC114ECF1B4399C52F46D14EAA12AA0EB5D"
+  },
+  {
+    "path": "extensions/nova-chrome/manifest.json",
+    "sha256": "DC8351DB86A1A31C3E08B657FC3C5C1F1E416CA3974B4D25ABDEEA4FEF2E7A33"
+  },
+  {
+    "path": "extensions/nova-chrome/popup.js",
+    "sha256": "14DE006E0D5DA426B69E8430B76B058405726BFDB90389231AC9F927736DF53C"
+  },
+  {
+    "path": "extensions/nova-chrome/popup.html",
+    "sha256": "8E8B08F68AF61996BBC82E06C5AEF0472A7CF0CE1427BE5E93AF0B30DE279CCA"
+  }
+]

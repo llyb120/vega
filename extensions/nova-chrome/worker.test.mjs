@@ -1,0 +1,354 @@
+import {test,afterEach} from 'node:test';
+const timers=new Set();
+const setTimeout=(fn,ms,...args)=>{const timer=globalThis.setTimeout(fn,ms,...args);timers.add(timer);return timer;};
+const clearTimeout=timer=>{timers.delete(timer);globalThis.clearTimeout(timer);};
+afterEach(()=>{for(const timer of timers)globalThis.clearTimeout(timer);timers.clear();});
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {runInNewContext} from 'node:vm';
+import {webcrypto} from 'node:crypto';
+
+test('native downloads expose progress, interruption and completion without tab guesses or replay',async()=>{
+  const event=()=>({addListener(){}});let query,calls=0;
+  let item={id:42,url:'blob:https://example.com/export',filename:'C:/Downloads/报告.csv',state:'in_progress',bytesReceived:0,totalBytes:-1,incognito:false};
+  const chrome={downloads:{search:async q=>{query=q;calls++;return [item];}},
+    storage:{session:{get:async()=>({}),set:async()=>{}}},tabs:{query:async()=>[],onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{onEvent:event(),onDetach:event()},runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async()=>{throw Error('offline');}};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+'\nglobalThis.run=args=>execute({operation:"downloads",args,expiresAt:Date.now()+3000});',scope);
+  const first=await scope.run({since:0});
+  assert.equal(first.scope,'browser');assert.equal(first.downloads[0].state,'in_progress');assert.equal(first.downloads[0].totalBytes,-1);
+  assert.equal(query.startedAfter,'1970-01-01T00:00:00.000Z');assert.equal(query.limit,100);
+  item={...item,state:'interrupted',bytesReceived:512,error:'NETWORK_FAILED',canResume:true};
+  const failed=await scope.run({downloadId:'42',since:-1});
+  assert.equal(query.id,42);assert.equal(query.startedAfter,undefined);assert.equal(failed.downloads[0].error,'NETWORK_FAILED');
+  item={...item,state:'complete',bytesReceived:1024,totalBytes:1024,error:undefined,exists:true};
+  const done=await scope.run({downloadId:'42'});assert.equal(done.downloads[0].state,'complete');assert.equal(done.downloads[0].path,item.filename);assert.equal(done.downloads[0].error,null);
+  assert.equal((await scope.run({incognito:true})).downloads.length,0);
+  for(const args of [{since:-1},{since:'1'},{since:8640000000000001},{downloadId:'oops'},{downloadId:'9007199254740992'},{incognito:'true'}])await assert.rejects(scope.run(args));
+  assert.equal(calls,4,'invalid inputs must not query or trigger downloads');
+  delete chrome.downloads;await assert.rejects(scope.run({}),/0\.1\.6/);
+  const schema=JSON.parse(await readFile(new URL('../../shared/chrome-tool.json',import.meta.url),'utf8'));
+  assert.ok(schema.inputSchema.properties.operation.enum.includes('downloads'));
+  assert.ok(schema.inputSchema.properties.operation.enum.includes('devtools'));
+  assert.match(schema.description,/Ctrl\+C.*TSV/);
+  assert.equal(schema.inputSchema.properties.downloadId.type,'string');
+  assert.match(done.notice,/state=complete/);
+});
+
+test('screenshots reveal a minimized window or background tab instead of hanging',async()=>{
+  const event=()=>({addListener(){}});const calls=[];
+  let win={id:5,state:'minimized'};const tab={id:11,windowId:5,url:'https://example.com',active:false};
+  const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},
+    tabs:{query:async()=>[tab],get:async()=>({...tab}),update:async(id,props)=>{calls.push(['tab',id,props]);Object.assign(tab,props);},onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    windows:{get:async()=>({...win}),update:async(id,props)=>{calls.push(['window',id,props]);win={...win,...props};}},
+    debugger:{attach:async()=>{},sendCommand:async(_t,method)=>{calls.push(['cdp',method]);return {data:'png'};},onEvent:event(),onDetach:event()},
+    runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async()=>{throw Error('offline');}};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+
+    '\nglobalThis.run=async method=>execute({operation:"cdp",args:{tabTag:(await inventory())[0].tag,method},expiresAt:Date.now()+3000});',scope);
+  assert.equal((await scope.run('Page.captureScreenshot')).data,'png');
+  // JSON compare: objects created inside the vm context have a different prototype.
+  assert.equal(JSON.stringify(calls),JSON.stringify([['window',5,{state:'normal'}],['tab',11,{active:true}],['cdp','Page.captureScreenshot']]));
+  calls.length=0;await scope.run('Page.captureScreenshot');await scope.run('Runtime.evaluate');
+  assert.equal(JSON.stringify(calls),JSON.stringify([['cdp','Page.captureScreenshot'],['cdp','Runtime.evaluate']]),'visible tabs and other commands are left alone');
+});
+
+test('devtools records console replay, exceptions and network, filters, fetches bodies and resets on detach',async()=>{
+  const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);},emit(...args){for(const fn of this.listeners)fn(...args);}});
+  const tab={id:11,windowId:5,url:'https://example.com',active:true};const sent=[];
+  const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},
+    tabs:{query:async()=>[tab],get:async()=>({...tab}),onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{attach:async()=>{},sendCommand:async(target,method,params)=>{
+      sent.push(method);
+      const emit=(m,p)=>chrome.debugger.onEvent.emit({tabId:11},m,p);
+      if(method==='Runtime.enable')emit('Runtime.consoleAPICalled',{type:'log',args:[{type:'string',value:'old'},{type:'object',preview:{properties:[{name:'a',value:'1'}]}}],timestamp:1});
+      if(method==='Network.getResponseBody')return {body:'{"ok":1}',base64Encoded:false};
+      return {};
+    },onEvent:event(),onDetach:event()},
+    runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async()=>{throw Error('offline');}};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+
+    '\nglobalThis.run=async devtools=>execute({operation:"devtools",args:{tabTag:(await inventory())[0].tag,devtools},expiresAt:Date.now()+3000});',scope);
+  const first=await scope.run();
+  assert.equal(first.console.items[0].text,'old {a: 1}','console history replayed by Runtime.enable');
+  assert.equal(first.network.total,0);
+  const emit=(m,p,source={tabId:11})=>chrome.debugger.onEvent.emit(source,m,p);
+  emit('Runtime.exceptionThrown',{timestamp:2,exceptionDetails:{text:'Uncaught',exception:{description:'TypeError: x'},url:'https://example.com/a.js',lineNumber:9}});
+  emit('Network.requestWillBeSent',{requestId:'r1',request:{method:'POST',url:'https://example.com/api',postData:'q=1'},type:'XHR',timestamp:10,wallTime:1000});
+  emit('Network.responseReceived',{requestId:'r1',type:'XHR',response:{status:500,statusText:'Err',mimeType:'application/json'}});
+  emit('Network.loadingFinished',{requestId:'r1',timestamp:10.25,encodedDataLength:7});
+  emit('Network.requestWillBeSent',{requestId:'r2',request:{method:'GET',url:'https://example.com/ok.png'},type:'Image',timestamp:11,wallTime:1001});
+  emit('Runtime.consoleAPICalled',{type:'log',args:[{type:'string',value:'iframe'}],timestamp:3},{tabId:11,sessionId:'child'});
+  const errors=await scope.run({level:'error'});
+  assert.equal(errors.console.items.length,1);assert.equal(errors.console.items[0].text,'TypeError: x');assert.equal(errors.console.items[0].line,10);
+  assert.equal(errors.network.items.length,1);assert.equal(errors.network.items[0].status,500);assert.equal(errors.network.items[0].durationMs,250);assert.equal(errors.network.items[0].postData,'q=1');
+  assert.equal((await scope.run({kind:'network',query:'png'})).network.items[0].requestId,'r2');
+  assert.equal((await scope.run({kind:'network'})).console,undefined);
+  assert.equal((await scope.run({requestId:'r1'})).body,'{"ok":1}');
+  await assert.rejects(scope.run({requestId:'missing'}),/requestId/);
+  for(const bad of [{kind:'dom'},{limit:0},{query:1},[]])await assert.rejects(scope.run(bad));
+  assert.equal(sent.filter(m=>m.endsWith('.enable')).length,3,'domains are enabled once per debugger session');
+  assert.equal((await scope.run({clear:true})).console.total,2);
+  assert.equal((await scope.run()).console.total,0);
+  chrome.debugger.onDetach.emit({tabId:11});await scope.run();
+  assert.equal(sent.filter(m=>m.endsWith('.enable')).length,6,'re-enabled after detach');
+});
+
+test('a stuck debugger command times out, polling resumes and late results are not replayed',async()=>{
+  const event=()=>({addListener(){}});
+  const replies=[]; let polls=0, calls=0, finishCommand;
+  const chrome={
+    extension:{isAllowedIncognitoAccess:async()=>false},
+    storage:{session:{get:async()=>({}),set:async()=>{}}},
+    tabs:{query:async()=>[{id:11,url:'https://example.com',active:true}],get:async()=>({id:11}),onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{attach:async()=>{},sendCommand:()=>{calls++;return new Promise(resolve=>{finishCommand=resolve;});},onDetach:event(),onEvent:event()},
+    runtime:{id:'test',onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()},
+  };
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async(url,options)=>{
+    const endpoint=new URL(url);
+    if(endpoint.port!=='47653')throw Error('offline');
+    if(endpoint.pathname==='/pair')return {ok:true,json:async()=>({token:'t'.repeat(32)})};
+    if(endpoint.pathname==='/reply'){replies.push(JSON.parse(options.body));return {ok:true};}
+    if(polls++>=2)return new Promise(()=>{});
+    const [tab]=await scope.api.inventory();
+    const command=polls===1
+      ? {id:'stuck',operation:'cdp',args:{tabTag:tab.tag,method:'Runtime.evaluate'},expiresAt:Date.now()+50}
+      : {id:'next',operation:'tabs',args:{},expiresAt:Date.now()+3000};
+    return {ok:true,json:async()=>({command})};
+  }};
+  const source=await readFile(new URL('./worker.js',import.meta.url),'utf8');
+  runInNewContext(source+'\nglobalThis.api={inventory,debuggerCall};',scope);
+  for(let i=0;i<100 && replies.length<2;i++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(replies.length,2,'a hung debugger must not stop polling or block the shared queue');
+  assert.match(replies[0].error,/响应超时.*不要重放/);
+  assert.equal(replies[1].result.tabs.length,1);
+  finishCommand({late:true});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls,1);
+  assert.equal(replies.length,2,'late completion cannot send another reply');
+  let slowCalls=0;
+  assert.equal(await scope.api.debuggerCall({expiresAt:Date.now()+10000},async()=>{
+    slowCalls++;await new Promise(resolve=>setTimeout(resolve,3100));return 'ready';
+  }),'ready');
+  assert.equal(slowCalls,1,'a busy renderer reply must not require resending');
+});
+
+test('navigation target events identify noopener children without scanning active tabs',async()=>{
+  const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);},emit(...args){for(const fn of this.listeners)fn(...args);}});
+  const tabs=[{id:11,windowId:5,url:'https://example.com/source',active:true}];
+  const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},
+    tabs:{query:async()=>tabs,onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    webNavigation:{onCreatedNavigationTarget:event()},debugger:{onEvent:event(),onDetach:event()},
+    runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async()=>{throw Error('offline');}};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+'\nglobalThis.api={inventory};',scope);
+  const [source]=await scope.api.inventory();
+  chrome.webNavigation.onCreatedNavigationTarget.emit({tabId:22,sourceTabId:11,sourceFrameId:0,url:'https://example.com/child'});
+  tabs.push({id:22,windowId:5,url:'https://example.com/child',active:true}); // rel=noopener: no openerTabId.
+  const child=(await scope.api.inventory()).find(tab=>tab.tag!==source.tag);
+  assert.equal(child.openerTag,source.tag);
+  const manifest=JSON.parse(await readFile(new URL('./manifest.json',import.meta.url),'utf8'));
+  assert.ok(manifest.permissions.includes('webNavigation'));
+});
+
+test('stable tags, default access, auto-attached frames, expiry and worker restart',async()=>{
+  const persisted={};let nativeCalls=[];const discovery=[];
+  let tabs=[{id:11,url:'https://example.com/a',title:'A',active:true},{id:22,url:'https://example.org/b',title:'B',active:false}];
+  const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);},emit(...args){for(const fn of this.listeners)fn(...args);}});
+  const chrome={
+    extension:{isAllowedIncognitoAccess:async()=>false},
+    storage:{session:{get:async()=>structuredClone(persisted),set:async v=>Object.assign(persisted,structuredClone(v))},local:{set:async()=>{},get:async()=>({})}},
+    tabs:{query:async filter=>structuredClone(filter?.active?tabs.filter(t=>t.active):tabs),get:async id=>{const tab=tabs.find(t=>t.id===id);if(!tab)throw Error('closed');return tab;},onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{attach:async target=>nativeCalls.push(['attach',target.tabId]),detach:async()=>{},sendCommand:async(target,method)=>{
+      nativeCalls.push([method,target.tabId]);
+      if(['Target.getTargets','Target.attachToTarget'].includes(method))throw Error('{"code":-32000,"message":"Not allowed"}');
+      if(method==='Target.setAutoAttach' && target.sessionId!=='child-2'){
+        const n=target.sessionId?2:1;
+        chrome.debugger.onEvent.emit(target,'Target.attachedToTarget',{sessionId:`child-${n}`,targetInfo:{targetId:`frame-${n}`,type:'iframe'}});
+      }
+      return {};
+    },onDetach:event(),onEvent:event()},
+    runtime:{id:'test',getURL:p=>p,onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()},
+  };
+  const source=await readFile(new URL('./worker.js',import.meta.url),'utf8');
+  const start=()=>{
+    const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async url=>{discovery.push(url);throw Error('offline');}};
+    runInNewContext(source+'\nglobalThis.api={inventory,execute,resolveTag};',scope);return scope.api;
+  };
+  const api=start();const initial=await api.inventory();
+  assert.notEqual(initial[0].tag,initial[1].tag);
+  const command=(tag,extra={})=>({operation:'cdp',args:{tabTag:tag,method:'Input.insertText',params:{text:'test'}},expiresAt:Date.now()+3000,...extra});
+  await assert.rejects(api.execute(command(undefined)),/tabTag/);
+  await api.execute(command(initial[0].tag));
+  // Legacy denied flags must not restrict access after upgrading.
+  persisted.model.tabs[11].allowed=false;
+  const restarted=start();
+  tabs[0].active=false;tabs[1].active=true;tabs[0].url='https://example.com/next';
+  assert.equal((await restarted.inventory())[0].tag,initial[0].tag);
+  await restarted.execute(command(initial[0].tag));
+  const cdp=(method,params={})=>restarted.execute({...command(initial[0].tag),args:{tabTag:initial[0].tag,method,params}});
+  const frames=await cdp('Target.getTargets');
+  assert.equal(frames.targetInfos.length,2);
+  assert.equal((await cdp('Target.attachToTarget',{targetId:'frame-2'})).sessionId,'child-2');
+  assert.ok(!nativeCalls.some(([method])=>['Target.getTargets','Target.attachToTarget'].includes(method)));
+  await assert.rejects(cdp('Target.attachToTarget',{targetId:'unrelated-frame'}),/重新观察/);
+  const popup=await new Promise(resolve=>chrome.runtime.onMessage.listeners.at(-1)({type:'status'},{id:'test'},resolve));
+  assert.equal(popup.tab.tag,initial[1].tag);
+  assert.equal('tabs' in popup,false,'Popup only exposes the active tab');
+  assert.ok(nativeCalls.every(([,id])=>id===11),'Never operate on the newly active tab');
+  const count=nativeCalls.length;
+  await assert.rejects(restarted.execute(command(initial[0].tag,{expiresAt:0})),/过期/);
+  assert.equal(nativeCalls.length,count);
+  tabs=tabs.filter(t=>t.id!==11);await restarted.inventory();
+  await assert.rejects(restarted.execute(command(initial[0].tag)),/失效/);
+  assert.ok(discovery.length>0,'Discover Nova without a bundled config or user setup');
+  assert.deepEqual([...new Set(discovery)].sort(),Array.from({length:10},(_,i)=>`http://127.0.0.1:${47653+i}/pair`));
+});
+
+test('multiple Nova instances route replies independently, serialize commands and reconnect without replay',async()=>{
+  const event=()=>({addListener(){}});
+  const replies=[], pairs=new Map(), polls=new Map();
+  const available=new Set([47653,47654]);
+  let active=0, peak=0, attaches=0;
+  const chrome={
+    extension:{isAllowedIncognitoAccess:async()=>false},
+    storage:{session:{get:async()=>({}),set:async()=>{}}},
+    tabs:{query:async()=>[{id:11,url:'https://example.com',active:true}],get:async()=>({id:11}),onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{attach:async()=>{attaches++;},sendCommand:async(_target,_method,params)=>{
+      peak=Math.max(peak,++active);
+      await new Promise(resolve=>setImmediate(resolve));
+      active--; return {text:params.text};
+    },onDetach:event(),onEvent:event()},
+    runtime:{id:'test',onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()},
+  };
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async(url,options)=>{
+    const endpoint=new URL(url),port=Number(endpoint.port);
+    if(!available.has(port))throw Error('offline');
+    if(endpoint.pathname==='/pair'){
+      pairs.set(port,(pairs.get(port)||0)+1);
+      return {ok:true,json:async()=>({token:String(port).repeat(8),origin:'http://127.0.0.1:1'})};
+    }
+    assert.equal(options.headers.Authorization,`Bearer ${String(port).repeat(8)}`);
+    if(endpoint.pathname==='/poll'){
+      const count=polls.get(port)||0;polls.set(port,count+1);
+      if(count)return new Promise(()=>{});
+      const [tab]=await scope.api.inventory();
+      return {ok:true,json:async()=>({command:{id:'same-id',operation:'cdp',args:{tabTag:tab.tag,method:'Input.insertText',params:{text:String(port)}},expiresAt:Date.now()+3000}})};
+    }
+    const reply=JSON.parse(options.body);
+    replies.push({port,reply});
+    if(port===47653)throw Error('reply connection lost');
+    return {ok:true};
+  }};
+  const source=await readFile(new URL('./worker.js',import.meta.url),'utf8');
+  runInNewContext(source+'\nglobalThis.api={inventory,loop,connections};',scope);
+  const waitFor=async predicate=>{
+    for(let i=0;i<100 && !predicate();i++)await new Promise(resolve=>setTimeout(resolve,5));
+    assert.ok(predicate());
+  };
+  await waitFor(()=>replies.length===2 && scope.api.connections.size===1);
+  for(const {port,reply} of replies){assert.equal(reply.result.text,String(port));assert.equal(reply.id,'same-id');}
+  assert.equal(attaches,1,'shared tab is attached once');
+  assert.equal(peak,1,'commands from separate instances cannot race a debugger attachment');
+  assert.ok(scope.api.connections.has('http://127.0.0.1:47654'),'a failed instance does not disconnect the other');
+  available.add(47655);
+  scope.api.loop();scope.api.loop();
+  await waitFor(()=>replies.length===3);
+  assert.equal(pairs.get(47653),2,'failed instance is discovered again');
+  assert.equal(pairs.get(47654),1,'live poll is not duplicated');
+  assert.equal(pairs.get(47655),1,'new instance is discovered while another is connected');
+  assert.equal(replies.filter(value=>value.port===47653).length,1,'failed delivery is never replayed');
+});
+
+test('after a reload Nova still holds the old clientId: retry soon instead of waiting for the alarm',async()=>{
+  const event=()=>({addListener(){}});let polls=0;
+  const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},tabs:{query:async()=>[],onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{onEvent:event(),onDetach:event()},runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,clearTimeout,setTimeout:(fn,ms)=>setTimeout(fn,ms===5000?1:ms),fetch:async(url)=>{
+    const endpoint=new URL(url);
+    if(endpoint.port!=='47653')throw Error('offline');
+    if(endpoint.pathname==='/pair')return {ok:true,json:async()=>({token:'t'.repeat(32)})};
+    if(++polls<=2)return {ok:false,status:409};
+    return new Promise(()=>{});
+  }};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+'\nglobalThis.api={connections};',scope);
+  for(let i=0;i<100 && polls<3;i++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(polls,3,'409 conflicts are retried without an alarm');
+});
+
+test('incognito permission, window isolation and tab filtering',async()=>{
+  const event=()=>({addListener(){}});let allowed=false,created=[],reloads=0;
+  let tabs=[{id:1,windowId:10,url:'https://example.com',incognito:false}];
+  const chrome={extension:{isAllowedIncognitoAccess:async()=>allowed},
+    storage:{session:{get:async()=>({}),set:async()=>{}}},
+    tabs:{query:async()=>tabs,get:async id=>tabs.find(t=>t.id===id),create:async args=>{created.push(args);return tabs[0];},onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    windows:{getAll:async()=>[{id:20,incognito:true},{id:10,incognito:false}],create:async args=>{created.push(args);const tab={id:2,windowId:20,url:args.url,incognito:args.incognito};tabs.push(tab);return {id:20,tabs:[tab]};}},
+    debugger:{onEvent:event(),onDetach:event()},runtime:{onMessage:event(),onInstalled:event(),onStartup:event(),reload:()=>reloads++},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async()=>{throw Error('offline');}};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+'\nglobalThis.api={execute};',scope);
+  const run=(operation,args={})=>scope.api.execute({operation,args,expiresAt:Date.now()+3000});
+  assert.equal((await run('status')).incognitoAllowed,false);
+  assert.equal((await run('reload',{extension:true})).reloading,true);
+  assert.equal(reloads,0,'reply first, reload after');
+  await new Promise(resolve=>setTimeout(resolve,400));
+  assert.equal(reloads,1);
+  await assert.rejects(run('open',{url:'https://example.com',incognito:true}),/允许在无痕/);
+  assert.equal(created.length,0);
+  allowed=true;
+  const opened=await run('open',{url:'https://example.com',incognito:true});
+  assert.ok(opened.tabTag);assert.equal(created[0].incognito,true);
+  const privateTabs=await run('tabs',{incognito:true});assert.equal(privateTabs.tabs.length,1);assert.equal(privateTabs.tabs[0].incognito,true);
+  await run('new_tab',{url:'https://example.org',incognito:false});assert.equal(created[1].windowId,10);
+  await assert.rejects(run('open',{incognito:'true'}),/boolean/);
+});
+
+test('miniapp launches carry the sender tab stable tag, never an active or message-provided target',async()=>{
+  const event=()=>({addListener(){}}), posts=[];
+  const source={id:11,url:'https://example.com/work/1',title:'Work',active:false};
+  let tabs=[source,{id:22,url:source.url,title:source.title,active:true}];
+  const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},tabs:{query:async()=>tabs,onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{onEvent:event(),onDetach:event()},runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async()=>{throw Error('offline');}};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+'\nglobalThis.api={inventory,launchMiniapp,instances};',scope);
+  const initial=await scope.api.inventory();
+  scope.api.instances.set('fixture',async(path,body)=>{posts.push({path,body});return {ok:true};});
+  const message={origin:'fixture',appId:'app',tabTag:initial[1].tag,url:'https://wrong.example/'};
+  await scope.api.launchMiniapp(message,source);
+  await scope.api.launchMiniapp(message,source);
+  assert.equal(posts.length,2);
+  for(const {path,body} of posts){
+    assert.equal(path,'/miniapp/launch');
+    assert.equal(body.tabTag,initial[0].tag);
+    assert.equal(body.url,source.url);
+    assert.equal(body.title,source.title);
+  }
+  tabs=tabs.filter(tab=>tab.id!==source.id);
+  await assert.rejects(scope.api.launchMiniapp(message,source),/标签页已关闭/);
+  assert.equal(posts.length,2,'a disappeared source must not fall back to its same-URL sibling');
+});
+
+test('miniapp page patterns match the whole URL with * as the only wildcard',async()=>{
+  const event=()=>({addListener(){}});
+  const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},tabs:{query:async()=>[],onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{onEvent:event(),onDetach:event()},runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async()=>{throw Error('offline');}};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+'\nglobalThis.match=globMatch;',scope);
+  assert.ok(scope.match('https://github.com/*/pull/*','https://github.com/a/b/pull/1?x=1'));
+  assert.ok(scope.match('*://example.com/*','http://example.com/'));
+  assert.ok(!scope.match('https://github.com/*/pull/*','https://github.com/a/b/issues/1'));
+  assert.ok(!scope.match('https://a.com/x.y','https://a.com/xzy'),'dots are literal');
+  assert.ok(!scope.match('https://a.com/','https://a.com/?evil'),'no implicit prefix match');
+});
+
+test('self-reload only targets a numerically newer Nova-bundled version',async()=>{
+  const event=()=>({addListener(){}});
+  const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},tabs:{query:async()=>[],onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{onEvent:event(),onDetach:event()},runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async()=>{throw Error('offline');}};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+'\nglobalThis.newer=newer;',scope);
+  assert.equal(scope.newer('0.1.12','0.1.11'),true);
+  assert.equal(scope.newer('0.1.10','0.1.9'),true,'numeric, not string, comparison');
+  assert.equal(scope.newer('0.1.11','0.1.11'),false);
+  assert.equal(scope.newer('0.1.9','0.1.10'),false,'an older Nova never downgrades the extension');
+});

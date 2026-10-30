@@ -1,0 +1,11 @@
+# Active implementation
+node_modules/
+.output/
+.nitro/
+.tmp/
+web/dist/
+*.db
+*.db-wal
+*.db-shm
+*.log
+.env

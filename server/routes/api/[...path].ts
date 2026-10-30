@@ -1,0 +1,371 @@
+import { readFile, stat } from "node:fs/promises";
+import { importSkill, materializeSkill } from "../../core/skills";
+import { skillMetadata } from "../../core/prompt";
+import {
+  defineEventHandler,
+  getRequestURL,
+  readBody,
+  createError,
+  setHeader,
+  send,
+  sendStream,
+} from "h3";
+import { PassThrough } from "node:stream";
+import { app } from "../../core/application";
+import { assert, object, type Obj } from "../../core/util";
+import { parseStage, Context } from "../../core/context";
+import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
+import presets from "../../../shared/provider-presets.json";
+async function inputMessage(a: Obj) {
+  assert(
+    typeof a.text === "string" || Array.isArray(a.images),
+    "Message required",
+  );
+  assert((a.text || "").trim() || a.images?.length, "Empty message");
+  assert(
+    (a.text || "").length <= 2 << 20 && (!a.images || a.images.length <= 16),
+    "Message too large",
+  );
+  let total = 0;
+  for (const image of a.images || []) {
+    assert(
+      [
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+      ].includes(image.mime) && typeof image.data === "string",
+      "Invalid image",
+    );
+    const data = Buffer.from(image.data, "base64");
+    total += data.length;
+    assert(
+      data.length <= 25 << 20 && total <= 64 << 20,
+      "Image attachment limit exceeded",
+    );
+  }
+  return { role: "user", text: a.text || "", images: a.images || [] };
+}
+export default defineEventHandler(async (event) => {
+  const { store, engine } = app(),
+    method = event.method,
+    path = getRequestURL(event)
+      .pathname.replace(/^\/api\/?/, "")
+      .split("/")
+      .filter(Boolean);
+  let a: Obj = {};
+  if (["POST", "PUT", "PATCH"].includes(method)) {
+    const length = Number(event.node.req.headers["content-length"] || 0);
+    assert(!length || length <= 90 << 20, "Request body too large");
+    let size = 0;
+    const chunks: Buffer[] = [];
+    for await (const chunk of event.node.req) {
+      size += chunk.length;
+      assert(size <= 90 << 20, "Request body too large");
+      chunks.push(Buffer.from(chunk));
+    }
+    a = object(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"));
+  }
+  try {
+    if (path[0] === "bootstrap" && method === "GET")
+      return {
+        sessions: store.sessions(),
+        running: Object.fromEntries(
+          [...engine.active.keys()].map((id) => [id, true]),
+        ),
+        config: maskedConfig(engine.config()),
+        cwd: process.cwd(),
+        stack: {
+          frontend: "Vue 3.6 Vapor",
+          backend: "Nitro",
+          storage: "SQLite",
+        },
+      };
+    if (path[0] === "events" && method === "GET") {
+      setHeader(event, "Content-Type", "text/event-stream");
+      setHeader(event, "Cache-Control", "no-cache");
+      setHeader(event, "X-Accel-Buffering", "no");
+      const stream = new PassThrough(),
+        listener = (value: any) => {
+          if (!stream.destroyed)
+            stream.write("data: " + JSON.stringify(value) + "\n\n");
+        };
+      engine.events.on("event", listener);
+      stream.write(": connected\n\n");
+      const timer = setInterval(() => stream.write(": heartbeat\n\n"), 15000);
+      const close = () => {
+        clearInterval(timer);
+        engine.events.off("event", listener);
+        stream.destroy();
+      };
+      event.node.res.once("close", close);
+      return sendStream(event, stream);
+    }
+    if (path[0] === "blobs" && method === "GET") {
+      const blob = store.blobData(path[1]);
+      assert(blob, "Blob not found");
+      setHeader(event, "Content-Type", blob.mime);
+      return send(event, Buffer.from(blob.data));
+    }
+    if (path[0] === "sessions") {
+      if (path.length === 1 && method === "POST") {
+        assert(!a.model || typeof a.model === "string", "Invalid model");
+        if (a.model) await engine.catalog.resolve(engine.config(), a.model);
+        return store.newSession({
+          cwd: a.cwd,
+          model: a.model,
+          title: a.title,
+          readOnly: a.readOnly === true,
+        });
+      }
+      const key = path[1],
+        session = store.session(key);
+      if (path.length === 2 && method === "GET")
+        return {
+          session,
+          messages: store.messages(key),
+          folds: engine.store.db
+            .prepare("SELECT data FROM folds WHERE session=?")
+            .all(key)
+            .map((r: any) => JSON.parse(r.data)),
+          fire: engine.fire.forSession(key),
+          running: engine.active.has(key),
+          context: new Context(
+            store,
+            key,
+            engine.config().contextMode === "acp" ? "acp" : "auto",
+          ).status(),
+        };
+      if (path.length === 2 && method === "DELETE") {
+        assert(
+          !engine.active.has(key) &&
+            engine.fire.forSession(key)?.status !== "running" &&
+            !session.taskId,
+          "Cannot delete running or employee-owned session",
+        );
+        store.deleteSession(key);
+        await engine.releaseSession(key);
+        return { ok: true };
+      }
+      if (path[2] === "stage" && method === "POST")
+        return store.stage(key, a.inheritModel === true);
+      if (path[2] === "cancel" && method === "POST") {
+        engine.fire.pause(key);
+        engine.cancel(key);
+        return { ok: true };
+      }
+      if (["messages", "steer"].includes(path[2]) && method === "POST") {
+        assert(!session.taskId, "Use employee controls to resume tasks");
+        const message = await inputMessage(a);
+        if (path[2] === "steer") {
+          engine.steer(key, message);
+          return { ok: true };
+        }
+        if (
+          path[2] === "messages" &&
+          /^\s*\/fire(?:\s|$)/i.test(message.text)
+        ) {
+          assert(!engine.active.has(key), "Session already running");
+          return engine.fire.start(key, message.text, message.images);
+        }
+        if (
+          path[2] === "messages" &&
+          /^\s*\/target(?:\s|$)/i.test(message.text)
+        )
+          throw Error("/target must be used inside /fire");
+        if (path[2] === "messages" && engine.fire.resume(key, message))
+          return { id: key, fire: engine.fire.forSession(key) };
+        const stage = parseStage(message.text);
+        let target = key;
+        if (stage) {
+          assert(
+            !message.images?.length,
+            "/stage does not support attachments",
+          );
+          if (stage.current)
+            await engine.launch(key, { ...message, text: stage.current });
+          target = store.stage(key).id;
+          message.text = stage.prompt;
+        }
+        await engine.launch(target, message);
+        return { id: target };
+      }
+      if (path[2] === "rename" && method === "POST") {
+        assert(
+          typeof a.title === "string" &&
+            a.title.trim() &&
+            a.title.length <= 200,
+          "Title required",
+        );
+        session.title = a.title;
+        store.saveSession(session);
+        return { ok: true };
+      }
+      if (path[2] === "fork" && method === "POST") {
+        assert(
+          !engine.active.has(key),
+          "Wait until the session stops before forking",
+        );
+        return store.fork(key);
+      }
+    }
+    if (path[0] === "config" && method === "PUT")
+      return engine.saveConfig(a as any);
+    if (path[0] === "providers") {
+      if (path[1] === "presets") return presets;
+      if (path[1] === "models")
+        return engine.catalog.list(
+          engine.config(),
+          a.force === true ||
+            getRequestURL(event).searchParams.get("force") === "true",
+        );
+      if (path[1] === "login") {
+        if (a.action === "start")
+          return engine.catalog.auth.loginStart(a.source, a.site);
+        if (a.action === "poll")
+          return {
+            complete: await engine.catalog.auth.loginPoll(
+              a.source,
+              a.state,
+              a.pasted,
+            ),
+          };
+        if (a.action === "logout") {
+          engine.catalog.auth.logout(a.source);
+          return { ok: true };
+        }
+        if (a.action === "status") {
+          try {
+            await engine.catalog.auth.load(a.source, store.get("paths", {}));
+            return { available: true };
+          } catch (e: any) {
+            return { available: false, reason: e.message };
+          }
+        }
+        throw Error("Unknown subscription action");
+      }
+      if (path[1] === "import" && method === "POST") {
+        const cfg = engine.config(),
+          key = a.id || a.source;
+        assert(
+          [
+            "codex",
+            "claude-code",
+            "codebuddy",
+            "workbuddy",
+            "devin",
+            "server-support",
+          ].includes(a.source),
+          "Unknown local source",
+        );
+        const preset =
+          a.source === "codex"
+            ? "local-codex"
+            : a.source === "claude-code"
+              ? "local-claude-code"
+              : a.source;
+        const p = await engine.catalog.provider({ preset, models: {} }, cfg);
+        const dynamic = await engine.catalog.models(p, true);
+        const first =
+          Object.keys(dynamic.models)[0] || Object.keys(p.models)[0];
+        assert(first, "No usable models in provider catalog");
+        cfg.provider ??= {};
+        cfg.provider[key] = { preset, models: {} };
+        if (!cfg.model) cfg.model = key + "/" + first;
+        store.put("config", cfg);
+        return {
+          config: maskedConfig(cfg),
+          models: await engine.catalog.list(cfg),
+        };
+      }
+      if (path[1] === "paths" && method === "PUT") {
+        store.put("paths", {
+          workbuddyPath: a.workbuddyPath || "",
+          devinPath: a.devinPath || "",
+        });
+        return { ok: true };
+      }
+    }
+    if (path[0] === "skills") {
+      if (method === "GET") {
+        const rows = [];
+        for (const skill of store.objects<any>("skill"))
+          rows.push({
+            id: skill.id,
+            name: skill.name,
+            description: skill.description,
+            ...(await materializeSkill(store, skill)),
+            files: skill.assets?.map((a: Obj) => a.path) || ["SKILL.md"],
+          });
+        return rows;
+      }
+      if (method === "DELETE") {
+        assert(path[1], "Skill id required");
+        store.remove("skill", path[1]);
+        return { ok: true };
+      }
+      if (method === "POST") {
+        assert(typeof a.path === "string" && a.path, "Skill path required");
+        return importSkill(store, a.path, a.id, a.replace === true);
+      }
+    }
+    if (path[0] === "employee") {
+      if (method === "GET")
+        return {
+          ...engine.employee.state(),
+          systemPresence: engine.employee.nativePresence,
+          busy: [...engine.employee.busy.keys()],
+          takeovers: [...engine.employee.takeovers].map(([id, v]) => ({
+            id,
+            ...v,
+          })),
+        };
+      if (path[1] === "control") return engine.employee.control(a);
+      if (path[1] === "takeover") {
+        engine.employee.takeover(a);
+        return { ok: true };
+      }
+      if (path[1] === "activity") {
+        engine.employee.lastActivity = Date.now() - (Number(a.idleMs) || 0);
+        engine.employee.locked = a.locked === true;
+        engine.employee.schedule();
+        return { ok: true };
+      }
+      if (path[1] === "transcript")
+        return engine.employee.transcript(a.threadId);
+      const out = await engine.employee.execute("", a);
+      return out.secret ? JSON.parse(out.secret) : out.value;
+    }
+    if (path[0] === "chrome") {
+      if (path[1] === "tool")
+        return engine.chrome.execute("user-ui", a.cwd || process.cwd(), a);
+      if (a.operation === "close") {
+        engine.chrome.bridge.close();
+        return { ok: true };
+      }
+      await engine.chrome.bridge.start();
+      return engine.chrome.bridge.status();
+    }
+    if (path[0] === "experiences" && method === "GET")
+      return engine.chrome.experiences.graph(
+        engine.chrome.experiences.all().filter((e) => !e.disabled),
+      );
+    if (path[0] === "team") {
+      if (path[1] === "call")
+        return engine.relay.call(a.peer, a.command, a.args || {});
+      return { connected: engine.relay.connected, peers: engine.relay.peers };
+    }
+    throw createError({
+      statusCode: 404,
+      statusMessage: "API route not found",
+    });
+  } catch (e: any) {
+    if (e.statusCode) throw e;
+    throw createError({
+      statusCode: 400,
+      statusMessage: String(e.message).slice(0, 1000),
+      data: { error: e.message },
+    });
+  }
+});

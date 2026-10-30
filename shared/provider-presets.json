@@ -1,0 +1,182 @@
+[
+  {
+    "baseURL": "",
+    "modelsDev": false,
+    "name": "server support",
+    "id": "server-support"
+  },
+  {
+    "baseURL": "",
+    "modelsDev": false,
+    "name": "本地 Codex",
+    "id": "local-codex"
+  },
+  {
+    "baseURL": "",
+    "modelsDev": false,
+    "name": "本地 Claude Code",
+    "id": "local-claude-code"
+  },
+  {
+    "baseURL": "",
+    "modelsDev": false,
+    "name": "Devin（本地 API）",
+    "id": "devin"
+  },
+  {
+    "baseURL": "",
+    "modelsDev": false,
+    "name": "CodeBuddy（本地 API）",
+    "id": "codebuddy"
+  },
+  {
+    "baseURL": "",
+    "modelsDev": false,
+    "name": "WorkBuddy（本地 API）",
+    "id": "workbuddy"
+  },
+  {
+    "baseURL": "https://api.commandcode.ai/provider/v1",
+    "modelsDev": false,
+    "name": "Command Code",
+    "id": "commandcode"
+  },
+  {
+    "baseURL": "https://amr-link.open-design.ai/v1",
+    "modelsDev": false,
+    "name": "OpenDesign",
+    "id": "opendesign"
+  },
+  {
+    "baseURL": "https://opencode.ai/zen/v1",
+    "modelsDev": true,
+    "name": "OpenCode Zen",
+    "id": "opencode"
+  },
+  {
+    "baseURL": "https://opencode.ai/zen/go/v1",
+    "modelsDev": true,
+    "name": "OpenCode Go",
+    "id": "opencode-go"
+  },
+  {
+    "baseURL": "https://api.deepseek.com",
+    "modelsDev": true,
+    "name": "DeepSeek",
+    "id": "deepseek"
+  },
+  {
+    "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+    "modelsDev": true,
+    "name": "智谱 GLM",
+    "id": "zhipuai"
+  },
+  {
+    "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4",
+    "modelsDev": true,
+    "name": "智谱 GLM Coding Plan",
+    "id": "zhipuai-coding-plan"
+  },
+  {
+    "baseURL": "https://api.z.ai/api/paas/v4",
+    "modelsDev": true,
+    "name": "Z.AI",
+    "id": "zai"
+  },
+  {
+    "baseURL": "https://api.z.ai/api/coding/paas/v4",
+    "modelsDev": true,
+    "name": "Z.AI Coding Plan",
+    "id": "zai-coding-plan"
+  },
+  {
+    "baseURL": "https://api.moonshot.cn/v1",
+    "modelsDev": true,
+    "name": "Kimi（Moonshot）",
+    "id": "moonshotai-cn"
+  },
+  {
+    "baseURL": "https://api.moonshot.ai/v1",
+    "modelsDev": true,
+    "name": "Kimi（Moonshot 国际）",
+    "id": "moonshotai"
+  },
+  {
+    "baseURL": "https://api.kimi.com/coding/v1",
+    "modelsDev": true,
+    "name": "Kimi For Coding",
+    "id": "kimi-code-plan-cn"
+  },
+  {
+    "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "modelsDev": true,
+    "name": "阿里云百炼",
+    "id": "alibaba-cn"
+  },
+  {
+    "baseURL": "https://coding.dashscope.aliyuncs.com/v1",
+    "modelsDev": true,
+    "name": "阿里云百炼 Coding Plan",
+    "id": "alibaba-coding-plan-cn"
+  },
+  {
+    "baseURL": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "modelsDev": true,
+    "name": "阿里云百炼（国际）",
+    "id": "alibaba"
+  },
+  {
+    "baseURL": "https://api.lkeap.cloud.tencent.com/coding/v3",
+    "modelsDev": true,
+    "name": "腾讯云 Coding Plan",
+    "id": "tencent-coding-plan"
+  },
+  {
+    "baseURL": "https://api.lkeap.cloud.tencent.com/plan/v3",
+    "modelsDev": true,
+    "name": "腾讯云 Token Plan",
+    "id": "tencent-token-plan"
+  },
+  {
+    "baseURL": "https://tokenhub.tencentmaas.com/v1",
+    "modelsDev": true,
+    "name": "腾讯 TokenHub",
+    "id": "tencent-tokenhub"
+  },
+  {
+    "baseURL": "https://ark.cn-beijing.volces.com/api/v3",
+    "modelsDev": true,
+    "name": "火山方舟",
+    "id": "volcengine"
+  },
+  {
+    "baseURL": "https://ark.cn-beijing.volces.com/api/coding/v3",
+    "modelsDev": true,
+    "name": "火山方舟 Coding Plan",
+    "id": "volcengine-coding-plan"
+  },
+  {
+    "baseURL": "https://api.minimax.cn/anthropic/v1",
+    "modelsDev": true,
+    "name": "MiniMax",
+    "id": "minimax-cn"
+  },
+  {
+    "baseURL": "https://api.siliconflow.cn/v1",
+    "modelsDev": true,
+    "name": "硅基流动",
+    "id": "siliconflow-cn"
+  },
+  {
+    "baseURL": "https://openrouter.ai/api/v1",
+    "modelsDev": true,
+    "name": "OpenRouter",
+    "id": "openrouter"
+  },
+  {
+    "baseURL": "",
+    "modelsDev": false,
+    "name": "OpenAI 兼容",
+    "id": "openai-compatible"
+  }
+]

@@ -1,0 +1,1 @@
+{"compilerOptions":{"target":"ES2023","module":"ESNext","moduleResolution":"Bundler","lib":["ES2023","DOM","DOM.Iterable"],"strict":true,"skipLibCheck":true,"resolveJsonModule":true,"esModuleInterop":true,"allowJs":true,"noEmit":true,"types":["node"]},"include":["server/**/*.ts","tests/**/*.ts","nitro.config.ts"],"exclude":["server/core/browser-page.js"]}
