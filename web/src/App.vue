@@ -1098,7 +1098,7 @@ onBeforeUnmount(() => {
         minlength="3"
         maxlength="64"
         autocomplete="username"
-        pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{2,63}"
+        pattern="[a-zA-Z0-9][a-zA-Z0-9_.\-]{2,63}"
         autocapitalize="none"
         spellcheck="false"
         placeholder="用户名"
@@ -1131,7 +1131,9 @@ onBeforeUnmount(() => {
         :aria-expanded="navigationOpen"
         @click="openNavigation"
       >
-        ☰
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 7h16M4 12h16M4 17h16" />
+        </svg>
       </button>
       <strong>{{ view === 'chat' ? conversationTitle : mobileTitles[view] }}</strong>
       <span
@@ -1157,13 +1159,16 @@ onBeforeUnmount(() => {
         </option>
       </select>
       <button
-        v-if="canExecute"
+        v-if="canExecute && view === 'chat'"
         class="icon mobile-control"
         aria-label="新建会话"
         @click="newSession"
       >
-        ＋
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
       </button>
+      <span v-else class="mobile-header-spacer" aria-hidden="true"></span>
     </header>
     <button
       v-if="navigationOpen"
@@ -1184,24 +1189,40 @@ onBeforeUnmount(() => {
     >
       <div class="brand">
         <span class="brand-mark small">V</span><strong>Vega</strong>
+        <span class="brand-edition">工作台</span>
         <button
           class="icon close-navigation"
           aria-label="关闭导航"
           @click="closeNavigation"
         >
-          ×
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" />
+          </svg>
         </button>
       </div>
+      <button v-if="canExecute" class="new-session" @click="newSession">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+        <span>新建会话</span>
+      </button>
       <nav aria-label="主导航" @click="closeNavigation">
         <button :class="{ selected: view === 'chat' }" @click="view = 'chat'">
-          <span class="nav-icon" aria-hidden="true">◈</span> <span>对话</span>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 15a3 3 0 0 1-3 3H9l-5 3v-6a3 3 0 0 1-1-2V7a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3Z" />
+          </svg>
+          <span>对话</span>
         </button>
         <button
           v-if="isAdmin"
           :class="{ selected: view === 'employee' }"
           @click="openEmployee()"
         >
-          <span class="nav-icon" aria-hidden="true">◎</span> <span>数字员工</span
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="8" r="3" />
+            <path d="M5 20v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2M4 4l2 2M20 4l-2 2" />
+          </svg>
+          <span>数字员工</span
           ><span v-if="activeTaskCount !== null" class="count">{{
             activeTaskCount
           }}</span>
@@ -1211,39 +1232,49 @@ onBeforeUnmount(() => {
           :class="{ selected: view === 'browser' }"
           @click="view = 'browser'"
         >
-          <span class="nav-icon" aria-hidden="true">▣</span> <span>浏览器</span>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="M3 9h18M7 6.5h.01M10 6.5h.01" />
+          </svg>
+          <span>浏览器</span>
         </button>
         <button
           v-if="isAdmin"
           :class="{ selected: view === 'experiences' }"
           @click="view = 'experiences'"
         >
-          <span class="nav-icon" aria-hidden="true">◇</span> <span>经验图谱</span>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="6" cy="6" r="2.5" />
+            <circle cx="18" cy="6" r="2.5" />
+            <circle cx="12" cy="18" r="2.5" />
+            <path d="m8 7 3 8.5M16 7l-3 8.5M8.5 6h7" />
+          </svg>
+          <span>经验图谱</span>
         </button>
         <button
           :class="{ selected: view === 'account' }"
           @click="view = 'account'"
         >
-          <span class="nav-icon" aria-hidden="true">♙</span> <span>账号</span>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="8" r="3.5" />
+            <path d="M4.5 20a7.5 7.5 0 0 1 15 0" />
+          </svg>
+          <span>账号</span>
         </button>
         <button
           v-if="isAdmin"
           :class="{ selected: view === 'settings' }"
           @click="view = 'settings'"
         >
-          <span class="nav-icon" aria-hidden="true">⚙</span> <span>设置</span>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19 13.5v-3l-2-.7a7 7 0 0 0-.7-1.7l.9-1.9-2.1-2.1-1.9.9a7 7 0 0 0-1.7-.7L10.5 2h-3l-.7 2a7 7 0 0 0-1.7.7l-1.9-.9-2.1 2.1.9 1.9a7 7 0 0 0-.7 1.7l-2 .7v3l2 .7a7 7 0 0 0 .7 1.7l-.9 1.9 2.1 2.1 1.9-.9a7 7 0 0 0 1.7.7l.7 2h3l.7-2a7 7 0 0 0 1.7-.7l1.9.9 2.1-2.1-.9-1.9a7 7 0 0 0 .7-1.7Z" transform="translate(3 1) scale(.75)" />
+          </svg>
+          <span>设置</span>
         </button>
       </nav>
       <div class="sidebar-heading">
-        <span>会话</span
-        ><button
-          v-if="canExecute"
-          class="icon"
-          title="新建会话"
-          @click="newSession"
-        >
-          ＋
-        </button>
+        <span>最近会话</span><span>{{ rootSessions.length }}</span>
       </div>
       <div class="session-list">
         <div
@@ -1272,7 +1303,13 @@ onBeforeUnmount(() => {
         <p v-if="!rootSessions.length" class="empty-small">从一个问题开始。</p>
       </div>
       <footer>
-        <button class="link" @click="logout">退出</button>
+        <span class="account-avatar" aria-hidden="true">{{ user?.username?.slice(0, 1).toUpperCase() }}</span>
+        <span class="account-meta"><strong>{{ user?.username }}</strong><small>{{ isAdmin ? '管理员' : '成员' }}</small></span>
+        <button class="icon" aria-label="退出登录" title="退出登录" @click="logout">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M10 5H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h5M14 8l4 4-4 4M8 12h10" />
+          </svg>
+        </button>
       </footer>
     </aside>
     <section class="workspace" :inert="navigationOpen">
@@ -1291,11 +1328,12 @@ onBeforeUnmount(() => {
       <template v-if="view === 'chat'">
         <header v-if="!narrow" class="topbar chat-topbar">
           <div>
+            <span class="topbar-eyebrow">工作台 / 对话</span>
             <h2>
               {{ conversationTitle }}
               <span v-if="current?.stageSource" class="pill">Stage</span>
             </h2>
-            <p v-if="!current">随时开始一个新对话</p>
+            <p>{{ current ? (current.cwd || project) : '随时开始一个新对话' }}</p>
             <select
               v-if="stagePath.length > 1"
               class="stage-switch"
@@ -1314,7 +1352,11 @@ onBeforeUnmount(() => {
             </select>
           </div>
           <div class="actions">
-            <span v-if="isRunning" class="pill green">执行中</span>
+            <span v-if="isRunning" class="pill green"><span class="status-dot"></span>执行中</span>
+            <button v-if="canExecute" class="topbar-new" @click="newSession">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              新建会话
+            </button>
           </div>
         </header>
         <div ref="transcript" class="transcript" aria-live="polite">
@@ -1323,16 +1365,18 @@ onBeforeUnmount(() => {
             v-if="!sessionLoading && !messages.length && !live"
             class="welcome"
           >
-            <div class="welcome-symbol">✳</div>
-            <h1>让想法开始运转。</h1>
-            <p>编写代码、探索网页，或把一项工作交给数字员工。</p>
+            <span class="welcome-kicker">VEGA WORKSPACE</span>
+            <h1>今天想完成什么？</h1>
+            <p>从一个问题开始。Vega 可以分析项目、探索网页，或把任务交给数字员工。</p>
             <div v-if="canWriteCurrent" class="suggestions">
               <button @click="draft = '分析当前项目结构，提出最小改进方案'">
-                ◈ 分析一个项目</button
-              ><button @click="draft = '请用 Chrome 查看当前标签页'">
-                ↗ 探索网页</button
-              ><button v-if="isAdmin" @click="openEmployee()">
-                ◎ 交给数字员工
+                <span class="suggestion-index">01</span><span>分析一个项目<small>梳理结构，找到最小改进路径</small></span><span aria-hidden="true">↗</span>
+              </button>
+              <button @click="draft = '请用 Chrome 查看当前标签页'">
+                <span class="suggestion-index">02</span><span>探索网页<small>查看当前页面并提取有效信息</small></span><span aria-hidden="true">↗</span>
+              </button>
+              <button v-if="isAdmin" @click="openEmployee()">
+                <span class="suggestion-index">03</span><span>交给数字员工<small>创建可持续推进的独立任务</small></span><span aria-hidden="true">↗</span>
               </button>
             </div>
           </div>
@@ -1428,12 +1472,6 @@ onBeforeUnmount(() => {
           当前账号仅可查看此会话，不能发送消息、停止任务或执行工具。
         </p>
         <div v-if="canWriteCurrent" class="composer-wrap">
-          <div class="context-controls">
-            <select v-model="chosenModel" aria-label="新会话模型">
-              <option value="">默认模型</option>
-              <option v-for="m in models" :key="m">{{ m }}</option>
-            </select>
-          </div>
           <form class="composer" @submit.prevent="send">
             <div v-if="attachments.length" class="attachments">
               <button
@@ -1465,7 +1503,9 @@ onBeforeUnmount(() => {
                 :disabled="uploading"
                 @click="imageInput.click()"
               >
-                ＋
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
               </button>
               <input
                 ref="imageInput"
@@ -1474,8 +1514,15 @@ onBeforeUnmount(() => {
                 multiple
                 hidden
                 @change="upload"
-              /><span class="hint">Enter 发送 · Shift + Enter 换行</span
-              ><button
+              />
+              <div v-if="!isRunning" class="context-controls">
+                <select v-model="chosenModel" aria-label="新会话模型">
+                  <option value="">默认模型</option>
+                  <option v-for="m in models" :key="m">{{ m }}</option>
+                </select>
+              </div>
+              <span class="hint">Enter 发送 · Shift + Enter 换行</span>
+              <button
                 v-if="isRunning"
                 type="button"
                 class="danger-text"

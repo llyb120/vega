@@ -114,7 +114,7 @@ onMounted(() => void run(refresh));
               required
               minlength="3"
               maxlength="64"
-              pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{2,63}"
+              pattern="[a-zA-Z0-9][a-zA-Z0-9_.\-]{2,63}"
               autocomplete="off"
               autocapitalize="none"
               spellcheck="false" /></label
