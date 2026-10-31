@@ -6,7 +6,26 @@ const status = ref(null),
   selected = ref(""),
   screenshot = ref(null),
   busy = ref(false),
-  error = ref("");
+  error = ref(""),
+  info = ref(""),
+  remote = ref(false),
+  mode = ref("click"),
+  text = ref(""),
+  address = ref(""),
+  imageReady = ref(false),
+  dragStart = ref(null);
+const keys = [
+  ["Enter", "回车"],
+  ["Tab", "Tab"],
+  ["Shift+Tab", "上一个输入框"],
+  ["Escape", "Esc"],
+  ["Backspace", "退格"],
+  ["Ctrl+A", "全选"],
+  ["ArrowLeft", "←"],
+  ["ArrowRight", "→"],
+  ["ArrowUp", "↑"],
+  ["ArrowDown", "↓"],
+];
 let version = 0,
   disposed = false;
 const pageURL = computed(
@@ -28,15 +47,22 @@ const viewable = (tab) =>
 async function capture(tab) {
   if (busy.value || !viewable(tab)) return;
   const request = ++version;
+  if (selected.value !== tab.tag) {
+    remote.value = false;
+    text.value = "";
+  }
+  dragStart.value = null;
+  imageReady.value = false;
   selected.value = tab.tag;
   screenshot.value = null;
   error.value = "";
+  info.value = "";
   busy.value = true;
   try {
     const result = await props.api("/chrome/screenshot", "POST", {
       tabTag: tab.tag,
     });
-    if (!disposed && request === version) screenshot.value = result;
+    if (!disposed && request === version) acceptScreenshot(result);
   } catch (e) {
     if (!disposed && request === version) error.value = e.message;
   } finally {
@@ -94,7 +120,163 @@ function keyboard(event) {
   controls[next]?.focus();
   controls[next]?.click();
 }
+function acceptScreenshot(result) {
+  screenshot.value = result.image ? result : null;
+  selected.value = result.tabTag || selected.value;
+  address.value = result.url || "";
+  const existing = tabs.value.find((tab) => tab.tag === selected.value);
+  if (existing) {
+    existing.title = result.title;
+    existing.url = result.url;
+  }
+  for (const tab of result.openedTabs || [])
+    if (!tabs.value.some((t) => t.tag === tab.tag)) tabs.value.push(tab);
+  if (
+    !existing &&
+    result.image &&
+    !tabs.value.some((t) => t.tag === result.tabTag)
+  )
+    tabs.value.push({
+      tag: result.tabTag,
+      title: result.title,
+      url: result.url,
+      controllable: true,
+    });
+}
+async function control(action) {
+  if (!remote.value || busy.value || !screenshot.value || !imageReady.value)
+    return;
+  const shown = screenshot.value,
+    request = ++version;
+  busy.value = true;
+  imageReady.value = false;
+  error.value = "";
+  info.value = "";
+  dragStart.value = null;
+  try {
+    const result = await props.api("/chrome/control", "POST", {
+      tabTag: shown.tabTag,
+      snapshotId: shown.snapshotId,
+      action,
+    });
+    if (disposed || request !== version) return;
+    acceptScreenshot(result);
+    if (result.status === "executed")
+      info.value = result.image
+        ? "操作已发送，截图已更新"
+        : "操作已发送，请刷新截图查看结果";
+    else
+      error.value =
+        (result.status === "not_executed"
+          ? "未操作："
+          : "操作结果需核对，不要重复提交：") +
+        (result.reason || "请刷新截图查看");
+    if (!result.image) remote.value = false;
+  } catch (e) {
+    if (!disposed && request === version) {
+      screenshot.value = null;
+      remote.value = false;
+      error.value = e.message + "；请刷新截图，不要重复提交。";
+    }
+  } finally {
+    if (!disposed && request === version) busy.value = false;
+  }
+}
+function imagePoint(event) {
+  const image = screenshot.value?.image,
+    r = event.currentTarget.getBoundingClientRect();
+  if (!image || !r.width || !r.height) return;
+  const x = ((event.clientX - r.left) * image.width) / r.width,
+    y = ((event.clientY - r.top) * image.height) / r.height;
+  if (x < 0 || y < 0 || x >= image.width || y >= image.height) return;
+  return {
+    x: Math.min(image.width - 1, Math.floor(x)),
+    y: Math.min(image.height - 1, Math.floor(y)),
+  };
+}
+function clickImage(event) {
+  if (mode.value === "drag" || !remote.value) return;
+  const point = imagePoint(event);
+  if (point)
+    void control({
+      action: "click_at",
+      ...point,
+      click_count: mode.value === "double" ? 2 : 1,
+      button: mode.value === "right" ? "right" : "left",
+    });
+}
+function pointerDown(event) {
+  if (
+    !remote.value ||
+    mode.value !== "drag" ||
+    busy.value ||
+    !imageReady.value ||
+    event.button !== 0
+  )
+    return;
+  const point = imagePoint(event);
+  if (!point) return;
+  event.preventDefault();
+  dragStart.value = { ...point, at: performance.now(), id: event.pointerId };
+  event.currentTarget.setPointerCapture(event.pointerId);
+}
+function pointerUp(event) {
+  const start = dragStart.value;
+  dragStart.value = null;
+  if (!start || start.id !== event.pointerId) return;
+  event.currentTarget.releasePointerCapture(event.pointerId);
+  const end = imagePoint(event);
+  if (!end || Math.hypot(end.x - start.x, end.y - start.y) < 3) return;
+  void control({
+    action: "drag",
+    x: start.x,
+    y: start.y,
+    to_x: end.x,
+    to_y: end.y,
+    duration_ms: Math.round(
+      Math.max(80, Math.min(1500, performance.now() - start.at)),
+    ),
+  });
+}
+function scrollRemote(delta, delta_x = 0) {
+  if (!screenshot.value) return;
+  void control({
+    action: "scroll_at",
+    x: Math.floor(screenshot.value.image.width / 2),
+    y: Math.floor(screenshot.value.image.height / 2),
+    delta,
+    delta_x,
+  });
+}
+function wheelImage(event) {
+  if (!remote.value) return;
+  event.preventDefault();
+  if (busy.value) return;
+  const point = imagePoint(event);
+  if (!point) return;
+  const delta = Math.round(
+    Math.max(
+      -1200,
+      Math.min(
+        1200,
+        event.deltaY *
+          (event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? 600 : 1),
+      ),
+    ),
+  );
+  const delta_x = Math.round(Math.max(-1200, Math.min(1200, event.deltaX)));
+  if (delta || delta_x)
+    void control({ action: "scroll_at", ...point, delta, delta_x });
+}
+function sendText() {
+  const value = text.value;
+  if (!value) return;
+  text.value = "";
+  void control({ action: "type", text: value });
+}
 function failedImage() {
+  imageReady.value = false;
+  remote.value = false;
   screenshot.value = null;
   error.value =
     "截图图片加载失败。登录可能已过期，或图片已不可用；请重新登录后刷新截图。";
@@ -120,6 +302,7 @@ onBeforeUnmount(() => {
   </header>
   <section class="browser-view" :aria-busy="busy">
     <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <p v-if="info" class="notice remote-notice" role="status">{{ info }}</p>
     <div
       v-if="tabs.length"
       class="browser-tabstrip"
@@ -173,6 +356,18 @@ onBeforeUnmount(() => {
           </details>
         </div>
         <div class="actions">
+          <button
+            :class="{ primary: remote }"
+            :aria-pressed="remote"
+            :aria-label="remote ? '退出远程操作' : '开启远程操作'"
+            :disabled="busy || !screenshot || !imageReady"
+            @click="
+              remote = !remote;
+              dragStart = null;
+            "
+          >
+            {{ remote ? "退出操作" : "远程操作" }}
+          </button>
           <a
             v-if="screenshot"
             :href="screenshot.image.url"
@@ -189,6 +384,93 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
+      <div v-if="remote" class="remote-controls">
+        <div class="remote-toolbar">
+          <select v-model="mode" aria-label="截图操作模式" :disabled="busy">
+            <option value="click">点击</option>
+            <option value="double">双击</option>
+            <option value="right">右键</option>
+            <option value="drag">拖动</option>
+          </select>
+          <button :disabled="busy || !imageReady" @click="scrollRemote(-600)">
+            网页上滚</button
+          ><button :disabled="busy || !imageReady" @click="scrollRemote(600)">
+            网页下滚
+          </button>
+        </div>
+        <details class="remote-input">
+          <summary>文字、按键与网址</summary>
+          <p class="hint">
+            先点截图中的输入框，再发送文字；不会自动按回车。操作会直接影响共享浏览器。
+          </p>
+          <form @submit.prevent="sendText" class="remote-text">
+            <textarea
+              v-model="text"
+              rows="2"
+              maxlength="16000"
+              aria-label="远程输入文字"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="要输入到网页的文字"
+            ></textarea
+            ><button
+              :disabled="busy || !imageReady || !screenshot?.editable || !text"
+            >
+              发送文字
+            </button>
+          </form>
+          <div class="remote-keys">
+            <button
+              v-for="[key, label] in keys"
+              :key="key"
+              :disabled="busy || !imageReady"
+              :aria-label="'远程按键 ' + label"
+              @click="control({ action: 'press', key })"
+            >
+              {{ label }}
+            </button>
+          </div>
+          <div class="remote-keys">
+            <button
+              :disabled="busy || !imageReady"
+              @click="control({ action: 'back' })"
+            >
+              网页后退</button
+            ><button
+              :disabled="busy || !imageReady"
+              @click="control({ action: 'forward' })"
+            >
+              网页前进</button
+            ><button
+              :disabled="busy || !imageReady"
+              @click="control({ action: 'reload' })"
+            >
+              重载网页
+            </button>
+          </div>
+          <form
+            class="remote-url"
+            @submit.prevent="control({ action: 'goto', url: address })"
+          >
+            <input
+              v-model="address"
+              type="url"
+              required
+              aria-label="远程网页地址"
+              placeholder="https://example.com"
+              autocapitalize="none"
+              spellcheck="false"
+            /><button :disabled="busy || !imageReady">前往</button>
+          </form>
+        </details>
+        <p class="hint remote-mode-hint">
+          {{
+            mode === "drag"
+              ? "按住截图拖动目标；退出拖动模式可正常上下查看。"
+              : "点击截图操作网页；手机滑动仍用于查看截图，网页翻页使用上滚/下滚。"
+          }}
+        </p>
+      </div>
       <div v-if="busy" class="browser-placeholder" role="status">
         <span class="spinner"></span>正在读取浏览器…
       </div>
@@ -204,6 +486,17 @@ onBeforeUnmount(() => {
             :height="screenshot.image.height"
             :alt="'标签页当前截图：' + screenshot.title"
             draggable="false"
+            :class="{
+              'remote-active': remote,
+              'remote-drag': remote && mode === 'drag',
+            }"
+            @load="imageReady = true"
+            @click="clickImage"
+            @pointerdown="pointerDown"
+            @pointerup="pointerUp"
+            @pointercancel="dragStart = null"
+            @wheel="wheelImage"
+            @contextmenu="remote && $event.preventDefault()"
             @error="failedImage"
           />
         </div>
@@ -230,6 +523,83 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.remote-controls {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface, #fff);
+}
+.remote-toolbar,
+.remote-keys,
+.remote-text,
+.remote-url {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.remote-toolbar select {
+  min-width: 0;
+  flex: 1 1 100px;
+}
+.remote-input {
+  margin-top: 8px;
+}
+.remote-input summary {
+  min-height: 44px;
+  padding: 10px 0;
+}
+.remote-input .hint {
+  margin: 4px 0 10px;
+}
+.remote-text {
+  align-items: stretch;
+}
+.remote-text textarea {
+  width: 100%;
+  min-width: 0;
+  flex: 1 1 200px;
+}
+.remote-keys {
+  margin: 10px 0;
+}
+.remote-url input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+}
+.remote-mode-hint {
+  margin: 6px 0 0;
+}
+.remote-notice {
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  border-radius: 8px;
+}
+.remote-active {
+  cursor: crosshair;
+}
+.remote-drag {
+  touch-action: none;
+  cursor: grab;
+}
+@media (max-width: 760px) {
+  .remote-controls {
+    padding: 8px 10px;
+  }
+  .remote-toolbar {
+    gap: 6px;
+  }
+  .remote-toolbar button {
+    padding: 8px;
+    font-size: 13px;
+  }
+  .remote-mode-hint {
+    font-size: 11px;
+  }
+  .remote-keys button {
+    flex: 1 0 44px;
+  }
+}
 .browser-view {
   flex: 1 1 0;
   min-height: 0;

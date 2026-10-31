@@ -9,7 +9,11 @@ import { tmpdir } from "node:os";
 import WebSocket from "ws";
 import { Store } from "../server/core/store";
 import { ChromeBridge } from "../server/core/chrome-bridge";
-import { browserTabs, browserScreenshot } from "../server/core/browser-preview";
+import {
+  browserTabs,
+  browserScreenshot,
+  browserControl,
+} from "../server/core/browser-preview";
 import { Chrome } from "../server/core/chrome";
 import { sleep, type Obj } from "../server/core/util";
 class FixtureBridge extends ChromeBridge {
@@ -105,15 +109,29 @@ class FixtureBridge extends ChromeBridge {
       });
       await this.attached(result.targetId);
       const end = Date.now() + 3000;
+      let loaded = false;
       while (Date.now() < end) {
         const ready = await this.send(
           "Runtime.evaluate",
-          { expression: "document.readyState", returnByValue: true },
+          {
+            expression: "({ready:document.readyState,url:location.href})",
+            returnByValue: true,
+          },
           this.sessions.get(result.targetId),
         );
-        if (ready.result.value === "complete") break;
+        if (
+          ready.result.value?.ready === "complete" &&
+          ready.result.value?.url === new URL(a.url || "about:blank").href
+        ) {
+          loaded = true;
+          break;
+        }
         await sleep(30);
       }
+      assert(
+        loaded,
+        "Fixture target did not load the requested URL; about:blank is not a ready page",
+      );
       return {
         tabTag: result.targetId,
         tabs: (await this.request("tabs", {})).tabs,
@@ -189,7 +207,7 @@ test(
         return;
       }
       res.end(
-        `<!doctype html><html><head><title>Vega complete browser fixture</title></head><body><label>Name<input aria-label="Name"></label><input id="upload" type="file" hidden><button onclick="fetch('/submit').then(()=>document.querySelector('#state').textContent='Saved')">Save</button><div id="state">Ready</div><iframe src="/frame"></iframe><div id="shadow"></div><script>const r=document.querySelector('#shadow').attachShadow({mode:'open'});r.innerHTML='<button>Shadow action</button>'</script><div style="height:1800px">long content</div></body></html>`,
+        `<!doctype html><html><head><title>Vega complete browser fixture</title></head><body><label>Name<input aria-label="Name"></label><input id="upload" type="file" hidden><button onclick="fetch('/submit').then(()=>document.querySelector('#state').textContent='Saved')">Save</button><div id="state">Ready</div><input id="slider" aria-label="Slider" type="range" min="0" max="100" value="0"><iframe src="/frame"></iframe><div id="shadow"></div><script>const r=document.querySelector('#shadow').attachShadow({mode:'open'});r.innerHTML='<button>Shadow action</button>'</script><div style="height:1800px">long content</div></body></html>`,
       );
     });
     await new Promise<void>((yes) => server.listen(0, "127.0.0.1", yes));
@@ -327,6 +345,155 @@ test(
       assert.equal(invalid.completedActions, 0);
       assert.equal(submitted, 1);
       const archive = store.object<any>("browser-observation", shot.snapshotId);
+      const remoteOwner = "browser-view:fixture";
+      let remote = await browserScreenshot(engine, remoteOwner, tag);
+      const remotePoint = async (selector: string) => {
+        const o = engine.observations.get(remoteOwner + ":" + tag)!,
+          image = o.images[0];
+        const r = await engine.evaluate(
+          tag,
+          o.frames[0],
+          `(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})()`,
+        );
+        return {
+          x: ((r.x + r.width / 2) * image.pixelWidth) / image.width,
+          y: ((r.y + r.height / 2) * image.pixelHeight) / image.height,
+          rect: r,
+          sx: image.pixelWidth / image.width,
+          sy: image.pixelHeight / image.height,
+        };
+      };
+      const click = await remotePoint("input[aria-label=Name]");
+      let controlled = await browserControl(engine, remoteOwner, {
+        tabTag: tag,
+        snapshotId: remote.snapshotId,
+        action: { action: "click_at", x: click.x, y: click.y },
+      });
+      assert.equal(controlled.status, "executed", controlled.reason);
+      assert.equal(controlled.editable, true);
+      controlled = await browserControl(engine, remoteOwner, {
+        tabTag: tag,
+        snapshotId: controlled.snapshotId,
+        action: { action: "press", key: "Ctrl+A" },
+      });
+      controlled = await browserControl(engine, remoteOwner, {
+        tabTag: tag,
+        snapshotId: controlled.snapshotId,
+        action: { action: "type", text: "远程输入 ✓" },
+      });
+      assert.equal(controlled.status, "executed", controlled.reason);
+      const remoteValue = await bridge.send(
+        "Runtime.evaluate",
+        {
+          expression: "document.querySelector('input').value",
+          returnByValue: true,
+        },
+        await bridge.attached(tag),
+      );
+      assert.equal(remoteValue.result.value, "远程输入 ✓");
+      assert(
+        !engine.observations.has("owner:" + tag),
+        "human input invalidates stale agent snapshots without modifying its transcript",
+      );
+      const slider = await remotePoint("#slider");
+      controlled = await browserControl(engine, remoteOwner, {
+        tabTag: tag,
+        snapshotId: controlled.snapshotId,
+        action: {
+          action: "drag",
+          x: (slider.rect.x + 5) * slider.sx,
+          y: slider.y,
+          to_x: (slider.rect.x + slider.rect.width - 5) * slider.sx,
+          to_y: slider.y,
+          duration_ms: 300,
+        },
+      });
+      assert.equal(controlled.status, "executed", controlled.reason);
+      assert(
+        Number(
+          (
+            await bridge.send(
+              "Runtime.evaluate",
+              {
+                expression: "document.querySelector('#slider').value",
+                returnByValue: true,
+              },
+              await bridge.attached(tag),
+            )
+          ).result.value,
+        ) > 70,
+      );
+      const save = await remotePoint("button");
+      const submission = {
+        tabTag: tag,
+        snapshotId: controlled.snapshotId,
+        action: { action: "click_at", x: save.x, y: save.y },
+      };
+      controlled = await browserControl(engine, remoteOwner, submission);
+      assert.equal(controlled.status, "executed", controlled.reason);
+      assert.equal(submitted, 2);
+      await assert.rejects(() =>
+        browserControl(engine, remoteOwner, submission),
+      );
+      assert.equal(
+        submitted,
+        2,
+        "lost/duplicate remote request must never submit twice",
+      );
+      await bridge.send(
+        "Runtime.evaluate",
+        { expression: "window.scrollTo(0,200)" },
+        await bridge.attached(tag),
+      );
+      await assert.rejects(
+        () =>
+          browserControl(engine, remoteOwner, {
+            tabTag: tag,
+            snapshotId: controlled.snapshotId,
+            action: { action: "click_at", x: save.x, y: save.y },
+          }),
+        /变化/,
+      );
+      await bridge.send(
+        "Runtime.evaluate",
+        { expression: "window.scrollTo(0,0)" },
+        await bridge.attached(tag),
+      );
+      remote = await browserScreenshot(engine, remoteOwner, tag);
+      const beforeChange = await remotePoint("button");
+      await bridge.send(
+        "Runtime.evaluate",
+        {
+          expression:
+            "document.querySelector('button').style.background='rgb(255,0,0)'",
+        },
+        await bridge.attached(tag),
+      );
+      controlled = await browserControl(engine, remoteOwner, {
+        tabTag: tag,
+        snapshotId: remote.snapshotId,
+        action: { action: "click_at", x: beforeChange.x, y: beforeChange.y },
+      });
+      assert.equal(controlled.status, "not_executed", controlled.reason);
+      assert.equal(controlled.inputAttempted, false);
+      assert.equal(submitted, 2);
+      controlled = await browserControl(engine, remoteOwner, {
+        tabTag: tag,
+        snapshotId: controlled.snapshotId,
+        action: { action: "scroll_at", x: 400, y: 300, delta: 500 },
+      });
+      assert.equal(controlled.status, "executed", controlled.reason);
+      assert(
+        Number(
+          (
+            await bridge.send(
+              "Runtime.evaluate",
+              { expression: "scrollY", returnByValue: true },
+              await bridge.attached(tag),
+            )
+          ).result.value,
+        ) > 100,
+      );
       assert(
         archive.images.length === 1,
         "Observation not persisted in SQLite",

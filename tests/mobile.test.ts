@@ -244,7 +244,10 @@ test(
       imports = 0,
       acceptDialog = false,
       employeeLoads = 0,
-      blockEmployee = true;
+      blockEmployee = true,
+      browserCapture = 0,
+      failRemote = false;
+    const remoteInputs: any[] = [];
     const dialogs: { message: string; type: string }[] = [];
     const waiting = new Map<
         number,
@@ -516,13 +519,44 @@ test(
                   }),
                 ),
               };
-            else if (request.url.endsWith("/api/chrome/screenshot")) {
+            else if (request.url.endsWith("/api/chrome/control")) {
+              const input = JSON.parse(request.postData);
+              remoteInputs.push(input);
+              if (failRemote) {
+                await command(
+                  "Fetch.failRequest",
+                  { requestId, errorReason: "ConnectionReset" },
+                  m.sessionId,
+                );
+                return;
+              }
+              await sleep(80);
+              value = {
+                status: "executed",
+                inputAttempted: true,
+                tabTag: input.tabTag,
+                title: input.tabTag,
+                url:
+                  input.action.action === "goto"
+                    ? input.action.url
+                    : "https://example.test/remote",
+                capturedAt: Date.now(),
+                snapshotId: "control-" + ++browserCapture,
+                editable: true,
+                image: {
+                  url: base + "/api/blobs/mobile-shot",
+                  width: 1568,
+                  height: 6000,
+                },
+              };
+            } else if (request.url.endsWith("/api/chrome/screenshot")) {
               const { tabTag } = JSON.parse(request.postData);
               value = {
                 title: tabTag,
                 url: "https://example.test/" + "long/".repeat(1000),
                 capturedAt: Date.now(),
-                snapshotId: tabTag,
+                snapshotId: tabTag + "-" + ++browserCapture,
+                editable: false,
                 image: {
                   url: base + "/api/blobs/mobile-shot",
                   width: 1568,
@@ -913,6 +947,111 @@ test(
         ),
       );
       await tap(".browser-url summary");
+      await tap('[aria-label="开启远程操作"]');
+      await until(`document.querySelector('.remote-controls')`);
+      await tap(".browser-image img");
+      await until(
+        `document.querySelector('.browser-image img')?.naturalWidth===1568&&!document.querySelector('.browser-view [role=status]')?.textContent.includes('正在')`,
+      );
+      assert.equal(remoteInputs[0].action.action, "click_at");
+      assert(
+        Math.abs(remoteInputs[0].action.x - 784) <= 2 &&
+          Math.abs(remoteInputs[0].action.y - 3000) <= 2,
+        "displayed screenshot coordinates must map to its original image pixels",
+      );
+      await tap(".remote-input summary");
+      await fill('textarea[aria-label="远程输入文字"]', "远程输入：你好");
+      await byText("发送文字", ".remote-text");
+      await until(
+        `document.querySelector('[aria-label="远程按键 回车"]')?.disabled===false`,
+      );
+      assert(
+        remoteInputs.some(
+          (input) =>
+            input.action.action === "type" &&
+            input.action.text === "远程输入：你好",
+        ),
+      );
+      await tap('[aria-label="远程按键 回车"]');
+      await until(
+        `document.querySelector('[aria-label="远程按键 回车"]')?.disabled===false`,
+      );
+      assert(
+        remoteInputs.some(
+          (input) =>
+            input.action.action === "press" && input.action.key === "Enter",
+        ),
+      );
+      await byText("网页下滚", ".remote-toolbar");
+      await until(
+        `document.querySelector('.browser-image img')?.naturalWidth===1568&&document.querySelector('.remote-toolbar button')?.disabled===false`,
+      );
+      assert(
+        remoteInputs.some(
+          (input) =>
+            input.action.action === "scroll_at" && input.action.delta === 600,
+        ),
+      );
+      await fill(
+        'input[aria-label="远程网页地址"]',
+        "https://example.test/new",
+      );
+      await byText("前往", ".remote-url");
+      await until(
+        `document.querySelector('.browser-url').textContent.includes('/new')`,
+      );
+      assert.equal(remoteInputs.at(-1).action.action, "goto");
+      await fill('select[aria-label="截图操作模式"]', "drag");
+      await swipe(".browser-image", true);
+      await until(
+        `document.querySelector('.remote-toolbar button')?.disabled===false`,
+      );
+      assert.equal(remoteInputs.at(-1).action.action, "drag");
+      assert(remoteInputs.at(-1).action.to_x < remoteInputs.at(-1).action.x);
+      await layout("remote browser controls");
+      await fill('select[aria-label="截图操作模式"]', "click");
+      const wheelPoint = await evaluate(
+        `(()=>{const e=document.querySelector('.browser-image img');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:Math.max(20,Math.min(innerHeight-20,r.y+r.height/2))}})()`,
+      );
+      const beforeWheel = remoteInputs.length;
+      await command("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        ...wheelPoint,
+        deltaX: 0,
+        deltaY: 320,
+      });
+      await command("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        ...wheelPoint,
+        deltaX: 0,
+        deltaY: 320,
+      });
+      await until(
+        `document.querySelector('.browser-image img')?.naturalWidth===1568&&document.querySelector('.remote-toolbar button')?.disabled===false`,
+      );
+      assert.equal(
+        remoteInputs.length,
+        beforeWheel + 1,
+        "wheel events must not queue repeated inputs against a consumed screenshot",
+      );
+      assert.equal(remoteInputs.at(-1).action.action, "scroll_at");
+      assert.equal(remoteInputs.at(-1).action.delta, 320);
+      failRemote = true;
+      const sentBefore = remoteInputs.length;
+      await tap('[aria-label="远程按键 回车"]');
+      await until(
+        `document.querySelector('.browser-view [role=alert]')?.textContent.includes('不要重复提交')`,
+      );
+      assert.equal(
+        remoteInputs.length,
+        sentBefore + 1,
+        "unconfirmed delivery must not retry",
+      );
+      assert.equal(
+        await evaluate(`!!document.querySelector('.browser-image img')`),
+        false,
+      );
+      failRemote = false;
       await nav("对话");
       await tap('.mobile-header [aria-label="新建会话"]');
       await until(`!document.querySelector('.message-text')`);

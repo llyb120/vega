@@ -445,6 +445,21 @@ test(
       assert(Array.isArray(chromeList.tabs));
       for (const login of [a, v]) {
         assert.equal(
+          (
+            await req(
+              "/chrome/control",
+              "POST",
+              {
+                tabTag: "not-a-real-tab",
+                snapshotId: "not-real",
+                action: { action: "press", key: "Enter" },
+              },
+              login,
+            )
+          ).r.status,
+          403,
+        );
+        assert.equal(
           (await req("/chrome/tabs", "GET", undefined, login)).r.status,
           403,
         );
@@ -460,6 +475,36 @@ test(
           403,
         );
       }
+      assert.equal(
+        (
+          await req(
+            "/chrome/control",
+            "POST",
+            {
+              tabTag: "not-a-real-tab",
+              snapshotId: "not-real",
+              action: { action: "press", key: "Enter" },
+            },
+            { ...admin, csrf: "" },
+          )
+        ).r.status,
+        403,
+      );
+      assert.equal(
+        (
+          await req(
+            "/chrome/control",
+            "POST",
+            {
+              tabTag: "not-a-real-tab",
+              snapshotId: "not-real",
+              action: { action: "evaluate", expression: "alert(1)" },
+            },
+            admin,
+          )
+        ).r.status,
+        400,
+      );
       assert.equal(
         (
           await req(

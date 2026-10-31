@@ -1,5 +1,9 @@
 import { uploadSkill } from "../../core/skill-upload";
-import { browserTabs, browserScreenshot } from "../../core/browser-preview";
+import {
+  browserTabs,
+  browserScreenshot,
+  browserControl,
+} from "../../core/browser-preview";
 import { publicOrigin, principal, eventAllowed } from "../../core/http-auth";
 import { authRoute, bodyJSON } from "../../core/http-auth-routes";
 import { check } from "../../core/auth";
@@ -441,12 +445,18 @@ export default defineEventHandler(async (event) => {
           400,
           "Screenshot requests only accept tabTag",
         );
-        return browserScreenshot(
+        return await browserScreenshot(
           engine.chrome,
           "browser-view:" + user.id,
           a.tabTag,
         );
       }
+      if (path.length === 2 && path[1] === "control" && method === "POST")
+        return await browserControl(
+          engine.chrome,
+          "browser-view:" + user.id,
+          a,
+        );
       if (path[1] === "tool")
         return engine.chrome.execute("user-ui", a.cwd || process.cwd(), a);
       if (a.operation === "close") {
