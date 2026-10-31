@@ -11,13 +11,17 @@ import {
 export async function bodyJSON(event: H3Event, max: number) {
   const length = Number(event.node.req.headers["content-length"] || 0);
   check(!length || length <= max, 413, "Request body too large");
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const c of event.node.req) {
-    bytes += c.length;
-    check(bytes <= max, 413, "Request body too large");
-    chunks.push(Buffer.from(c));
-  }
+  const direct = (event.node.req as any).body,
+    chunks: Buffer[] = direct == null ? [] : [Buffer.from(direct)];
+  let bytes = chunks[0]?.length || 0;
+  check(bytes <= max, 413, "Request body too large");
+  // shortcut: Nitro localFetch exposes body directly; remove when mock requests support async iteration.
+  if (direct == null)
+    for await (const c of event.node.req) {
+      bytes += c.length;
+      check(bytes <= max, 413, "Request body too large");
+      chunks.push(Buffer.from(c));
+    }
   let data;
   try {
     data = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");

@@ -1,5 +1,7 @@
 <script setup vapor>
 import SettingsView from "./SettingsView.vue";
+import MessageText from "./MessageText.vue";
+import ToolSteps from "./ToolSteps.vue";
 import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
 import Team from "./Team.vue";
@@ -155,10 +157,18 @@ const duty = ref(emptyDuty()),
   dutyOpen = ref(false),
   vault = ref([]),
   vaultForm = ref({ name: "", condition: "", content: "" });
-let eventsController,
+let eventsSocket,
+  eventsReady = false,
+  eventsWasConnected = false,
+  eventGeneration = 0,
+  eventReconnect,
+  eventsHeartbeat,
+  eventQueue = Promise.resolve(),
   closed = false,
   sessionRequest = 0,
   employeeRefreshTimer;
+const wsRequests = new Map(),
+  WS_BODY_LIMIT = 240 * 1024;
 function emptyDuty() {
   return {
     id: "",
@@ -175,6 +185,27 @@ function emptyDuty() {
 const isRunning = computed(
   () => current.value && running.value[current.value.id],
 );
+const timeline = computed(() => {
+  const groups = [];
+  for (const m of messages.value) {
+    const last = groups.at(-1);
+    if (m.role === "tool") {
+      if (last?.kind === "tools") last.items.push(m);
+      else
+        groups.push({
+          kind: "tools",
+          key: `tools-${m.seq ?? groups.length}`,
+          items: [m],
+        });
+    } else
+      groups.push({
+        kind: "message",
+        key: `${m.role}-${m.seq ?? groups.length}`,
+        message: m,
+      });
+  }
+  return groups;
+});
 const catalogModels = ref([]);
 function configuredModels(models, prefix = "") {
   return Object.entries(models || {}).flatMap(([id, m]) =>
@@ -267,7 +298,7 @@ function ended(s) {
 function date(at) {
   return formatBeijing(at);
 }
-async function api(path, method = "GET", data) {
+async function httpApi(path, method = "GET", data) {
   const response = await fetch(`/api${path}`, {
     method,
     credentials: "same-origin",
@@ -290,6 +321,170 @@ async function api(path, method = "GET", data) {
         response.statusText,
     );
   return result;
+}
+async function api(path, method = "GET", data) {
+  const size = data === undefined ? 0 : new Blob([JSON.stringify(data)]).size;
+  if (
+    size > WS_BODY_LIMIT ||
+    /^\/(auth|blobs)(\/|$)/.test(path) ||
+    path === "/chrome/live"
+  )
+    return httpApi(path, method, data);
+  if (eventsReady && eventsSocket?.readyState === WebSocket.OPEN)
+    return new Promise((resolve, reject) => {
+      const id = crypto.randomUUID(),
+        timer = setTimeout(() => {
+          wsRequests.delete(id);
+          reject(
+            Error(
+              method === "GET"
+                ? "实时请求超时"
+                : "操作结果不确定，请核对后再操作，不要重复提交",
+            ),
+          );
+        }, 60000);
+      wsRequests.set(id, { resolve, reject, timer, path, method, data });
+      try {
+        eventsSocket.send(
+          JSON.stringify({ type: "request", id, method, path, data }),
+        );
+      } catch (e) {
+        clearTimeout(timer);
+        wsRequests.delete(id);
+        reject(e);
+      }
+    });
+  if (eventsWasConnected && method !== "GET")
+    throw Error("实时连接中断，请等待重连后再操作，不要重复提交");
+  return httpApi(path, method, data);
+}
+function rejectSocketRequests(reason) {
+  for (const request of wsRequests.values()) {
+    clearTimeout(request.timer);
+    request.reject(
+      Error(
+        request.method === "GET"
+          ? reason
+          : "连接中断，操作结果可能已提交，请核对后再操作",
+      ),
+    );
+  }
+  wsRequests.clear();
+}
+function socketMessage(value) {
+  if (value.type === "response") {
+    const request = wsRequests.get(value.id);
+    if (!request) return;
+    wsRequests.delete(value.id);
+    clearTimeout(request.timer);
+    if (value.httpFallback) {
+      request.resolve(httpApi(request.path, request.method, request.data));
+      return;
+    }
+    if (!value.status) {
+      request.reject(Error(value.error || "实时请求失败"));
+      return;
+    }
+    try {
+      const result = value.body ? JSON.parse(value.body) : null;
+      if (value.status === 401 && authenticated.value) resetLogin();
+      if (value.status < 200 || value.status >= 300)
+        throw Error(
+          result?.data?.error ||
+            result?.statusMessage ||
+            result?.message ||
+            (typeof result?.error === "string" ? result.error : "") ||
+            value.statusText,
+        );
+      request.resolve(result);
+    } catch (e) {
+      request.reject(e);
+    }
+    return;
+  }
+  if (value.type === "error") {
+    error.value = value.reason;
+    return;
+  }
+  eventQueue = eventQueue
+    .then(() => handleEvent(value))
+    .catch((e) => (error.value = e.message));
+}
+function connectEvents() {
+  const generation = ++eventGeneration;
+  clearTimeout(eventReconnect);
+  clearInterval(eventsHeartbeat);
+  eventsReady = false;
+  eventsSocket?.close();
+  void httpApi("/events", "POST", {})
+    .then(({ ticket }) => {
+      if (generation !== eventGeneration) return;
+      const url = new URL("/api/events", window.location.href);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("ticket", ticket);
+      openEventSocket(url, generation);
+    })
+    .catch((e) => {
+      if (generation !== eventGeneration || closed) return;
+      error.value = `实时通道认证失败：${e.message}`;
+      eventReconnect = setTimeout(() => {
+        if (generation === eventGeneration) connectEvents();
+      }, 1500);
+    });
+}
+function openEventSocket(url, generation) {
+  const ws = new WebSocket(url);
+  eventsSocket = ws;
+  ws.onopen = () => {
+    if (generation !== eventGeneration) return;
+    eventsHeartbeat = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: "ping" }));
+    }, 10000);
+  };
+  ws.onmessage = ({ data }) => {
+    if (generation !== eventGeneration) return;
+    try {
+      const value = JSON.parse(data);
+      if (value.type === "ready") {
+        const reconnect = eventsWasConnected;
+        eventsReady = true;
+        eventsWasConnected = true;
+        if (error.value.includes("实时")) error.value = "";
+        if (reconnect)
+          void attempt(async () => {
+            await bootstrap();
+            if (current.value) await refreshCurrent();
+            if (view.value === "employee" && !employeeSession.value)
+              await refreshEmployee();
+          });
+        return;
+      }
+      if (value.type !== "pong") socketMessage(value);
+    } catch (e) {
+      error.value = `实时消息无效：${e.message}`;
+    }
+  };
+  ws.onerror = () => {
+    if (generation === eventGeneration)
+      error.value = "实时通道连接失败，请检查反向代理的 WebSocket 配置";
+  };
+  ws.onclose = (event) => {
+    if (generation !== eventGeneration) return;
+    eventsReady = false;
+    clearInterval(eventsHeartbeat);
+    rejectSocketRequests("实时连接已中断");
+    if (closed || !authenticated.value) return;
+    if (event.code === 4401) {
+      resetLogin();
+      error.value = "登录已过期或被撤销，请重新登录";
+      return;
+    }
+    error.value = "实时连接中断，正在重连；未完成的操作不会自动重发。";
+    eventReconnect = setTimeout(() => {
+      if (generation === eventGeneration) connectEvents();
+    }, 1500);
+  };
 }
 async function attempt(fn) {
   error.value = "";
@@ -318,6 +513,7 @@ async function enter(result) {
   csrfToken.value = result.csrfToken;
   closed = false;
   authenticated.value = true;
+  void connectEvents();
   await bootstrap();
   if (isAdmin.value) startPresence();
   await Promise.all([
@@ -330,8 +526,7 @@ async function enter(result) {
     );
     if (isAdmin.value && pending?.expires > Date.now()) view.value = "settings";
   } catch {}
-  eventsController = new AbortController();
-  void eventLoop(eventsController.signal);
+  closed = false;
 }
 async function login() {
   if (authBusy.value) return;
@@ -360,7 +555,14 @@ function resetLogin() {
   stopPresence();
   clearTimeout(employeeRefreshTimer);
   closed = true;
-  eventsController?.abort();
+  eventGeneration++;
+  clearTimeout(eventReconnect);
+  clearInterval(eventsHeartbeat);
+  eventsSocket?.close();
+  eventsSocket = null;
+  eventsReady = false;
+  eventsWasConnected = false;
+  rejectSocketRequests("连接已关闭");
   authenticated.value = false;
   user.value = null;
   csrfToken.value = "";
@@ -546,50 +748,6 @@ async function scrollBottom() {
   await nextTick();
   if (transcript.value)
     transcript.value.scrollTop = transcript.value.scrollHeight;
-}
-async function eventLoop(signal) {
-  closed = false;
-  while (!signal.aborted && !closed) {
-    try {
-      const response = await fetch("/api/events", {
-        credentials: "same-origin",
-        signal,
-      });
-      if (response.status === 401) {
-        resetLogin();
-        error.value = "登录已过期或被撤销，请重新登录";
-        return;
-      }
-      if (!response.ok) throw Error("事件连接认证失败");
-      const reader = response.body.getReader(),
-        decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let end;
-        while ((end = buffer.indexOf("\n\n")) >= 0) {
-          const frame = buffer.slice(0, end);
-          buffer = buffer.slice(end + 2);
-          const line = frame.split("\n").find((x) => x.startsWith("data: "));
-          if (line) await handleEvent(JSON.parse(line.slice(6)));
-        }
-      }
-    } catch (e) {
-      if (signal.aborted) return;
-      error.value = `事件连接中断：${e.message}。已保存的数据不会丢失，正在重连。`;
-    }
-    if (!signal.aborted) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      try {
-        await bootstrap();
-        if (current.value) await refreshCurrent();
-        if (view.value === "employee" && !employeeSession.value)
-          await refreshEmployee();
-      } catch {}
-    }
-  }
 }
 async function refreshCurrent() {
   if (!current.value) return;
@@ -991,14 +1149,14 @@ onBeforeUnmount(() => {
       </div>
       <nav aria-label="主导航" @click="closeNavigation">
         <button :class="{ selected: view === 'chat' }" @click="view = 'chat'">
-          ◈ <span>对话</span>
+          <span class="nav-icon" aria-hidden="true">◈</span> <span>对话</span>
         </button>
         <button
           v-if="isAdmin"
           :class="{ selected: view === 'employee' }"
           @click="openEmployee()"
         >
-          ◎ <span>数字员工</span
+          <span class="nav-icon" aria-hidden="true">◎</span> <span>数字员工</span
           ><span v-if="activeTaskCount !== null" class="count">{{
             activeTaskCount
           }}</span>
@@ -1008,27 +1166,27 @@ onBeforeUnmount(() => {
           :class="{ selected: view === 'browser' }"
           @click="view = 'browser'"
         >
-          ▣ <span>浏览器</span>
+          <span class="nav-icon" aria-hidden="true">▣</span> <span>浏览器</span>
         </button>
         <button
           v-if="isAdmin"
           :class="{ selected: view === 'experiences' }"
           @click="view = 'experiences'"
         >
-          ◇ <span>经验图谱</span>
+          <span class="nav-icon" aria-hidden="true">◇</span> <span>经验图谱</span>
         </button>
         <button
           :class="{ selected: view === 'account' }"
           @click="view = 'account'"
         >
-          ♙ <span>账号</span>
+          <span class="nav-icon" aria-hidden="true">♙</span> <span>账号</span>
         </button>
         <button
           v-if="isAdmin"
           :class="{ selected: view === 'settings' }"
           @click="view = 'settings'"
         >
-          ⚙ <span>设置</span>
+          <span class="nav-icon" aria-hidden="true">⚙</span> <span>设置</span>
         </button>
       </nav>
       <div class="sidebar-heading">
@@ -1128,46 +1286,41 @@ onBeforeUnmount(() => {
             {{ fireState.status }}
             <p v-if="fireState.reason">{{ fireState.reason }}</p>
           </div>
-          <article
-            v-for="(m, i) in messages"
-            :key="`${current?.id}-${m.seq || i}`"
-            :class="['message', m.role]"
-          >
-            <template v-if="m.role === 'tool'"
-              ><details class="tool-block">
-                <summary>
-                  {{ m.error ? "⚠" : "✓" }} {{ m.name }} <span>工具结果</span>
-                </summary>
-                <pre>{{ m.text }}</pre>
-                <img
-                  v-for="(image, n) in m.images || []"
-                  :key="n"
-                  :src="`data:${image.mime};base64,${image.data}`"
-                  alt="工具返回的图片"
-                /></details></template
-            ><template v-else
-              ><div class="message-meta">
-                <span>{{ m.role === "user" ? "你" : "Vega" }}</span
-                ><span>{{ m.model || "" }}</span
-                ><span v-if="m.seq">m{{ String(m.seq).padStart(5, "0") }}</span>
+          <template v-for="(entry, i) in timeline" :key="`${current?.id}-${entry.key}`">
+            <ToolSteps
+              v-if="entry.kind === 'tools'"
+              :items="entry.items"
+              :active="i === timeline.length - 1 ? activeTools : []"
+            />
+            <article v-else :class="['message', entry.message.role]">
+              <div v-if="entry.message.role !== 'user'" class="message-meta">
+                <span>Vega</span><span>{{ entry.message.model || "" }}</span>
               </div>
-              <details v-if="m.thinking" class="reasoning">
+              <details v-if="entry.message.thinking" class="reasoning">
                 <summary>思考过程</summary>
-                <pre>{{ m.thinking }}</pre>
+                <pre>{{ entry.message.thinking }}</pre>
               </details>
-              <div v-if="m.text" class="message-text">
-                {{ m.displayText || m.text }}
+              <MessageText
+                v-if="entry.message.role === 'assistant' && entry.message.text"
+                :text="entry.message.displayText || entry.message.text"
+              />
+              <div
+                v-else-if="entry.message.text"
+                class="message-text"
+              >
+                {{ entry.message.displayText || entry.message.text }}
               </div>
-              <div v-if="m.calls?.length" class="calls">
-                <span v-for="c in m.calls" :key="c.id">↳ {{ c.name }}</span>
+              <div v-if="entry.message.calls?.length" class="calls">
+                <span v-for="c in entry.message.calls" :key="c.id">↳ {{ c.name }}</span>
               </div>
               <img
-                v-for="(image, n) in m.images || []"
+                v-for="(image, n) in entry.message.images || []"
                 :key="n"
                 :src="`data:${image.mime};base64,${image.data}`"
                 alt="用户附图"
-            /></template>
-          </article>
+              />
+            </article>
+          </template>
           <article v-if="live || thinking" class="message assistant">
             <div class="message-meta">
               <span>Vega</span><span>{{ model }}</span
@@ -1177,13 +1330,12 @@ onBeforeUnmount(() => {
               <summary>思考中</summary>
               <pre>{{ thinking }}</pre>
             </details>
-            <div class="message-text">
-              {{ live }}<span class="cursor">▍</span>
-            </div>
+            <MessageText v-if="live" :text="live" streaming />
           </article>
-          <div v-for="c in activeTools" :key="c.id" class="tool-progress">
-            <span class="spinner"></span>{{ c.name }} 正在执行…
-          </div>
+          <ToolSteps
+            v-if="activeTools.length && timeline.at(-1)?.kind !== 'tools'"
+            :active="activeTools"
+          />
         </div>
         <p v-if="!canWriteCurrent" class="context-note">
           当前账号仅可查看此会话，不能发送消息、停止任务或执行工具。

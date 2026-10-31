@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { sleep } from "../server/core/util";
+import WebSocket from "ws";
 test(
   "built Nitro deployment: bundled frontend/assets, auth, streaming agent, SQLite tasks, restart",
   { timeout: 45000, skip: process.env.VEGA_TEST_DEPLOYED !== "1" },
@@ -117,7 +118,8 @@ test(
       });
     };
     let cookie = "",
-      csrf = "";
+      csrf = "",
+      realtime: WebSocket | undefined;
     const api = async (path: string, method = "GET", data?: any) => {
       const r = await fetch(base + "/api" + path, {
         method,
@@ -177,35 +179,33 @@ test(
       const saved = await api("/config", "PUT", config);
       assert.equal(saved.provider.test.apiKey, "__stored_secret__");
       const session = await api("/sessions", "POST", { cwd: dir });
-      const streamAbort = new AbortController(),
-        stream = await fetch(base + "/api/events", {
-          headers: { Cookie: cookie },
-          signal: streamAbort.signal,
-        });
-      const reader = stream.body!.getReader();
+      const { ticket } = await api("/events", "POST", {});
+      realtime = new WebSocket(
+        base.replace("http:", "ws:") + "/api/events?ticket=" + ticket,
+        { headers: { Cookie: cookie, Origin: base } },
+      );
       let events = "";
-      const reading = (async () => {
-        try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            events += new TextDecoder().decode(value);
-            if (events.includes('"type":"done"')) return;
-          }
-        } finally {
-          await reader.cancel().catch(() => {});
-        }
-      })();
+      const reading = new Promise<void>((resolve, reject) => {
+        realtime!.on("message", (data) => {
+          events += data.toString();
+          if (events.includes('"type":"done"')) resolve();
+        });
+        realtime!.on("error", reject);
+      });
+      await new Promise<void>((yes, no) => {
+        realtime!.once("open", yes);
+        realtime!.once("error", no);
+      });
       await api(`/sessions/${session.id}/messages`, "POST", {
         text: "Write the local fixture once",
       });
       await Promise.race([
         reading,
         sleep(10000).then(() => {
-          throw Error("SSE completion not observed");
+          throw Error("WebSocket completion not observed");
         }),
       ]);
-      streamAbort.abort();
+      realtime.close();
       assert(events.includes("tool_end"));
       assert.equal(
         await readFile(join(dir, "result.txt"), "utf8"),
@@ -279,6 +279,7 @@ test(
       );
       assert.equal((await api("/sessions/" + session.id)).messages.length, 4);
     } finally {
+      realtime?.close();
       await stop();
       mock.closeAllConnections();
       await new Promise<void>((yes) => mock.close(() => yes()));

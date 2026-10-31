@@ -7,12 +7,14 @@ import { ChromeBridge } from "./chrome-bridge";
 import { Chrome } from "./chrome";
 import { Engine } from "./engine";
 import { BrowserLive } from "./browser-live";
+import { EventsSocket } from "./events-socket";
 export type Application = {
   store: Store;
   engine: Engine;
   token: string;
   auth: Auth;
   browserLive: BrowserLive;
+  eventsSocket: EventsSocket;
 };
 let application: Application | undefined;
 export function app() {
@@ -42,6 +44,7 @@ export async function initialize(pageScript: string, helper: string) {
     token,
     auth,
     browserLive: new BrowserLive(chrome, auth),
+    eventsSocket: new EventsSocket(engine, auth),
   };
   await bridge.start();
   engine.employee.start();

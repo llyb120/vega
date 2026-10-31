@@ -1,8 +1,12 @@
 import { defineNitroPlugin, useStorage } from "nitropack/runtime";
 import { initialize } from "../core/application";
+import { WS_BODY_LIMIT } from "../core/events-socket";
 export default defineNitroPlugin(async (nitro) => {
   Object.assign(nitro.h3App.websocket, {
-    serverOptions: { maxPayload: 65536, perMessageDeflate: false },
+    serverOptions: {
+      maxPayload: WS_BODY_LIMIT + 4096,
+      perMessageDeflate: false,
+    },
   });
   const page =
     await useStorage("assets:browser").getItem<string>("browser-page.js");
@@ -10,8 +14,12 @@ export default defineNitroPlugin(async (nitro) => {
     "workbuddy-login.cjs",
   );
   if (!page || !helper) throw Error("Bundled migration assets missing");
-  const { store, engine, browserLive } = await initialize(page, helper);
+  const { store, engine, browserLive, eventsSocket } = await initialize(
+    page,
+    helper,
+  );
   nitro.hooks.hook("close", async () => {
+    eventsSocket.closeAll();
     await browserLive.close();
     await engine.close();
     store.close();

@@ -4,7 +4,7 @@ import {
   browserScreenshot,
   browserControl,
 } from "../../core/browser-preview";
-import { publicOrigin, principal, eventAllowed } from "../../core/http-auth";
+import { publicOrigin, principal } from "../../core/http-auth";
 import { authRoute, bodyJSON } from "../../core/http-auth-routes";
 import { check } from "../../core/auth";
 import { readFile, stat } from "node:fs/promises";
@@ -17,9 +17,7 @@ import {
   createError,
   setHeader,
   send,
-  sendStream,
 } from "h3";
-import { PassThrough } from "node:stream";
 import { app } from "../../core/application";
 import { assert, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
@@ -101,51 +99,6 @@ export default defineEventHandler(async (event) => {
           storage: "SQLite",
         },
       };
-    if (path[0] === "events" && method === "GET") {
-      setHeader(event, "Content-Type", "text/event-stream");
-      setHeader(event, "Cache-Control", "no-cache");
-      setHeader(event, "X-Accel-Buffering", "no");
-      const stream = new PassThrough(),
-        listener = (value: any) => {
-          const current = auth.resolveHash(who.hash);
-          if (!current) {
-            close();
-            return;
-          }
-          if (!stream.destroyed && eventAllowed(current.user, value))
-            stream.write("data: " + JSON.stringify(value) + "\n\n");
-        };
-      engine.events.on("event", listener);
-      const revoke = (id: string) => {
-          if (id === user.id) close();
-        },
-        logout = (hash: string) => {
-          if (hash === who.hash) close();
-        };
-      auth.events.on("revoke", revoke);
-      auth.events.on("logout", logout);
-      stream.write(": connected\n\n");
-      const timer = setInterval(() => {
-        if (!auth.resolveHash(who.hash)) {
-          close();
-          return;
-        }
-        stream.write(": heartbeat\n\n");
-      }, 15000);
-      let streamClosed = false;
-      const close = () => {
-        if (streamClosed) return;
-        streamClosed = true;
-        clearInterval(timer);
-        engine.events.off("event", listener);
-        auth.events.off("revoke", revoke);
-        auth.events.off("logout", logout);
-        stream.end();
-        event.node.res.end();
-      };
-      event.node.res.once("close", close);
-      return sendStream(event, stream);
-    }
     if (path[0] === "blobs" && method === "GET") {
       check(auth.canBlob(user, path[1]), 404, "Blob not found");
       const blob = store.blobData(path[1]);

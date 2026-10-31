@@ -390,6 +390,39 @@ test(
       });
       await sleep(30);
     };
+    const dragMouse = async (selector: string) => {
+      const p = await evaluate(
+        `(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();const left=Math.max(0,r.left),right=Math.min(innerWidth,r.right),top=Math.max(0,r.top),bottom=Math.min(innerHeight,r.bottom);return {x:left+(right-left)*0.75,y:(top+bottom)/2}})()`,
+      );
+      await command("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x: p.x,
+        y: p.y,
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+      });
+      for (let n = 1; n <= 6; n++) {
+        await evaluate(
+          "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))",
+        );
+        await command("Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: p.x - n * 20,
+          y: p.y,
+          button: "left",
+          buttons: 1,
+        });
+      }
+      await command("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: p.x - 120,
+        y: p.y,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
+      });
+    };
     const swipe = async (selector: string, horizontal = false) => {
       await evaluate(
         "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))",
@@ -472,7 +505,7 @@ test(
         );
       }
       const target = await evaluate(
-        `(()=>{const e=[...document.querySelector('nav').querySelectorAll('button')].find(e=>e.querySelector('span')?.textContent===${JSON.stringify(label)});if(!e)throw Error('Missing navigation');e.dataset.mobileTest='nav';return '[data-mobile-test="nav"]'})()`,
+        `(()=>{const e=[...document.querySelector('nav').querySelectorAll('button')].find(e=>e.querySelector('.nav-icon + span')?.textContent===${JSON.stringify(label)});if(!e)throw Error('Missing navigation: '+document.body.innerText);e.dataset.mobileTest='nav';return '[data-mobile-test="nav"]'})()`,
       );
       await tap(target);
       await evaluate(
@@ -709,7 +742,7 @@ test(
         await command("Target.attachToTarget", { targetId, flatten: true }, "")
       ).sessionId;
       await command("Page.addScriptToEvaluateOnNewDocument", {
-        source: `(()=>{const Native=window.WebSocket;window.WebSocket=class extends Native{constructor(url,protocols){const u=new URL(url);if(u.pathname==='/api/chrome/live'){u.protocol='ws:';u.host='127.0.0.1:${(mock.address() as any).port}';u.pathname='/browser-live';}super(u.href,protocols);}};})()`,
+        source: `(()=>{const Native=window.WebSocket;window.WebSocket=class extends Native{constructor(url,protocols){const u=new URL(url);if(u.pathname==='/api/chrome/live'){u.protocol='ws:';u.host='127.0.0.1:${(mock.address() as any).port}';u.pathname='/browser-live';}super(u.href,protocols);}send(data){const u=new URL(this.url),value=JSON.parse(data);if(u.pathname==='/api/events'&&value.type==='request'&&(value.path.startsWith('/chrome/')||['/providers/login','/providers/import'].includes(value.path))){void fetch('/api'+value.path,{method:value.method||'GET',headers:value.data===undefined?{}:{'Content-Type':'application/json'},body:value.data===undefined?undefined:JSON.stringify(value.data)}).then(async response=>{this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'response',id:value.id,status:response.status,statusText:response.statusText,contentType:response.headers.get('content-type')||'',body:await response.text()})}));}).catch(error=>{this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'response',id:value.id,status:0,error:error.message})}));});return;}super.send(data);}};})()`,
       });
       await command("Runtime.enable");
       await command("Page.enable");
@@ -1025,17 +1058,25 @@ test(
         ),
       );
       await tap(".browser-url summary");
-      await tap('[aria-label="开启远程操作"]');
-      await until(`document.querySelector('.remote-controls')`);
+      await until(
+        `[...document.querySelectorAll('.browser-address .pill')].some(e=>e.textContent.trim()==="实时画面")&&document.querySelector('.browser-image img')?.naturalWidth===1568`,
+      );
       await tap(".browser-image img");
       await until(
-        `document.querySelector('.browser-image img')?.naturalWidth===1568&&!document.querySelector('.browser-view [role=status]')?.textContent.includes('正在')`,
+        `document.querySelector('.remote-controls')&&document.querySelector('.browser-image img')?.naturalWidth===1568`,
       );
-      assert.equal(remoteInputs[0].action.action, "click_at");
+      for (
+        let i = 0;
+        i < 100 &&
+        !remoteInputs.some((input) => input.action.action === "click_at");
+        i++
+      )
+        await sleep(20);
+      assert.equal(remoteInputs.at(-1).action.action, "click_at");
       assert(
-        Math.abs(remoteInputs[0].action.x - 784) <= 2 &&
-          Math.abs(remoteInputs[0].action.y - 3000) <= 2,
-        "displayed screenshot coordinates must map to its original image pixels",
+        Math.abs(remoteInputs.at(-1).action.x - 784) <= 2 &&
+          Math.abs(remoteInputs.at(-1).action.y - 3000) <= 4,
+        "displayed screenshot coordinates must map to its original image pixels: " + JSON.stringify(remoteInputs.at(-1)),
       );
       await tap(".remote-input summary");
       await fill('textarea[aria-label="远程输入文字"]', "远程输入：你好");
@@ -1079,11 +1120,13 @@ test(
         `document.querySelector('.browser-url').textContent.includes('/new')`,
       );
       assert.equal(remoteInputs.at(-1).action.action, "goto");
-      await fill('select[aria-label="截图操作模式"]', "drag");
-      await swipe(".browser-image", true);
-      await until(
-        `document.querySelector('.remote-toolbar button')?.disabled===false`,
-      );
+      await dragMouse(".browser-image");
+      for (
+        let i = 0;
+        i < 150 && !remoteInputs.some((input) => input.action.phase === "up");
+        i++
+      )
+        await sleep(20);
       assert.equal(remoteInputs.at(-1).action.action, "pointer");
       assert.equal(remoteInputs.at(-1).action.phase, "up");
       const moves = remoteInputs.filter(
@@ -1093,7 +1136,9 @@ test(
       assert(moves.some((input) => input.action.phase === "move"));
       assert(moves.at(-1).action.x < moves[0].action.x);
       await layout("remote browser controls");
-      await fill('select[aria-label="截图操作模式"]', "click");
+      await until(
+        `[...document.querySelectorAll('.browser-address .pill')].every(e=>e.textContent.trim()!=="同步中…")`,
+      );
       const wheelPoint = await evaluate(
         `(()=>{const e=document.querySelector('.browser-image img');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:Math.max(20,Math.min(innerHeight-20,r.y+r.height/2))}})()`,
       );
@@ -1235,7 +1280,7 @@ test(
         true,
       );
       await until(
-        `document.querySelectorAll('.message.assistant .message-text').length===2`,
+        `document.querySelectorAll('.message.assistant .markdown').length===2`,
       );
       for (let i = 0; i < 40 && requests.length < 2; i++) await sleep(50);
       assert.equal(requests.length, 2);

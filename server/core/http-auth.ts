@@ -104,8 +104,8 @@ export function gate(event: H3Event, path: string) {
   const role = session.user.role;
   if (role === "admin") return;
   if (
-    ["/api/bootstrap", "/api/events"].includes(path) &&
-    event.method === "GET"
+    (path === "/api/bootstrap" && event.method === "GET") ||
+    (path === "/api/events" && ["GET", "POST"].includes(event.method))
   )
     return;
   if (/^\/api\/blobs\/[^/]+$/.test(path) && event.method === "GET") return;

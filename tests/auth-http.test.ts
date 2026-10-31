@@ -6,11 +6,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
+import WebSocket from "ws";
 import { Store } from "../server/core/store";
 import { sleep } from "../server/core/util";
 type Login = { cookie: string; csrf: string; id: string };
 test(
-  "deployed website login/RBAC: cookie,CSRF,owners,readonly grants,SSE revocation and no token bypass",
+  "deployed website login/RBAC: cookie,CSRF,owners,readonly grants,WebSocket revocation and no token bypass",
   { timeout: 60000, skip: process.env.VEGA_TEST_DEPLOYED !== "1" },
   async () => {
     const dir = await mkdtemp(join(tmpdir(), "vega-web-auth-")),
@@ -99,7 +100,7 @@ test(
     let logs = "";
     child.stdout!.on("data", (c) => (logs += c));
     child.stderr!.on("data", (c) => (logs += c));
-    const controllers: AbortController[] = [];
+    const sockets: WebSocket[] = [];
     const req = async (
       path: string,
       method = "GET",
@@ -147,28 +148,29 @@ test(
       };
     };
     const openStream = async (login: Login) => {
-      const controller = new AbortController();
-      controllers.push(controller);
-      const r = await fetch(base + "/api/events", {
-        headers: { Cookie: login.cookie },
-        signal: controller.signal,
-      });
-      assert.equal(r.status, 200);
-      const reader = r.body!.getReader();
+      const { ticket } = await ok("/events", "POST", {}, login),
+        ws = new WebSocket(
+          base.replace("http:", "ws:") + "/api/events?ticket=" + ticket,
+          { headers: { Cookie: login.cookie, Origin: base } },
+        );
+      sockets.push(ws);
       let text = "",
         ended = false;
-      const done = (async () => {
-        try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            text += new TextDecoder().decode(value);
-          }
-        } catch {
-        } finally {
+      ws.on("message", (data) => (text += data.toString()));
+      ws.on("error", () => {});
+      const done = new Promise<void>((yes) =>
+        ws.once("close", () => {
           ended = true;
-        }
-      })();
+          yes();
+        }),
+      );
+      await new Promise<void>((yes, no) => {
+        ws.once("open", yes);
+        ws.once("error", no);
+      });
+      for (let i = 0; i < 100 && !text.includes('"ready"'); i++)
+        await sleep(10);
+      assert(text.includes('"ready"'));
       return {
         get text() {
           return text;
@@ -177,7 +179,6 @@ test(
           return ended;
         },
         done,
-        controller,
       };
     };
     try {
@@ -642,7 +643,7 @@ test(
       await Promise.race([
         streamB.done,
         sleep(1500).then(() => {
-          throw Error("Disabled user SSE was not revoked");
+          throw Error("Disabled user WebSocket was not revoked");
         }),
       ]);
       assert(streamB.ended);
@@ -718,7 +719,7 @@ test(
       assert(!logs.includes("valid-admin-fixture-password"));
       assert(!logs.includes("valid-runner-one-password"));
     } finally {
-      for (const c of controllers) c.abort();
+      for (const socket of sockets) socket.close();
       mock.closeAllConnections();
       await new Promise<void>((yes) => mock.close(() => yes()));
       if (child.exitCode === null) {

@@ -1,0 +1,104 @@
+const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+const MARK = String.fromCharCode(0);
+const escape = (value) =>
+  String(value).replace(/[&<>"]/g, (c) => ESCAPES[c]);
+
+export function renderInline(text) {
+  const codes = [];
+  const source = String(text).replace(/`([^`\n]+)`/g, (_, code) => {
+    codes.push(code);
+    return MARK + (codes.length - 1) + MARK;
+  });
+  const html = escape(source)
+    .replace(
+      /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      (_, label, url) =>
+        `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`,
+    )
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  return html.replace(
+    new RegExp(MARK + "(\\d+)" + MARK, "g"),
+    (_, i) => `<code>${escape(codes[i])}</code>`,
+  );
+}
+
+// shortcut: chat-oriented Markdown subset (no raw HTML or images); upgrade to a
+// full parser only if message formatting requires it.
+export function renderMarkdown(text) {
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n"),
+    html = [],
+    codes = [];
+  let paragraph = [],
+    list = "",
+    quote = [];
+  const flush = () => {
+    if (paragraph.length) {
+      html.push(`<p>${paragraph.map(renderInline).join("<br>")}</p>`);
+      paragraph = [];
+    }
+    if (list) {
+      html.push(`</${list}>`);
+      list = "";
+    }
+    if (quote.length) {
+      html.push(
+        `<blockquote>${quote.map(renderInline).join("<br>")}</blockquote>`,
+      );
+      quote = [];
+    }
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      flush();
+      const language = line.trim().slice(3).trim(),
+        body = [];
+      while (i + 1 < lines.length && !/^\s*```/.test(lines[++i]))
+        body.push(lines[i]);
+      const code = body.join("\n");
+      codes.push(code);
+      html.push(
+        `<div class="code-block"><div class="code-head"><span>${escape(language || "code")}</span><button type="button" class="code-copy" data-code="${codes.length - 1}">复制</button></div><pre><code>${escape(code)}</code></pre></div>`,
+      );
+      continue;
+    }
+    if (!line.trim()) {
+      flush();
+      continue;
+    }
+    const heading = line.match(/^\s{0,3}(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flush();
+      html.push(`<h3>${renderInline(heading[2])}</h3>`);
+      continue;
+    }
+    if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      flush();
+      html.push("<hr>");
+      continue;
+    }
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/),
+      ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      const tag = unordered ? "ul" : "ol",
+        item = (unordered || ordered)[1];
+      if (paragraph.length || quote.length || (list && list !== tag)) flush();
+      if (!list) {
+        html.push(`<${tag}>`);
+        list = tag;
+      }
+      html.push(`<li>${renderInline(item)}</li>`);
+      continue;
+    }
+    const quoted = line.match(/^\s*>\s?(.*)$/);
+    if (quoted) {
+      if (paragraph.length || list) flush();
+      quote.push(quoted[1]);
+      continue;
+    }
+    if (list || quote.length) flush();
+    paragraph.push(line);
+  }
+  flush();
+  return { html: html.join(""), codes };
+}

@@ -342,14 +342,27 @@ test(
       );
       assert(frames > before, "frames update without manual refresh or input");
       await until(
-        `document.querySelector('[aria-label="开启远程操作"]')?.disabled===false`,
+        `document.querySelector('.browser-image img')?.complete===true`,
       );
-      await tap('[aria-label="开启远程操作"]');
+      await tap(".browser-image img");
       await sleep(350);
       assert.equal(modes.at(-1)?.mode, "control", JSON.stringify(modes));
       await until(`document.querySelector('.remote-controls')`);
-      await tap(".browser-image img");
-      for (let i = 0; i < 100 && !inputs.length; i++) await sleep(10);
+      for (
+        let i = 0;
+        i < 100 && !inputs.some((m) => m.action.action === "click_at");
+        i++
+      )
+        await sleep(10);
+      assert(
+        inputs.some((m) => m.action.action === "click_at"),
+        "first tap must send click_at; modes=" +
+          JSON.stringify(modes) +
+          " state=" +
+          (await evaluate(
+            `JSON.stringify([...document.querySelectorAll('.browser-address .pill,.browser-address button')].map(e=>e.textContent.trim()))`,
+          )),
+      );
       assert.equal(inputs[0].action.action, "click_at");
       assert(Math.abs(inputs[0].action.x - 450) < 3);
       await tap(".remote-input summary");
@@ -399,24 +412,37 @@ test(
         "https://example.test/new-draft",
       );
       await sleep(150);
-      await fill('select[aria-label="截图操作模式"]', "drag");
       const p = await evaluate(
-        `(()=>{const e=document.querySelector('.browser-image img');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width*.75,y:innerHeight/2}})()`,
+        `(()=>{const e=document.querySelector('.browser-image img');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width*.75,y:r.y+r.height/2}})()`,
       );
-      await command("Input.dispatchTouchEvent", {
-        type: "touchStart",
-        touchPoints: [p],
+      const clicksBeforeDrag = inputs.filter(
+        (m) => m.action.action === "click_at",
+      ).length;
+      await command("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x: p.x,
+        y: p.y,
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
       });
       for (let n = 1; n <= 6; n++) {
         await sleep(60);
-        await command("Input.dispatchTouchEvent", {
-          type: "touchMove",
-          touchPoints: [{ x: p.x - n * 20, y: p.y }],
+        await command("Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: p.x - n * 20,
+          y: p.y,
+          button: "left",
+          buttons: 1,
         });
       }
-      await command("Input.dispatchTouchEvent", {
-        type: "touchEnd",
-        touchPoints: [],
+      await command("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: p.x - 120,
+        y: p.y,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
       });
       for (
         let i = 0;
@@ -429,6 +455,12 @@ test(
       assert(
         inputs.some((m) => m.action.phase === "up"),
         "stream repaint must not remove pointer capture during drag",
+      );
+      await sleep(400);
+      assert.equal(
+        inputs.filter((m) => m.action.action === "click_at").length,
+        clicksBeforeDrag,
+        "a drag must not also send a click",
       );
       for (const [width, height] of [
         [320, 568],
@@ -455,8 +487,6 @@ test(
             "touch controls at least 44px",
           );
       }
-      await fill('select[aria-label="截图操作模式"]', "click");
-      await sleep(150);
       await evaluate(`document.querySelector('.browser-image img').focus()`);
       for (const key of "abc")
         await command("Input.dispatchKeyEvent", {
