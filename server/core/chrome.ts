@@ -661,82 +661,6 @@ export class Chrome {
     }
     return true;
   }
-  async pixelGuard(o: Observation, image: Obj, x: number, y: number) {
-    const stored = this.store.blobData(image.blobId);
-    assert(stored, "Screenshot pixels missing");
-    const vp = await this.evaluate(
-      o.tabTag,
-      o.frames[0],
-      "({width:innerWidth,height:innerHeight,scrollX,scrollY})",
-    );
-    const fresh = await this.cdp(o.tabTag, "Page.captureScreenshot", {
-      format: "webp",
-      quality: 100,
-      fromSurface: true,
-      captureBeyondViewport: false,
-    });
-    const raw = Buffer.from(fresh.data, "base64"),
-      meta = await sharp(raw, { limitInputPixels: 64000000 }).metadata();
-    assert(meta.width && meta.height, "Invalid current screenshot");
-    const docX = image.x + (x * image.width) / image.pixelWidth,
-      docY = image.y + (y * image.height) / image.pixelHeight;
-    const left = Math.max(
-        image.x,
-        vp.scrollX,
-        docX - (12 * image.width) / image.pixelWidth,
-      ),
-      top = Math.max(
-        image.y,
-        vp.scrollY,
-        docY - (12 * image.height) / image.pixelHeight,
-      ),
-      right = Math.min(
-        image.x + image.width,
-        vp.scrollX + vp.width,
-        docX + (12 * image.width) / image.pixelWidth,
-      ),
-      bottom = Math.min(
-        image.y + image.height,
-        vp.scrollY + vp.height,
-        docY + (12 * image.height) / image.pixelHeight,
-      );
-    assert(
-      right > left && bottom > top,
-      "Screenshot target moved outside viewport",
-    );
-    const region = (ox: number, oy: number, sx: number, sy: number) => ({
-      left: Math.max(0, Math.floor((left - ox) * sx)),
-      top: Math.max(0, Math.floor((top - oy) * sy)),
-      width: Math.max(1, Math.floor((right - left) * sx)),
-      height: Math.max(1, Math.floor((bottom - top) * sy)),
-    });
-    const before = region(
-        image.x,
-        image.y,
-        image.pixelWidth / image.width,
-        image.pixelHeight / image.height,
-      ),
-      now = region(
-        vp.scrollX,
-        vp.scrollY,
-        meta.width / vp.width,
-        meta.height / vp.height,
-      );
-    const [a, b] = await Promise.all([
-      sharp(stored.data)
-        .extract(before)
-        .resize(24, 24)
-        .removeAlpha()
-        .raw()
-        .toBuffer(),
-      sharp(raw).extract(now).resize(24, 24).removeAlpha().raw().toBuffer(),
-    ]);
-    assert(
-      a.length === b.length &&
-        a.reduce((n, v, i) => n + Math.abs(v - b[i]), 0) / a.length <= 16,
-      "Screenshot target pixels changed; input was not sent, inspect the new result",
-    );
-  }
   async action(
     o: Observation,
     a: Obj,
@@ -773,8 +697,12 @@ export class Chrome {
       assert(frame, "Unknown frame");
       const mode =
         kind === "scroll" ? (a.delta_x ? "scroll_x" : "scroll_y") : kind;
+      // Lyra dom_preflight: resolving the DOM ref to a point cannot have sent
+      // input; it stays set through hover-verify for click/fill.
+      progress.domPreflight = true;
       const p = await this.point(o, frameIndex, a.ref || null, mode);
       if (kind === "scroll") {
+        progress.domPreflight = false;
         assert(
           Math.abs(a.delta) <= 1200 && Math.abs(a.delta_x || 0) <= 1200,
           "Scroll exceeds 1200 pixels",
@@ -983,19 +911,21 @@ export class Chrome {
         o.frames[0],
         `__novaWebview.coordinate(${xy.x},${xy.y},${JSON.stringify(o.pages[0].stamp)},${o.fullPage})`,
       );
-      if (kind !== "move") await this.pixelGuard(o, image, a.x, a.y);
       changed();
       await this.cdp(tag, "Input.dispatchMouseEvent", {
         type: "mouseMoved",
         x: p.x,
         y: p.y,
       });
-      if (p.hoverTarget)
+      if (p.hoverTarget) {
         await this.evaluate(
           tag,
           o.frames[0],
           `__novaWebview.verifyPoint(${JSON.stringify(p.hoverTarget.ref)},${p.x},${p.y},${JSON.stringify(p.hoverTarget.rect)})`,
         );
+        const hovered = await this.evaluate(tag, o.frames[0], `__novaWebview.stamp()`);
+        assert(hovered === p.stamp, "悬停期间视口已变化，停止点击");
+      }
       if (kind === "click_at") {
         await this.mouse(tag, p, a.button || "left", a.click_count || 1);
         progress.focus = p.editable
@@ -1029,6 +959,8 @@ export class Chrome {
             buttons: 1,
             clickCount: 1,
           });
+          // Let drag handlers initialize and settle before releasing.
+          await sleep(120, signal);
           for (let i = 1; i <= steps; i++) {
             signal.throwIfAborted();
             last = {
@@ -1043,6 +975,7 @@ export class Chrome {
             });
             await sleep(duration / steps, signal);
           }
+          await sleep(120, signal);
         } finally {
           await this.cdp(tag, "Input.dispatchMouseEvent", {
             type: "mouseReleased",
@@ -1263,7 +1196,11 @@ export class Chrome {
       };
     }
 
-    const progress: Obj = { attempted: false, completed: 0 };
+    const progress: Obj = {
+      attempted: false,
+      completed: 0,
+      domPreflight: false,
+    };
     const before = (await this.bridge.request("tabs", {}, signal)).tabs;
     let error: string | undefined;
     for (const action of actions) {
@@ -1301,12 +1238,21 @@ export class Chrome {
       inputAttempted: progress.attempted,
       completedActions: progress.completed,
       reason: error,
+      basedOnSnapshotId: o.id,
       openedTabs: opened,
       sourceTabTag: observedTag !== tag ? tag : undefined,
       scrollFeedback: progress.scrollFeedback,
       clipboard: progress.clipboard,
       verification: "unverified",
     };
+    // Lyra parity: these are emitted only on failure. domPreflight stays true
+    // through a click/fill's hover-verify, so a stamp/iframe-move failure counts
+    // as a preflight abort even after attempted flipped on real input.
+    if (error) {
+      result.failedAtPreflight = !!progress.domPreflight;
+      result.canReobserve = !!progress.domPreflight && progress.completed === 0;
+      result.next = "先重新观察确认状态；不要重放可能已经执行的动作";
+    }
     try {
       Object.assign(
         result,

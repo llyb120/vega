@@ -400,11 +400,30 @@ export class Tools {
             data: Buffer.from(data.data).toString("base64"),
           });
       }
-      return {
-        value: result,
-        images,
-        error: ["needs_review", "not_executed"].includes(result.status),
-      };
+      // not_executed/needs_review is a structured resumable state, not a tool
+      // failure: the model must read status/reason/next and re-observe, not stop.
+      // errors_first: on any non-executed act/evaluate, lift decision fields to
+      // the front so context trimming never drops them. Same order as Lyra.
+      const isActResult =
+        result.status !== undefined && result.status !== "executed";
+      if (isActResult) {
+        const head: Obj = {};
+        for (const key of [
+          "status",
+          "reason",
+          "completedActions",
+          "inputAttempted",
+          "snapshotId",
+          "tabTag",
+          "observationError",
+          "next",
+        ])
+          if (result[key] !== undefined) head[key] = result[key];
+        for (const key of Object.keys(result))
+          if (!(key in head)) head[key] = result[key];
+        return { value: head, images };
+      }
+      return { value: result, images };
     }
     throw Error("Runtime-only or unknown tool: " + call.name);
   }
