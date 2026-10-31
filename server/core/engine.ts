@@ -102,6 +102,7 @@ export class Engine {
     public catalog: Catalog,
     public chrome: Chrome,
   ) {
+    this.providers.resolveImage = (im) => this.store.imageData(im);
     this.events.setMaxListeners(256);
     this.vault = new Vault(store);
     const runtime: EmployeeRuntime = {

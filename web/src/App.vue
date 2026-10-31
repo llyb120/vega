@@ -1339,7 +1339,11 @@ onBeforeUnmount(() => {
                 <img
                   v-for="(image, n) in turn.user.images || []"
                   :key="n"
-                  :src="`data:${image.mime};base64,${image.data}`"
+                  :src="
+                    image.blobId
+                      ? `/api/blobs/${image.blobId}`
+                      : `data:${image.mime};base64,${image.data}`
+                  "
                   alt="用户附图"
                 />
               </article>

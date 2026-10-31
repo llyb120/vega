@@ -14,7 +14,7 @@ export type Message = {
   calls?: Call[];
   callId?: string;
   name?: string;
-  images?: { mime: string; data: string }[];
+  images?: { mime: string; data?: string; blobId?: string }[];
   error?: boolean;
   model?: string;
   usage?: any;
@@ -75,6 +75,7 @@ export class Store {
    CREATE TABLE IF NOT EXISTS web_users(id TEXT PRIMARY KEY,username TEXT NOT NULL UNIQUE COLLATE NOCASE,password TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','operator','viewer')),disabled INTEGER NOT NULL DEFAULT 0,createdAt INTEGER NOT NULL,lastLogin INTEGER NOT NULL DEFAULT 0);
    CREATE TABLE IF NOT EXISTS web_sessions(hash TEXT PRIMARY KEY,userId TEXT NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,csrf TEXT NOT NULL,createdAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL);
    CREATE INDEX IF NOT EXISTS web_sessions_user ON web_sessions(userId);
+   CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated DESC);
    CREATE TABLE IF NOT EXISTS blob_access(blob TEXT NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(blob,session));
    PRAGMA application_id=1447380801; PRAGMA user_version=3; COMMIT;`);
     if (path !== ":memory:") chmodSync(path, 0o600);
@@ -151,6 +152,22 @@ export class Store {
     return this.db
       .prepare("SELECT mime,data FROM blobs WHERE id=?")
       .get(key) as { mime: string; data: Uint8Array } | undefined;
+  }
+  // Resolve an image reference ({mime,blobId} or legacy {mime,data}) to the
+  // {mime,data:base64} the model providers expect. Central lazy materialization
+  // point: only images that survive history trimming reach here.
+  imageData(image: { mime: string; data?: string; blobId?: string }): {
+    mime: string;
+    data: string;
+  } {
+    if (typeof image.data === "string") return { mime: image.mime, data: image.data };
+    if (!image.blobId) return { mime: image.mime, data: "" };
+    const blob = this.blobData(image.blobId);
+    if (!blob) return { mime: image.mime, data: "" };
+    return {
+      mime: blob.mime,
+      data: Buffer.from(blob.data).toString("base64"),
+    };
   }
   newSession(input: Partial<Session> = {}) {
     const cwd = resolve(input.cwd || process.cwd());

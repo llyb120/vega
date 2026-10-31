@@ -77,7 +77,11 @@ onBeforeUnmount(() => version++);
         <img
           v-for="(image, n) in message.images || []"
           :key="n"
-          :src="'data:' + image.mime + ';base64,' + image.data"
+          :src="
+            image.blobId
+              ? '/api/blobs/' + image.blobId
+              : 'data:' + image.mime + ';base64,' + image.data
+          "
           alt="工具返回的图片"
         />
       </details>
@@ -101,7 +105,11 @@ onBeforeUnmount(() => version++);
         <img
           v-for="(image, n) in message.images || []"
           :key="n"
-          :src="'data:' + image.mime + ';base64,' + image.data"
+          :src="
+            image.blobId
+              ? '/api/blobs/' + image.blobId
+              : 'data:' + image.mime + ';base64,' + image.data
+          "
           alt="任务附图"
       /></template>
     </article>

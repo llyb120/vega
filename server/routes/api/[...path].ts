@@ -23,7 +23,11 @@ import { assert, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
 import presets from "../../../shared/provider-presets.json";
-async function inputMessage(a: Obj) {
+async function inputMessage(
+  a: Obj,
+  store: ReturnType<typeof app>["store"],
+  sessionId: string,
+) {
   assert(
     typeof a.text === "string" || Array.isArray(a.images),
     "Message required",
@@ -33,6 +37,7 @@ async function inputMessage(a: Obj) {
     (a.text || "").length <= 2 << 20 && (!a.images || a.images.length <= 16),
     "Message too large",
   );
+  const images: { mime: string; blobId?: string; data?: string }[] = [];
   let total = 0;
   for (const image of a.images || []) {
     assert(
@@ -51,8 +56,11 @@ async function inputMessage(a: Obj) {
       data.length <= 25 << 20 && total <= 64 << 20,
       "Image attachment limit exceeded",
     );
+    const blobId = store.blob(image.mime, data);
+    store.grantBlob(blobId, sessionId);
+    images.push({ mime: image.mime, blobId });
   }
-  return { role: "user", text: a.text || "", images: a.images || [] };
+  return { role: "user", text: a.text || "", images };
 }
 export default defineEventHandler(async (event) => {
   const { store, engine, auth } = app(),
@@ -167,7 +175,7 @@ export default defineEventHandler(async (event) => {
       }
       if (["messages", "steer"].includes(path[2]) && method === "POST") {
         assert(!session.taskId, "Use employee controls to resume tasks");
-        const message = await inputMessage(a);
+        const message = await inputMessage(a, store, key);
         if (path[2] === "steer") {
           engine.steer(key, message);
           return { ok: true };

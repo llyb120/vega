@@ -790,8 +790,8 @@ export class Employee {
     );
     for (const m of [...rows].reverse())
       if (m.images?.length) {
-        const im = m.images.at(-1)!;
-        if (im.data.length <= (4 * 1024 * 1024 * 4) / 3)
+        const im = this.store.imageData(m.images.at(-1)!);
+        if (im.data && im.data.length <= (4 * 1024 * 1024 * 4) / 3)
           return { data: im.data, ext: im.mime.split("/")[1] };
       }
   }

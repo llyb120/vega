@@ -80,7 +80,7 @@ test("automatic compaction summarizes current folded view, not archived binary i
     assert(
       store
         .messages(session.id)
-        .some((m) => m.images?.[0]?.data.length === 1000000),
+        .some((m) => m.images?.[0]?.data?.length === 1000000),
       "Archived image original was lost",
     );
     assert.equal(

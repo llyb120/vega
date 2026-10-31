@@ -29,7 +29,7 @@ import type { Config, Model } from "./config";
 import type { Tool } from "./provider";
 export type Outcome = {
   value: any;
-  images?: { mime: string; data: string }[];
+  images?: { mime: string; data?: string; blobId?: string }[];
   error?: boolean;
   stop?: boolean;
   secret?: string;
@@ -364,7 +364,12 @@ export class Tools {
       const images: Outcome["images"] = [];
       for (const part of result.content || [])
         if (part.type === "image") {
-          images.push({ mime: part.mimeType, data: part.data });
+          const blobId = this.engine.store.blob(
+            part.mimeType,
+            Buffer.from(part.data, "base64"),
+          );
+          this.engine.store.grantBlob(blobId, this.session.id);
+          images.push({ mime: part.mimeType, blobId });
           part.data = "[image attached]";
         }
       return { value: result, images, error: result.isError };
@@ -393,12 +398,7 @@ export class Tools {
       const images: Outcome["images"] = [];
       for (const im of result.images || []) {
         this.engine.store.grantBlob(im.blobId, this.session.id);
-        const data = this.engine.store.blobData(im.blobId);
-        if (data)
-          images.push({
-            mime: data.mime,
-            data: Buffer.from(data.data).toString("base64"),
-          });
+        images.push({ mime: im.mime, blobId: im.blobId });
       }
       // not_executed/needs_review is a structured resumable state, not a tool
       // failure: the model must read status/reason/next and re-observe, not stop.
@@ -496,12 +496,7 @@ export class Tools {
         assert(blob, "Archived blob missing");
         return {
           value: { path: a.path },
-          images: [
-            {
-              mime: blob.mime,
-              data: Buffer.from(blob.data).toString("base64"),
-            },
-          ],
+          images: [{ mime: blob.mime, blobId: match[2] }],
         };
       }
       const value = this.engine.store.object(match[1], match[2]);
@@ -518,6 +513,11 @@ export class Tools {
       assert(st.size <= 25 << 20, "Image exceeds25MiB");
       const data = await readFile(path),
         metadata = await sharp(data, { limitInputPixels: 64000000 }).metadata();
+      const blobId = this.engine.store.blob(
+        "image/" + (metadata.format === "jpeg" ? "jpeg" : metadata.format),
+        data,
+      );
+      this.engine.store.grantBlob(blobId, this.session.id);
       return {
         value: { path },
         images: [
@@ -525,7 +525,7 @@ export class Tools {
             mime:
               "image/" +
               (metadata.format === "jpeg" ? "jpeg" : metadata.format),
-            data: data.toString("base64"),
+            blobId,
           },
         ],
       };

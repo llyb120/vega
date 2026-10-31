@@ -111,8 +111,24 @@ export function bodyFor(
   system: string,
   input: Message[],
   tools: Tool[],
+  resolveImage?: (image: { mime: string; data?: string; blobId?: string }) => {
+    mime: string;
+    data: string;
+  },
 ) {
-  const rows = historyImages(input),
+  const trimmed = historyImages(input),
+    rows = resolveImage
+      ? trimmed.map((m) =>
+          m.images?.length
+            ? {
+                ...m,
+                images: m.images.map((im) =>
+                  im.data ? { mime: im.mime, data: im.data } : resolveImage(im),
+                ),
+              }
+            : m,
+        )
+      : trimmed,
     options = wireOptions(model),
     body: Obj = { ...options, model: model.id, stream: true };
   const api = model.api;
@@ -453,6 +469,16 @@ type Checkpoint = {
 };
 export class Providers {
   checkpoints = new Map<string, Checkpoint>();
+  // Injected by the engine: resolves {mime,blobId} -> {mime,data:base64} lazily,
+  // only for images that survived history trimming.
+  resolveImage: (image: {
+    mime: string;
+    data?: string;
+    blobId?: string;
+  }) => { mime: string; data: string } = (im) => ({
+    mime: im.mime,
+    data: im.data || "",
+  });
   reset(session: string) {
     for (const key of this.checkpoints.keys())
       if (key.startsWith(session + ":")) this.checkpoints.delete(key);
@@ -466,7 +492,13 @@ export class Providers {
     emit: Emit = () => {},
     session = "",
   ): Promise<Message> {
-    const { path, body } = bodyFor(model, system, messages, tools);
+    const { path, body } = bodyFor(
+      model,
+      system,
+      messages,
+      tools,
+      this.resolveImage,
+    );
     if (model.api === "devin")
       return await devinStream(
         model,
@@ -528,6 +560,7 @@ export class Providers {
           system,
           messages.slice(previous.count),
           tools,
+          this.resolveImage,
         ).body.input;
         continuation = true;
       }
@@ -565,7 +598,13 @@ export class Providers {
     ) {
       await bounded(response, 4096);
       delete body.previous_response_id;
-      body.input = bodyFor(model, system, messages, tools).body.input;
+      body.input = bodyFor(
+        model,
+        system,
+        messages,
+        tools,
+        this.resolveImage,
+      ).body.input;
       response = await request(
         model.baseURL + path,
         {
@@ -604,7 +643,13 @@ export class Providers {
             (p) => !["thinking", "redacted_thinking"].includes(p.type),
           ),
         }));
-        const retry = bodyFor(model, system, unsigned, tools);
+        const retry = bodyFor(
+        model,
+        system,
+        unsigned,
+        tools,
+        this.resolveImage,
+      );
         response = await request(
           model.baseURL + retry.path,
           { method: "POST", headers, body: JSON.stringify(retry.body), signal },
