@@ -799,162 +799,204 @@ nav button.selected {
   white-space: pre-wrap;
 }
 
-/* ---------- Tool steps ---------- */
+/* ---------- Nova-style turn and process folds ---------- */
 .turn-fold {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 28px;
-  padding: 3px 6px;
+  width: fit-content;
+  max-width: min(100%, 400px);
+  min-height: 26px;
+  margin: 12px 0 2px -8px;
+  padding: 4px 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 7px;
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 18px;
+  text-align: left;
 }
 .turn-fold:hover {
   background: var(--surface-sunken);
 }
-.turn-fold-hint {
+.turn-fold > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.turn-fold-chevron,
+.steps-chevron,
+.step-chevron {
+  flex: none;
   color: #a2a8b6;
   font-size: 11px;
 }
 .turn-process {
-  margin: 2px 0 6px 7px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border);
+  margin: 4px 0 6px;
+  padding: 2px 0;
+}
+.turn-process.folded {
+  padding-left: 12px;
+  box-shadow: inset 2px 0 var(--border);
+}
+.turn-fold + .turn-process {
+  margin-top: 6px;
 }
 .turn-process:empty {
   display: none;
 }
 .tool-steps {
-  margin: 2px 0 4px;
-  border-radius: 6px;
-  background: transparent;
-  overflow: hidden;
-  transition: background 0.15s ease;
-}
-.tool-steps:hover {
-  background: var(--surface-sunken);
+  padding: 4px 0;
 }
 .tool-steps-summary {
   display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  width: calc(100% + 8px);
+  max-width: none;
   min-height: 28px;
-  padding: 3px 6px;
+  margin-left: -8px;
+  padding: 0 8px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: var(--muted);
   font-size: 12px;
+  line-height: 24px;
   text-align: left;
-  font-weight: 500;
 }
 .tool-steps-summary:hover {
-  background: #f0f1f6;
+  background: var(--surface-sunken);
 }
-.tool-steps-summary strong {
-  font-weight: 600;
+.steps-summary-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  min-width: 0;
 }
-.steps-icon {
-  color: var(--accent);
-  font-size: 15px;
+.steps-summary-text {
+  max-width: calc(100% - 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.steps-count {
-  color: #9aa0af;
-  font-size: 11px;
-  font-weight: 500;
+.steps-live-preview {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  max-height: 48px;
+  overflow: hidden;
 }
-.steps-state {
-  margin-left: auto;
-  color: #8a91a1;
-  font-size: 11px;
-  font-weight: 500;
+.steps-live-lines {
+  display: block;
+  flex: none;
+  width: calc(100% - 32px);
+  min-width: 1px;
 }
-.steps-state:empty {
-  display: none;
+.steps-live-line {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 24px;
 }
-.steps-state.running {
-  color: var(--accent);
-}
-.steps-state.failed {
-  color: #b4654f;
-}
-.steps-chevron {
+.steps-live-chevron {
+  display: inline-block;
+  margin-left: 6px;
   color: #a2a8b6;
   font-size: 11px;
 }
 .tool-steps-body {
-  margin: 2px 0 6px 12px;
-  padding: 2px 0 2px 12px;
-  border-left: 2px solid var(--border);
+  padding-left: 4px;
 }
 .tool-step {
-  padding: 5px 0;
-  color: #7b8292;
+  padding: 1px 0;
+  color: var(--text-secondary);
   font-size: 12px;
 }
 .tool-step summary {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
+  min-height: 26px;
+  padding: 3px 8px;
+  border-radius: 7px;
   list-style: none;
-  padding: 6px 0;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  line-height: 20px;
+  cursor: pointer;
+}
+.tool-step summary:hover {
+  background: var(--surface-sunken);
 }
 .tool-step summary::-webkit-details-marker {
   display: none;
 }
-.step-status {
-  display: inline-grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  font-size: 10px;
-  font-weight: 700;
-}
-.step-status.done {
-  color: #20724a;
-  background: #dcf2e6;
-}
-.step-status.failed {
-  color: #a83f2a;
-  background: #fbe0da;
+.step-icon {
+  display: inline-flex;
+  flex: none;
+  width: 14px;
+  justify-content: center;
+  color: #a2a8b6;
 }
 .step-name {
-  color: #5d6474;
-  overflow-wrap: anywhere;
-  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.step-hint {
-  margin-left: auto;
-  color: #a4aab8;
-  font-size: 11px;
+.tool-step.failed .step-name {
+  color: var(--red);
+}
+.step-failed {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--red);
+}
+.tool-step[open] .step-chevron {
+  transform: rotate(90deg);
 }
 .tool-step pre {
   max-height: 320px;
   overflow: auto;
-  margin: 8px 0 4px 27px;
-  padding: 10px 13px;
-  border-radius: var(--r-sm);
-  background: #f0f1f5;
-  color: #6a7181;
+  overscroll-behavior: contain;
+  margin: 4px 0 8px 14px;
+  padding: 10px;
+  border-radius: 7px;
+  background: var(--surface-sunken);
+  box-shadow: inset 0 0 0 1px var(--border);
+  color: var(--text-secondary);
+  font: 12px/1.55 ui-monospace, "SFMono-Regular", Consolas, monospace;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .tool-step img {
   max-width: 100%;
+  margin: 4px 0 8px 14px;
   border-radius: var(--r-sm);
-  margin: 8px 0 4px 27px;
 }
 .tool-step.active {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 9px 0;
-  color: var(--accent);
-  font-weight: 500;
+  gap: 8px;
+  min-height: 26px;
+  padding: 3px 8px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  line-height: 20px;
+}
+.tool-thought {
+  padding: 6px 0;
+}
+.tool-thought pre {
+  margin-left: 4px;
 }
 
 /* ---------- Markdown ---------- */
@@ -1711,12 +1753,15 @@ summary {
     scroll-behavior: auto;
   }
   .message-fold,
-  .turn-fold,
   .stage-switch,
   .stage-switch {
     max-width: 130px;
     font-size: 16px;
   }
+  .turn-fold {
+    max-width: 100%;
+  }
+  .turn-fold,
   .tool-steps-summary,
   .tool-step summary,
   .reasoning summary,
@@ -1856,9 +1901,6 @@ summary {
     padding: 13px;
     flex-wrap: wrap;
     min-height: 46px;
-  }
-  .step-hint {
-    font-size: 11px;
   }
   .markdown {
     font-size: 15px;

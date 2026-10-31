@@ -1,7 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { renderMarkdown, renderInline } from "../web/src/markdown.js";
-import { groupTurns, timelineOf } from "../web/src/conversation.js";
+import {
+  formatDuration,
+  formatTokens,
+  groupTurns,
+  processLiveLines,
+  processSummary,
+  timelineOf,
+  turnStats,
+} from "../web/src/conversation.js";
 
 test("conversation keeps conclusions visible and folds only completed process", () => {
   const messages = [
@@ -15,8 +23,39 @@ test("conversation keeps conclusions visible and folds only completed process", 
   assert.deepEqual(turn.process.map((m: any) => m.seq), [2, 3]);
   assert.deepEqual(turn.conclusion.map((m: any) => m.seq), [4]);
   assert.equal(next.user.seq, 5);
-  assert.equal(timelineOf(turn.process)[1].kind, "tools");
+  const timeline = timelineOf(turn.process) as any[];
+  assert.equal(timeline.length, 1);
+  assert.equal(timeline[0].kind, "process");
+  assert.deepEqual(timeline[0].items.map((m: any) => m.role), ["thought", "tool"]);
   assert.equal(timelineOf(turn.conclusion)[0].continuation, false);
+});
+
+test("process folds use Nova summaries, live previews and measured turn usage", () => {
+  const items = [
+    { role: "thought", seq: 2, text: "先检查文件" },
+    { role: "tool", seq: 3, name: "read", text: "ok" },
+    { role: "tool", seq: 4, name: "bash", text: "one" },
+    { role: "tool", seq: 5, name: "bash", text: "two", error: true },
+  ];
+  assert.equal(processSummary(items), "读取文件 ×1、执行命令 ×2（1 项失败）");
+  assert.deepEqual(processLiveLines(items), ["已完成 · bash", "失败 · bash"]);
+  assert.deepEqual(processLiveLines([...items, { role: "tool", name: "write", active: true }]).slice(-1), ["进行中 · write"]);
+
+  const stats = turnStats([
+    { role: "assistant", at: 2000, usage: { input: 100, output: 20, cacheRead: 10, totalTokens: 130 } },
+    { role: "tool", at: 3000 },
+    { role: "assistant", at: 4000, usage: { input: 50, output: 10, totalTokens: 60 } },
+  ], 1000);
+  assert.deepEqual(stats, {
+    durationMs: 3000,
+    totalTokens: 190,
+    inputTokens: 150,
+    outputTokens: 30,
+    cacheReadTokens: 10,
+    cacheWriteTokens: 0,
+  });
+  assert.equal(formatDuration(stats.durationMs), "3s");
+  assert.equal(formatTokens(12500), "12.5k");
 });
 
 test("chat markdown escapes HTML and only links safe protocols", () => {

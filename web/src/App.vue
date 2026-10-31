@@ -190,22 +190,35 @@ const isRunning = computed(
   () => current.value && running.value[current.value.id],
 );
 const turns = computed(() =>
-  groupTurns(messages.value).map((turn, i, all) => ({
-    ...turn,
-    running: i === all.length - 1 && !!isRunning.value,
-    processMessages: turn.body.slice(
-      0,
-      turn.body.length - turn.conclusion.length,
-    ),
-    process: timelineOf(
-      i === all.length - 1 && isRunning.value
+  groupTurns(messages.value).map((turn, i, all) => {
+    const running = i === all.length - 1 && !!isRunning.value;
+    const process = timelineOf(
+      running
         ? turn.body
         : turn.body.slice(0, turn.body.length - turn.conclusion.length),
-    ),
-    conclusion: timelineOf(
-      i === all.length - 1 && isRunning.value ? [] : turn.conclusion,
-    ),
-  })),
+    );
+    if (running && thinking.value) {
+      const item = { role: "thought", seq: "live-thought", text: thinking.value };
+      const last = process.at(-1);
+      if (last?.kind === "process") last.items.push(item);
+      else process.push({ kind: "process", key: "process-live-thought", items: [item] });
+    }
+    if (running && live.value) {
+      process.push({
+        kind: "message",
+        key: "assistant-live",
+        message: { role: "assistant", text: live.value, streaming: true },
+        continuation: false,
+      });
+    }
+    return {
+      ...turn,
+      running,
+      process,
+      lastProcessIndex: process.findLastIndex((entry) => entry.kind === "process"),
+      conclusion: timelineOf(running ? [] : turn.conclusion),
+    };
+  }),
 );
 const rootSessions = computed(() =>
   sessions.value.filter((s) => !s.stageSource),
@@ -1350,27 +1363,30 @@ onBeforeUnmount(() => {
               <div v-if="turn.body.length" class="message-meta">
                 <span>Vega</span><span>{{ turn.body.findLast((m) => m.model)?.model || "" }}</span>
               </div>
-              <TurnProcess v-if="turn.process.length" :messages="turn.processMessages" :initial-open="turn.running">
+              <TurnProcess
+                v-if="turn.process.length"
+                :messages="turn.body"
+                :started-at="turn.user?.at"
+                :running="turn.running"
+              >
                 <template v-for="(entry, i) in turn.process" :key="entry.key">
                   <ToolSteps
-                    v-if="entry.kind === 'tools'"
+                    v-if="entry.kind === 'process'"
                     :items="entry.items"
-                    :active="turn.running && i === turn.process.length - 1 ? activeTools : []"
+                    :active="turn.running && i === turn.lastProcessIndex ? activeTools : []"
+                    :live="turn.running && (i === turn.process.length - 1 || (activeTools.length && i === turn.lastProcessIndex))"
                   />
                   <article
                     v-else
                     :class="['message', entry.message.role, { continuation: entry.continuation }]"
                   >
-                    <details v-if="entry.message.thinking" class="reasoning">
-                      <summary>{{ turn.running ? "思考中" : "思考过程" }}</summary>
-                      <pre>{{ entry.message.thinking }}</pre>
-                    </details>
                     <MessageText
                       v-if="entry.message.text"
                       :text="entry.message.displayText || entry.message.text"
+                      :streaming="entry.message.streaming"
                     />
                     <div
-                      v-if="entry.message.calls?.length && turn.process[i + 1]?.kind !== 'tools'"
+                      v-if="entry.message.calls?.length && turn.process[i + 1]?.kind !== 'process'"
                       class="calls"
                     >
                       <span v-for="c in entry.message.calls" :key="c.id">↳ {{ c.name }}</span>
@@ -1385,7 +1401,10 @@ onBeforeUnmount(() => {
               </template>
             </section>
           </template>
-          <article v-if="live || thinking" class="message assistant continuation">
+          <article
+            v-if="(live || thinking) && (!turns.length || !turns.at(-1).running)"
+            class="message assistant continuation"
+          >
             <div class="message-meta">
               <span>Vega</span><span>{{ model }}</span
               ><span class="status-dot"></span>
@@ -1399,9 +1418,10 @@ onBeforeUnmount(() => {
           <ToolSteps
             v-if="
               activeTools.length &&
-              (!turns.length || !turns.at(-1).running || !turns.at(-1).process.length)
+              (!turns.length || !turns.at(-1).running || turns.at(-1).lastProcessIndex < 0)
             "
             :active="activeTools"
+            live
           />
         </div>
         <p v-if="!canWriteCurrent" class="context-note">

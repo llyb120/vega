@@ -1,50 +1,69 @@
 <script setup vapor>
 import { computed, ref } from "vue";
+import { processLiveLines, processSummary, toolKind } from "./conversation";
 const props = defineProps({
   items: { type: Array, default: () => [] },
   active: { type: Array, default: () => [] },
+  live: { type: Boolean, default: false },
 });
 const expanded = ref(false);
-const open = computed(() => expanded.value || props.active.length > 0);
-const failed = computed(() => props.items.some((m) => m.error));
+const allItems = computed(() => [
+  ...props.items,
+  ...props.active.map((item) => ({ ...item, role: "tool", active: true })),
+]);
+const summary = computed(() => processSummary(allItems.value));
+const lines = computed(() => processLiveLines(allItems.value));
+const hasBody = (item) => !!(item.text || item.images?.length);
+const icons = { read: "⌕", edit: "±", delete: "−", search: "⌕", execute: "$", think: "●", fetch: "↗", tool: "⚙" };
+const icon = (item) => icons[toolKind(item.name)];
 </script>
 <template>
-  <section class="tool-steps" :class="{ open }">
+  <section class="tool-steps" :class="{ open: expanded }">
     <button
       type="button"
       class="tool-steps-summary"
-      :aria-expanded="open"
-      @click="expanded = !open"
+      :aria-expanded="expanded"
+      @click="expanded = !expanded"
     >
-      <span class="steps-icon" aria-hidden="true">⌁</span>
-      <strong>执行过程</strong>
-      <span class="steps-count">{{ items.length + active.length }} 步</span>
-      <span v-if="failed" class="steps-state failed">有失败</span>
-      <span v-else-if="active.length" class="steps-state running">执行中</span>
-      <span class="steps-chevron" aria-hidden="true">{{
-        open ? "▾" : "▸"
-      }}</span>
+      <span v-if="!live" class="steps-summary-line" :title="summary">
+        <span class="steps-summary-text">{{ summary }}</span>
+        <span class="steps-chevron" aria-hidden="true">{{ expanded ? "▾" : "▸" }}</span>
+      </span>
+      <span v-else class="steps-live-preview" :title="lines.join('\n')">
+        <span class="steps-live-lines">
+          <span v-for="(line, i) in lines" :key="i" class="steps-live-line">
+            {{ line }}<span v-if="i === lines.length - 1" class="steps-live-chevron" aria-hidden="true">{{ expanded ? "▾" : "▸" }}</span>
+          </span>
+        </span>
+      </span>
     </button>
-    <div v-show="open" class="tool-steps-body">
-      <details v-for="(m, i) in items" :key="m.seq || i" class="tool-step">
-        <summary>
-          <span :class="['step-status', m.error ? 'failed' : 'done']">{{
-            m.error ? "!" : "✓"
-          }}</span>
+    <div v-show="expanded" class="tool-steps-body">
+      <template v-for="(m, i) in allItems" :key="`${m.role}-${m.seq || m.callId || m.id || i}`">
+        <details v-if="m.role === 'thought'" class="reasoning tool-thought">
+          <summary>思考过程</summary>
+          <pre>{{ m.text }}</pre>
+        </details>
+        <div v-else-if="m.active" class="tool-step active">
+          <span class="step-icon" aria-hidden="true">{{ icon(m) }}</span>
           <span class="step-name">{{ m.name }}</span>
-          <span class="step-hint">查看结果</span>
-        </summary>
-        <pre>{{ m.text }}</pre>
-        <img
-          v-for="(image, n) in m.images || []"
-          :key="n"
-          :src="`data:${image.mime};base64,${image.data}`"
-          alt="工具返回的图片"
-        />
-      </details>
-      <div v-for="c in active" :key="c.id" class="tool-step active">
-        <span class="spinner"></span>{{ c.name }} 正在执行…
-      </div>
+          <span class="spinner" role="status" aria-label="进行中"></span>
+        </div>
+        <details v-else class="tool-step" :class="{ failed: m.error }">
+          <summary>
+            <span class="step-icon" aria-hidden="true">{{ icon(m) }}</span>
+            <span class="step-name">{{ m.name }}</span>
+            <span v-if="m.error" class="step-failed" role="img" aria-label="失败"></span>
+            <span v-if="hasBody(m)" class="step-chevron" aria-hidden="true">▸</span>
+          </summary>
+          <pre v-if="m.text">{{ m.text }}</pre>
+          <img
+            v-for="(image, n) in m.images || []"
+            :key="n"
+            :src="`data:${image.mime};base64,${image.data}`"
+            alt="工具返回的图片"
+          />
+        </details>
+      </template>
     </div>
   </section>
 </template>

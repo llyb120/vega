@@ -127,22 +127,28 @@ test(
     store.put("config", config);
     store.append(session.id, {
       role: "user",
+      at: 1000,
       text: "https://example.test/" + "a".repeat(2000),
     });
     store.append(session.id, {
       role: "assistant",
+      at: 2000,
       text: "过程说明",
       thinking: "分析上下文",
+      usage: { input: 100, output: 20, totalTokens: 120 },
     });
     store.append(session.id, {
       role: "tool",
+      at: 3000,
       name: "read",
       callId: "fixture-read",
       text: "工具结果",
     });
     store.append(session.id, {
       role: "assistant",
+      at: 4000,
       text: "已有历史正文\n".repeat(300),
+      usage: { input: 50, output: 10, totalTokens: 60 },
     });
     new Experiences(store).execute(
       "fixture",
@@ -809,9 +815,19 @@ test(
         "none",
         "completed turn starts folded",
       );
+      assert.equal(
+        await evaluate(`document.querySelector('.turn-fold > span:first-child').textContent`),
+        "已处理 3s · 180 tokens · 平均输出 10 tok/s",
+        "completed turn uses Nova duration and token summary",
+      );
       await tap(".turn-fold");
       await until(`document.querySelector('.tool-step')`);
-      await tap(".tool-steps-summary");
+      assert(
+        await evaluate(`[...document.querySelectorAll('.tool-steps-summary')].some(e => e.textContent.includes('读取文件 ×1'))`),
+        "process segment summarizes actions instead of a generic step count",
+      );
+      await evaluate(`(()=>{const e=[...document.querySelectorAll('.tool-steps-summary')].find(e=>e.textContent.includes('读取文件 ×1'));e.dataset.mobileTest='process-summary';return !!e})()`);
+      await tap('[data-mobile-test="process-summary"]');
       await tap(".tool-step summary");
       assert(
         await evaluate(`document.querySelector('.tool-step pre').textContent.includes('工具结果')`),
