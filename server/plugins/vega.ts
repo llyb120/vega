@@ -14,13 +14,12 @@ export default defineNitroPlugin(async (nitro) => {
     "workbuddy-login.cjs",
   );
   if (!page || !helper) throw Error("Bundled migration assets missing");
-  const { store, engine, browserLive, eventsSocket } = await initialize(
-    page,
-    helper,
-  );
+  const { store, engine, browserLive, eventsSocket, headless } =
+    await initialize(page, helper);
   nitro.hooks.hook("close", async () => {
     eventsSocket.closeAll();
     await browserLive.close();
+    await headless.close();
     await engine.close();
     store.close();
   });

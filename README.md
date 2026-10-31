@@ -129,7 +129,9 @@ docker run -d --name vega --shm-size=1g \
 
 WS连接先通过带CSRF校验的POST取得15秒有效、一次性且绑定管理员登录的票据；握手同时校验Cookie和Origin，注销/撤权会关闭已连接通道。慢客户端每次只保留一张待确认画面，不积压帧或点击；实时画面不写入SQLite。输入按连接序号去重，并校验用户实际显示过的帧、网页/视口和焦点，断线和结果不确定时不重放；原HTTP截图/操作接口仍保留，继续使用原像素校验规则。
 
-手动控制期间独占共享Chrome操作锁，agent的后续Chrome操作等待，不取消任务；退出、断线、页面隐藏或30秒未操作会释放控制权，并在必要时松开鼠标。手动操作会使同页agent的旧观察失效，但纯查看不会覆盖agent的ref/截图。获取后台/最小化标签画面可能会显示Chrome窗口并切到该页。
+手动控制期间独占**该标签页**的 Chrome 操作锁，同一标签页的 agent 后续操作等待；不同标签页的人工控制与 agent 任务互不阻塞，多 tab 可同时查看或操作。退出、断线、页面隐藏或30秒未操作会释放控制权，并在必要时松开鼠标。手动操作会使同页 agent 的旧观察失效，但纯查看不会覆盖 agent 的 ref/截图。获取后台/最小化标签画面可能会显示 Chrome 窗口并切到该页。
+
+**无头模式**：设置 `VEGA_BROWSER_MODE=isolated` 后，服务启动一个私有无头 Chrome（与 Docker 同一套扩展协议、独立 profile 目录 `<数据库目录>/chromium`），不占宿主桌面。Linux/Windows/macOS 都支持；Windows 上通过 `VEGA_CHROME_PATH` 指定 chrome.exe，未设置时自动探测常见安装路径。无头实例可多 tab 并行截图和输入；cookie/登录态持久在私有 profile，不与用户日常浏览器共享。Docker 模式同样使用此变量，行为一致。
 
 远程部署仍只需现有网站端口。反向代理须为`/api/events`和`/api/chrome/live`转发WebSocket的HTTP/1.1 Upgrade/Connection并保留Host；公网请配置正确的`VEGA_PUBLIC_URL`并使用HTTPS/WSS，**不要暴露Chrome调试端口或回环扩展端口**。断线后点击刷新重新连接，不自动补发上次操作。
 

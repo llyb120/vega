@@ -66,16 +66,15 @@ test("container health requires authenticated extension pairing, not merely an a
   }
 });
 
-test("isolated-browser presence is opt-in on Linux and cannot masquerade as host activity or locking", () => {
+test("isolated-browser presence applies to any platform with a private headless browser", () => {
   assert.equal(isolatedBrowserPresence("linux", undefined), undefined);
-  assert.equal(isolatedBrowserPresence("win32", "isolated"), undefined);
-  assert.equal(isolatedBrowserPresence("darwin", "isolated"), undefined);
-  const first = isolatedBrowserPresence("linux", "isolated", 10000)!,
-    next = isolatedBrowserPresence("linux", "isolated", 30000)!;
-  assert.equal(first.source, "isolated-chromium");
-  assert(first.available && !first.locked);
-  assert.equal(first.sampledAt! - first.idleMs, 0);
-  assert.equal(next.sampledAt! - next.idleMs, 0);
+  assert.equal(isolatedBrowserPresence("win32", undefined), undefined);
+  for (const platform of ["linux", "win32", "darwin"]) {
+    const p = isolatedBrowserPresence(platform, "isolated", 10000)!;
+    assert.equal(p.source, "isolated-chromium");
+    assert(p.available && !p.locked);
+    assert.equal(p.sampledAt! - p.idleMs, 0);
+  }
 });
 
 test("dedicated container browser tasks start without claiming a physical desktop and retain normal task isolation", async () => {

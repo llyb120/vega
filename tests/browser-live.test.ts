@@ -1,3 +1,5 @@
+import { isolatedBrowserPresence } from "../server/core/presence";
+import { headlessArguments } from "../server/core/headless";
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -21,8 +23,8 @@ test("live control idle and uncertain delivery release the shared gate without r
     "mode",
     (m) => m.mode === "view" && String(m.reason).includes("闲置"),
   );
-  await f.chrome.gate.run(async () => {});
-  assert.equal(f.hub.controller, undefined);
+  await f.chrome.tabGate("C1").run(async () => {});
+  assert.equal(f.hub.controllers.size, 0);
   s.message({ type: "mode", mode: "control" });
   for (let i = 0; i < 100 && !f.hub.sessions.get(s.socket.id)!.locked; i++)
     await sleep(5);
@@ -45,11 +47,51 @@ test("live control idle and uncertain delivery release the shared gate without r
   const result = await s.wait("input_result");
   assert.equal(result.status, "needs_review");
   assert.match(result.reason, /wire lost/);
-  await f.chrome.gate.run(async () => {});
-  assert.equal(f.hub.controller, undefined);
+  await f.chrome.tabGate("C1").run(async () => {});
+  assert.equal(f.hub.controllers.size, 0);
   s.message(input);
   assert.equal(attempts, 1);
   assert(s.closed.length);
+});
+test("control of another tab runs while an agent task owns a different tab", async () => {
+  const f = await fixture(),
+    a = await f.open(),
+    b = await f.open();
+  await a.wait("frame");
+  await b.wait("frame");
+  const session = f.hub.sessions.get(b.socket.id)!;
+  session.tabTag = "C2";
+  f.state.url = "https://other.test/";
+  b.message({ type: "mode", mode: "control" });
+  await b.wait("mode", (m) => m.mode === "control");
+  assert(f.hub.controllers.get("C2") === session);
+  let released = false;
+  const held = f.chrome.tabGate("C1").run(async () => {
+    await sleep(60);
+    released = true;
+  });
+  b.message({
+    type: "input",
+    seq: 1,
+    frameId: b.frame().frameId,
+    action: { action: "click_at", x: 250, y: 150 },
+  });
+  const result = await b.wait("input_result");
+  assert.equal(result.status, "executed");
+  assert(!released, "click on a different tab must not wait for the C1 gate");
+  await held;
+});
+test("isolated browser presence is per-platform and headless arguments are consistent with Docker", () => {
+  assert.equal(isolatedBrowserPresence("win32", undefined), undefined);
+  assert.equal(isolatedBrowserPresence("win32", "isolated", 5000)!.source, "isolated-chromium");
+  assert.equal(isolatedBrowserPresence("linux", "isolated", 5000)!.source, "isolated-chromium");
+  assert.equal(isolatedBrowserPresence("darwin", "isolated", 5000)!.source, "isolated-chromium");
+  const args = headlessArguments("/data/chromium", "/app/extension");
+  assert(args.includes("--headless=new"));
+  assert(args.includes("--user-data-dir=/data/chromium"));
+  assert(args.includes("--load-extension=/app/extension"));
+  assert(args.includes("--remote-debugging-port=0"));
+  assert(args.includes("--password-store=basic"));
 });
 async function fixture() {
   const bytes = await sharp({
@@ -82,8 +124,15 @@ async function fixture() {
       url: "https://example.test/",
       title: "Live fixture",
     };
+  const tabGates = new Map<string, Mutex>();
   const chrome = {
     gate: new Mutex(),
+    tabGates,
+    tabGate(tag: string) {
+      let g = tabGates.get(tag);
+      if (!g) tabGates.set(tag, (g = new Mutex()));
+      return g;
+    },
     observations: new Map(),
     bridge: {
       status: () => ({ connected: true }),
@@ -246,7 +295,7 @@ test("live frames use acknowledgement backpressure without SQLite snapshots; con
   s.message({ type: "mode", mode: "control" });
   await s.wait("mode", (m) => m.mode === "control");
   let agentRan = false;
-  const agent = f.chrome.gate.run(async () => {
+  const agent = f.chrome.tabGate("C1").run(async () => {
     agentRan = true;
   });
   await sleep(30);
@@ -302,13 +351,13 @@ test("live input maps displayed pixels, streams drag phases, types once and rele
   );
   await input({ action: "pointer", phase: "down", x: 100, y: 100 });
   await f.hub.sessions.get(s.socket.id)!.close();
-  await f.chrome.gate.run(async () => {});
+  await f.chrome.tabGate("C1").run(async () => {});
   assert.equal(
     f.calls.filter((c) => c.method === "Input.dispatchMouseEvent").at(-1)
       ?.params.type,
     "mouseReleased",
   );
-  assert.equal(f.hub.controller, undefined);
+  assert.equal(f.hub.controllers.size, 0);
 });
 test("live controls reject stale frames, changed focus, arbitrary scripts and duplicates, and auth revocation closes a live lease", async () => {
   const f = await fixture(),
@@ -348,7 +397,7 @@ test("live controls reject stale frames, changed focus, arbitrary scripts and du
   );
   assert(!f.calls.some((c) => c.method === "Input.insertText"));
   f.revoke();
-  await f.chrome.gate.run(async () => {});
+  await f.chrome.tabGate("C1").run(async () => {});
   assert.equal(s.closed.at(-1)?.code, 4401);
   assert.equal(session.active, false);
   assert.equal(f.hub.sessions.size, 0);

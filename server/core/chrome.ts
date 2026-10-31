@@ -26,6 +26,12 @@ type Observation = {
 };
 export class Chrome {
   gate = new Mutex();
+  tabGates = new Map<string, Mutex>();
+  tabGate(tag: string) {
+    let gate = this.tabGates.get(tag);
+    if (!gate) this.tabGates.set(tag, (gate = new Mutex()));
+    return gate;
+  }
   observations = new Map<string, Observation>();
   cancelled = new Map<string, AbortController>();
   experiences: Experiences;
@@ -1061,7 +1067,8 @@ export class Chrome {
       this.cancelled.get(owner)?.abort();
       return { stopped: true };
     }
-    return await this.gate.run(async () => {
+    const target = args.tabTag || args.snapshotId;
+    return await (target ? this.tabGate(target) : this.gate).run(async () => {
       const control = new AbortController();
       this.cancelled.set(owner, control);
       const signal = AbortSignal.any([

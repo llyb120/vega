@@ -66,8 +66,9 @@ export function isolatedBrowserPresence(
   mode: string | undefined,
   now = Date.now(),
 ): Presence | undefined {
-  if (platform !== "linux" || mode !== "isolated") return;
-  // A private, container-owned browser has no host desktop to seize or unlock.
+  if (mode !== "isolated") return;
+  // A dedicated isolated/headless browser has no host desktop to seize or
+  // unlock: its input events never reach the user session on any platform.
   return {
     available: true,
     locked: false,
@@ -75,7 +76,7 @@ export function isolatedBrowserPresence(
     sampledAt: now,
     source: "isolated-chromium",
     reason:
-      "Dedicated container browser only; this does not report host desktop state",
+      "Dedicated private browser only; this does not report host desktop state",
   };
 }
 export async function systemPresence(): Promise<Presence> {

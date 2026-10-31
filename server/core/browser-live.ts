@@ -25,7 +25,10 @@ const stateExpression =
 export class BrowserLive {
   tickets = new Map<string, Ticket>();
   sessions = new Map<string, LiveSession>();
-  controller?: LiveSession;
+  controllers = new Map<string, LiveSession>();
+  controllerOf(tag: string) {
+    return this.controllers.get(tag);
+  }
   constructor(
     public chrome: Chrome,
     public auth: Auth,
@@ -46,9 +49,9 @@ export class BrowserLive {
       this.auth.resolveHash(principal.hash)?.user.role === "admin",
       "仅管理员可查看和操作浏览器",
     );
-    const tab = await this.chrome.gate.run(() =>
-      browserTarget(this.chrome, tabTag),
-    );
+    const tab = await this.chrome
+      .tabGate(String(tabTag))
+      .run(() => browserTarget(this.chrome, tabTag));
     for (const [id, t] of this.tickets)
       if (t.until < Date.now()) this.tickets.delete(id);
     assert(this.tickets.size < 64, "实时浏览器连接过多");
@@ -169,7 +172,7 @@ class LiveSession {
           const capture = () => this.io.run(() => this.capture());
           if (this.locked) await capture();
           else
-            await this.hub.chrome.gate.run(async () => {
+            await this.hub.chrome.tabGate(this.tabTag).run(async () => {
               if (this.active && !this.wantsControl) await capture();
             });
         }
@@ -323,19 +326,21 @@ class LiveSession {
       });
       return;
     }
-    if (this.hub.controller && this.hub.controller !== this) {
+    const current = this.hub.controllers.get(this.tabTag);
+    if (current && current !== this) {
       this.send({
         type: "mode",
         mode: "view",
-        reason: "另一位管理员正在操作浏览器",
+        reason: "另一位管理员正在操作此标签页",
       });
       return;
     }
-    this.hub.controller = this;
+    this.hub.controllers.set(this.tabTag, this);
     this.wantsControl = true;
     this.lastInput = Date.now();
     this.send({ type: "mode", mode: "waiting" });
-    this.claimTask = this.hub.chrome.gate
+    this.claimTask = this.hub.chrome
+      .tabGate(this.tabTag)
       .run(async () => {
         if (!this.active || !this.wantsControl) return;
         this.locked = true;
@@ -353,7 +358,8 @@ class LiveSession {
       .finally(() => {
         this.claimTask = undefined;
         this.stopping = false;
-        if (this.hub.controller === this) this.hub.controller = undefined;
+        if (this.hub.controllers.get(this.tabTag) === this)
+          this.hub.controllers.delete(this.tabTag);
       });
   }
   releaseControl(reason?: string) {
@@ -361,8 +367,8 @@ class LiveSession {
     this.wantsControl = false;
     this.release?.();
     this.release = undefined;
-    if (this.hub.controller === this && !this.locked)
-      this.hub.controller = undefined;
+    if (this.hub.controllers.get(this.tabTag) === this && !this.locked)
+      this.hub.controllers.delete(this.tabTag);
     this.send({ type: "mode", mode: "view", reason });
   }
   invalidate() {

@@ -6,6 +6,7 @@ import { Catalog } from "./catalog";
 import { ChromeBridge } from "./chrome-bridge";
 import { Chrome } from "./chrome";
 import { Engine } from "./engine";
+import { HeadlessBrowser } from "./headless";
 import { BrowserLive } from "./browser-live";
 import { EventsSocket } from "./events-socket";
 export type Application = {
@@ -15,6 +16,7 @@ export type Application = {
   auth: Auth;
   browserLive: BrowserLive;
   eventsSocket: EventsSocket;
+  headless: HeadlessBrowser;
 };
 let application: Application | undefined;
 export function app() {
@@ -45,7 +47,10 @@ export async function initialize(pageScript: string, helper: string) {
     auth,
     browserLive: new BrowserLive(chrome, auth),
     eventsSocket: new EventsSocket(engine, auth),
+    headless: new HeadlessBrowser(),
   };
+  const dbPath = process.env.VEGA_DB || "vega.db";
+  await application.headless.start(dbPath);
   await bridge.start();
   engine.employee.start();
   engine.relay.restart();
