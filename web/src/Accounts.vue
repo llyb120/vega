@@ -96,15 +96,10 @@ onMounted(() => void run(refresh));
     </div>
   </header>
   <div class="page-scroll settings">
-    <p class="hint">
-      这里管理的只是网站访问权限。退出、过期、改密码或停用账号不暂停内部agent、数字员工和定时任务；任务只能通过明确的停止/取消操作中止。
-    </p>
+    <p class="hint">退出登录不影响已提交任务。</p>
     <section class="card">
       <h3>修改我的密码</h3>
-      <p class="hint">
-        登录由 HttpOnly Cookie
-        保存，固定12小时有效；修改密码后所有设备需重新登录。
-      </p>
+      <p class="hint">修改密码后需重新登录。</p>
       <form class="form-grid" @submit.prevent="changePassword">
         <label
           >当前密码<input
@@ -128,9 +123,7 @@ onMounted(() => void run(refresh));
     <template v-if="user.role === 'admin'">
       <section class="card">
         <h3>账号管理</h3>
-        <p>
-          管理员管理网站配置、账号、数字员工和凭据入口；操作用户可通过网站提交自己的任务；只读用户只能查看管理员授权的会话。内部运行机制和工具能力不受网站角色裁剪。
-        </p>
+        <p>管理员可管理网站，操作用户可提交任务，只读用户仅可查看授权内容。</p>
         <p class="attention">
           执行任务的agent拥有容器/服务器工具能力，提交任务的账号必须可信。网站角色不是内部运行权限，也不是多租户沙箱。
         </p>
@@ -142,7 +135,9 @@ onMounted(() => void run(refresh));
               minlength="3"
               maxlength="64"
               pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{2,63}"
-              autocomplete="off" /></label
+              autocomplete="off"
+              autocapitalize="none"
+              spellcheck="false" /></label
           ><label
             >初始密码<input
               v-model="create.password"

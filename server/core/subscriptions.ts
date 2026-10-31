@@ -76,10 +76,15 @@ export class Subscriptions {
       verifier?: string;
       code?: string;
       close?: () => void;
+      owner?: string;
+      callback?: string;
+      complete?: boolean;
     }
   >();
+  loginRequest = jsonRequest;
   vault: Vault;
   refreshLocks = new Map<string, Mutex>();
+  loginLocks = new Map<string, Mutex>();
   workbuddyTokens = new Map<string, string>();
   constructor(
     public store: Store,
@@ -144,7 +149,7 @@ export class Subscriptions {
         saved.origin === this.origin(source, saved.site),
         "Invalid stored login origin",
       );
-      const data = await jsonRequest(
+      const data = await this.loginRequest(
         saved.origin + "/v2/plugin/auth/token/refresh",
         {
           method: "POST",
@@ -163,12 +168,17 @@ export class Subscriptions {
     }
     return saved;
   }
-  async loginStart(source: string, site = "global") {
+  async loginStart(
+    source: string,
+    site = "global",
+    context: { callbackOrigin?: string; owner?: string } = {},
+  ) {
     for (const [key, p] of this.pending)
       if (Date.now() - p.created > 600000) {
         p.close?.();
         this.pending.delete(key);
       }
+    if (this.pending.size >= 64) throw Error("待完成的登录过多，请稍后重试");
     if (source === "devin") {
       const state = b64(randomBytes(24)),
         verifier = b64(randomBytes(48));
@@ -179,32 +189,48 @@ export class Subscriptions {
         created: Date.now(),
         verifier,
         code: "",
+        owner: context.owner,
+        callback: undefined as string | undefined,
+        close: undefined as (() => void) | undefined,
       };
-      const server = createServer((req, res) => {
-        const u = new URL(req.url || "/", "http://127.0.0.1");
-        const valid =
-          u.pathname === "/callback" &&
-          u.searchParams.get("state") === state &&
-          u.searchParams.get("code");
-        res.writeHead(valid ? 200 : 400, {
-          "Content-Type": "text/plain; charset=utf-8",
+      if (context.callbackOrigin) {
+        const base = httpURL(context.callbackOrigin, true);
+        pending.callback = base.origin + "/api/providers/callback/devin";
+      } else {
+        const server = createServer((req, res) => {
+          const u = new URL(req.url || "/", "http://127.0.0.1");
+          const valid =
+            u.pathname === "/callback" &&
+            u.searchParams.get("state") === state &&
+            u.searchParams.get("code");
+          res.writeHead(valid ? 200 : 400, {
+            "Content-Type": "text/plain; charset=utf-8",
+          });
+          res.end(valid ? "登录完成，请返回 Vega" : "Invalid login callback");
+          if (valid) pending.code = u.searchParams.get("code")!;
         });
-        res.end(valid ? "登录完成，请返回 Vega" : "Invalid login callback");
-        if (valid) pending.code = u.searchParams.get("code")!;
-      });
-      await new Promise<void>((yes, no) => {
-        server.once("error", no);
-        server.listen(0, "127.0.0.1", yes);
-      });
-      const port = (server.address() as any).port;
-      this.pending.set(state, { ...pending, close: () => server.close() });
-      server.on("request", () => {
-        const p = this.pending.get(state);
-        if (p) p.code = pending.code;
-      });
+        await new Promise<void>((yes, no) => {
+          server.once("error", no);
+          server.listen(0, "127.0.0.1", yes);
+        });
+        const port = (server.address() as any).port;
+        pending.callback = `http://127.0.0.1:${port}/callback`;
+        pending.close = () => server.close();
+      }
+      const expires = setTimeout(() => {
+        this.pending.get(state)?.close?.();
+        this.pending.delete(state);
+      }, 600000);
+      expires.unref();
+      const close = pending.close;
+      pending.close = () => {
+        clearTimeout(expires);
+        close?.();
+      };
+      this.pending.set(state, pending);
       const url = new URL("https://app.devin.ai/auth/cli/continue");
       for (const [k, v] of Object.entries({
-        redirect_uri: `http://127.0.0.1:${port}/callback`,
+        redirect_uri: pending.callback!,
         state,
         prompt: "select_account",
         code_challenge: b64(createHash("sha256").update(verifier).digest()),
@@ -214,16 +240,34 @@ export class Subscriptions {
       return { state, url: url.href };
     }
     const origin = this.origin(source, site);
-    const data = await jsonRequest(
+    const data = await this.loginRequest(
       origin + "/v2/plugin/auth/state?platform=CLI",
       { method: "POST", headers: this.noAuth(), body: "{}" },
     );
     const { state, authUrl } = object(data.data);
+    const parsed = new URL(authUrl || "");
+    const family =
+      source === "workbuddy"
+        ? "workbuddy.cn"
+        : site === "cn"
+          ? "codebuddy.cn"
+          : "codebuddy.ai";
     assert(
-      state && authUrl && new URL(authUrl).origin === origin,
+      typeof state === "string" &&
+        state &&
+        parsed.protocol === "https:" &&
+        !parsed.username &&
+        !parsed.password &&
+        (parsed.hostname === family || parsed.hostname.endsWith("." + family)),
       "Invalid official login URL",
     );
-    this.pending.set(state, { source, site, origin, created: Date.now() });
+    this.pending.set(state, {
+      source,
+      site,
+      origin,
+      created: Date.now(),
+      owner: context.owner,
+    });
     return { state, url: authUrl };
   }
   noAuth() {
@@ -235,12 +279,51 @@ export class Subscriptions {
       "X-No-Department-Info": "true",
     };
   }
-  async loginPoll(source: string, state: string, pasted?: string) {
+  receiveCallback(state: string, code: string) {
+    const pending = this.pending.get(state);
+    assert(
+      pending?.source === "devin" && Date.now() - pending.created < 600000,
+      "登录已过期，请重新开始",
+    );
+    assert(
+      typeof code === "string" && code.length > 0 && code.length <= 8192,
+      "授权码无效",
+    );
+    assert(!pending.code || pending.code === code, "该登录已有其他回调");
+    pending.code = code;
+  }
+  async loginPoll(
+    source: string,
+    state: string,
+    pasted?: string,
+    owner?: string,
+  ) {
+    let lock = this.loginLocks.get(state);
+    if (!lock) {
+      lock = new Mutex();
+      this.loginLocks.set(state, lock);
+    }
+    try {
+      return await lock.run(() => this.pollLogin(source, state, pasted, owner));
+    } finally {
+      if (!this.pending.has(state)) this.loginLocks.delete(state);
+    }
+  }
+  async pollLogin(
+    source: string,
+    state: string,
+    pasted?: string,
+    owner?: string,
+  ) {
     const p = this.pending.get(state);
     assert(
-      p && p.source === source && Date.now() - p.created < 600000,
+      p &&
+        p.source === source &&
+        (!p.owner || p.owner === owner) &&
+        Date.now() - p.created < 600000,
       "Login state expired or belongs to another source",
     );
+    if (p.complete) return true;
     if (source === "devin") {
       let code = p.code;
       if (pasted) {
@@ -249,21 +332,26 @@ export class Subscriptions {
         code = url.searchParams.get("code") || "";
       }
       if (!code) return false;
-      const data = await jsonRequest("https://api.devin.ai/auth/cli/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, code_verifier: p.verifier }),
-      });
+      this.pending.delete(state);
+      p.close?.();
+      const data = await this.loginRequest(
+        "https://api.devin.ai/auth/cli/token",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code, code_verifier: p.verifier }),
+        },
+      );
       assert(data.token, "Devin did not return a token");
       this.saveLogin("devin", {
         windsurf_api_key: "devin-session-token$" + data.token,
         api_server_url: "https://server.codeium.com",
       });
-      p.close?.();
-      this.pending.delete(state);
+      this.pending.set(state, p);
+      this.completeLogin(state);
       return true;
     }
-    const data = await jsonRequest(
+    const data = await this.loginRequest(
       p.origin + "/v2/plugin/auth/token?state=" + encodeURIComponent(state),
       { headers: this.noAuth() },
     );
@@ -272,12 +360,15 @@ export class Subscriptions {
       auth = this.normalizeAuth(object(data.data), domain);
     let account;
     for (let i = 0; i < 10; i++) {
-      const response = await jsonRequest(p.origin + "/v2/plugin/account", {
-        headers: {
-          Authorization: "Bearer " + auth.accessToken,
-          "X-Domain": domain,
+      const response = await this.loginRequest(
+        p.origin + "/v2/plugin/account",
+        {
+          headers: {
+            Authorization: "Bearer " + auth.accessToken,
+            "X-Domain": domain,
+          },
         },
-      });
+      );
       if (response.code !== 12151) {
         account = response.data;
         break;
@@ -294,8 +385,25 @@ export class Subscriptions {
       auth,
       account,
     });
-    this.pending.delete(state);
+    this.completeLogin(state);
     return true;
+  }
+  completeLogin(state: string) {
+    const p = this.pending.get(state)!;
+    p.close?.();
+    delete p.code;
+    delete p.verifier;
+    p.complete = true;
+    // A mobile browser can lose a poll response while switching apps; never exchange its code twice.
+    const expiry = setTimeout(
+      () => {
+        this.pending.delete(state);
+        this.loginLocks.delete(state);
+      },
+      Math.max(0, 600000 - (Date.now() - p.created)),
+    );
+    expiry.unref();
+    p.close = () => clearTimeout(expiry);
   }
   logout(source: string) {
     this.store.put("subscription:" + source, null);
@@ -384,7 +492,9 @@ export class Subscriptions {
       );
       version = product.genieVersion || version;
     }
-    if (!key) {
+    if (!key && this.store.get<Obj | null>("subscription:" + source, null))
+      session = await this.saved(source);
+    else if (!key) {
       try {
         assert(!existsSync(authPath + ".logged-out"), "CLI is logged out");
         session = localJSON(authPath);
@@ -501,8 +611,13 @@ export class Subscriptions {
         : process.platform === "darwin"
           ? join(homedir(), "Library/Application Support")
           : process.env.XDG_DATA_HOME || join(homedir(), ".local/share");
-    let saved: Obj | undefined;
-    for (const root of [configRoot, dataRoot])
+    let saved: Obj | undefined = this.store.get<Obj | null>(
+      "subscription:devin",
+      null,
+    )
+      ? await this.saved("devin")
+      : undefined;
+    for (const root of saved ? [] : [configRoot, dataRoot])
       if (root && existsSync(join(root, "devin/credentials.toml"))) {
         saved = parseTOML(join(root, "devin/credentials.toml"));
         break;

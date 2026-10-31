@@ -106,10 +106,7 @@ onBeforeUnmount(() => {
     </div>
   </header>
   <section class="browser-view" :aria-busy="busy">
-    <p class="hint browser-hint">
-      仅管理员可查看共享浏览器。这里显示静态截图，不是实时视频；不会向网页发送点击或键盘输入。截取后台或最小化窗口时，Chrome
-      可能切到前台。
-    </p>
+    <p class="hint browser-hint">点击标签页查看当前截图。</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <div
       v-if="tabs.length"
@@ -160,12 +157,22 @@ onBeforeUnmount(() => {
             {{ screenshot?.url || tabs.find((t) => t.tag === selected)?.url }}
           </p>
         </div>
-        <button
-          :disabled="busy"
-          @click="capture(tabs.find((t) => t.tag === selected))"
-        >
-          刷新截图
-        </button>
+        <div class="actions">
+          <a
+            v-if="screenshot"
+            :href="screenshot.image.url"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="button-link"
+            >查看大图 ↗</a
+          >
+          <button
+            :disabled="busy"
+            @click="capture(tabs.find((t) => t.tag === selected))"
+          >
+            刷新截图
+          </button>
+        </div>
       </div>
       <div v-if="busy" class="browser-placeholder" role="status">
         <span class="spinner"></span>正在读取浏览器…
@@ -354,6 +361,14 @@ onBeforeUnmount(() => {
   .browser-address {
     padding: 12px;
     align-items: flex-start;
+    flex-direction: column;
+  }
+  .browser-panel {
+    flex: none;
+    min-height: 240px;
+  }
+  .browser-placeholder {
+    min-height: 200px;
   }
   .browser-image {
     padding: 4px;

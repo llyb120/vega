@@ -276,6 +276,17 @@ export class Tools {
             ),
           );
     }
+    const employee = defs.find((tool) => tool.name === "employee");
+    if (employee) {
+      employee.parameters = structuredClone(employee.parameters);
+      employee.parameters.properties.action.enum =
+        employee.parameters.properties.action.enum.filter(
+          (name: string) => !name.startsWith("orbit_"),
+        );
+      delete employee.parameters.properties.events;
+      employee.description =
+        "管理数字员工职责、任务、计划、记忆和密码本。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。员工执行前progress保存完整计划，验证成功才标completed；ask等待用户审批、help找交代人补充、defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接，vault_request/发送只限授权支援；密码本改动仅用户可以。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增todo、给自己改期或为所属动态职责安排下次/停用。定时和日期均为北京时间Asia/Shanghai，普通任务中不新建子任务分解步骤；Chrome必须relay，coding用同会话switch_scene。";
+    }
     for (const def of defs) {
       def.parameters = structuredClone(def.parameters);
       def.parameters.properties ??= {};

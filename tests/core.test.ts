@@ -275,7 +275,7 @@ test("employee task permissions, key dedup, approval reuses original sessions", 
   assert.equal(a.value.id, b.value.id);
   assert(b.value.exists);
 });
-test("duty validation, manual never auto schedules, events coalesce", async () => {
+test("duty validation, manual scheduling and removed Orbit do not trigger work", async () => {
   const e = employee(),
     now = Date.now();
   for (const a of [
@@ -286,28 +286,30 @@ test("duty validation, manual never auto schedules, events coalesce", async () =
     { everyMinutes: 0.5 },
   ])
     assert.throws(() => applyDuty({ text: "work" }, a));
+  await assert.rejects(() =>
+    e.execute("", {
+      action: "add",
+      kind: "duty",
+      text: "removed event",
+      events: ["orbit.changed"],
+    }),
+  );
+  await assert.rejects(() =>
+    e.execute("", { action: "orbit_add", text: "not available" }),
+  );
   const d = await e.execute("", {
     action: "add",
     kind: "duty",
-    text: "event work",
-    events: ["orbit.changed"],
+    text: "manual workflow",
+    manual: true,
   });
-  await e.execute("", { action: "orbit_add", text: "one" });
-  await e.execute("", { action: "orbit_add", text: "two" });
-  assert.equal(e.state().duties[0].pending.length, 2);
   e.update((s) => {
     s.enabled = true;
     s.workStart = s.workEnd = "00:00";
   });
   e.closed = false;
-  let runs = 0;
-  e.runtime.run = async () => {
-    runs++;
-  };
-  await e.tick(e.state().duties[0].eventAt + 1);
-  await new Promise((yes) => setTimeout(yes, 30));
-  assert.equal(e.state().tasks.length, 1);
-  assert.equal(runs, 0); // no configured model: deterministic failed task, never polls an agent
+  await e.tick();
+  assert.equal(e.state().tasks.length, 0);
   e.close();
   const manual = {
     id: "manual",
@@ -322,8 +324,8 @@ test("duty validation, manual never auto schedules, events coalesce", async () =
   assert.equal(manual.everyMinutes, 0);
   assert.deepEqual(manual.times, []);
   assert(
-    workSlot("22:00", "06:00", new Date(2026, 1, 1, 23).getTime()) ===
-      new Date(2026, 1, 1, 23).getTime(),
+    workSlot("22:00", "06:00", Date.parse("2026-02-01T23:00:00+08:00")) ===
+      Date.parse("2026-02-01T23:00:00+08:00"),
   );
 });
 test("memory forgetting, permanent retention and relevant reinforcement", () => {

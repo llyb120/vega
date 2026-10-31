@@ -1,5 +1,6 @@
+import { uploadSkill } from "../../core/skill-upload";
 import { browserTabs, browserScreenshot } from "../../core/browser-preview";
-import { principal, eventAllowed } from "../../core/http-auth";
+import { publicOrigin, principal, eventAllowed } from "../../core/http-auth";
 import { authRoute, bodyJSON } from "../../core/http-auth-routes";
 import { check } from "../../core/auth";
 import { readFile, stat } from "node:fs/promises";
@@ -271,6 +272,21 @@ export default defineEventHandler(async (event) => {
     if (path[0] === "config" && method === "PUT")
       return engine.saveConfig(a as any);
     if (path[0] === "providers") {
+      if (path[1] === "discover" && method === "POST") {
+        check(
+          a.provider &&
+            typeof a.id === "string" &&
+            /^[a-zA-Z0-9_.-]{1,80}$/.test(a.id),
+          400,
+          "服务商信息无效",
+        );
+        const raw = structuredClone(a.provider);
+        mergeSecrets(raw, engine.config().provider?.[a.id]);
+        const p = await engine.catalog.provider(raw, engine.config()),
+          fetched = await engine.catalog.models(p, true),
+          models = { ...fetched.models, ...modelEntries(p.models) };
+        return { models };
+      }
       if (path[1] === "presets") return presets;
       if (path[1] === "models")
         return engine.catalog.list(
@@ -280,13 +296,17 @@ export default defineEventHandler(async (event) => {
         );
       if (path[1] === "login") {
         if (a.action === "start")
-          return engine.catalog.auth.loginStart(a.source, a.site);
+          return engine.catalog.auth.loginStart(a.source, a.site, {
+            callbackOrigin: a.manual === true ? undefined : publicOrigin(event),
+            owner: user.id,
+          });
         if (a.action === "poll")
           return {
             complete: await engine.catalog.auth.loginPoll(
               a.source,
               a.state,
               a.pasted,
+              user.id,
             ),
           };
         if (a.action === "logout") {
@@ -329,9 +349,17 @@ export default defineEventHandler(async (event) => {
           Object.keys(dynamic.models)[0] || Object.keys(p.models)[0];
         assert(first, "No usable models in provider catalog");
         cfg.provider ??= {};
-        cfg.provider[key] = { preset, models: {} };
+        cfg.provider[key] = {
+          ...cfg.provider[key],
+          preset,
+          name:
+            typeof a.name === "string" && a.name.trim()
+              ? a.name.trim().slice(0, 200)
+              : cfg.provider[key]?.name || key,
+          models: { ...cfg.provider[key]?.models },
+        };
         if (!cfg.model) cfg.model = key + "/" + first;
-        store.put("config", cfg);
+        await engine.saveConfig(cfg);
         return {
           config: maskedConfig(cfg),
           models: await engine.catalog.list(cfg),
@@ -346,6 +374,8 @@ export default defineEventHandler(async (event) => {
       }
     }
     if (path[0] === "skills") {
+      if (path[1] === "upload" && method === "POST")
+        return uploadSkill(store, a);
       if (method === "GET") {
         const rows = [];
         for (const skill of store.objects<any>("skill"))
@@ -371,7 +401,10 @@ export default defineEventHandler(async (event) => {
     if (path[0] === "employee") {
       if (method === "GET")
         return {
-          ...engine.employee.state(),
+          ...(() => {
+            const { orbit, ...state } = engine.employee.state();
+            return state;
+          })(),
           systemPresence: engine.employee.nativePresence,
           busy: [...engine.employee.busy.keys()],
           takeovers: [...engine.employee.takeovers].map(([id, v]) => ({

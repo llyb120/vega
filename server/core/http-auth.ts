@@ -69,6 +69,9 @@ export function clearLogin(event: H3Event) {
 }
 export function gate(event: H3Event, path: string) {
   const { auth, token } = app();
+  // OAuth returns cross-site without a website cookie; callback validates its one-time state.
+  if (path === "/api/providers/callback/devin" && event.method === "GET")
+    return;
   sameOrigin(event);
   if (path === "/api/health") {
     check(

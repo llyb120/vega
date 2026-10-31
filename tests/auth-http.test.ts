@@ -24,6 +24,32 @@ test(
       );
     seeded.close();
     const mock = createServer(async (req, res) => {
+      if (req.method === "GET" && req.url === "/models") {
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            data: [
+              {
+                id: "fixture-text",
+                name: "Fixture Text",
+                context_length: 128000,
+                max_output_tokens: 8192,
+              },
+              {
+                id: "fixture-vision",
+                name: "Fixture Vision",
+                context_length: 200000,
+                max_output_tokens: 8192,
+                architecture: { input_modalities: ["text", "image"] },
+                reasoning_options: [
+                  { type: "effort", values: ["low", "high"] },
+                ],
+              },
+            ],
+          }),
+        );
+        return;
+      }
       const chunks = [];
       for await (const c of req) chunks.push(c);
       if (
@@ -249,6 +275,46 @@ test(
         403,
       );
       await ok("/config", "PUT", config, admin);
+      const discovered = await ok(
+        "/providers/discover",
+        "POST",
+        {
+          id: "test",
+          provider: {
+            preset: "openai-compatible",
+            api: "openai-completions",
+            options: {
+              baseURL: config.provider.test.baseURL,
+              apiKey: "__stored_secret__",
+            },
+            models: {},
+          },
+        },
+        admin,
+      );
+      assert(discovered.models["fixture-text"]);
+      assert(
+        discovered.models["fixture-vision"].modalities.input.includes("image"),
+      );
+      const attempt = await ok(
+          "/providers/login",
+          "POST",
+          { action: "start", source: "devin" },
+          admin,
+        ),
+        callback = new URL(attempt.url).searchParams.get("redirect_uri")!;
+      assert(callback.startsWith(base + "/api/providers/callback/devin"));
+      const rejected = await fetch(callback + "?state=wrong&code=fixture", {
+        headers: { "Sec-Fetch-Site": "cross-site" },
+      });
+      assert.equal(rejected.status, 400);
+      await rejected.text();
+      const accepted = await fetch(
+        callback + "?state=" + attempt.state + "&code=fixture",
+        { headers: { "Sec-Fetch-Site": "cross-site" } },
+      );
+      assert.equal(accepted.status, 200);
+      assert((await accepted.text()).includes("授权已收到"));
       const runner1 = (
         await ok(
           "/users",

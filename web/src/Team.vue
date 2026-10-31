@@ -119,7 +119,7 @@ onMounted(() => void refresh());
       公开本机员工到团队</label
     >
     <details>
-      <summary>团队中转设置（HTTP + SSE v2）</summary>
+      <summary>团队设置</summary>
       <div class="form-grid">
         <input
           v-model="relay.server"

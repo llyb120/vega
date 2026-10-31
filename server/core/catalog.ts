@@ -247,7 +247,16 @@ export class Catalog {
       const budget = { bytes: 16 << 20 };
       const preset = presets.find((v) => v.id === p.preset);
       let metadata = this.store.get<any>("models.dev", null);
-      if (p.preset && (!metadata || Date.now() - metadata.at > 21600000)) {
+      const needsMetadata =
+        !!preset?.modelsDev ||
+        [
+          "commandcode",
+          "opendesign",
+          "server-support",
+          "local-codex",
+          "local-claude-code",
+        ].includes(p.preset);
+      if (needsMetadata && (!metadata || Date.now() - metadata.at > 21600000)) {
         try {
           metadata = {
             at: Date.now(),
@@ -484,6 +493,13 @@ export class Catalog {
             name: m.name || key,
             variants: Object.keys(m.variants || {}),
             api: m.api || p.api,
+            supportsImages:
+              m.supportsImages ??
+              m.modalities?.input?.includes("image") ??
+              false,
+            context: m.limit?.context,
+            output: m.limit?.output,
+            provider: id,
             available: true,
           });
         }

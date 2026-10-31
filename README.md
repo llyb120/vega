@@ -66,7 +66,7 @@ docker run -d --name vega --shm-size=1g \
 | 上下文 | 自动摘要与 billion-context/acp-kernel 风格 ACP；稳定原子单元引用、45%/75% 压力/增长提醒、T1/T2/T3 精炼、92%/输入硬上限应急截断与机械轮廓、provider usage 实测锚点；原文/嵌套账本可逆，fork 复制账本但隔离状态 |
 | 内置命令 | `/skill:name`、`/plan`、`/easy`、`/setup`、`/setup-image`、`/generate-image`、`/edit-image`、`/stage`；SQLite 配置虚拟路径有当轮显式授权/修改分区约束；`/fire ... /target ...` 为独立执行/验收链，最多20轮，可暂停/重启后显式续做 |
 | 工具 | read / bash / edit / write / change_working_directory、同会话持久 MCP 渐进发现、图片生成/编辑、Chrome、employee。**不提供 Polaris / Jianlai** |
-| 数字员工 | 用户拥有的职责/备注、不定时/固定时刻/完成后间隔/动态检查/星轨事件，任务业务 key 去重，最多 3 并发、1 个电脑任务；完整计划、进度、审批、补充、挂起、续做、重新派发、任务时间线 |
+| 数字员工 | 用户拥有的职责/备注、不定时/北京时间固定时刻/完成后间隔/动态检查，任务业务 key 去重，最多 3 并发、1 个电脑任务；完整计划、进度、审批、补充、挂起、续做、重新派发、任务时间线；星轨已按要求移除 |
 | 员工会话 | 同任务固定主会话 + 独立固定 Chrome 会话，relay 交接后结束本轮、结果自动回主会话；defer 保存外部作业恢复点、释放名额，到期只检查原作业 |
 | 记忆 / 密码本 | 相关性检索、强化/衰减/永久重要性、300 条记忆上限；AES-256-GCM、使用条件/用途审计、X25519 跨机加密支援、任务专属临时条目与清理 |
 | StarLink | 原 v2 HTTP + SSE 中转协议、群组/设备/纪元/游标、gzip 与旧 `_z` 信封、messageId 幂等重传、成员派单、交代人审批/补充、加密凭据支援与任务时间线 |
@@ -76,7 +76,7 @@ docker run -d --name vega --shm-size=1g \
 
 ## 配置模型
 
-设置页保存 JSON（SQLite），支持旧的 `provider.options.baseURL/apiKey/headers` 与顶层写法、嵌套模型分类、`limit.context/output`、`modalities.input` 和 `variants`。密钥可用 `{env:NAME}` 或 `${NAME}` 引用；设置接口返回的 `__stored_secret__` 表示保留已存值。
+设置页通过表单管理服务商、接口地址、密钥和模型，支持获取/搜索/手动添加模型与修改能力、长度参数；场景模型通过下拉选择，支持档位和备用顺序，浏览器场景只显示图片模型。高级请求头/厂商参数按需展开。底层仍支持旧`provider.options.baseURL/apiKey/headers`与顶层写法、嵌套分类、`limit.context/output`、`modalities.input`和`variants`。密钥可用`{env:NAME}`/`${NAME}`引用；`__stored_secret__`保留已有密钥。经验图谱独立导航，设置排在最后；界面不再提供目录配置或技术机制说明。
 
 ```json
 {
@@ -101,7 +101,7 @@ docker run -d --name vega --shm-size=1g \
 
 ### 专有订阅
 
-设置 →「订阅与本地 CLI」选择来源。CodeBuddy 可选择中国/国际站，WorkBuddy 固定官方网站；点击官方网页登录，完成后检查**本次**登录，再导入服务商并刷新模型。Devin 用 PKCE 本机回调；跨机器浏览器可粘贴完整回调地址。登录 state 绑定来源且 10 分钟过期；Token 不返回到网页配置里。
+设置 →「服务商」选择CodeBuddy/WorkBuddy/Devin，点击登录会立即打开窗口、绑定本次来源/站点并自动检查结果，成功后直接导入账号模型。远程Devin默认回调网站的`/api/providers/callback/devin`，不再要求用户浏览器访问服务器的127.0.0.1端口；公网部署需设置正确的`VEGA_PUBLIC_URL`并使用HTTPS。回调独立校验一次性state/PKCE，轮询绑定发起管理员，错误/过期state不能交换Token。若官方限制回调地址，可改用手动回调登录并粘贴登录后完整跳转地址。CodeBuddy/WorkBuddy使用服务端轮询，不依赖客户端本机安装CLI；仅在点击「读取服务端已有登录」时使用部署端已有凭据。网站新登录优先于部署端旧CLI会话。真实账号及第三方回调白名单仍需在目标部署验收，协议夹具不能代替它。
 
 - **CodeBuddy**：CLI 环境/登录优先，缺少时使用应用内登录；续期、账号/企业请求头、`/v3/config` 和本地 product 默认模型合并、CLI 可用模型过滤、reasoning summary、重复工具 ID/包装 JSON 归一化。
 - **WorkBuddy**：独立认证与模型目录，不能误用 CodeBuddy 的账号；自动查找 `resources/app.asar.unpacked/cli`，使用 WorkBuddy 自己的 Electron helper 只读解密登录。设置页可指定安装目录/`WorkBuddy.exe`/内置 CLI 路径；`WORKBUDDY_EXE` 可显式指定解密运行时。
@@ -129,8 +129,12 @@ docker run -d --name vega --shm-size=1g \
 
 - MCP 配置为 `{"server": {"command":"node", "args":["server.js"], "env":{}}}` 或 `{"server":{"url":"https://example/mcp","headers":{}}}`。先 list → describe → call；定义变化须重新 describe。只读模式须由用户配置本地 `readOnlyTools` 允许列表，远端 `readOnlyHint` 不是授权。
 - 图片服务为 OpenAI Images 兼容接口，`image.models` 是可用 ID 数组；编辑必须有原图，输出新 PNG，不覆盖原图；失败不自动计费重试。文件产物留在用户指定输出目录，任务/配置/图片历史均存 SQLite。
-- 技能可在设置页导入服务端技能目录、ZIP或`SKILL.md`，**正文和附属脚本/参考资源一起存入SQLite**；同名覆盖须确认。运行时按内容摘要物化可再生缓存以保持相对资源路径（`VEGA_SKILL_CACHE`可指定目录），不自动运行导入脚本；拒绝目录穿越、链接、大小/数量超限，跳过`.env`/版本库/依赖缓存。也可设置`skillsDirectory`/`VEGA_SKILLS_DIR`；未指定时只读发现已有`~/.nova/skills`、`~/.nova/alkaid/skills`，不改写原技能。先展示元数据、匹配时读取正文，支持`/skill:name`。项目`AGENTS.md`和`systemPrompt`继续生效。
+- 技能在设置页选择本地ZIP上传，不需要填写服务器目录；**正文和附属脚本/参考资源一起存入SQLite**，同名覆盖须确认。运行时按内容摘要物化可再生缓存，不自动运行导入脚本；拒绝目录穿越、链接和超限资源。原服务端目录/ZIP/SKILL.md导入API与`VEGA_SKILLS_DIR`仍保留供已有部署兼容，不在界面暴露目录配置。先展示元数据，按需读取正文，支持`/skill:name`。
 - `relay: {"server":"https://relay.example","token":"{env:RELAY_TOKEN}","groups":"team-a"}` 接入原中转站。员工页 → 团队员工，只有公开的员工可接指令；对方的补充请求必须来自曾经交代过任务的成员。仅交代人可补充/审批其任务，凭据用密码本加密传回。
+
+员工每天时刻、工作时段和`nextAt`统一按**北京时间 Asia/Shanghai**解释，列表中的日期也按北京时间显示；不再取服务器或浏览器本地时区。旧固定时刻职责升级后按北京时间运行；旧星轨数据保留，但事件职责不再触发，需改成手动/固定/动态安排。
+
+界面适配手机与平板：小屏使用可展开的完整导航及会话列表，内容区独立滚动；触控按钮至少44px，表单输入保持16px以避免iOS自动放大，保留页面缩放。聊天手机回车换行、点击发送，桌面保留Enter发送并防止中文输入法误发；软键盘/地址栏变化按可视视口调整，刘海及底部安全区留白。服务商登录在本标签短期保存不含凭据的发起信息，切回或重载后继续同一次登录；服务端完成回执短期幂等，不重复交换授权码。浏览器截图可打开原图放大。移动回归使用独立Chrome触控模拟，覆盖320–1024px、横屏及键盘缩小视口；未进行iPhone/Safari、Android实体手机实机验收。
 
 ## billion-context / ACP 与查漏记录
 

@@ -1,3 +1,8 @@
+import {
+  beijingParts,
+  beijingTimestamp,
+  beijingDateTime,
+} from "../../shared/time";
 import { systemPresence, type Presence } from "./presence";
 import type { Store } from "./store";
 import { assert, id, clone, clip, type Obj } from "./util";
@@ -48,16 +53,17 @@ export function requestedTime(a: Obj, now = Date.now()) {
     assert(
       typeof a.nextAt === "string" &&
         /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(a.nextAt),
-      "nextAt must be local YYYY-MM-DD HH:MM",
+      "nextAt must be Beijing YYYY-MM-DD HH:MM",
     );
-    const parsed = new Date(a.nextAt.replace(" ", "T") + ":00");
+    const [year, month, day, hour, minute] = a.nextAt
+      .match(/\d+/g)!
+      .map(Number);
+    const at = beijingTimestamp(year, month - 1, day, hour, minute);
     assert(
-      parsed.getTime() > now &&
-        `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")} ${String(parsed.getHours()).padStart(2, "0")}:${String(parsed.getMinutes()).padStart(2, "0")}` ===
-          a.nextAt,
-      "nextAt must be a valid future local time",
+      at > now && beijingDateTime(at) === a.nextAt,
+      "nextAt must be a valid future Beijing time",
     );
-    return parsed.getTime();
+    return at;
   }
   if (a.nextCheckInMinutes !== undefined) {
     assert(
@@ -119,11 +125,8 @@ export function applyDuty(d: Obj, a: Obj, now = Date.now()) {
   );
   if ("events" in a) {
     assert(
-      Array.isArray(a.events) &&
-        a.events.every((e: string) =>
-          ["orbit.added", "orbit.done", "orbit.changed"].includes(e),
-        ),
-      "Unknown duty event",
+      Array.isArray(a.events) && a.events.length === 0,
+      "不再支持星轨事件触发",
     );
     d.events = [...new Set(a.events)];
     d.pending = [];
@@ -196,34 +199,30 @@ export function recallMemory(
   return scored.map((v) => v.m);
 }
 export function nextFixed(times: string[], after: number) {
-  const base = new Date(after),
-    values = [];
+  const p = beijingParts(after),
+    values: number[] = [];
   for (let days = 0; days < 3; days++)
-    for (const s of times) {
-      const [h, m] = s.split(":").map(Number),
-        date = new Date(
-          base.getFullYear(),
-          base.getMonth(),
-          base.getDate() + days,
-          h,
-          m,
-        );
-      if (date.getTime() > after) values.push(date.getTime());
+    for (const value of times) {
+      const [hour, minute] = value.split(":").map(Number),
+        at = beijingTimestamp(p.year, p.month, p.day + days, hour, minute);
+      if (at > after) values.push(at);
     }
   return Math.min(...values);
 }
 export function workSlot(start: string, end: string, now: number) {
   assert(hhmm(start) && hhmm(end), "Work hours require HH:MM");
-  const d = new Date(now),
-    hm = d.toTimeString().slice(0, 5),
-    open =
-      start === end ||
-      (start < end ? hm >= start && hm < end : hm >= start || hm < end);
-  if (open) return now;
-  const [h, m] = start.split(":").map(Number),
-    next = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m);
-  if (next.getTime() <= now) next.setDate(next.getDate() + 1);
-  return next.getTime();
+  const p = beijingParts(now),
+    hm = beijingDateTime(now).slice(-5);
+  if (
+    start === end ||
+    (start < end ? hm >= start && hm < end : hm >= start || hm < end)
+  )
+    return now;
+  const [hour, minute] = start.split(":").map(Number);
+  let next = beijingTimestamp(p.year, p.month, p.day, hour, minute);
+  if (next <= now)
+    next = beijingTimestamp(p.year, p.month, p.day + 1, hour, minute);
+  return next;
 }
 export type EmployeeRuntime = {
   run: (session: string, text: string) => Promise<void>;
@@ -249,7 +248,7 @@ export class Employee {
   ) {}
   // shortcut: task history shares one SQLite document; normalize tasks when histories become large.
   state(): EmployeeState {
-    return this.store.get("employee", {
+    const state = this.store.get<EmployeeState>("employee", {
       enabled: false,
       public: false,
       workStart: "09:00",
@@ -265,6 +264,16 @@ export class Employee {
       orbit: [],
       links: [],
     });
+    // Retain legacy data but do not fire removed Orbit subscriptions.
+    for (const duty of state.duties)
+      if (duty.events?.some((name: string) => name.startsWith("orbit."))) {
+        duty.events = [];
+        duty.pending = [];
+        duty.eventAt = 0;
+        if (!duty.manual && !duty.everyMinutes && !duty.times?.length)
+          duty.enabled = false;
+      }
+    return state;
   }
   update<T>(fn: (s: EmployeeState) => T): T {
     const result = this.store.transaction(() => {
@@ -339,9 +348,6 @@ export class Employee {
         "vault_get",
         "vault_request",
         "vault_send",
-        "orbit_list",
-        "orbit_add",
-        "orbit_done",
       ].includes(action)
     )
       return t;
@@ -386,6 +392,7 @@ export class Employee {
   ): Promise<{ value: any; stop?: boolean; secret?: string }> {
     const action = a.action;
     assert(typeof action === "string", "employee action required");
+    assert(!action.startsWith("orbit_"), "星轨功能已移除");
     if (a.text !== undefined)
       assert(
         typeof a.text === "string" && [...a.text].length <= 8000,
@@ -429,7 +436,8 @@ export class Employee {
       switch (action) {
         case "list":
           return {
-            now: new Date(now).toLocaleString(),
+            now: beijingDateTime(now),
+            timeZone: "Asia/Shanghai",
             duties: s.duties,
             inbox: s.tasks.filter((t) => !ended(t.status)),
             tasks: s.tasks,
@@ -752,32 +760,6 @@ export class Employee {
           );
           s.memories = s.memories.filter((m) => m.id !== a.id);
           return { ok: true };
-        case "orbit_list":
-          return { items: s.orbit };
-        case "orbit_add": {
-          assert(content, "text required");
-          const item = { id: id("o"), text: content, done: false, at: now };
-          s.orbit.push(item);
-          if (!caller) this.event(s, "orbit.added", content, now);
-          return item;
-        }
-        case "orbit_done": {
-          const item = s.orbit.find((o) => o.id === a.id);
-          assert(item, "Orbit item not found");
-          const done = a.done ?? true;
-          assert(typeof done === "boolean", "done must be boolean");
-          if (item.done !== done) {
-            item.done = done;
-            if (!caller)
-              this.event(
-                s,
-                done ? "orbit.done" : "orbit.changed",
-                item.text,
-                now,
-              );
-          }
-          return { ok: true };
-        }
         default:
           throw Error("Unknown employee action " + action);
       }
@@ -787,19 +769,6 @@ export class Employee {
       await this.runtime.send(send.to, send.type, send.data);
     }
     return { value, stop };
-  }
-  event(s: EmployeeState, kind: string, text: string, now: number) {
-    for (const d of s.duties)
-      if (
-        d.enabled &&
-        !d.manual &&
-        (d.events?.includes(kind) || d.events?.includes("orbit.changed"))
-      ) {
-        d.eventAt = now + 5000;
-        d.pending = [...(d.pending || []), clip(kind + ": " + text, 500)].slice(
-          -20,
-        );
-      }
   }
   note(s: EmployeeState, t: Task, kind: string, who: string, text: string) {
     const run = [...s.runs].reverse().find((r) => r.taskId === t.id);

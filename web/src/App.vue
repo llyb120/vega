@@ -1,9 +1,96 @@
 <script setup vapor>
-import Integrations from "./Integrations.vue";
+import SettingsView from "./SettingsView.vue";
+import ExperiencesView from "./ExperiencesView.vue";
+import { formatBeijing } from "../../shared/time";
 import Team from "./Team.vue";
 import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
+const narrow = ref(false),
+  navigationOpen = ref(false),
+  navigation = ref(null),
+  menuButton = ref(null),
+  imageInput = ref(null),
+  uploading = ref(false);
+const mobileTitles = {
+  chat: "对话",
+  employee: "数字员工",
+  browser: "浏览器",
+  experiences: "经验图谱",
+  account: "账号",
+  settings: "设置",
+};
+function closeNavigation() {
+  if (!navigationOpen.value) return;
+  navigationOpen.value = false;
+  nextTick(() => menuButton.value?.focus());
+}
+async function openNavigation() {
+  navigationOpen.value = true;
+  await nextTick();
+  navigation.value?.querySelector("button")?.focus();
+}
+function navigationKey(event) {
+  if (!navigationOpen.value) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeNavigation();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const controls = [
+    ...navigation.value.querySelectorAll(
+      "button:not(:disabled),a[href],input,select",
+    ),
+  ].filter((el) => el.getClientRects().length);
+  const first = controls[0],
+    last = controls.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last?.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first?.focus();
+  }
+}
+onMounted(() => {
+  const media = window.matchMedia("(max-width: 760px)"),
+    viewport = window.visualViewport;
+  const layout = () => {
+    narrow.value = media.matches;
+    if (!media.matches) closeNavigation();
+    if (!viewport || viewport.scale === 1) {
+      document.documentElement.style.setProperty(
+        "--app-height",
+        `${viewport?.height || window.innerHeight}px`,
+      );
+      document.documentElement.style.setProperty(
+        "--app-top",
+        `${viewport?.offsetTop || 0}px`,
+      );
+    }
+  };
+  layout();
+  media.addEventListener("change", layout);
+  window.addEventListener("resize", layout);
+  viewport?.addEventListener("resize", layout);
+  viewport?.addEventListener("scroll", layout);
+  onBeforeUnmount(() => {
+    media.removeEventListener("change", layout);
+    window.removeEventListener("resize", layout);
+    viewport?.removeEventListener("resize", layout);
+    viewport?.removeEventListener("scroll", layout);
+    document.documentElement.style.removeProperty("--app-height");
+    document.documentElement.style.removeProperty("--app-top");
+  });
+});
 const user = ref(null),
   csrfToken = ref(""),
   setupRequired = ref(false),
@@ -24,6 +111,7 @@ const authenticated = ref(false),
   error = ref(""),
   notice = ref(""),
   view = ref("chat");
+watch(view, closeNavigation);
 const sessions = ref([]),
   current = ref(null),
   messages = ref([]),
@@ -41,14 +129,12 @@ const live = ref(""),
   transcript = ref(null),
   project = ref(""),
   chosenModel = ref(""),
-  config = ref({}),
-  configText = ref("");
+  config = ref({});
 const employee = ref({
     duties: [],
     tasks: [],
     memories: [],
     runs: [],
-    orbit: [],
   }),
   employeeTab = ref("tasks"),
   taskText = ref(""),
@@ -58,7 +144,6 @@ const employee = ref({
   importance = ref(1);
 const duty = ref(emptyDuty()),
   dutyOpen = ref(false),
-  orbitText = ref(""),
   vault = ref([]),
   vaultForm = ref({ name: "", condition: "", content: "" });
 let eventsController,
@@ -73,7 +158,6 @@ function emptyDuty() {
     times: "09:00",
     everyMinutes: 60,
     nextAt: "",
-    events: "orbit.changed",
     enabled: true,
   };
 }
@@ -123,7 +207,6 @@ async function loadModels() {
 }
 function providerSaved(value) {
   config.value = value;
-  configText.value = JSON.stringify(value, null, 2);
   void attempt(loadModels);
 }
 let activityAt = Date.now(),
@@ -171,7 +254,7 @@ function ended(s) {
   return ["done", "failed", "cancelled", "stopped"].includes(s);
 }
 function date(at) {
-  return at ? new Date(at).toLocaleString() : "";
+  return formatBeijing(at);
 }
 async function api(path, method = "GET", data) {
   const response = await fetch(`/api${path}`, {
@@ -227,13 +310,14 @@ async function enter(result) {
   await bootstrap();
   if (isAdmin.value) startPresence();
   await loadModels();
-  configText.value = JSON.stringify(
-    config.value.model ? config.value : exampleConfig(),
-    null,
-    2,
-  );
   if (isAdmin.value) await loadEmployee();
   if (sessions.value.length) await selectSession(sessions.value[0]);
+  try {
+    const pending = JSON.parse(
+      sessionStorage.getItem("vega:provider-login:" + user.value.id) || "null",
+    );
+    if (isAdmin.value && pending?.expires > Date.now()) view.value = "settings";
+  } catch {}
   eventsController = new AbortController();
   void eventLoop(eventsController.signal);
 }
@@ -257,6 +341,10 @@ async function login() {
   authBusy.value = false;
 }
 function resetLogin() {
+  try {
+    sessionStorage.removeItem("vega:provider-login:" + user.value?.id);
+  } catch {}
+  closeNavigation();
   stopPresence();
   closed = true;
   eventsController?.abort();
@@ -293,6 +381,7 @@ onMounted(
     }),
 );
 async function selectSession(session) {
+  closeNavigation();
   const v = await api(`/sessions/${session.id}`);
   current.value = v.session;
   messages.value = v.messages || [];
@@ -324,7 +413,7 @@ async function newStage() {
     const s = await api(`/sessions/${current.value.id}/stage`, "POST", {});
     await bootstrap();
     await selectSession(s);
-    toast("Stage 使用独立历史；每轮自动引用来源会话的最新提示词与结论。");
+    toast("已创建新对话");
   });
 }
 async function removeSession(s) {
@@ -342,6 +431,7 @@ async function send() {
   if (!canWriteCurrent.value) return;
   if (sending.value || (!draft.value.trim() && !attachments.value.length))
     return;
+  if (uploading.value) return;
   sending.value = true;
   const body = { text: draft.value, images: attachments.value };
   await attempt(async () => {
@@ -368,21 +458,59 @@ async function send() {
   });
   sending.value = false;
 }
+function messageKey(event) {
+  if (
+    event.key !== "Enter" ||
+    event.isComposing ||
+    event.keyCode === 229 ||
+    event.shiftKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.altKey
+  )
+    return;
+  if (narrow.value || window.matchMedia("(pointer: coarse)").matches) return;
+  event.preventDefault();
+  void send();
+}
 async function upload(event) {
+  if (uploading.value) return;
+  uploading.value = true;
+  const target = attachments.value;
   await attempt(async () => {
-    for (const file of event.target.files) {
-      if (!file.type.startsWith("image/") || file.size > 25 * 1024 * 1024)
-        throw Error("仅支持不超过 25 MiB 的图片");
+    const files = [...event.target.files];
+    if (files.length + attachments.value.length > 16)
+      throw Error("每条消息最多16张图片");
+    if (
+      files.reduce((n, f) => n + f.size, 0) +
+        attachments.value.reduce((n, f) => n + (f.data.length * 3) / 4, 0) >
+      64 * 1024 * 1024
+    )
+      throw Error("图片总大小不能超过64MiB");
+    for (const file of files) {
+      if (
+        ![
+          "image/png",
+          "image/jpeg",
+          "image/webp",
+          "image/gif",
+          "image/bmp",
+        ].includes(file.type) ||
+        file.size > 25 * 1024 * 1024
+      )
+        throw Error("请选择PNG、JPEG、WebP、GIF或BMP图片，单张不能超过25MiB");
       const data = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result).split(",")[1]);
         reader.onerror = reject;
         reader.readAsDataURL(file);
       });
-      attachments.value.push({ mime: file.type, data });
+      if (attachments.value !== target) return;
+      target.push({ mime: file.type, data });
     }
-    event.target.value = "";
   });
+  event.target.value = "";
+  uploading.value = false;
 }
 async function scrollBottom() {
   await nextTick();
@@ -445,7 +573,6 @@ async function refreshCurrent() {
 async function handleEvent(event) {
   if (event.type === "config_changed") {
     await bootstrap();
-    configText.value = JSON.stringify(config.value, null, 2);
     await loadModels();
     return;
   }
@@ -600,11 +727,8 @@ function editDuty(d) {
         ? "interval"
         : d.times?.length
           ? "times"
-          : d.events?.length
-            ? "events"
-            : "dynamic",
+          : "dynamic",
     times: (d.times || ["09:00"]).join(","),
-    events: (d.events || ["orbit.changed"]).join(","),
   };
   dutyOpen.value = true;
 }
@@ -630,11 +754,6 @@ async function saveDuty() {
         .map((s) => s.trim())
         .filter(Boolean);
     if (d.trigger === "interval") data.everyMinutes = Number(d.everyMinutes);
-    if (d.trigger === "events")
-      data.events = d.events
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
     if (d.trigger === "dynamic") data.nextAt = d.nextAt.replace("T", " ");
     await employeeAction(data);
     dutyOpen.value = false;
@@ -660,7 +779,6 @@ async function saveEmployeeSettings() {
       enabled: employee.value.enabled,
       workStart: employee.value.workStart,
       workEnd: employee.value.workEnd,
-      cwd: project.value,
     });
     toast("员工设置已保存");
   });
@@ -675,42 +793,6 @@ async function saveVault() {
     vaultForm.value = { name: "", condition: "", content: "" };
     await loadVault();
     toast("凭据已加密保存");
-  });
-}
-function exampleConfig() {
-  return {
-    model: "openai/gpt-4.1",
-    provider: {
-      openai: {
-        api: "openai-completions",
-        baseURL: "https://api.openai.com/v1",
-        apiKey: "{env:OPENAI_API_KEY}",
-        models: {
-          "gpt-4.1": {
-            contextWindow: 128000,
-            maxOutputTokens: 8192,
-            supportsImages: true,
-          },
-        },
-      },
-    },
-    scenes: {
-      lightweight: ["openai/gpt-4.1"],
-      coding: ["openai/gpt-4.1"],
-      computer: ["openai/gpt-4.1"],
-    },
-    contextMode: "auto",
-    mcp: {},
-    image: { baseURL: "", apiKey: "", models: [] },
-  };
-}
-async function saveConfig() {
-  await attempt(async () => {
-    const saved = await api("/config", "PUT", JSON.parse(configText.value));
-    config.value = saved;
-    configText.value = JSON.stringify(saved, null, 2);
-    await loadModels();
-    toast("配置已存入 SQLite；新轮次生效");
   });
 }
 
@@ -750,6 +832,8 @@ onBeforeUnmount(() => {
         maxlength="64"
         autocomplete="username"
         pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{2,63}"
+        autocapitalize="none"
+        spellcheck="false"
         placeholder="用户名"
       />
       <label for="password">密码</label
@@ -767,23 +851,63 @@ onBeforeUnmount(() => {
           authBusy ? "正在验证…" : setupRequired ? "创建管理员并登录" : "登录 →"
         }}
       </button>
-      <p class="hint">
-        登录凭据保存在 HttpOnly
-        Cookie，前端不存储密码；仅管理员可以创建其他账号。
-      </p>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
     </form>
   </main>
   <div v-else class="shell">
-    <aside class="sidebar">
+    <header class="mobile-header">
+      <button
+        ref="menuButton"
+        class="icon"
+        aria-label="打开导航与会话"
+        aria-controls="navigation"
+        :aria-expanded="navigationOpen"
+        @click="openNavigation"
+      >
+        ☰
+      </button>
+      <strong>{{ mobileTitles[view] }}</strong>
+      <button
+        v-if="canExecute"
+        class="icon"
+        aria-label="新建会话"
+        @click="newSession"
+      >
+        ＋
+      </button>
+    </header>
+    <button
+      v-if="navigationOpen"
+      class="navigation-backdrop"
+      aria-label="关闭导航"
+      tabindex="-1"
+      @click="closeNavigation"
+    ></button>
+    <aside
+      id="navigation"
+      ref="navigation"
+      :class="['sidebar', { 'mobile-open': navigationOpen }]"
+      :role="narrow ? 'dialog' : undefined"
+      :aria-modal="narrow && navigationOpen ? true : undefined"
+      aria-label="导航与会话"
+      :inert="narrow && !navigationOpen"
+      @keydown="navigationKey"
+    >
       <div class="brand">
-        <span class="brand-mark small">V</span><strong>Vega</strong
-        ><span class="beta">WORKSPACE</span>
+        <span class="brand-mark small">V</span><strong>Vega</strong>
+        <button
+          class="icon close-navigation"
+          aria-label="关闭导航"
+          @click="closeNavigation"
+        >
+          ×
+        </button>
       </div>
-      <nav aria-label="主导航">
+      <nav aria-label="主导航" @click="closeNavigation">
         <button :class="{ selected: view === 'chat' }" @click="view = 'chat'">
-          ◈ <span>对话</span></button
-        ><button
+          ◈ <span>对话</span>
+        </button>
+        <button
           v-if="isAdmin"
           :class="{ selected: view === 'employee' }"
           @click="
@@ -792,13 +916,7 @@ onBeforeUnmount(() => {
           "
         >
           ◎ <span>数字员工</span
-          ><span class="count">{{ activeTasks.length }}</span></button
-        ><button
-          v-if="isAdmin"
-          :class="{ selected: view === 'settings' }"
-          @click="view = 'settings'"
-        >
-          ⚙ <span>设置</span>
+          ><span class="count">{{ activeTasks.length }}</span>
         </button>
         <button
           v-if="isAdmin"
@@ -808,10 +926,24 @@ onBeforeUnmount(() => {
           ▣ <span>浏览器</span>
         </button>
         <button
+          v-if="isAdmin"
+          :class="{ selected: view === 'experiences' }"
+          @click="view = 'experiences'"
+        >
+          ◇ <span>经验图谱</span>
+        </button>
+        <button
           :class="{ selected: view === 'account' }"
           @click="view = 'account'"
         >
-          ♙ <span>{{ user.username }} · 账号</span>
+          ♙ <span>账号</span>
+        </button>
+        <button
+          v-if="isAdmin"
+          :class="{ selected: view === 'settings' }"
+          @click="view = 'settings'"
+        >
+          ⚙ <span>设置</span>
         </button>
       </nav>
       <div class="sidebar-heading">
@@ -855,11 +987,10 @@ onBeforeUnmount(() => {
         <p v-if="!sessions.length" class="empty-small">从一个问题开始。</p>
       </div>
       <footer>
-        <span class="status-dot"></span> Nitro · SQLite
         <button class="link" @click="logout">退出</button>
       </footer>
     </aside>
-    <section class="workspace">
+    <section class="workspace" :inert="navigationOpen">
       <div v-if="error" class="banner error" role="alert">
         {{ error
         }}<button class="icon" aria-label="关闭错误" @click="error = ''">
@@ -879,7 +1010,7 @@ onBeforeUnmount(() => {
               {{ current?.title || "对话" }}
               <span v-if="current?.stageSource" class="pill">Stage</span>
             </h2>
-            <p>{{ current?.cwd || project || "选择工作目录，开始对话" }}</p>
+            <p v-if="!current">随时开始一个新对话</p>
           </div>
           <div class="actions">
             <span v-if="isRunning" class="pill green">执行中</span
@@ -908,32 +1039,6 @@ onBeforeUnmount(() => {
             {{ fireState.role === "judge" ? "独立验收" : "执行" }} ·
             {{ fireState.status }}
             <p v-if="fireState.reason">{{ fireState.reason }}</p>
-            <small
-              >只继续最后阶段；旧阶段不会分叉工作流。验收不以执行者自述为证。</small
-            >
-          </div>
-          <details v-if="contextBudget" class="context-note">
-            <summary>
-              上下文约 {{ contextBudget.usedPercent }}% ·
-              {{ contextBudget.method }}
-            </summary>
-            <p>
-              T1/T2/T3 分层压缩 ·
-              {{ contextBudget.blocks?.length || 0 }} 个活动块 · 已缩短
-              {{ contextBudget.truncatedToolResults || 0 }} 个旧工具结果
-            </p>
-            <p v-if="contextBudget.lastReceipt?.mechanical">
-              窗口应急恢复使用了机械轮廓，细节可能省略；原文仍可
-              recall/decompress。
-            </p>
-            <p>
-              剩余输入预算约
-              {{ contextBudget.remaining }} tokens（实测锚点之外为启发式估算）。
-            </p>
-          </details>
-          <div v-if="folds.some((b) => b.active)" class="context-note">
-            {{ folds.filter((b) => b.active).length }}
-            个上下文区块已压缩，原文保留在 SQLite，可随时还原。
           </div>
           <article
             v-for="(m, i) in messages"
@@ -997,11 +1102,7 @@ onBeforeUnmount(() => {
         </p>
         <div v-if="canWriteCurrent" class="composer-wrap">
           <div class="context-controls">
-            <input
-              v-model="project"
-              aria-label="工作目录"
-              placeholder="服务端工作目录"
-            /><select v-model="chosenModel" aria-label="新会话模型">
+            <select v-model="chosenModel" aria-label="新会话模型">
               <option value="">默认模型</option>
               <option v-for="m in models" :key="m">{{ m }}</option>
             </select>
@@ -1026,17 +1127,27 @@ onBeforeUnmount(() => {
                   : '写下你的问题，或 /stage 创建引用会话…'
               "
               rows="3"
-              @keydown.enter.exact.prevent="send"
+              enterkeyhint="enter"
+              @keydown="messageKey"
             ></textarea>
             <div class="composer-bottom">
-              <label class="attach" title="添加图片"
-                >＋<input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  hidden
-                  @change="upload" /></label
-              ><span class="hint">Enter 发送 · Shift + Enter 换行</span
+              <button
+                type="button"
+                class="attach icon"
+                aria-label="添加图片"
+                :disabled="uploading"
+                @click="imageInput.click()"
+              >
+                ＋
+              </button>
+              <input
+                ref="imageInput"
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+                multiple
+                hidden
+                @change="upload"
+              /><span class="hint">Enter 发送 · Shift + Enter 换行</span
               ><button
                 v-if="isRunning"
                 type="button"
@@ -1050,15 +1161,23 @@ onBeforeUnmount(() => {
                 停止</button
               ><button
                 class="primary"
-                :disabled="sending || (!draft.trim() && !attachments.length)"
+                :disabled="
+                  sending || uploading || (!draft.trim() && !attachments.length)
+                "
               >
-                {{ isRunning ? "补充约束" : "发送" }} ↑
+                {{
+                  uploading
+                    ? "读取图片…"
+                    : sending
+                      ? "提交中…"
+                      : isRunning
+                        ? "补充约束"
+                        : "发送"
+                }}
+                ↑
               </button>
             </div>
           </form>
-          <p class="disclaimer">
-            工具操作发生在服务端。请核对重要结果，勿向不可信网页泄露凭据。
-          </p>
         </div>
       </template>
       <Accounts
@@ -1090,32 +1209,17 @@ onBeforeUnmount(() => {
               >工作时间 <input v-model="employee.workStart" type="time" /> —
               <input v-model="employee.workEnd" type="time" /></label
             ><button @click="saveEmployeeSettings">保存</button
-            ><small>时刻均为服务端本地时间，相同起止时刻表示全天。</small
-            ><input
-              v-model="project"
-              aria-label="员工工作目录"
-              placeholder="员工的服务端工作目录"
-            />
+            ><small>北京时间</small>
           </div>
           <div v-if="!employee.enabled" class="context-note">
             员工当前停用，新任务只保存、不执行。启用并进入工作时间后开始处理。
           </div>
-          <p v-if="employee.systemPresence" class="hint">
-            电脑任务系统状态：{{
-              !employee.systemPresence.available
-                ? "不可确认（保留排队）"
-                : employee.systemPresence.locked
-                  ? "锁屏，解锁后续做"
-                  : "可用"
-            }}。{{ employee.systemPresence.reason || "" }}
-          </p>
           <div class="tabs" role="tablist">
             <button
               v-for="[id, label] in [
                 ['tasks', '任务'],
                 ['duties', '职责'],
                 ['memories', '长期记忆'],
-                ['orbit', '星轨'],
                 ['team', '团队员工'],
                 ['vault', '密码本'],
               ]"
@@ -1297,7 +1401,6 @@ onBeforeUnmount(() => {
                     <option value="manual">不定时，手动匹配</option>
                     <option value="times">每天固定时刻</option>
                     <option value="interval">固定间隔</option>
-                    <option value="events">星轨事件</option>
                     <option value="dynamic">动态安排</option>
                   </select></label
                 ><label
@@ -1319,10 +1422,6 @@ onBeforeUnmount(() => {
                   min="1"
                   max="10080"
                   required /></label
-              ><label v-if="duty.trigger === 'events'"
-                >事件（逗号分隔）<input
-                  v-model="duty.events"
-                  placeholder="orbit.added,orbit.done" /></label
               ><label v-if="duty.trigger === 'dynamic'"
                 >首次执行<input
                   v-model="duty.nextAt"
@@ -1401,9 +1500,6 @@ onBeforeUnmount(() => {
                 取消
               </button>
             </form>
-            <p class="hint">
-              普通记忆随时间淡忘，相关任务会强化记忆；长期记忆不会自动删除。
-            </p>
             <article
               v-for="m in employee.memories || []"
               :key="m.id"
@@ -1435,51 +1531,8 @@ onBeforeUnmount(() => {
               </div>
             </article></template
           >
-          <template v-if="employeeTab === 'orbit'"
-            ><form
-              class="inline-form"
-              @submit.prevent="
-                attempt(async () => {
-                  await employeeAction({
-                    action: 'orbit_add',
-                    text: orbitText,
-                  });
-                  orbitText = '';
-                })
-              "
-            >
-              <input
-                v-model="orbitText"
-                required
-                placeholder="一件待办事项"
-              /><button class="primary">添加</button>
-            </form>
-            <label
-              v-for="item in employee.orbit || []"
-              :key="item.id"
-              class="card orbit-item"
-              ><input
-                :checked="item.done"
-                type="checkbox"
-                @change="
-                  attempt(() =>
-                    employeeAction({
-                      action: 'orbit_done',
-                      id: item.id,
-                      done: !item.done,
-                    }),
-                  )
-                "
-              /><span :class="{ strike: item.done }">{{
-                item.text
-              }}</span></label
-            ></template
-          >
-          <template v-if="employeeTab === 'vault'"
-            ><p class="context-note">
-              密码本凭据使用 AES-GCM 加密存入 SQLite，可配置 VEGA_VAULT_KEY
-              将主密钥放在数据库外；未配置时自动生成本机密钥并存于同一数据库，仅防误读误传。
-            </p>
+
+          <template v-if="employeeTab === 'vault'">
             <form class="card form-grid" @submit.prevent="saveVault">
               <label
                 >名称<input
@@ -1526,54 +1579,20 @@ onBeforeUnmount(() => {
         </div></template
       >
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" />
-      <template v-else-if="isAdmin"
-        ><header class="topbar">
-          <div>
-            <h2>设置</h2>
-            <p>配置存于服务端 SQLite，凭据不会放入前端存储。</p>
-          </div>
-        </header>
-        <div class="page-scroll settings">
-          <Integrations
-            :api="api"
-            @saved="providerSaved"
-            @error="error = $event"
-            @notice="notice = $event"
-          />
-          <section class="card">
-            <div class="section-heading">
-              <div>
-                <h3>模型与场景</h3>
-                <p class="hint">
-                  支持 OpenAI Chat Completions、Responses、Anthropic
-                  Messages。场景候选模型按顺序降级。
-                </p>
-              </div>
-              <button class="primary" @click="saveConfig">保存配置</button>
-            </div>
-            <textarea
-              v-model="configText"
-              class="config-editor"
-              spellcheck="false"
-              aria-label="模型配置 JSON"
-            ></textarea>
-            <p class="hint">
-              apiKey 可使用 {env:变量名}。__stored_secret__
-              表示保留已有密钥。默认自动压缩，可将 contextMode 设为 acp
-              由模型主动压缩。MCP 支持 command/args/env 或 url/headers。
-            </p>
-          </section>
-
-          <section class="card">
-            <h3>部署与权限</h3>
-            <p>
-              这是具备服务端文件读写、命令执行与浏览器控制能力的管理工作台。只向可信用户开放；跨设备访问请通过
-              HTTPS 反向代理。SQLite 中的模型配置可能含明文 API
-              Key，建议使用环境变量引用并保护数据库及备份。
-            </p>
-          </section>
-        </div></template
-      >
+      <ExperiencesView
+        v-else-if="view === 'experiences' && isAdmin"
+        :api="api"
+      />
+      <SettingsView
+        v-else-if="view === 'settings' && isAdmin"
+        :api="api"
+        :config="config"
+        :user-id="user.id"
+        :models="catalogModels"
+        @saved="providerSaved"
+        @error="error = $event"
+        @notice="notice = $event"
+      />
     </section>
   </div>
 </template>
