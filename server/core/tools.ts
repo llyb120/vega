@@ -397,6 +397,7 @@ export class Tools {
       );
       const images: Outcome["images"] = [];
       for (const im of result.images || []) {
+        this.engine.store.grantBlob(im.blobId, this.session.id);
         const data = this.engine.store.blobData(im.blobId);
         if (data)
           images.push({

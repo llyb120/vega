@@ -1,3 +1,6 @@
+import { principal, eventAllowed } from "../../core/http-auth";
+import { authRoute, bodyJSON } from "../../core/http-auth-routes";
+import { check } from "../../core/auth";
 import { readFile, stat } from "node:fs/promises";
 import { importSkill, materializeSkill } from "../../core/skills";
 import { skillMetadata } from "../../core/prompt";
@@ -48,34 +51,41 @@ async function inputMessage(a: Obj) {
   return { role: "user", text: a.text || "", images: a.images || [] };
 }
 export default defineEventHandler(async (event) => {
-  const { store, engine } = app(),
+  const { store, engine, auth } = app(),
     method = event.method,
     path = getRequestURL(event)
       .pathname.replace(/^\/api\/?/, "")
       .split("/")
       .filter(Boolean);
+  if (path[0] === "health")
+    return { connected: engine.chrome.bridge.status().connected, ready: true };
+  if (["auth", "users"].includes(path[0])) return authRoute(event, path);
+  const who = principal(event),
+    user = who.user;
   let a: Obj = {};
-  if (["POST", "PUT", "PATCH"].includes(method)) {
-    const length = Number(event.node.req.headers["content-length"] || 0);
-    assert(!length || length <= 90 << 20, "Request body too large");
-    let size = 0;
-    const chunks: Buffer[] = [];
-    for await (const chunk of event.node.req) {
-      size += chunk.length;
-      assert(size <= 90 << 20, "Request body too large");
-      chunks.push(Buffer.from(chunk));
-    }
-    a = object(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"));
-  }
+  if (["POST", "PUT", "PATCH"].includes(method))
+    a = await bodyJSON(event, 90 << 20);
   try {
     if (path[0] === "bootstrap" && method === "GET")
       return {
-        sessions: store.sessions(),
+        user,
+        sessions: store.sessions().filter((s) => auth.canRead(user, s)),
         running: Object.fromEntries(
-          [...engine.active.keys()].map((id) => [id, true]),
+          [...engine.active.keys()]
+            .filter((key) => {
+              try {
+                return auth.canRead(user, store.session(key));
+              } catch {
+                return false;
+              }
+            })
+            .map((id) => [id, true]),
         ),
-        config: maskedConfig(engine.config()),
-        cwd: process.cwd(),
+        config:
+          user.role === "admin"
+            ? maskedConfig(engine.config())
+            : { model: engine.config().model, provider: {} },
+        cwd: user.role === "viewer" ? "" : process.cwd(),
         stack: {
           frontend: "Vue 3.6 Vapor",
           backend: "Nitro",
@@ -88,21 +98,45 @@ export default defineEventHandler(async (event) => {
       setHeader(event, "X-Accel-Buffering", "no");
       const stream = new PassThrough(),
         listener = (value: any) => {
-          if (!stream.destroyed)
+          const current = auth.resolveHash(who.hash);
+          if (!current) {
+            close();
+            return;
+          }
+          if (!stream.destroyed && eventAllowed(current.user, value))
             stream.write("data: " + JSON.stringify(value) + "\n\n");
         };
       engine.events.on("event", listener);
+      const revoke = (id: string) => {
+          if (id === user.id) close();
+        },
+        logout = (hash: string) => {
+          if (hash === who.hash) close();
+        };
+      auth.events.on("revoke", revoke);
+      auth.events.on("logout", logout);
       stream.write(": connected\n\n");
-      const timer = setInterval(() => stream.write(": heartbeat\n\n"), 15000);
+      const timer = setInterval(() => {
+        if (!auth.resolveHash(who.hash)) {
+          close();
+          return;
+        }
+        stream.write(": heartbeat\n\n");
+      }, 15000);
+      let streamClosed=false;
       const close = () => {
+        if(streamClosed)return;streamClosed=true;
         clearInterval(timer);
         engine.events.off("event", listener);
-        stream.destroy();
+        auth.events.off("revoke", revoke);
+        auth.events.off("logout", logout);
+        stream.end();event.node.res.end();
       };
       event.node.res.once("close", close);
       return sendStream(event, stream);
     }
     if (path[0] === "blobs" && method === "GET") {
+      check(auth.canBlob(user, path[1]), 404, "Blob not found");
       const blob = store.blobData(path[1]);
       assert(blob, "Blob not found");
       setHeader(event, "Content-Type", blob.mime);
@@ -114,16 +148,37 @@ export default defineEventHandler(async (event) => {
         if (a.model) await engine.catalog.resolve(engine.config(), a.model);
         return store.newSession({
           cwd: a.cwd,
+          ownerId: user.id,
           model: a.model,
           title: a.title,
           readOnly: a.readOnly === true,
         });
       }
       const key = path[1],
-        session = store.session(key);
+        session = auth.session(user, key, method !== "GET");
+      if (path[2] === "access" && method === "PUT") {
+        check(user.role === "admin", 403, "Administrator permission required");
+        check(
+          Array.isArray(a.readerIds) &&
+            a.readerIds.length <= 100 &&
+            a.readerIds.every(
+              (id: any) =>
+                typeof id === "string" &&
+                auth.user(id) &&
+                !auth.user(id)!.disabled,
+            ),
+          400,
+          "Readers must be enabled user IDs",
+        );
+        session.readerIds = [...new Set(a.readerIds)] as string[];
+        store.saveSession(session);
+        return { ok: true, readerIds: session.readerIds };
+      }
+
       if (path.length === 2 && method === "GET")
         return {
           session,
+          canWrite: auth.canWrite(user, session),
           messages: store.messages(key),
           folds: engine.store.db
             .prepare("SELECT data FROM folds WHERE session=?")

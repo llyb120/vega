@@ -1058,8 +1058,9 @@ export class Employee {
         }
         let takeover = this.takeovers.get(t.id);
         const idle =
+          desk.source === "isolated-chromium" ||
           Math.min(desk.idleMs, now - this.lastActivity) >=
-          s.idleMinutes * 60000;
+            s.idleMinutes * 60000;
         if (!idle && !takeover) {
           takeover = { until: now + s.takeoverSeconds * 1000, accepted: false };
           this.takeovers.set(t.id, takeover);

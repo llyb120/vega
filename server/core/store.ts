@@ -30,6 +30,8 @@ export type Session = {
   stageSource?: string;
   taskId?: string;
   readOnly?: boolean;
+  ownerId?: string;
+  readerIds?: string[];
   fireRoot?: string;
   fireRole?: "work" | "judge";
   createdAt: number;
@@ -59,7 +61,7 @@ export class Store {
     assert(
       (app === 0 || app === 1447380801) &&
         !(app === 0 && tables > 0) &&
-        version <= 2,
+        version <= 3,
       "Not a supported Vega database; existing data left unchanged",
     );
     this.db
@@ -70,7 +72,11 @@ export class Store {
    CREATE TABLE IF NOT EXISTS folds(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,id));
    CREATE TABLE IF NOT EXISTS objects(kind TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(kind,id));
    CREATE TABLE IF NOT EXISTS blobs(id TEXT PRIMARY KEY,mime TEXT NOT NULL,data BLOB NOT NULL,created INTEGER NOT NULL);
-   PRAGMA application_id=1447380801; PRAGMA user_version=2; COMMIT;`);
+   CREATE TABLE IF NOT EXISTS web_users(id TEXT PRIMARY KEY,username TEXT NOT NULL UNIQUE COLLATE NOCASE,password TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','operator','viewer')),disabled INTEGER NOT NULL DEFAULT 0,createdAt INTEGER NOT NULL,lastLogin INTEGER NOT NULL DEFAULT 0);
+   CREATE TABLE IF NOT EXISTS web_sessions(hash TEXT PRIMARY KEY,userId TEXT NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,csrf TEXT NOT NULL,createdAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL);
+   CREATE INDEX IF NOT EXISTS web_sessions_user ON web_sessions(userId);
+   CREATE TABLE IF NOT EXISTS blob_access(blob TEXT NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(blob,session));
+   PRAGMA application_id=1447380801; PRAGMA user_version=3; COMMIT;`);
     if (path !== ":memory:") chmodSync(path, 0o600);
   }
   close() {
@@ -134,6 +140,12 @@ export class Store {
       .prepare("INSERT INTO blobs VALUES(?,?,?,?)")
       .run(key, mime, data, Date.now());
     return key;
+  }
+  grantBlob(blob: string, session: string) {
+    if (this.db.prepare("SELECT id FROM sessions WHERE id=?").get(session))
+      this.db
+        .prepare("INSERT OR IGNORE INTO blob_access VALUES(?,?)")
+        .run(blob, session);
   }
   blobData(key: string) {
     return this.db
@@ -245,6 +257,8 @@ export class Store {
       cwd: source.cwd,
       title: "Stage",
       stageSource: key,
+      ownerId: source.ownerId,
+      readerIds: source.readerIds,
       model: inherit ? source.model : undefined,
       readOnly: source.readOnly,
     });

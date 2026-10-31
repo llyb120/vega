@@ -1,9 +1,25 @@
 <script setup vapor>
 import Integrations from "./Integrations.vue";
 import Team from "./Team.vue";
-import { computed, nextTick, onBeforeUnmount, ref } from "vue";
-const token = ref(""),
-  authenticated = ref(false),
+import Accounts from "./Accounts.vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+const user = ref(null),
+  csrfToken = ref(""),
+  setupRequired = ref(false),
+  username = ref(""),
+  password = ref(""),
+  setupToken = ref(""),
+  authBusy = ref(false);
+const isAdmin = computed(() => user.value?.role === "admin"),
+  canExecute = computed(() => !!user.value && user.value.role !== "viewer");
+const canWriteCurrent = computed(
+  () =>
+    canExecute.value &&
+    (!current.value ||
+      isAdmin.value ||
+      current.value.ownerId === user.value?.id),
+);
+const authenticated = ref(false),
   error = ref(""),
   notice = ref(""),
   view = ref("chat");
@@ -98,6 +114,10 @@ const models = computed(() => [
   ]),
 ]);
 async function loadModels() {
+  if (!canExecute.value) {
+    catalogModels.value = [];
+    return;
+  }
   catalogModels.value = await api("/providers/models");
 }
 function providerSaved(value) {
@@ -118,7 +138,7 @@ function startPresence() {
   window.addEventListener("pointerdown", userActive, { passive: true });
   window.addEventListener("keydown", userActive);
   presenceTimer = setInterval(() => {
-    if (authenticated.value)
+    if (authenticated.value && isAdmin.value)
       void api("/employee/activity", "POST", {
         idleMs: Date.now() - activityAt,
       }).catch(() => {});
@@ -155,13 +175,17 @@ function date(at) {
 async function api(path, method = "GET", data) {
   const response = await fetch(`/api${path}`, {
     method,
+    credentials: "same-origin",
     headers: {
-      Authorization: `Bearer ${token.value}`,
+      ...(!["GET", "HEAD"].includes(method) && csrfToken.value
+        ? { "X-CSRF-Token": csrfToken.value }
+        : {}),
       ...(data !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     body: data === undefined ? undefined : JSON.stringify(data),
   });
   const result = await response.json();
+  if (response.status === 401 && authenticated.value) resetLogin();
   if (!response.ok)
     throw Error(
       result.data?.error ||
@@ -186,41 +210,87 @@ function toast(text) {
 }
 async function bootstrap() {
   const b = await api("/bootstrap");
+  user.value = b.user;
   sessions.value = b.sessions || [];
   running.value = b.running || {};
   config.value = b.config || {};
   if (!project.value) project.value = b.cwd;
   return b;
 }
-async function login() {
-  await attempt(async () => {
-    await bootstrap();
-    closed = false;
-    authenticated.value = true;
-    startPresence();
-    await loadModels();
-    configText.value = JSON.stringify(
-      config.value.model ? config.value : exampleConfig(),
-      null,
-      2,
-    );
-    await loadEmployee();
-    if (sessions.value.length) await selectSession(sessions.value[0]);
-    eventsController = new AbortController();
-    void eventLoop(eventsController.signal);
-  });
+async function enter(result) {
+  user.value = result.user;
+  setupRequired.value = false;
+  csrfToken.value = result.csrfToken;
+  closed = false;
+  authenticated.value = true;
+  await bootstrap();
+  if (isAdmin.value) startPresence();
+  await loadModels();
+  configText.value = JSON.stringify(
+    config.value.model ? config.value : exampleConfig(),
+    null,
+    2,
+  );
+  if (isAdmin.value) await loadEmployee();
+  if (sessions.value.length) await selectSession(sessions.value[0]);
+  eventsController = new AbortController();
+  void eventLoop(eventsController.signal);
 }
-function logout() {
+async function login() {
+  if (authBusy.value) return;
+  authBusy.value = true;
+  await attempt(async () => {
+    const result = await api(
+      setupRequired.value ? "/auth/setup" : "/auth/login",
+      "POST",
+      {
+        username: username.value,
+        password: password.value,
+        ...(setupRequired.value ? { setupToken: setupToken.value } : {}),
+      },
+    );
+    password.value = "";
+    setupToken.value = "";
+    await enter(result);
+  });
+  authBusy.value = false;
+}
+function resetLogin() {
   stopPresence();
   closed = true;
   eventsController?.abort();
   authenticated.value = false;
-  token.value = "";
+  user.value = null;
+  csrfToken.value = "";
+  password.value = "";
+  setupToken.value = "";
   current.value = null;
+  sessions.value = [];
   messages.value = [];
+  folds.value = [];
+  running.value = {};
   vault.value = [];
   config.value = {};
+  catalogModels.value = [];
+  draft.value = "";
+  attachments.value = [];
+  view.value = "chat";
 }
+async function logout() {
+  try {
+    await api("/auth/logout", "POST", {});
+  } finally {
+    resetLogin();
+  }
+}
+onMounted(
+  () =>
+    void attempt(async () => {
+      const result = await api("/auth/me");
+      setupRequired.value = result.setupRequired;
+      if (result.user) await enter(result);
+    }),
+);
 async function selectSession(session) {
   const v = await api(`/sessions/${session.id}`);
   current.value = v.session;
@@ -268,6 +338,7 @@ async function removeSession(s) {
   });
 }
 async function send() {
+  if (!canWriteCurrent.value) return;
   if (sending.value || (!draft.value.trim() && !attachments.value.length))
     return;
   sending.value = true;
@@ -322,9 +393,14 @@ async function eventLoop(signal) {
   while (!signal.aborted && !closed) {
     try {
       const response = await fetch("/api/events", {
-        headers: { Authorization: `Bearer ${token.value}` },
+        credentials: "same-origin",
         signal,
       });
+      if (response.status === 401) {
+        resetLogin();
+        error.value = "登录已过期或被撤销，请重新登录";
+        return;
+      }
       if (!response.ok) throw Error("事件连接认证失败");
       const reader = response.body.getReader(),
         decoder = new TextDecoder();
@@ -350,7 +426,7 @@ async function eventLoop(signal) {
       try {
         await bootstrap();
         if (current.value) await refreshCurrent();
-        await loadEmployee();
+        if (isAdmin.value) await loadEmployee();
       } catch {}
     }
   }
@@ -473,6 +549,7 @@ async function handleEvent(event) {
   }
 }
 async function loadEmployee() {
+  if (!isAdmin.value) return;
   employee.value = await api("/employee");
 }
 async function employeeAction(data) {
@@ -647,18 +724,52 @@ onBeforeUnmount(() => {
     <form class="login-card" @submit.prevent="login">
       <div class="brand-mark">V</div>
       <h1>Vega</h1>
-      <p>一个轻巧的工作伙伴</p>
-      <label for="access-token">服务端访问令牌</label
+      <p>{{ setupRequired ? "首次使用：创建管理员账号" : "登录你的工作台" }}</p>
+      <template v-if="setupRequired"
+        ><label for="setup-token">初始化令牌</label
+        ><input
+          id="setup-token"
+          v-model="setupToken"
+          type="password"
+          required
+          minlength="16"
+          autocomplete="off"
+          placeholder="服务端日志或VEGA_TOKEN中的初始化令牌"
+        />
+        <p class="hint">
+          令牌只用于创建首个管理员，创建后不能替代账号登录。
+        </p></template
+      >
+      <label for="username">用户名</label
       ><input
-        id="access-token"
-        v-model="token"
-        type="password"
-        minlength="16"
+        id="username"
+        v-model="username"
         required
-        autocomplete="current-password"
-        placeholder="终端显示的令牌 / VEGA_TOKEN"
-      /><button class="primary">进入工作台 →</button>
-      <p class="hint">令牌仅保存在当前页面内存中。所有工具在服务端执行。</p>
+        minlength="3"
+        maxlength="64"
+        autocomplete="username"
+        pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{2,63}"
+        placeholder="用户名"
+      />
+      <label for="password">密码</label
+      ><input
+        id="password"
+        v-model="password"
+        type="password"
+        required
+        :minlength="setupRequired ? 12 : 1"
+        maxlength="128"
+        :autocomplete="setupRequired ? 'new-password' : 'current-password'"
+        placeholder="密码（新账号至少12字符）"
+      /><button class="primary" :disabled="authBusy">
+        {{
+          authBusy ? "正在验证…" : setupRequired ? "创建管理员并登录" : "登录 →"
+        }}
+      </button>
+      <p class="hint">
+        登录凭据保存在 HttpOnly
+        Cookie，前端不存储密码；仅管理员可以创建其他账号。
+      </p>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
     </form>
   </main>
@@ -672,6 +783,7 @@ onBeforeUnmount(() => {
         <button :class="{ selected: view === 'chat' }" @click="view = 'chat'">
           ◈ <span>对话</span></button
         ><button
+          v-if="isAdmin"
           :class="{ selected: view === 'employee' }"
           @click="
             view = 'employee';
@@ -681,15 +793,29 @@ onBeforeUnmount(() => {
           ◎ <span>数字员工</span
           ><span class="count">{{ activeTasks.length }}</span></button
         ><button
+          v-if="isAdmin"
           :class="{ selected: view === 'settings' }"
           @click="view = 'settings'"
         >
           ⚙ <span>设置</span>
         </button>
+        <button
+          :class="{ selected: view === 'account' }"
+          @click="view = 'account'"
+        >
+          ♙ <span>{{ user.username }} · 账号</span>
+        </button>
       </nav>
       <div class="sidebar-heading">
         <span>会话</span
-        ><button class="icon" title="新建会话" @click="newSession">＋</button>
+        ><button
+          v-if="canExecute"
+          class="icon"
+          title="新建会话"
+          @click="newSession"
+        >
+          ＋
+        </button>
       </div>
       <div class="session-list">
         <div
@@ -705,7 +831,12 @@ onBeforeUnmount(() => {
               }}{{ s.title }}</span
             ></button
           ><button
-            v-if="!s.taskId && !running[s.id]"
+            v-if="
+              !s.taskId &&
+              !running[s.id] &&
+              canExecute &&
+              (isAdmin || s.ownerId === user.id)
+            "
             class="delete icon"
             title="删除会话"
             @click="removeSession(s)"
@@ -744,7 +875,9 @@ onBeforeUnmount(() => {
           </div>
           <div class="actions">
             <span v-if="isRunning" class="pill green">执行中</span
-            ><button v-if="current" @click="newStage">＋ Stage</button>
+            ><button v-if="current && canWriteCurrent" @click="newStage">
+              ＋ Stage
+            </button>
           </div>
         </header>
         <div ref="transcript" class="transcript" aria-live="polite">
@@ -752,12 +885,14 @@ onBeforeUnmount(() => {
             <div class="welcome-symbol">✳</div>
             <h1>让想法开始运转。</h1>
             <p>编写代码、探索网页，或把一项工作交给数字员工。</p>
-            <div class="suggestions">
+            <div v-if="canWriteCurrent" class="suggestions">
               <button @click="draft = '分析当前项目结构，提出最小改进方案'">
                 ◈ 分析一个项目</button
               ><button @click="draft = '请用 Chrome 查看当前标签页'">
                 ↗ 探索网页</button
-              ><button @click="view = 'employee'">◎ 交给数字员工</button>
+              ><button v-if="isAdmin" @click="view = 'employee'">
+                ◎ 交给数字员工
+              </button>
             </div>
           </div>
           <div v-if="fireState" class="context-note">
@@ -849,7 +984,10 @@ onBeforeUnmount(() => {
             <span class="spinner"></span>{{ c.name }} 正在执行…
           </div>
         </div>
-        <div class="composer-wrap">
+        <p v-if="!canWriteCurrent" class="context-note">
+          当前账号仅可查看此会话，不能发送消息、停止任务或执行工具。
+        </p>
+        <div v-if="canWriteCurrent" class="composer-wrap">
           <div class="context-controls">
             <input
               v-model="project"
@@ -915,7 +1053,17 @@ onBeforeUnmount(() => {
           </p>
         </div>
       </template>
-      <template v-else-if="view === 'employee'"
+      <Accounts
+        v-else-if="view === 'account'"
+        :api="api"
+        :user="user"
+        :sessions="sessions"
+        @error="error = $event"
+        @notice="notice = $event"
+        @signed-out="resetLogin"
+        @changed="attempt(bootstrap)"
+      />
+      <template v-else-if="view === 'employee' && isAdmin"
         ><header class="topbar">
           <div>
             <h2>数字员工</h2>
@@ -1369,7 +1517,7 @@ onBeforeUnmount(() => {
           >
         </div></template
       >
-      <template v-else
+      <template v-else-if="isAdmin"
         ><header class="topbar">
           <div>
             <h2>设置</h2>

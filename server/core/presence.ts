@@ -61,7 +61,29 @@ export function linuxPresence(text: string, now = Date.now()): Presence {
     source: "loginctl",
   };
 }
+export function isolatedBrowserPresence(
+  platform: string,
+  mode: string | undefined,
+  now = Date.now(),
+): Presence | undefined {
+  if (platform !== "linux" || mode !== "isolated") return;
+  // A private, container-owned browser has no host desktop to seize or unlock.
+  return {
+    available: true,
+    locked: false,
+    idleMs: now,
+    sampledAt: now,
+    source: "isolated-chromium",
+    reason:
+      "Dedicated container browser only; this does not report host desktop state",
+  };
+}
 export async function systemPresence(): Promise<Presence> {
+  const isolated = isolatedBrowserPresence(
+    process.platform,
+    process.env.VEGA_BROWSER_MODE,
+  );
+  if (isolated) return isolated;
   try {
     if (process.platform === "win32") {
       const { stdout } = await exec(

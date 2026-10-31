@@ -156,6 +156,8 @@ export class Fire {
       const root = this.store.session(s.root),
         next = this.store.newSession({
           cwd: root.cwd,
+          ownerId: root.ownerId,
+          readerIds: root.readerIds,
           model: root.model,
           title: `[Fire] ${s.role === "judge" ? "判断" : "阶段"} ${s.attempt}`,
           fireRoot: s.root,

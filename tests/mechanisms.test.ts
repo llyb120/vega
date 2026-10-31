@@ -342,7 +342,12 @@ test("StarLink validates peer identity and preserves authenticated owner for tas
   );
 });
 test("Vue3.6 components use Vapor compiler, not VDOM fallback", () => {
-  for (const file of ["App.vue", "Integrations.vue", "Team.vue"]) {
+  for (const file of [
+    "App.vue",
+    "Integrations.vue",
+    "Team.vue",
+    "Accounts.vue",
+  ]) {
     const code = readFileSync("web/src/" + file, "utf8"),
       descriptor = parse(code, { filename: file }).descriptor;
     assert.equal(descriptor.scriptSetup?.attrs.vapor, true);

@@ -431,6 +431,7 @@ export class Chrome {
       (!["none", "inspect"].includes(a.feedback) && a.visual !== "none");
     const shot = capture ? await this.capture(o, a, prior) : {};
     this.observations.set(key, o);
+    for (const image of o.images) this.store.grantBlob(image.blobId, owner);
     this.store.save("browser-observation", o.id, { ...o, frames: undefined });
     const origin = new URL(o.pages[0].url).origin;
     return {

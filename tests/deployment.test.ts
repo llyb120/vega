@@ -90,7 +90,7 @@ test(
       for (let i = 0; i < 100; i++) {
         if (child.exitCode !== null) throw Error(log);
         try {
-          const r = await fetch(base + "/api/bootstrap", {
+          const r = await fetch(base + "/api/health", {
             headers: { Authorization: "Bearer " + token },
           });
           if (r.ok) {
@@ -116,16 +116,22 @@ test(
         });
       });
     };
+    let cookie = "",
+      csrf = "";
     const api = async (path: string, method = "GET", data?: any) => {
       const r = await fetch(base + "/api" + path, {
         method,
         headers: {
-          Authorization: "Bearer " + token,
+          ...(cookie ? { Cookie: cookie } : {}),
+          ...(csrf ? { "X-CSRF-Token": csrf } : {}),
           ...(data ? { "Content-Type": "application/json" } : {}),
         },
         body: data ? JSON.stringify(data) : undefined,
       });
+      if (r.headers.get("set-cookie"))
+        cookie = r.headers.get("set-cookie")!.split(";")[0];
       const value = await r.json();
+      if (value.csrfToken) csrf = value.csrfToken;
       assert(r.ok, JSON.stringify(value));
       return value;
     };
@@ -150,6 +156,12 @@ test(
       );
       assert.equal(extension.status, 200);
       assert.equal((await extension.json()).version, "0.1.14");
+      const signed = await api("/auth/setup", "POST", {
+        setupToken: token,
+        username: "deployed-admin",
+        password: "valid deployment fixture password",
+      });
+      assert.equal(signed.user.role, "admin");
       const config = {
         model: "test/m",
         provider: {
@@ -167,7 +179,7 @@ test(
       const session = await api("/sessions", "POST", { cwd: dir });
       const streamAbort = new AbortController(),
         stream = await fetch(base + "/api/events", {
-          headers: { Authorization: "Bearer " + token },
+          headers: { Cookie: cookie },
           signal: streamAbort.signal,
         });
       const reader = stream.body!.getReader();
