@@ -164,6 +164,7 @@ let eventsSocket,
   eventReconnect,
   eventsHeartbeat,
   eventQueue = Promise.resolve(),
+  wsRequestSerial = 0,
   closed = false,
   sessionRequest = 0,
   employeeRefreshTimer;
@@ -332,7 +333,7 @@ async function api(path, method = "GET", data) {
     return httpApi(path, method, data);
   if (eventsReady && eventsSocket?.readyState === WebSocket.OPEN)
     return new Promise((resolve, reject) => {
-      const id = crypto.randomUUID(),
+      const id = String(++wsRequestSerial),
         timer = setTimeout(() => {
           wsRequests.delete(id);
           reject(
