@@ -68,7 +68,7 @@ test("events WebSocket dispatches small API calls once and falls back for large 
   let calls = 0;
   await dispatch(
     peer,
-    { type: "request", id: "request-1", method: "POST", path: "/sessions", data: { title: "one" } },
+    { type: "request", id: "00000001", method: "POST", path: "/sessions", data: { title: "one" } },
     async (method, path, body) => {
       calls++;
       assert.equal(method, "POST");
@@ -78,12 +78,12 @@ test("events WebSocket dispatches small API calls once and falls back for large 
     },
   );
   assert.equal(calls, 1);
-  const response = sent.find((v) => v.id === "request-1");
+  const response = sent.find((v) => v.id === "00000001");
   assert.equal(response.status, 201);
   assert.equal(JSON.parse(response.body).id, "session-1");
   await dispatch(
     peer,
-    { type: "request", id: "request-1", method: "POST", path: "/sessions" },
+    { type: "request", id: "00000001", method: "POST", path: "/sessions" },
     async () => {
       calls++;
       return Response.json({});

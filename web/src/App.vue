@@ -333,7 +333,7 @@ async function api(path, method = "GET", data) {
     return httpApi(path, method, data);
   if (eventsReady && eventsSocket?.readyState === WebSocket.OPEN)
     return new Promise((resolve, reject) => {
-      const id = String(++wsRequestSerial),
+      const id = String(++wsRequestSerial).padStart(8, "0"),
         timer = setTimeout(() => {
           wsRequests.delete(id);
           reject(
