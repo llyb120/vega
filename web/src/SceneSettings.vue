@@ -153,9 +153,10 @@ async function save() {
 }
 .scene-item {
   min-width: 0;
-  padding: 14px;
+  padding: 16px;
+  background: #f9fafc;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 12px;
 }
 .scene-row {
   display: flex;

@@ -931,7 +931,7 @@ onBeforeUnmount(() => {
     <header class="mobile-header">
       <button
         ref="menuButton"
-        class="icon"
+        class="icon mobile-control"
         aria-label="打开导航与会话"
         aria-controls="navigation"
         :aria-expanded="navigationOpen"
@@ -939,10 +939,23 @@ onBeforeUnmount(() => {
       >
         ☰
       </button>
-      <strong>{{ mobileTitles[view] }}</strong>
+      <strong>{{ current?.title || mobileTitles[view] }}</strong>
+      <span
+        v-if="narrow && view === 'chat' && isRunning"
+        class="status-dot"
+        role="status"
+        aria-label="执行中"
+      ></span>
+      <button
+        v-if="narrow && view === 'chat' && current && canWriteCurrent"
+        class="mobile-stage"
+        @click="newStage"
+      >
+        Stage
+      </button>
       <button
         v-if="canExecute"
-        class="icon"
+        class="icon mobile-control"
         aria-label="新建会话"
         @click="newSession"
       >
@@ -1075,7 +1088,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <template v-if="view === 'chat'">
-        <header class="topbar">
+        <header v-if="!narrow" class="topbar">
           <div>
             <h2>
               {{ current?.title || "对话" }}

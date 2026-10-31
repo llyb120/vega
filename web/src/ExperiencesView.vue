@@ -104,12 +104,14 @@ onMounted(() => void refresh());
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 22px 28px;
+  padding: 30px 40px;
+  scrollbar-width: thin;
+  scrollbar-color: #d5d8e1 transparent;
 }
 .experience-filters {
   display: flex;
   gap: 12px;
-  margin-bottom: 20px;
+  margin-bottom: 22px;
 }
 .experience-filters select {
   max-width: 50%;
@@ -121,7 +123,7 @@ onMounted(() => void refresh());
   display: grid;
   grid-template-columns: 250px minmax(0, 1fr);
   align-items: start;
-  gap: 20px;
+  gap: 22px;
 }
 .experience-list {
   display: flex;
@@ -130,7 +132,9 @@ onMounted(() => void refresh());
 }
 .experience-list button {
   text-align: left;
-  padding: 14px;
+  color: #5c6272;
+  padding: 15px;
+  border-radius: 12px;
 }
 .experience-list strong,
 .experience-list small {
@@ -138,8 +142,10 @@ onMounted(() => void refresh());
   overflow-wrap: anywhere;
 }
 .experience-list .selected {
-  border-color: var(--green);
-  background: #edf5ef;
+  border-color: #d9d9f5;
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: 0 3px 10px #5b5bd60a;
 }
 .experience-detail {
   margin: 0;
@@ -153,10 +159,10 @@ onMounted(() => void refresh());
 .flow-node {
   width: min(100%, 540px);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px 18px;
+  border-radius: 12px;
+  padding: 15px 18px;
   line-height: 1.8;
-  background: #f8faf8;
+  background: #f8f9fb;
   overflow-wrap: anywhere;
 }
 .flow-node p {
@@ -167,15 +173,16 @@ onMounted(() => void refresh());
   margin-bottom: 5px;
 }
 .flow-node.complete {
-  border-color: #9bc9b0;
-  background: #edf8f0;
+  border-color: #d8f0e3;
+  background: #edf8f2;
 }
 .flow-node.entry {
-  background: #f1f5fa;
+  border-color: #dfdff6;
+  background: #f4f4fc;
 }
 .flow-arrow {
   font-size: 24px;
-  color: #97ac9f;
+  color: #b1b4c3;
   padding: 6px;
 }
 .step-number {
@@ -185,9 +192,10 @@ onMounted(() => void refresh());
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: #dfede3;
-  color: var(--green);
+  background: #e8e8fb;
+  color: var(--accent);
   font-size: 12px;
+  font-weight: 600;
   margin-right: 10px;
 }
 .experience-cautions {
@@ -197,24 +205,35 @@ onMounted(() => void refresh());
 }
 @media (max-width: 800px) {
   .experience-page {
-    padding: 16px;
+    padding: 18px 14px max(24px, env(safe-area-inset-bottom, 0px));
   }
   .experience-layout {
     grid-template-columns: 1fr;
+    gap: 16px;
   }
   .experience-list {
     flex-direction: row;
     overflow: auto;
     max-width: 100%;
+    margin: 0 -14px;
+    padding: 0 14px 4px;
+    scrollbar-width: none;
+  }
+  .experience-list::-webkit-scrollbar {
+    display: none;
   }
   .experience-list button {
-    min-width: 200px;
+    min-width: 190px;
   }
   .experience-flow {
-    padding: 4px;
+    padding: 4px 0;
+  }
+  .flow-node {
+    padding: 13px 14px;
   }
   .experience-filters {
     flex-wrap: wrap;
+    gap: 10px;
   }
   .experience-filters select {
     max-width: 100%;

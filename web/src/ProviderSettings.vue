@@ -661,8 +661,8 @@ onBeforeUnmount(() => {
 <style scoped>
 .provider-layout {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
-  gap: 22px;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 24px;
 }
 .provider-list {
   display: flex;
@@ -671,6 +671,8 @@ onBeforeUnmount(() => {
 }
 .provider-list button {
   text-align: left;
+  color: #606677;
+  padding: 11px 13px;
 }
 .provider-list small,
 .model-name small {
@@ -678,8 +680,9 @@ onBeforeUnmount(() => {
   word-break: break-all;
 }
 .provider-list .selected {
-  border-color: var(--green);
-  background: #edf5ef;
+  border-color: #d9d9f5;
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 .provider-form {
   display: flex;
@@ -691,14 +694,16 @@ onBeforeUnmount(() => {
   max-height: 360px;
   overflow: auto;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 11px;
+  scrollbar-width: thin;
 }
 .model-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 10px 12px;
+  background: #fff;
   border-bottom: 1px solid var(--border);
 }
 .model-row:last-child {
@@ -714,16 +719,18 @@ onBeforeUnmount(() => {
 }
 .model-edit {
   width: 100%;
-  padding: 10px;
-  background: #f7faf7;
+  padding: 12px;
+  background: #f7f8fb;
+  border-radius: 9px;
 }
 .model-edit label {
   min-width: 140px;
 }
 .provider-login {
-  padding: 14px;
-  background: #f5f9f5;
-  border-radius: 9px;
+  padding: 15px;
+  background: #f4f4fc;
+  border: 1px solid #e3e3f5;
+  border-radius: 11px;
 }
 .login-progress {
   display: flex;
@@ -744,13 +751,20 @@ onBeforeUnmount(() => {
 @media (max-width: 760px) {
   .provider-layout {
     grid-template-columns: 1fr;
+    gap: 20px;
   }
   .provider-list {
     flex-direction: row;
     overflow: auto;
+    margin: 0 -16px;
+    padding: 0 16px 4px;
+    scrollbar-width: none;
+  }
+  .provider-list::-webkit-scrollbar {
+    display: none;
   }
   .provider-list button {
-    min-width: 130px;
+    min-width: 140px;
     max-width: 220px;
     flex-shrink: 0;
     overflow-wrap: anywhere;

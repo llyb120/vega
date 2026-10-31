@@ -608,17 +608,19 @@ onBeforeUnmount(() => {
   overflow-x: hidden;
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
-  padding: 18px 28px 28px;
+  padding: 22px 32px 32px;
+  scrollbar-width: thin;
+  scrollbar-color: #d5d8e1 transparent;
 }
 .browser-tabstrip {
   display: flex;
   flex-shrink: 0;
   overflow-x: auto;
   overscroll-behavior-y: auto;
-  margin-bottom: 12px;
-  gap: 5px;
+  margin-bottom: 16px;
+  gap: 6px;
   padding: 4px 2px 8px;
-  border-bottom: 1px solid var(--line, #e0e7e2);
+  border-bottom: 1px solid var(--border);
 }
 .browser-tab {
   display: flex;
@@ -628,15 +630,17 @@ onBeforeUnmount(() => {
   max-width: 250px;
   flex-shrink: 0;
   padding: 11px 14px;
-  border-radius: 9px 9px 0 0;
+  border-radius: 10px 10px 0 0;
   text-align: left;
-  background: var(--surface, #fff);
+  color: #656b7b;
+  background: #f5f6f9;
+  border-color: transparent;
 }
 .browser-tab.selected {
-  background: #e5f1eb;
-  border-color: #32836c;
-  color: #14624e;
-  box-shadow: inset 0 -2px #23745d;
+  background: var(--accent-soft);
+  border-color: #d9d9f5;
+  color: var(--accent);
+  box-shadow: inset 0 -2px var(--accent);
 }
 .browser-tab-title {
   overflow: hidden;
@@ -647,29 +651,30 @@ onBeforeUnmount(() => {
 .browser-tab small {
   white-space: nowrap;
   font-size: 10px;
-  color: var(--muted, #748079);
+  color: #858b9a;
 }
 .browser-tab-mark {
-  color: #387e69;
+  color: var(--accent);
 }
 .browser-tab:focus-visible {
-  outline: 2px solid #23745d;
+  outline: 2px solid #8585e5;
   outline-offset: 1px;
 }
 .browser-panel {
-  border: 1px solid var(--line, #e0e7e2);
-  border-radius: 12px;
+  border: 1px solid #e3e5ed;
+  border-radius: 16px;
   background: #fff;
+  box-shadow: 0 5px 20px #30334b08;
+  overflow: hidden;
 }
 .browser-address {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 18px;
-  background: #f6f9f7;
-  border-bottom: 1px solid #e0e7e2;
-  border-radius: 11px 11px 0 0;
+  padding: 16px 20px;
+  background: #f8f9fb;
+  border-bottom: 1px solid var(--border);
 }
 .browser-address > div {
   min-width: 0;
@@ -686,6 +691,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: #363b4a;
 }
 .browser-url {
   margin-top: 4px;
@@ -700,7 +706,7 @@ onBeforeUnmount(() => {
 .browser-url p {
   font-size: 12px;
   margin: 5px 0 0;
-  color: #6e7b74;
+  color: #777e8e;
   overflow-wrap: anywhere;
   max-height: 96px;
   overflow-y: auto;
@@ -718,7 +724,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 12px;
   text-align: center;
-  color: #64736b;
+  color: #777e8e;
 }
 .browser-placeholder p {
   max-width: 650px;
@@ -729,15 +735,15 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 .browser-capture figcaption {
-  padding: 10px 18px;
+  padding: 11px 18px;
   font-size: 11px;
-  color: #68766e;
-  border-bottom: 1px solid #e8ede9;
+  color: #7b8190;
+  background: #fafbfc;
+  border-bottom: 1px solid var(--border);
 }
 .browser-image {
-  padding: 14px;
-  background: #eaf0ec;
-  border-radius: 0 0 11px 11px;
+  padding: 18px;
+  background: #f0f1f5;
 }
 .browser-image img {
   display: block;
@@ -745,35 +751,54 @@ onBeforeUnmount(() => {
   height: auto;
   max-width: 1568px;
   margin: 0 auto;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px #30334b0a;
   background: #fff;
   user-select: none;
 }
 @media (max-width: 760px) {
   .browser-view {
-    padding: 12px 10px max(18px, env(safe-area-inset-bottom, 0px));
+    padding: 14px 12px max(22px, env(safe-area-inset-bottom, 0px));
+  }
+  .browser-tabstrip {
+    margin: 0 -12px 14px;
+    padding: 0 12px 8px;
+    border-bottom: 0;
+    scrollbar-width: none;
+  }
+  .browser-tabstrip::-webkit-scrollbar {
+    display: none;
   }
   .browser-tab {
-    min-width: 130px;
+    min-width: 145px;
     max-width: 190px;
-    padding: 10px;
+    padding: 10px 12px;
+    border-radius: 11px;
+  }
+  .browser-tab.selected {
+    box-shadow: none;
   }
   .browser-address > div:first-child {
     width: 100%;
   }
   .browser-address {
-    padding: 10px;
-    gap: 8px;
+    padding: 14px;
+    gap: 12px;
     align-items: flex-start;
     flex-direction: column;
   }
+  .browser-address > .actions {
+    width: 100%;
+  }
+  .browser-address > .actions button {
+    flex: 1;
+  }
   .browser-placeholder {
     min-height: 200px;
+    padding: 24px 18px;
   }
   .browser-image {
-    padding: 4px;
-  }
-  .browser-placeholder {
-    padding: 20px;
+    padding: 6px;
   }
   .topbar {
     gap: 12px;
