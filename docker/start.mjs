@@ -33,6 +33,7 @@ export async function supervise() {
     NITRO_HOST: "0.0.0.0",
     NOVA_CHROME_PORT: "47653",
     VEGA_BROWSER_MODE: "isolated",
+    VEGA_CHROMIUM_EXTERNAL: "1",
   };
   const address = apiAddress(env);
   const profile = "/data/chromium",

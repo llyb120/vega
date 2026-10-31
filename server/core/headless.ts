@@ -47,7 +47,11 @@ export class HeadlessBrowser {
   child?: ChildProcess;
   dir?: string;
   async start(dbPath: string) {
-    if (process.env.VEGA_BROWSER_MODE !== "isolated") return;
+    if (
+      process.env.VEGA_BROWSER_MODE !== "isolated" ||
+      process.env.VEGA_CHROMIUM_EXTERNAL === "1"
+    )
+      return;
     if (this.child) return;
     const binary = chromeBinary();
     if (!binary) {

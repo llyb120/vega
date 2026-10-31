@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { chromiumArguments } from "../docker/start.mjs";
 import { connected, apiAddress } from "../docker/healthcheck.mjs";
+import { HeadlessBrowser } from "../server/core/headless";
 import { isolatedBrowserPresence } from "../server/core/presence";
 import { Store } from "../server/core/store";
 import { Vault } from "../server/core/vault";
@@ -31,6 +32,24 @@ test("container Chromium automatically loads the fixed extension in its private 
   assert.throws(() =>
     chromiumArguments("/data/chromium", "/app/extension", "yes"),
   );
+});
+
+test("externally supervised Chromium prevents Nitro from spawning a competing instance", async () => {
+  const mode = process.env.VEGA_BROWSER_MODE,
+    external = process.env.VEGA_CHROMIUM_EXTERNAL;
+  process.env.VEGA_BROWSER_MODE = "isolated";
+  process.env.VEGA_CHROMIUM_EXTERNAL = "1";
+  try {
+    const browser = new HeadlessBrowser();
+    await browser.start("/data/vega.db");
+    assert.equal(browser.child, undefined);
+    assert.equal(browser.dir, undefined);
+  } finally {
+    if (mode === undefined) delete process.env.VEGA_BROWSER_MODE;
+    else process.env.VEGA_BROWSER_MODE = mode;
+    if (external === undefined) delete process.env.VEGA_CHROMIUM_EXTERNAL;
+    else process.env.VEGA_CHROMIUM_EXTERNAL = external;
+  }
 });
 
 test("container health requires authenticated extension pairing, not merely an alive HTTP server", async () => {
