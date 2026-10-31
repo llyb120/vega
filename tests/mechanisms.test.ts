@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { MCP } from "../server/core/mcp";
 import { Store } from "../server/core/store";
 import { Providers } from "../server/core/provider";
@@ -341,29 +341,37 @@ test("StarLink validates peer identity and preserves authenticated owner for tas
     1,
   );
 });
-test("Vue3.6 components use Vapor compiler, not VDOM fallback", () => {
-  for (const file of [
-    "App.vue",
-    "Integrations.vue",
-    "Team.vue",
-    "Accounts.vue",
-    "BrowserView.vue",
-  ]) {
+test("all Vue components use Vapor compiler, not VDOM fallback", () => {
+  const files = readdirSync("web/src", {
+    recursive: true,
+    encoding: "utf8",
+  }).filter((file) => file.endsWith(".vue"));
+  assert(files.length > 0, "No Vue components found");
+  for (const file of files) {
     const code = readFileSync("web/src/" + file, "utf8"),
-      descriptor = parse(code, { filename: file }).descriptor;
-    assert.equal(descriptor.scriptSetup?.attrs.vapor, true);
+      { descriptor, errors } = parse(code, { filename: file });
+    assert.deepEqual(errors, [], "Invalid Vue component: " + file);
+    assert.equal(
+      descriptor.scriptSetup?.attrs.vapor,
+      true,
+      file + " must use <script setup vapor>",
+    );
     const compiled = compileScript(descriptor, {
       id: file,
       inlineTemplate: true,
     });
     assert(
-      descriptor.vapor &&
-        compiled.content.includes("_template(") &&
-        compiled.content.includes("_renderEffect"),
-      "Vapor DOM output missing for " + file,
+      descriptor.vapor && /__vapor:\s*true/.test(compiled.content),
+      "Vapor component output missing for " + file,
     );
   }
-  assert.match(readFileSync("web/src/main.js", "utf8"), /createVaporApp/);
+  const entry = readFileSync("web/src/main.js", "utf8");
+  assert.match(entry, /createVaporApp/);
+  assert.doesNotMatch(
+    entry,
+    /\bcreateApp\s*\(/,
+    "Do not mount a VDOM application",
+  );
   const pkg = JSON.parse(readFileSync("package.json", "utf8"));
   assert.match(pkg.dependencies.vue, /^3\.6\./);
 });
