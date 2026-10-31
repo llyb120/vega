@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import WebSocket from "ws";
 import { Store } from "../server/core/store";
 import { ChromeBridge } from "../server/core/chrome-bridge";
+import { browserTabs, browserScreenshot } from "../server/core/browser-preview";
 import { Chrome } from "../server/core/chrome";
 import { sleep, type Obj } from "../server/core/util";
 class FixtureBridge extends ChromeBridge {
@@ -23,6 +24,14 @@ class FixtureBridge extends ChromeBridge {
     }
   >();
   sessions = new Map<string, string>();
+  override async start() {}
+  override status() {
+    return {
+      ...super.status(),
+      connected: this.ws?.readyState === WebSocket.OPEN,
+      browser: "Chrome fixture",
+    };
+  }
   async connect(url: string) {
     this.ws = new WebSocket(url);
     await new Promise<void>((yes, no) => {
@@ -250,6 +259,23 @@ test(
       });
       assert.equal(shot.images.length, 1);
       assert(shot.images[0].pixelWidth <= 800);
+      const listed = await browserTabs(engine);
+      assert(listed.tabs.some((t) => t.tag === tag));
+      const preview = await browserScreenshot(
+        engine,
+        "browser-view:fixture",
+        tag,
+      );
+      assert.equal(preview.tabTag, tag);
+      assert(preview.image.width > 0);
+      assert.equal(preview.title, "Vega complete browser fixture");
+      assert(store.blobData(preview.image.url.split("/").at(-1)!));
+      assert.equal(
+        engine.observations.get("owner:" + tag)!.id,
+        shot.snapshotId,
+        "Preview must not overwrite an agent observation",
+      );
+      assert.equal(submitted, 0, "Viewing a tab must not submit the page");
       const cropped = await engine.execute("owner", dir, {
         operation: "screenshot",
         tabTag: tag,

@@ -1,6 +1,7 @@
 <script setup vapor>
 import Integrations from "./Integrations.vue";
 import Team from "./Team.vue";
+import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 const user = ref(null),
@@ -800,6 +801,13 @@ onBeforeUnmount(() => {
           ⚙ <span>设置</span>
         </button>
         <button
+          v-if="isAdmin"
+          :class="{ selected: view === 'browser' }"
+          @click="view = 'browser'"
+        >
+          ▣ <span>浏览器</span>
+        </button>
+        <button
           :class="{ selected: view === 'account' }"
           @click="view = 'account'"
         >
@@ -1517,6 +1525,7 @@ onBeforeUnmount(() => {
           >
         </div></template
       >
+      <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" />
       <template v-else-if="isAdmin"
         ><header class="topbar">
           <div>

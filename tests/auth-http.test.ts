@@ -328,6 +328,47 @@ test(
         ).r.status,
         403,
       );
+      const chromeList = await ok("/chrome/tabs", "GET", undefined, admin);
+      assert(Array.isArray(chromeList.tabs));
+      for (const login of [a, v]) {
+        assert.equal(
+          (await req("/chrome/tabs", "GET", undefined, login)).r.status,
+          403,
+        );
+        assert.equal(
+          (
+            await req(
+              "/chrome/screenshot",
+              "POST",
+              { tabTag: "not-a-real-tab" },
+              login,
+            )
+          ).r.status,
+          403,
+        );
+      }
+      assert.equal(
+        (
+          await req(
+            "/chrome/screenshot",
+            "POST",
+            { tabTag: "not-a-real-tab", operation: "act" },
+            admin,
+          )
+        ).r.status,
+        400,
+      );
+      assert.equal(
+        (
+          await req(
+            "/chrome/screenshot",
+            "POST",
+            { tabTag: "not-a-real-tab" },
+            { ...admin, csrf: "" },
+          )
+        ).r.status,
+        403,
+      );
       assert.equal((await req("/config", "PUT", config, a)).r.status, 403);
       assert.equal(
         (await req("/sessions", "POST", { cwd: dir }, v)).r.status,

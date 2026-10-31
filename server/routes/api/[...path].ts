@@ -1,3 +1,4 @@
+import { browserTabs, browserScreenshot } from "../../core/browser-preview";
 import { principal, eventAllowed } from "../../core/http-auth";
 import { authRoute, bodyJSON } from "../../core/http-auth-routes";
 import { check } from "../../core/auth";
@@ -123,14 +124,16 @@ export default defineEventHandler(async (event) => {
         }
         stream.write(": heartbeat\n\n");
       }, 15000);
-      let streamClosed=false;
+      let streamClosed = false;
       const close = () => {
-        if(streamClosed)return;streamClosed=true;
+        if (streamClosed) return;
+        streamClosed = true;
         clearInterval(timer);
         engine.events.off("event", listener);
         auth.events.off("revoke", revoke);
         auth.events.off("logout", logout);
-        stream.end();event.node.res.end();
+        stream.end();
+        event.node.res.end();
       };
       event.node.res.once("close", close);
       return sendStream(event, stream);
@@ -393,6 +396,20 @@ export default defineEventHandler(async (event) => {
       return out.secret ? JSON.parse(out.secret) : out.value;
     }
     if (path[0] === "chrome") {
+      if (path.length === 2 && path[1] === "tabs" && method === "GET")
+        return browserTabs(engine.chrome);
+      if (path.length === 2 && path[1] === "screenshot" && method === "POST") {
+        check(
+          Object.keys(a).every((key) => key === "tabTag"),
+          400,
+          "Screenshot requests only accept tabTag",
+        );
+        return browserScreenshot(
+          engine.chrome,
+          "browser-view:" + user.id,
+          a.tabTag,
+        );
+      }
       if (path[1] === "tool")
         return engine.chrome.execute("user-ui", a.cwd || process.cwd(), a);
       if (a.operation === "close") {

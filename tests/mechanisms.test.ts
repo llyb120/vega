@@ -347,6 +347,7 @@ test("Vue3.6 components use Vapor compiler, not VDOM fallback", () => {
     "Integrations.vue",
     "Team.vue",
     "Accounts.vue",
+    "BrowserView.vue",
   ]) {
     const code = readFileSync("web/src/" + file, "utf8"),
       descriptor = parse(code, { filename: file }).descriptor;
