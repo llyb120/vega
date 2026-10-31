@@ -1,15 +1,13 @@
 <script setup vapor>
 import { ref, onMounted } from "vue";
-const props = defineProps({ api: Function, user: Object, sessions: Array });
+const props = defineProps({ api: Function, user: Object });
 const emit = defineEmits(["error", "notice", "signed-out", "changed"]);
 const users = ref([]),
   busy = ref(false),
   create = ref({ username: "", password: "", role: "viewer" }),
   reset = ref({ id: "", password: "" }),
   currentPassword = ref(""),
-  newPassword = ref(""),
-  sharedSession = ref(""),
-  readerIds = ref([]);
+  newPassword = ref("");
 const labels = { admin: "管理员", operator: "操作用户", viewer: "只读用户" };
 async function run(fn) {
   busy.value = true;
@@ -66,24 +64,6 @@ async function changePassword() {
     newPassword.value = "";
     emit("notice", "密码已修改，请重新登录。");
     emit("signed-out");
-  });
-}
-async function loadAccess() {
-  if (sharedSession.value)
-    readerIds.value =
-      (await props.api("/sessions/" + sharedSession.value)).session.readerIds ||
-      [];
-}
-async function saveAccess() {
-  await run(async () => {
-    await props.api("/sessions/" + sharedSession.value + "/access", "PUT", {
-      readerIds: readerIds.value,
-    });
-    emit(
-      "notice",
-      "会话查看权限已更新；授权查看不授予发送消息或执行工具的权限。",
-    );
-    emit("changed");
   });
 }
 onMounted(() => void run(refresh));
@@ -205,35 +185,8 @@ onMounted(() => void run(refresh));
         </details>
       </section>
       <section class="card">
-        <h3>授权查看会话</h3>
-        <p class="hint">
-          旧版本的会话仅管理员可见。可单独授权其他账号查看已有会话；其工具调用、图片和正文均属于共享内容，授权前请检查敏感信息。
-        </p>
-        <select
-          v-model="sharedSession"
-          @change="run(loadAccess)"
-          aria-label="要共享的会话"
-        >
-          <option value="">选择会话</option>
-          <option v-for="s in sessions || []" :key="s.id" :value="s.id">
-            {{ s.title }}
-          </option></select
-        ><template v-if="sharedSession"
-          ><div class="form-grid">
-            <label
-              v-for="u in users.filter(
-                (u) => u.role !== 'admin' && !u.disabled,
-              )"
-              :key="u.id"
-              ><input v-model="readerIds" type="checkbox" :value="u.id" />{{
-                u.username
-              }}（{{ labels[u.role] }}）</label
-            >
-          </div>
-          <button :disabled="busy" @click="saveAccess">
-            保存查看授权
-          </button></template
-        >
+        <h3>独立会话</h3>
+        <p class="hint">每个用户的会话和 Stage 仅本人可见；数字员工由管理员共享管理。</p>
       </section>
     </template>
   </div>

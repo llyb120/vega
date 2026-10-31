@@ -344,10 +344,32 @@ test(
       await until(
         `document.querySelector('.browser-image img')?.complete===true`,
       );
+      const controlsHeight = await evaluate(
+        `document.querySelector('.remote-controls').getBoundingClientRect().height`,
+      );
+      const imageTop = await evaluate(
+        `document.querySelector('.browser-image img').getBoundingClientRect().top+document.querySelector('.browser-view').scrollTop`,
+      );
       await tap(".browser-image img");
       await sleep(350);
       assert.equal(modes.at(-1)?.mode, "control", JSON.stringify(modes));
-      await until(`document.querySelector('.remote-controls')`);
+      await until(
+        `getComputedStyle(document.querySelector('.remote-controls')).visibility==='visible'`,
+      );
+      assert.equal(
+        await evaluate(
+          `document.querySelector('.remote-controls').getBoundingClientRect().height`,
+        ),
+        controlsHeight,
+        "showing remote controls must not change the layout",
+      );
+      assert.equal(
+        await evaluate(
+          `document.querySelector('.browser-image img').getBoundingClientRect().top+document.querySelector('.browser-view').scrollTop`,
+        ),
+        imageTop,
+        "showing remote controls must not move the screenshot",
+      );
       for (
         let i = 0;
         i < 100 && !inputs.some((m) => m.action.action === "click_at");

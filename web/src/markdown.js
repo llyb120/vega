@@ -57,8 +57,11 @@ export function renderMarkdown(text) {
         body.push(lines[i]);
       const code = body.join("\n");
       codes.push(code);
+      const block = `<div class="code-block"><div class="code-head"><span>${escape(language || "code")}</span><button type="button" class="code-copy" data-code="${codes.length - 1}">复制</button></div><pre><code>${escape(code)}</code></pre></div>`;
       html.push(
-        `<div class="code-block"><div class="code-head"><span>${escape(language || "code")}</span><button type="button" class="code-copy" data-code="${codes.length - 1}">复制</button></div><pre><code>${escape(code)}</code></pre></div>`,
+        body.length > 18
+          ? `<details class="code-fold"><summary>展开 ${escape(language || "code")} 代码 · ${body.length} 行</summary>${block}</details>`
+          : block,
       );
       continue;
     }
@@ -69,7 +72,7 @@ export function renderMarkdown(text) {
     const heading = line.match(/^\s{0,3}(#{1,4})\s+(.+)$/);
     if (heading) {
       flush();
-      html.push(`<h3>${renderInline(heading[2])}</h3>`);
+      html.push(`<h${heading[1].length}>${renderInline(heading[2])}</h${heading[1].length}>`);
       continue;
     }
     if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {

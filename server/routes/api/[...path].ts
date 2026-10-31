@@ -70,6 +70,8 @@ export default defineEventHandler(async (event) => {
   if (["POST", "PUT", "PATCH"].includes(method))
     a = await bodyJSON(event, 90 << 20);
   try {
+    if (["config", "providers", "skills", "employee"].includes(path[0]))
+      check(user.role === "admin", 403, "Administrator permission required");
     if (path[0] === "bootstrap" && method === "GET")
       return {
         user,
@@ -120,24 +122,8 @@ export default defineEventHandler(async (event) => {
       }
       const key = path[1],
         session = auth.session(user, key, method !== "GET");
-      if (path[2] === "access" && method === "PUT") {
-        check(user.role === "admin", 403, "Administrator permission required");
-        check(
-          Array.isArray(a.readerIds) &&
-            a.readerIds.length <= 100 &&
-            a.readerIds.every(
-              (id: any) =>
-                typeof id === "string" &&
-                auth.user(id) &&
-                !auth.user(id)!.disabled,
-            ),
-          400,
-          "Readers must be enabled user IDs",
-        );
-        session.readerIds = [...new Set(a.readerIds)] as string[];
-        store.saveSession(session);
-        return { ok: true, readerIds: session.readerIds };
-      }
+      if (path[2] === "access")
+        check(false, 404, "Private sessions cannot be shared");
 
       if (path.length === 2 && method === "GET")
         return {
@@ -157,14 +143,18 @@ export default defineEventHandler(async (event) => {
           ).status(),
         };
       if (path.length === 2 && method === "DELETE") {
+        const family = store.sessionFamily(key);
         assert(
-          !engine.active.has(key) &&
-            engine.fire.forSession(key)?.status !== "running" &&
-            !session.taskId,
+          family.every(
+            (s) =>
+              !engine.active.has(s.id) &&
+              engine.fire.forSession(s.id)?.status !== "running" &&
+              !s.taskId,
+          ),
           "Cannot delete running or employee-owned session",
         );
         store.deleteSession(key);
-        await engine.releaseSession(key);
+        for (const s of family) await engine.releaseSession(s.id);
         return { ok: true };
       }
       if (path[2] === "stage" && method === "POST")

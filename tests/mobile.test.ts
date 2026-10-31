@@ -127,11 +127,22 @@ test(
     store.put("config", config);
     store.append(session.id, {
       role: "user",
-      text: "https://example.test/" + "a".repeat(1000),
+      text: "https://example.test/" + "a".repeat(2000),
     });
     store.append(session.id, {
       role: "assistant",
-      text: "已有历史正文\n".repeat(100),
+      text: "过程说明",
+      thinking: "分析上下文",
+    });
+    store.append(session.id, {
+      role: "tool",
+      name: "read",
+      callId: "fixture-read",
+      text: "工具结果",
+    });
+    store.append(session.id, {
+      role: "assistant",
+      text: "已有历史正文\n".repeat(300),
     });
     new Experiences(store).execute(
       "fixture",
@@ -501,7 +512,8 @@ test(
       if (await evaluate(`matchMedia('(max-width:760px)').matches`)) {
         await tap('[aria-label="打开导航与会话"]');
         await until(
-          `document.querySelector('.sidebar').classList.contains('mobile-open')`,
+          `document.querySelector('.sidebar').classList.contains('mobile-open')&&Math.abs(document.querySelector('.sidebar').getBoundingClientRect().left)<1`,
+          "navigation drawer finishes opening",
         );
       }
       const target = await evaluate(
@@ -528,7 +540,7 @@ test(
       }
       if (await evaluate(`matchMedia('(pointer:coarse)').matches`)) {
         const small = await evaluate(
-          `JSON.stringify([...document.querySelectorAll('button,summary')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.height<43.5}).map(e=>e.textContent.trim().slice(0,30)))`,
+          `JSON.stringify([...document.querySelectorAll('button,summary')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.height<43.5}).map(e=>({text:e.textContent.trim().slice(0,30),height:e.getBoundingClientRect().height,minHeight:getComputedStyle(e).minHeight})))`,
         );
         assert.equal(small, "[]", label + " touch targets");
       }
@@ -779,7 +791,33 @@ test(
       await fill("#password", "Phone-regression-password-2026");
       await tap(".login-card .primary");
       await until(`document.querySelector('.shell')`);
-      await until(`document.querySelector('.message-text')`);
+      await until(`document.querySelector('.message-fold')`);
+      assert(
+        (await evaluate(`document.querySelector('.message-text').textContent`)).length <
+          1000,
+        "long prompt starts folded",
+      );
+      await tap(".message-fold");
+      assert(
+        (await evaluate(`document.querySelector('.message-text').textContent`)).length >
+          2000,
+        "long prompt expands on demand",
+      );
+      await tap(".message-fold");
+      assert.equal(
+        await evaluate(`getComputedStyle(document.querySelector('.turn-process')).display`),
+        "none",
+        "completed turn starts folded",
+      );
+      await tap(".turn-fold");
+      await until(`document.querySelector('.tool-step')`);
+      await tap(".tool-steps-summary");
+      await tap(".tool-step summary");
+      assert(
+        await evaluate(`document.querySelector('.tool-step pre').textContent.includes('工具结果')`),
+      );
+      await tap(".turn-fold");
+      await layout("folded conversation");
       assert.equal(
         employeeLoads,
         0,
@@ -979,11 +1017,10 @@ test(
       await byText("长期记忆", ".tabs");
       await byText("密码本", ".tabs");
       await layout("vault form");
-      await byText("团队员工", ".tabs");
-      await evaluate(
-        `document.querySelector('.page-scroll details').open=true`,
+      assert.equal(
+        await evaluate(`document.querySelector('.tabs').textContent.includes('团队员工')`),
+        false,
       );
-      await layout("team form");
       await nav("浏览器");
       await until(
         `document.querySelector('.browser-image img')?.naturalWidth===1568`,
@@ -1284,6 +1321,28 @@ test(
       );
       for (let i = 0; i < 40 && requests.length < 2; i++) await sleep(50);
       assert.equal(requests.length, 2);
+      assert.equal(
+        await evaluate(`document.querySelectorAll('.mobile-stage,.chat-topbar button').length`),
+        0,
+        "Stage is created by command, not a separate add button",
+      );
+      const sessionCount = await evaluate(
+        `document.querySelectorAll('.session-row').length`,
+      );
+      await fill('textarea[aria-label="消息"]', "/stage 复核当前方案");
+      await evaluate(
+        `document.querySelector('[aria-label="消息"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))`,
+      );
+      await until(`document.querySelector('.stage-switch')?.value!==document.querySelector('.stage-switch option').value`);
+      assert.equal(
+        await evaluate(`document.querySelectorAll('.session-row').length`),
+        sessionCount,
+        "Stage stays inside its source conversation",
+      );
+      await evaluate(
+        `(()=>{const e=document.querySelector('.stage-switch');e.value=e.options[0].value;e.dispatchEvent(new Event('change',{bubbles:true}))})()`,
+      );
+      await until(`document.querySelector('.stage-switch').value===document.querySelector('.stage-switch option').value`);
       await layout("desktop remains usable");
       await resize(320, 568);
       await tap('[aria-label="打开导航与会话"]');

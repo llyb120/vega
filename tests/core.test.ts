@@ -129,6 +129,10 @@ test("SQLite reopen, independent Stage history, current source timeline", async 
   assert.equal(s.messages(stage.id).length, 0);
   s.append(first.id, { role: "user", text: "latest requirement" });
   assert.match(new Context(s, first.id).stage(), /latest requirement/);
+  assert.deepEqual(s.sessionFamily(first.id).map((v) => v.id).sort(), [first.id, stage.id].sort());
+  s.deleteSession(first.id);
+  assert.throws(() => s.session(stage.id), /Session not found/);
+  assert.equal(s.messages(stage.id).length, 0);
 });
 test("exact edits reject ambiguous/overlap without modifying file", async () => {
   const dir = await temp(),

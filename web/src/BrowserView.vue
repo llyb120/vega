@@ -645,7 +645,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-      <div v-if="remote" class="remote-controls">
+      <div class="remote-controls" :class="{ 'remote-controls-hidden': !remote }">
         <div class="remote-toolbar">
           <button :disabled="inputDisabled" @click="scrollRemote(-600)">
             网页上滚</button
@@ -780,6 +780,9 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border);
   background: var(--surface, #fff);
 }
+.remote-controls-hidden {
+  visibility: hidden;
+}
 .remote-toolbar,
 .remote-keys,
 .remote-text,
@@ -827,6 +830,7 @@ onBeforeUnmount(() => {
   cursor: crosshair;
 }
 @media (max-width: 760px) {
+  .remote-controls button,
   .remote-controls button,
   .browser-address button,
   .browser-address .button-link,

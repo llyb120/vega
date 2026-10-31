@@ -1,10 +1,12 @@
 <script setup vapor>
 import SettingsView from "./SettingsView.vue";
 import MessageText from "./MessageText.vue";
+import UserMessage from "./UserMessage.vue";
+import TurnProcess from "./TurnProcess.vue";
+import { groupTurns, timelineOf } from "./conversation";
 import ToolSteps from "./ToolSteps.vue";
 import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
-import Team from "./Team.vue";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
 import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
@@ -110,8 +112,9 @@ const canWriteCurrent = computed(
     !sessionLoading.value &&
     !current.value?.taskId &&
     (!current.value ||
-      isAdmin.value ||
-      current.value.ownerId === user.value?.id),
+      (current.value.ownerId
+        ? current.value.ownerId === user.value?.id
+        : isAdmin.value)),
 );
 const authenticated = ref(false),
   error = ref(""),
@@ -186,27 +189,52 @@ function emptyDuty() {
 const isRunning = computed(
   () => current.value && running.value[current.value.id],
 );
-const timeline = computed(() => {
-  const groups = [];
-  for (const m of messages.value) {
-    const last = groups.at(-1);
-    if (m.role === "tool") {
-      if (last?.kind === "tools") last.items.push(m);
-      else
-        groups.push({
-          kind: "tools",
-          key: `tools-${m.seq ?? groups.length}`,
-          items: [m],
-        });
-    } else
-      groups.push({
-        kind: "message",
-        key: `${m.role}-${m.seq ?? groups.length}`,
-        message: m,
-      });
+const turns = computed(() =>
+  groupTurns(messages.value).map((turn, i, all) => ({
+    ...turn,
+    running: i === all.length - 1 && !!isRunning.value,
+    processMessages: turn.body.slice(
+      0,
+      turn.body.length - turn.conclusion.length,
+    ),
+    process: timelineOf(
+      i === all.length - 1 && isRunning.value
+        ? turn.body
+        : turn.body.slice(0, turn.body.length - turn.conclusion.length),
+    ),
+    conclusion: timelineOf(
+      i === all.length - 1 && isRunning.value ? [] : turn.conclusion,
+    ),
+  })),
+);
+const rootSessions = computed(() =>
+  sessions.value.filter((s) => !s.stageSource),
+);
+const rootSession = computed(() => {
+  let session = current.value;
+  const seen = new Set();
+  while (session?.stageSource && !seen.has(session.id)) {
+    seen.add(session.id);
+    session = sessions.value.find((s) => s.id === session.stageSource);
   }
-  return groups;
+  return session || current.value;
 });
+const stagePath = computed(() => {
+  const path = rootSession.value ? [rootSession.value] : [];
+  const seen = new Set(path.map((s) => s.id));
+  while (path.length) {
+    const child = sessions.value.find(
+      (s) => s.stageSource === path.at(-1).id && !seen.has(s.id),
+    );
+    if (!child) break;
+    path.push(child);
+    seen.add(child.id);
+  }
+  return path;
+});
+const conversationTitle = computed(
+  () => rootSession.value?.title || current.value?.title || "对话",
+);
 const catalogModels = ref([]);
 function configuredModels(models, prefix = "") {
   return Object.entries(models || {}).flatMap(([id, m]) =>
@@ -519,7 +547,9 @@ async function enter(result) {
   if (isAdmin.value) startPresence();
   await Promise.all([
     loadModels(),
-    sessions.value.length ? selectSession(sessions.value[0]) : null,
+    sessions.value.length
+      ? selectSession(rootSessions.value[0] || sessions.value[0])
+      : null,
   ]);
   try {
     const pending = JSON.parse(
@@ -643,16 +673,8 @@ async function newSession() {
     await Promise.all([bootstrap(), selectSession(s)]);
   });
 }
-async function newStage() {
-  if (!current.value) return;
-  await attempt(async () => {
-    const s = await api(`/sessions/${current.value.id}/stage`, "POST", {});
-    await Promise.all([bootstrap(), selectSession(s)]);
-    toast("已创建新对话");
-  });
-}
 async function removeSession(s) {
-  if (!confirm("删除该会话及其消息？此操作不可撤销。")) return;
+  if (!confirm("删除该会话及其 Stage 和消息？此操作不可撤销。")) return;
   await attempt(async () => {
     await api(`/sessions/${s.id}`, "DELETE");
     if (current.value?.id === s.id) {
@@ -1098,20 +1120,29 @@ onBeforeUnmount(() => {
       >
         ☰
       </button>
-      <strong>{{ current?.title || mobileTitles[view] }}</strong>
+      <strong>{{ view === 'chat' ? conversationTitle : mobileTitles[view] }}</strong>
       <span
         v-if="narrow && view === 'chat' && isRunning"
         class="status-dot"
         role="status"
         aria-label="执行中"
       ></span>
-      <button
-        v-if="narrow && view === 'chat' && current && canWriteCurrent"
-        class="mobile-stage"
-        @click="newStage"
+      <select
+        v-if="narrow && view === 'chat' && stagePath.length > 1"
+        class="stage-switch"
+        aria-label="切换会话 Stage"
+        :value="current?.id"
+        @change="selectSession(stagePath.find((s) => s.id === $event.target.value))"
       >
-        Stage
-      </button>
+        <option :value="stagePath[0].id">主对话</option>
+        <option
+          v-for="(stage, i) in stagePath.slice(1)"
+          :key="stage.id"
+          :value="stage.id"
+        >
+          Stage {{ i + 1 }}
+        </option>
+      </select>
       <button
         v-if="canExecute"
         class="icon mobile-control"
@@ -1203,22 +1234,20 @@ onBeforeUnmount(() => {
       </div>
       <div class="session-list">
         <div
-          v-for="s in sessions"
+          v-for="s in rootSessions"
           :key="s.id"
           class="session-row"
-          :class="{ active: current?.id === s.id && view === 'chat' }"
+          :class="{ active: rootSession?.id === s.id && view === 'chat' }"
         >
           <button @click="attempt(() => selectSession(s))">
             <span :class="['dot', { working: running[s.id] }]"></span
-            ><span class="truncate"
-              >{{ s.stageSource ? "↳ " : "" }}{{ s.title }}</span
-            ></button
+            ><span class="truncate">{{ s.title }}</span></button
           ><button
             v-if="
               !s.taskId &&
               !running[s.id] &&
               canExecute &&
-              (isAdmin || s.ownerId === user.id)
+              s.ownerId === user.id
             "
             class="delete icon"
             title="删除会话"
@@ -1227,7 +1256,7 @@ onBeforeUnmount(() => {
             ×
           </button>
         </div>
-        <p v-if="!sessions.length" class="empty-small">从一个问题开始。</p>
+        <p v-if="!rootSessions.length" class="empty-small">从一个问题开始。</p>
       </div>
       <footer>
         <button class="link" @click="logout">退出</button>
@@ -1247,19 +1276,32 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <template v-if="view === 'chat'">
-        <header v-if="!narrow" class="topbar">
+        <header v-if="!narrow" class="topbar chat-topbar">
           <div>
             <h2>
-              {{ current?.title || "对话" }}
+              {{ conversationTitle }}
               <span v-if="current?.stageSource" class="pill">Stage</span>
             </h2>
             <p v-if="!current">随时开始一个新对话</p>
+            <select
+              v-if="stagePath.length > 1"
+              class="stage-switch"
+              aria-label="切换会话 Stage"
+              :value="current?.id"
+              @change="selectSession(stagePath.find((s) => s.id === $event.target.value))"
+            >
+              <option :value="stagePath[0].id">主对话</option>
+              <option
+                v-for="(stage, i) in stagePath.slice(1)"
+                :key="stage.id"
+                :value="stage.id"
+              >
+                Stage {{ i + 1 }} · {{ stage.title }}
+              </option>
+            </select>
           </div>
           <div class="actions">
-            <span v-if="isRunning" class="pill green">执行中</span
-            ><button v-if="current && canWriteCurrent" @click="newStage">
-              ＋ Stage
-            </button>
+            <span v-if="isRunning" class="pill green">执行中</span>
           </div>
         </header>
         <div ref="transcript" class="transcript" aria-live="polite">
@@ -1287,42 +1329,59 @@ onBeforeUnmount(() => {
             {{ fireState.status }}
             <p v-if="fireState.reason">{{ fireState.reason }}</p>
           </div>
-          <template v-for="(entry, i) in timeline" :key="`${current?.id}-${entry.key}`">
-            <ToolSteps
-              v-if="entry.kind === 'tools'"
-              :items="entry.items"
-              :active="i === timeline.length - 1 ? activeTools : []"
-            />
-            <article v-else :class="['message', entry.message.role]">
-              <div v-if="entry.message.role !== 'user'" class="message-meta">
-                <span>Vega</span><span>{{ entry.message.model || "" }}</span>
+          <template v-for="turn in turns" :key="`${current?.id}-${turn.user?.seq ?? 'live'}`">
+            <section class="conversation-turn">
+              <article v-if="turn.user" class="message user">
+                <UserMessage
+                  v-if="turn.user.text"
+                  :text="turn.user.displayText || turn.user.text"
+                />
+                <img
+                  v-for="(image, n) in turn.user.images || []"
+                  :key="n"
+                  :src="`data:${image.mime};base64,${image.data}`"
+                  alt="用户附图"
+                />
+              </article>
+              <div v-if="turn.body.length" class="message-meta">
+                <span>Vega</span><span>{{ turn.body.findLast((m) => m.model)?.model || "" }}</span>
               </div>
-              <details v-if="entry.message.thinking" class="reasoning">
-                <summary>思考过程</summary>
-                <pre>{{ entry.message.thinking }}</pre>
-              </details>
-              <MessageText
-                v-if="entry.message.role === 'assistant' && entry.message.text"
-                :text="entry.message.displayText || entry.message.text"
-              />
-              <div
-                v-else-if="entry.message.text"
-                class="message-text"
-              >
-                {{ entry.message.displayText || entry.message.text }}
-              </div>
-              <div v-if="entry.message.calls?.length" class="calls">
-                <span v-for="c in entry.message.calls" :key="c.id">↳ {{ c.name }}</span>
-              </div>
-              <img
-                v-for="(image, n) in entry.message.images || []"
-                :key="n"
-                :src="`data:${image.mime};base64,${image.data}`"
-                alt="用户附图"
-              />
-            </article>
+              <TurnProcess v-if="turn.process.length" :messages="turn.processMessages" :initial-open="turn.running">
+                <template v-for="(entry, i) in turn.process" :key="entry.key">
+                  <ToolSteps
+                    v-if="entry.kind === 'tools'"
+                    :items="entry.items"
+                    :active="turn.running && i === turn.process.length - 1 ? activeTools : []"
+                  />
+                  <article
+                    v-else
+                    :class="['message', entry.message.role, { continuation: entry.continuation }]"
+                  >
+                    <details v-if="entry.message.thinking" class="reasoning">
+                      <summary>{{ turn.running ? "思考中" : "思考过程" }}</summary>
+                      <pre>{{ entry.message.thinking }}</pre>
+                    </details>
+                    <MessageText
+                      v-if="entry.message.text"
+                      :text="entry.message.displayText || entry.message.text"
+                    />
+                    <div
+                      v-if="entry.message.calls?.length && turn.process[i + 1]?.kind !== 'tools'"
+                      class="calls"
+                    >
+                      <span v-for="c in entry.message.calls" :key="c.id">↳ {{ c.name }}</span>
+                    </div>
+                  </article>
+                </template>
+              </TurnProcess>
+              <template v-for="entry in turn.conclusion" :key="entry.key">
+                <article :class="['message', entry.message.role, { continuation: entry.continuation }]">
+                  <MessageText :text="entry.message.displayText || entry.message.text" />
+                </article>
+              </template>
+            </section>
           </template>
-          <article v-if="live || thinking" class="message assistant">
+          <article v-if="live || thinking" class="message assistant continuation">
             <div class="message-meta">
               <span>Vega</span><span>{{ model }}</span
               ><span class="status-dot"></span>
@@ -1334,7 +1393,10 @@ onBeforeUnmount(() => {
             <MessageText v-if="live" :text="live" streaming />
           </article>
           <ToolSteps
-            v-if="activeTools.length && timeline.at(-1)?.kind !== 'tools'"
+            v-if="
+              activeTools.length &&
+              (!turns.length || !turns.at(-1).running || !turns.at(-1).process.length)
+            "
             :active="activeTools"
           />
         </div>
@@ -1365,9 +1427,9 @@ onBeforeUnmount(() => {
               :placeholder="
                 isRunning
                   ? '补充当前任务的约束，不会重开任务…'
-                  : '写下你的问题，或 /stage 创建引用会话…'
+                  : '输入消息，Enter 发送…'
               "
-              rows="3"
+              rows="2"
               enterkeyhint="enter"
               @keydown="messageKey"
             ></textarea>
@@ -1425,7 +1487,6 @@ onBeforeUnmount(() => {
         v-else-if="view === 'account'"
         :api="api"
         :user="user"
-        :sessions="sessions"
         @error="error = $event"
         @notice="notice = $event"
         @signed-out="resetLogin"
@@ -1478,7 +1539,6 @@ onBeforeUnmount(() => {
                 ['tasks', '任务'],
                 ['duties', '职责'],
                 ['memories', '长期记忆'],
-                ['team', '团队员工'],
                 ['vault', '密码本'],
               ]"
               :key="id"
@@ -1491,12 +1551,6 @@ onBeforeUnmount(() => {
               {{ label }}
             </button>
           </div>
-          <Team
-            v-if="employeeTab === 'team'"
-            :api="api"
-            @error="error = $event"
-            @notice="notice = $event"
-          />
           <template v-if="employeeTab === 'tasks'"
             ><form class="inline-form" @submit.prevent="addTask">
               <input

@@ -400,6 +400,13 @@ test(
         "human input invalidates stale agent snapshots without modifying its transcript",
       );
       const slider = await remotePoint("#slider");
+      await bridge.send(
+        "Runtime.evaluate",
+        {
+          expression: `window.__dragEvents=[];for(const type of ['pointerdown','pointermove','pointerup'])document.querySelector('#slider').addEventListener(type,()=>__dragEvents.push({type,at:performance.now()}))`,
+        },
+        await bridge.attached(tag),
+      );
       controlled = await browserControl(engine, remoteOwner, {
         tabTag: tag,
         snapshotId: controlled.snapshotId,
@@ -413,6 +420,24 @@ test(
         },
       });
       assert.equal(controlled.status, "executed", controlled.reason);
+      const dragEvents = (
+        await bridge.send(
+          "Runtime.evaluate",
+          { expression: "window.__dragEvents", returnByValue: true },
+          await bridge.attached(tag),
+        )
+      ).result.value;
+      const lastMove = dragEvents.filter((e: Obj) => e.type === "pointermove").at(-1);
+      const release = dragEvents.find((e: Obj) => e.type === "pointerup");
+      assert(lastMove && release, "drag must move before releasing");
+      assert(
+        release.at - lastMove.at >= 80,
+        "drag must settle at its destination before releasing",
+      );
+      assert(
+        dragEvents.find((e: Obj) => e.type === "pointerdown").at < lastMove.at,
+        "drag must press before moving",
+      );
       assert(
         Number(
           (

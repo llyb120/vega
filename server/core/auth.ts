@@ -358,9 +358,8 @@ export class Auth {
   }
   canRead(user: User, session: Session) {
     return (
-      user.role === "admin" ||
       session.ownerId === user.id ||
-      session.readerIds?.includes(user.id) === true
+      (user.role === "admin" && (!session.ownerId || !!session.taskId))
     );
   }
   canWrite(user: User, session: Session) {
@@ -386,7 +385,6 @@ export class Auth {
     return session;
   }
   canBlob(user: User, id: string) {
-    if (user.role === "admin") return true;
     const rows = this.store.db
       .prepare("SELECT session FROM blob_access WHERE blob=?")
       .all(id) as any[];

@@ -133,7 +133,7 @@ test("last enabled admin remains recoverable; demotion, disable and password res
     store.close();
   }
 });
-test("ownership and explicit readonly grants cover session descendants and screenshot blob access", async () => {
+test("private ownership covers session descendants and screenshot blob access", async () => {
   const store = new Store(":memory:"),
     auth = new Auth(store, secret);
   try {
@@ -152,12 +152,13 @@ test("ownership and explicit readonly grants cover session descendants and scree
     assert(!auth.canRead(operator, legacy));
     assert(auth.canWrite(operator, session));
     assert(!auth.canRead(viewer, session));
+    assert(!auth.canRead(admin, session));
     session.readerIds = [viewer.id];
     store.saveSession(session);
-    assert(auth.canRead(viewer, session));
+    assert(!auth.canRead(viewer, session));
     assert(!auth.canWrite(viewer, session));
     assert.throws(() => auth.session(viewer, session.id, true), {
-      statusCode: 403,
+      statusCode: 404,
     });
     assert.throws(() => auth.session(operator, legacy.id), { statusCode: 404 });
     const child = store.stage(session.id),
@@ -168,12 +169,14 @@ test("ownership and explicit readonly grants cover session descendants and scree
     const blob = store.blob("image/png", Buffer.from("fixture"));
     assert(!auth.canBlob(viewer, blob));
     store.grantBlob(blob, session.id);
-    assert(auth.canBlob(viewer, blob));
+    assert(!auth.canBlob(viewer, blob));
+    assert(!auth.canBlob(admin, blob));
+    assert(auth.canBlob(operator, blob));
     session.readerIds = [];
     store.saveSession(session);
     assert(!auth.canBlob(viewer, blob));
     assert(auth.canBlob(operator, blob));
-    assert(auth.canBlob(admin, blob));
+    assert(!auth.canBlob(admin, blob));
     await auth.update(operator.id, { role: "viewer" });
     assert(!auth.canWrite(auth.user(operator.id)!, session));
   } finally {

@@ -4,7 +4,8 @@ const props = defineProps({
   items: { type: Array, default: () => [] },
   active: { type: Array, default: () => [] },
 });
-const open = ref(false);
+const expanded = ref(false);
+const open = computed(() => expanded.value || props.active.length > 0);
 const failed = computed(() => props.items.some((m) => m.error));
 </script>
 <template>
@@ -13,14 +14,13 @@ const failed = computed(() => props.items.some((m) => m.error));
       type="button"
       class="tool-steps-summary"
       :aria-expanded="open"
-      @click="open = !open"
+      @click="expanded = !open"
     >
       <span class="steps-icon" aria-hidden="true">⌁</span>
       <strong>执行过程</strong>
       <span class="steps-count">{{ items.length + active.length }} 步</span>
       <span v-if="failed" class="steps-state failed">有失败</span>
       <span v-else-if="active.length" class="steps-state running">执行中</span>
-      <span v-else class="steps-state">已完成</span>
       <span class="steps-chevron" aria-hidden="true">{{
         open ? "▾" : "▸"
       }}</span>

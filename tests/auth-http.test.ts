@@ -11,7 +11,7 @@ import { Store } from "../server/core/store";
 import { sleep } from "../server/core/util";
 type Login = { cookie: string; csrf: string; id: string };
 test(
-  "deployed website login/RBAC: cookie,CSRF,owners,readonly grants,WebSocket revocation and no token bypass",
+  "deployed website login/RBAC: cookie,CSRF,private sessions,WebSocket revocation and no token bypass",
   { timeout: 60000, skip: process.env.VEGA_TEST_DEPLOYED !== "1" },
   async () => {
     const dir = await mkdtemp(join(tmpdir(), "vega-web-auth-")),
@@ -442,6 +442,17 @@ test(
         ).r.status,
         403,
       );
+      for (const [path, method, data] of [
+        ["/config", "PUT", {}],
+        ["/skills", "GET", undefined],
+        ["/employee", "POST", { action: "vault_list" }],
+        ["/employee", "POST", { action: "vault_save", name: "x" }],
+      ])
+        assert.equal(
+          (await req(path as string, method as string, data, a)).r.status,
+          403,
+          path + " must be admin-only",
+        );
       const chromeList = await ok("/chrome/tabs", "GET", undefined, admin);
       assert(Array.isArray(chromeList.tabs));
       for (const login of [a, v]) {
@@ -586,16 +597,27 @@ test(
         ).r.status,
         403,
       );
-      await ok(
-        "/sessions/" + s1.id + "/access",
-        "PUT",
-        { readerIds: [viewer.id] },
-        admin,
+      assert.equal(
+        (
+          await req(
+            "/sessions/" + s1.id + "/access",
+            "PUT",
+            { readerIds: [viewer.id] },
+            admin,
+          )
+        ).r.status,
+        404,
       );
-      const read = await ok("/sessions/" + s1.id, "GET", undefined, v);
-      assert.equal(read.canWrite, false);
+      assert.equal(
+        (await req("/sessions/" + s1.id, "GET", undefined, v)).r.status,
+        404,
+      );
+      assert.equal(
+        (await req("/sessions/" + s1.id, "GET", undefined, admin)).r.status,
+        404,
+      );
       assert(
-        (await ok("/bootstrap", "GET", undefined, v)).sessions.some(
+        !(await ok("/bootstrap", "GET", undefined, v)).sessions.some(
           (s: any) => s.id === s1.id,
         ),
       );
@@ -630,7 +652,7 @@ test(
         n++
       )
         await sleep(10);
-      assert(streamViewer.text.includes("private session response"));
+      assert(!streamViewer.text.includes("private session response"));
       assert(!streamB.text.includes(s1.id));
       assert(!streamB.text.includes("private session response"));
       await ok(
@@ -647,12 +669,16 @@ test(
         }),
       ]);
       assert(streamB.ended);
-      let continued: any;
+      let continued: any,
+        privateMessages: any[] = [];
       for (let n = 0; n < 150; n++) {
-        continued = await ok("/sessions/" + s2.id, "GET", undefined, admin);
+        const inspectPrivate = new Store(db);
+        continued = inspectPrivate.session(s2.id);
+        privateMessages = inspectPrivate.messages(s2.id);
+        inspectPrivate.close();
         if (
           !continued.running &&
-          continued.messages.some(
+          privateMessages.some(
             (m: any) =>
               m.role === "assistant" && m.text === "private session response",
           )
@@ -661,13 +687,17 @@ test(
         await sleep(20);
       }
       assert(
-        continued.messages.some(
+        privateMessages.some(
           (m: any) =>
             m.role === "assistant" && m.text === "private session response",
         ),
         "Disabling website access must not cancel the already authorized internal run",
       );
-      assert.equal(continued.running, false);
+      assert.equal(
+        (await req("/sessions/" + s2.id, "GET", undefined, admin)).r.status,
+        404,
+        "Another user's private session stays hidden from administrators",
+      );
       assert.equal(
         (await req("/bootstrap", "GET", undefined, b)).r.status,
         401,
@@ -681,11 +711,16 @@ test(
         ).r.status,
         401,
       );
-      await ok(
-        "/sessions/" + s1.id + "/access",
-        "PUT",
-        { readerIds: [] },
-        admin,
+      assert.equal(
+        (
+          await req(
+            "/sessions/" + s1.id + "/access",
+            "PUT",
+            { readerIds: [] },
+            admin,
+          )
+        ).r.status,
+        404,
       );
       assert.equal(
         (await req("/sessions/" + s1.id, "GET", undefined, v)).r.status,

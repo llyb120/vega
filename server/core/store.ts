@@ -185,8 +185,23 @@ export class Store {
       .all()
       .map((r: any) => JSON.parse(r.data));
   }
+  sessionFamily(key: string): Session[] {
+    const all = this.sessions(),
+      ids = new Set([key]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const s of all)
+        if (s.stageSource && ids.has(s.stageSource) && !ids.has(s.id)) {
+          ids.add(s.id);
+          changed = true;
+        }
+    }
+    return all.filter((s) => ids.has(s.id));
+  }
   deleteSession(key: string) {
-    this.db.prepare("DELETE FROM sessions WHERE id=?").run(key);
+    for (const s of this.sessionFamily(key))
+      this.db.prepare("DELETE FROM sessions WHERE id=?").run(s.id);
   }
   messages(key: string): Message[] {
     return this.db
