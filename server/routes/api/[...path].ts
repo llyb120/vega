@@ -71,12 +71,15 @@ export default defineEventHandler(async (event) => {
     if (path[0] === "bootstrap" && method === "GET")
       return {
         user,
-        sessions: store.sessions().filter((s) => auth.canRead(user, s)),
+        sessions: store
+          .sessions()
+          .filter((s) => !s.taskId && auth.canRead(user, s)),
         running: Object.fromEntries(
           [...engine.active.keys()]
             .filter((key) => {
               try {
-                return auth.canRead(user, store.session(key));
+                const session = store.session(key);
+                return !session.taskId && auth.canRead(user, session);
               } catch {
                 return false;
               }
@@ -182,7 +185,7 @@ export default defineEventHandler(async (event) => {
       if (path.length === 2 && method === "GET")
         return {
           session,
-          canWrite: auth.canWrite(user, session),
+          canWrite: !session.taskId && auth.canWrite(user, session),
           messages: store.messages(key),
           folds: engine.store.db
             .prepare("SELECT data FROM folds WHERE session=?")
@@ -210,6 +213,7 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "stage" && method === "POST")
         return store.stage(key, a.inheritModel === true);
       if (path[2] === "cancel" && method === "POST") {
+        assert(!session.taskId, "Use employee controls to stop tasks");
         engine.fire.pause(key);
         engine.cancel(key);
         return { ok: true };

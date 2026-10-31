@@ -62,7 +62,12 @@ export function redactMessage(message: Message, redact: Redactor): Message {
       safe[key as "displayText"] = redact.text((message as any)[key]);
   return safe;
 }
-export type AgentEvent = { type: string; session?: string; data?: any };
+export type AgentEvent = {
+  type: string;
+  session?: string;
+  taskId?: string;
+  data?: any;
+};
 export class Engine {
   events = new EventEmitter();
   active = new Map<
@@ -120,9 +125,14 @@ export class Engine {
     this.relay.onStatus = (data) => this.emit({ type: "relay", data });
   }
   config(): Config {
-    return this.store.get("config", { model: "", provider: {} });
+    const { image, ...config } = this.store.get<Config & { image?: unknown }>(
+      "config",
+      { model: "", provider: {} },
+    );
+    return config;
   }
   async saveConfig(next: Config) {
+    delete (next as Obj).image;
     const previous = this.config();
     mergeSecrets(next, previous);
     assert(
@@ -148,21 +158,6 @@ export class Engine {
       !next.contextMode || ["auto", "acp"].includes(next.contextMode),
       "Invalid contextMode",
     );
-    if (next.image?.baseURL) {
-      const url = new URL(next.image.baseURL);
-      assert(
-        ["http:", "https:"].includes(url.protocol) &&
-          !url.username &&
-          !url.password &&
-          next.image.apiKey &&
-          Array.isArray(next.image.models) &&
-          next.image.models.length &&
-          next.image.models.every(
-            (s: any) => typeof s === "string" && s.trim(),
-          ),
-        "Image configuration requires HTTP(S) baseURL,apiKey and real model IDs",
-      );
-    }
     for (const entry of Object.values(next.mcp || {}))
       assert(
         !!entry.command !== !!entry.url,
@@ -400,7 +395,8 @@ export class Engine {
     this.active.set(key, state);
     const redact = new Redactor();
     this.redactors.set(key, redact);
-    const emit: Emit = (type, data) => this.emit({ type, session: key, data });
+    const emit: Emit = (type, data) =>
+      this.emit({ type, session: key, taskId: session?.taskId, data });
     let session: Session | undefined,
       original: { model?: string; scene?: string } | undefined,
       tools: Tools | undefined,
@@ -433,12 +429,7 @@ export class Engine {
       tools = new Tools(this, session, config, control.signal, emit);
       this.active.get(key)!.context = tools.context;
       const setup = builtinCommand(input?.text || "")?.command;
-      tools.setupAccess =
-        setup === "setup"
-          ? "provider"
-          : setup === "setup-image"
-            ? "image"
-            : undefined;
+      tools.setupAccess = setup === "setup" ? "provider" : undefined;
       const frames: { model?: string; scene?: string; resume?: string }[] = [],
         failed = new Set<string>(),
         secrets = new Map<string, string>();
@@ -468,10 +459,7 @@ export class Engine {
         const expandedInputs = new Map<number, string>();
         for (const m of tools.context.promptView())
           if (m.role === "user" && m.seq! >= tools.context.completedBefore)
-            expandedInputs.set(
-              m.seq!,
-              (await expandBuiltin(m, config)) || m.text || "",
-            );
+            expandedInputs.set(m.seq!, expandBuiltin(m) || m.text || "");
         const prepareView = () => {
           const rows = tools!.context.promptView().map((m) =>
             m.role === "tool" && secrets.has(m.callId!)
@@ -944,8 +932,6 @@ const barrier = (name: string) =>
     "edit",
     "bash",
     "chrome",
-    "generate_image",
-    "edit_image",
     "context_budget",
     "recall",
     "search_context",

@@ -26,9 +26,6 @@ body,
   overflow: hidden;
   overscroll-behavior: none;
 }
-* {
-  overscroll-behavior: none;
-}
 body {
   margin: 0;
   -webkit-font-smoothing: antialiased;

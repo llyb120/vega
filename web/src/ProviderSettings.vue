@@ -1,5 +1,6 @@
 <script setup vapor>
 import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
+const confirm = window.confirm.bind(window);
 const props = defineProps({ api: Function, config: Object, userId: String });
 const emit = defineEmits(["saved", "error", "notice"]);
 const presets = ref([]),

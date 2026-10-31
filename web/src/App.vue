@@ -3,6 +3,7 @@ import SettingsView from "./SettingsView.vue";
 import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
 import Team from "./Team.vue";
+import EmployeeSessionView from "./EmployeeSessionView.vue";
 import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
 import {
@@ -13,6 +14,7 @@ import {
   ref,
   watch,
 } from "vue";
+const confirm = window.confirm.bind(window);
 const narrow = ref(false),
   navigationOpen = ref(false),
   navigation = ref(null),
@@ -103,6 +105,8 @@ const isAdmin = computed(() => user.value?.role === "admin"),
 const canWriteCurrent = computed(
   () =>
     canExecute.value &&
+    !sessionLoading.value &&
+    !current.value?.taskId &&
     (!current.value ||
       isAdmin.value ||
       current.value.ownerId === user.value?.id),
@@ -115,6 +119,7 @@ watch(view, closeNavigation);
 const sessions = ref([]),
   current = ref(null),
   messages = ref([]),
+  sessionLoading = ref(false),
   folds = ref([]),
   running = ref({}),
   draft = ref(""),
@@ -137,17 +142,23 @@ const employee = ref({
     runs: [],
   }),
   employeeTab = ref("tasks"),
+  employeeSession = ref(""),
+  employeeSessionVersion = ref(0),
+  employeeError = ref(""),
   taskText = ref(""),
   taskProfile = ref("lightweight"),
   memoryText = ref(""),
   memoryID = ref(""),
-  importance = ref(1);
+  importance = ref(1),
+  activeTaskCount = ref(null);
 const duty = ref(emptyDuty()),
   dutyOpen = ref(false),
   vault = ref([]),
   vaultForm = ref({ name: "", condition: "", content: "" });
 let eventsController,
-  closed = false;
+  closed = false,
+  sessionRequest = 0,
+  employeeRefreshTimer;
 function emptyDuty() {
   return {
     id: "",
@@ -295,7 +306,7 @@ function toast(text) {
 async function bootstrap() {
   const b = await api("/bootstrap");
   user.value = b.user;
-  sessions.value = b.sessions || [];
+  sessions.value = (b.sessions || []).filter((session) => !session.taskId);
   running.value = b.running || {};
   config.value = b.config || {};
   if (!project.value) project.value = b.cwd;
@@ -309,9 +320,10 @@ async function enter(result) {
   authenticated.value = true;
   await bootstrap();
   if (isAdmin.value) startPresence();
-  await loadModels();
-  if (isAdmin.value) await loadEmployee();
-  if (sessions.value.length) await selectSession(sessions.value[0]);
+  await Promise.all([
+    loadModels(),
+    sessions.value.length ? selectSession(sessions.value[0]) : null,
+  ]);
   try {
     const pending = JSON.parse(
       sessionStorage.getItem("vega:provider-login:" + user.value.id) || "null",
@@ -346,6 +358,7 @@ function resetLogin() {
   } catch {}
   closeNavigation();
   stopPresence();
+  clearTimeout(employeeRefreshTimer);
   closed = true;
   eventsController?.abort();
   authenticated.value = false;
@@ -354,6 +367,8 @@ function resetLogin() {
   password.value = "";
   setupToken.value = "";
   current.value = null;
+  sessionRequest++;
+  sessionLoading.value = false;
   sessions.value = [];
   messages.value = [];
   folds.value = [];
@@ -361,6 +376,9 @@ function resetLogin() {
   vault.value = [];
   config.value = {};
   catalogModels.value = [];
+  activeTaskCount.value = null;
+  employeeSession.value = "";
+  employeeError.value = "";
   draft.value = "";
   attachments.value = [];
   view.value = "chat";
@@ -381,21 +399,37 @@ onMounted(
     }),
 );
 async function selectSession(session) {
+  if (session.taskId) {
+    openEmployee(session.id);
+    return;
+  }
+  const request = ++sessionRequest;
   closeNavigation();
-  const v = await api(`/sessions/${session.id}`);
-  current.value = v.session;
-  messages.value = v.messages || [];
-  folds.value = v.folds || [];
-  contextBudget.value = v.context;
-  fireState.value = v.fire;
-  running.value[session.id] = v.running;
+  current.value = session;
+  messages.value = [];
+  folds.value = [];
+  contextBudget.value = null;
+  fireState.value = null;
   live.value = "";
   thinking.value = "";
   activeTools.value = [];
   draft.value = "";
   attachments.value = [];
   view.value = "chat";
-  await scrollBottom();
+  sessionLoading.value = true;
+  try {
+    const v = await api(`/sessions/${session.id}`);
+    if (request !== sessionRequest) return;
+    current.value = v.session;
+    messages.value = v.messages || [];
+    folds.value = v.folds || [];
+    contextBudget.value = v.context;
+    fireState.value = v.fire;
+    running.value[session.id] = v.running;
+    await scrollBottom();
+  } finally {
+    if (request === sessionRequest) sessionLoading.value = false;
+  }
 }
 async function newSession() {
   await attempt(async () => {
@@ -403,16 +437,14 @@ async function newSession() {
       cwd: project.value,
       model: chosenModel.value,
     });
-    await bootstrap();
-    await selectSession(s);
+    await Promise.all([bootstrap(), selectSession(s)]);
   });
 }
 async function newStage() {
   if (!current.value) return;
   await attempt(async () => {
     const s = await api(`/sessions/${current.value.id}/stage`, "POST", {});
-    await bootstrap();
-    await selectSession(s);
+    await Promise.all([bootstrap(), selectSession(s)]);
     toast("已创建新对话");
   });
 }
@@ -440,8 +472,7 @@ async function send() {
         cwd: project.value,
         model: chosenModel.value,
       });
-      await bootstrap();
-      await selectSession(s);
+      await Promise.all([bootstrap(), selectSession(s)]);
     }
     const id = current.value.id;
     const path = isRunning.value ? "steer" : "messages";
@@ -449,8 +480,7 @@ async function send() {
     draft.value = "";
     attachments.value = [];
     if (result.id && result.id !== id) {
-      await bootstrap();
-      await selectSession({ id: result.id });
+      await Promise.all([bootstrap(), selectSession({ id: result.id })]);
     } else {
       await refreshCurrent();
     }
@@ -555,14 +585,18 @@ async function eventLoop(signal) {
       try {
         await bootstrap();
         if (current.value) await refreshCurrent();
-        if (isAdmin.value) await loadEmployee();
+        if (view.value === "employee" && !employeeSession.value)
+          await refreshEmployee();
       } catch {}
     }
   }
 }
 async function refreshCurrent() {
   if (!current.value) return;
-  const data = await api(`/sessions/${current.value.id}`);
+  const id = current.value.id,
+    request = sessionRequest;
+  const data = await api(`/sessions/${id}`);
+  if (current.value?.id !== id || request !== sessionRequest) return;
   current.value = data.session;
   messages.value = data.messages || [];
   folds.value = data.folds || [];
@@ -572,8 +606,7 @@ async function refreshCurrent() {
 }
 async function handleEvent(event) {
   if (event.type === "config_changed") {
-    await bootstrap();
-    await loadModels();
+    await Promise.all([bootstrap(), loadModels()]);
     return;
   }
   if (event.type === "fire") {
@@ -611,14 +644,28 @@ async function handleEvent(event) {
       });
     return;
   }
+  if (event.taskId) {
+    if (
+      ["started", "message_end", "compacted", "error", "done"].includes(
+        event.type,
+      )
+    ) {
+      if (event.session === employeeSession.value)
+        employeeSessionVersion.value++;
+      queueEmployeeRefresh();
+    }
+    return;
+  }
   const selected = event.session === current.value?.id;
   if (event.type === "started") running.value[event.session] = true;
   if (event.type === "employee_changed") {
-    await loadEmployee();
+    if (typeof event.data?.activeTasks === "number")
+      activeTaskCount.value = event.data.activeTasks;
+    queueEmployeeRefresh();
     return;
   }
   if (event.type === "employee_error") {
-    error.value = event.data;
+    employeeError.value = event.data;
     return;
   }
   if (!selected) {
@@ -670,15 +717,41 @@ async function handleEvent(event) {
       live.value = "";
       thinking.value = "";
       activeTools.value = [];
-      await refreshCurrent();
-      await bootstrap();
+      await Promise.all([refreshCurrent(), bootstrap()]);
       await scrollBottom();
       break;
   }
 }
 async function loadEmployee() {
   if (!isAdmin.value) return;
-  employee.value = await api("/employee");
+  const owner = user.value.id;
+  const data = await api("/employee");
+  if (user.value?.id !== owner) return;
+  employee.value = data;
+  activeTaskCount.value = (data.tasks || []).filter(
+    (t) => !ended(t.status),
+  ).length;
+}
+function openEmployee(session = "") {
+  employeeSession.value = session;
+  view.value = "employee";
+  closeNavigation();
+  if (!session) void refreshEmployee();
+}
+async function refreshEmployee() {
+  try {
+    await loadEmployee();
+  } catch (e) {
+    employeeError.value = e.message;
+  }
+}
+function queueEmployeeRefresh() {
+  clearTimeout(employeeRefreshTimer);
+  if (view.value !== "employee" || employeeSession.value) return;
+  employeeRefreshTimer = setTimeout(() => {
+    if (view.value === "employee" && !employeeSession.value)
+      void refreshEmployee();
+  }, 150);
 }
 async function employeeAction(data) {
   const result = await api("/employee", "POST", data);
@@ -910,13 +983,12 @@ onBeforeUnmount(() => {
         <button
           v-if="isAdmin"
           :class="{ selected: view === 'employee' }"
-          @click="
-            view = 'employee';
-            attempt(loadEmployee);
-          "
+          @click="openEmployee()"
         >
           ◎ <span>数字员工</span
-          ><span class="count">{{ activeTasks.length }}</span>
+          ><span v-if="activeTaskCount !== null" class="count">{{
+            activeTaskCount
+          }}</span>
         </button>
         <button
           v-if="isAdmin"
@@ -967,8 +1039,7 @@ onBeforeUnmount(() => {
           <button @click="attempt(() => selectSession(s))">
             <span :class="['dot', { working: running[s.id] }]"></span
             ><span class="truncate"
-              >{{ s.stageSource ? "↳ " : s.taskId ? "◎ " : ""
-              }}{{ s.title }}</span
+              >{{ s.stageSource ? "↳ " : "" }}{{ s.title }}</span
             ></button
           ><button
             v-if="
@@ -1020,7 +1091,11 @@ onBeforeUnmount(() => {
           </div>
         </header>
         <div ref="transcript" class="transcript" aria-live="polite">
-          <div v-if="!messages.length && !live" class="welcome">
+          <div v-if="sessionLoading" class="context-note">正在加载会话…</div>
+          <div
+            v-if="!sessionLoading && !messages.length && !live"
+            class="welcome"
+          >
             <div class="welcome-symbol">✳</div>
             <h1>让想法开始运转。</h1>
             <p>编写代码、探索网页，或把一项工作交给数字员工。</p>
@@ -1029,7 +1104,7 @@ onBeforeUnmount(() => {
                 ◈ 分析一个项目</button
               ><button @click="draft = '请用 Chrome 查看当前标签页'">
                 ↗ 探索网页</button
-              ><button v-if="isAdmin" @click="view = 'employee'">
+              ><button v-if="isAdmin" @click="openEmployee()">
                 ◎ 交给数字员工
               </button>
             </div>
@@ -1190,6 +1265,13 @@ onBeforeUnmount(() => {
         @signed-out="resetLogin"
         @changed="attempt(bootstrap)"
       />
+      <EmployeeSessionView
+        v-else-if="view === 'employee' && isAdmin && employeeSession"
+        :api="api"
+        :session-id="employeeSession"
+        :revision="employeeSessionVersion"
+        @back="openEmployee()"
+      />
       <template v-else-if="view === 'employee' && isAdmin"
         ><header class="topbar">
           <div>
@@ -1201,6 +1283,16 @@ onBeforeUnmount(() => {
           }}</span>
         </header>
         <div class="page-scroll">
+          <p v-if="employeeError" class="banner error" role="alert">
+            {{ employeeError
+            }}<button
+              class="icon"
+              aria-label="关闭员工错误"
+              @click="employeeError = ''"
+            >
+              ×
+            </button>
+          </p>
           <div class="employee-settings">
             <label
               ><input v-model="employee.enabled" type="checkbox" />
@@ -1341,14 +1433,12 @@ onBeforeUnmount(() => {
                   时间线</button
                 ><button
                   v-if="t.workSession"
-                  @click="attempt(() => selectSession({ id: t.workSession }))"
+                  @click="openEmployee(t.workSession)"
                 >
                   主会话 ↗</button
                 ><button
                   v-if="t.computerSession"
-                  @click="
-                    attempt(() => selectSession({ id: t.computerSession }))
-                  "
+                  @click="openEmployee(t.computerSession)"
                 >
                   Chrome 会话 ↗</button
                 ><button

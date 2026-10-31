@@ -282,7 +282,7 @@ export class Employee {
       this.store.put("employee", s);
       return value;
     });
-    this.runtime.emit("employee_changed");
+    this.emitChanged(this.state());
     this.schedule();
     return result;
   }
@@ -308,6 +308,11 @@ export class Employee {
     this.closed = true;
     clearTimeout(this.timer);
     for (const run of this.busy.values()) this.runtime.cancel(run.session);
+  }
+  emitChanged(s: EmployeeState) {
+    this.runtime.emit("employee_changed", {
+      activeTasks: s.tasks.filter((t) => !ended(t.status)).length,
+    });
   }
   schedule() {
     if (this.closed) return;
@@ -970,7 +975,7 @@ export class Employee {
         before?.locked !== desk.locked ||
         before?.available !== desk.available
       )
-        this.runtime.emit("employee_changed");
+        this.emitChanged(initial);
     }
     const s = this.state();
     if (!s.enabled) return;
@@ -1054,7 +1059,7 @@ export class Employee {
     }
     if (changed) {
       this.store.put("employee", s);
-      this.runtime.emit("employee_changed");
+      this.emitChanged(s);
     }
     if (Number.isFinite(next))
       this.timer = setTimeout(

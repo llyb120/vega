@@ -253,6 +253,10 @@ export class Store {
   }
   stage(key: string, inherit = false) {
     const source = this.session(key);
+    assert(
+      !source.taskId,
+      "Employee task history must continue through task controls",
+    );
     return this.newSession({
       cwd: source.cwd,
       title: "Stage",

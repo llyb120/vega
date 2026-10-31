@@ -14,7 +14,7 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Catalog } from "../server/core/catalog";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
-import { resolveModel } from "../server/core/config";
+import { maskedConfig, resolveModel } from "../server/core/config";
 function engine() {
   const store = new Store(":memory:"),
     auth = new Subscriptions(store, ""),
@@ -107,10 +107,9 @@ test("setup virtual config is explicit-authorized, section-scoped and secret-pre
   try {
     const value = {
       ...config,
-      image: {
-        baseURL: "https://images.test/v1",
-        apiKey: "test-key",
-        models: ["real-id"],
+      provider: {
+        ...config.provider,
+        p: { ...config.provider.p, apiKey: "test-key" },
       },
     };
     await assert.rejects(() =>
@@ -123,7 +122,7 @@ test("setup virtual config is explicit-authorized, section-scoped and secret-pre
         model,
       ),
     );
-    tools.setupAccess = "image";
+    tools.setupAccess = "provider";
     const result = await tools.execute(
       {
         id: "x",
@@ -132,8 +131,8 @@ test("setup virtual config is explicit-authorized, section-scoped and secret-pre
       },
       model,
     );
-    assert.equal(result.value.image.apiKey, "__stored_secret__");
-    assert.equal(e.config().image?.apiKey, "test-key");
+    assert.equal(result.value.provider.p.apiKey, "__stored_secret__");
+    assert.equal(e.config().provider.p.apiKey, "test-key");
     const bad = { ...value, systemPrompt: "injected" };
     await assert.rejects(() =>
       tools.execute(
@@ -150,27 +149,91 @@ test("setup virtual config is explicit-authorized, section-scoped and secret-pre
     assert.equal(builtinCommand("/plan x")?.goal, "x");
     assert.throws(() => builtinCommand("/easy"));
     assert(
-      (
-        await expandBuiltin(
-          { role: "user", text: "[m00001] /plan build thing" },
-          config,
-        )
-      )?.includes("实施计划"),
+      expandBuiltin({
+        role: "user",
+        text: "[m00001] /plan build thing",
+      })?.includes("实施计划"),
     );
     assert(
-      (
-        await expandBuiltin({ role: "user", text: "/easy fix type" }, config)
-      )?.includes("不要运行或新增测试"),
+      expandBuiltin({ role: "user", text: "/easy fix type" })?.includes(
+        "不要运行或新增测试",
+      ),
     );
     assert(
-      (
-        await expandBuiltin({ role: "user", text: "/setup-image" }, config)
-      )?.includes("不自动发起收费"),
+      expandBuiltin({ role: "user", text: "/setup select a model" })?.includes(
+        "仅允许修改provider、model和scenes",
+      ),
     );
   } finally {
     await tools.close();
     await e.close();
     store.close();
+  }
+});
+test("removed image service is hidden and unavailable while reading image pixels remains supported", async () => {
+  const { e, store, config } = engine(),
+    dir = await mkdtemp(join(tmpdir(), "vega-vision-"));
+  const legacy = {
+    ...config,
+    image: {
+      baseURL: "https://images.test/v1",
+      apiKey: "retired-image-secret",
+      models: ["image-model"],
+    },
+  };
+  store.put("config", legacy);
+  const model = resolveModel(config),
+    session = store.newSession({ cwd: dir }),
+    tools = new Tools(
+      e,
+      session,
+      e.config(),
+      new AbortController().signal,
+      () => {},
+    );
+  try {
+    assert(!("image" in e.config()));
+    assert(!("image" in maskedConfig(legacy)));
+    for (const name of ["generate_image", "edit_image"]) {
+      assert(!tools.definitions(model).some((tool) => tool.name === name));
+      await assert.rejects(
+        () =>
+          tools.execute(
+            { id: name, name, arguments: { prompt: "not executed" } },
+            model,
+          ),
+        /unavailable/,
+      );
+    }
+    for (const command of [
+      "/setup-image",
+      "/generate-image a picture",
+      "/edit-image a picture",
+    ]) {
+      assert.equal(builtinCommand(command), undefined);
+      assert.equal(expandBuiltin({ role: "user", text: command }), command);
+    }
+    const image = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aVKkAAAAASUVORK5CYII=",
+      "base64",
+    );
+    await writeFile(join(dir, "photo.png"), image);
+    const read = await tools.read({ path: "photo.png" });
+    assert.equal(read.images?.[0].mime, "image/png");
+    assert.deepEqual(Buffer.from(read.images![0].data, "base64"), image);
+    const id = store.blob("image/png", image);
+    assert.equal(
+      (await tools.read({ path: "sqlite:blob/" + id })).images?.[0].data,
+      image.toString("base64"),
+    );
+    assert(tools.definitions(model).some((tool) => tool.name === "chrome"));
+    assert(!("image" in (await e.saveConfig(legacy))));
+    assert(!("image" in store.get<any>("config", {})));
+  } finally {
+    await tools.close();
+    await e.close();
+    store.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 test("file read uses actual returned line boundary at50KiB, reports oversized lines without skipping", async () => {

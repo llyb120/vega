@@ -360,6 +360,17 @@ test("all Vue components use Vapor compiler, not VDOM fallback", () => {
       id: file,
       inlineTemplate: true,
     });
+    for (const match of descriptor.template?.content.matchAll(
+      /\b(confirm|prompt)\s*\(/g,
+    ) || []) {
+      assert(
+        compiled.bindings?.[match[1]],
+        file +
+          " must bind " +
+          match[1] +
+          " before using it in a Vapor template",
+      );
+    }
     assert(
       descriptor.vapor && /__vapor:\s*true/.test(compiled.content),
       "Vapor component output missing for " + file,

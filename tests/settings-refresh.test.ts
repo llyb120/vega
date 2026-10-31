@@ -213,7 +213,15 @@ test("UI keeps all pages Vapor, settings last, separate experiences, no whole-pa
   assert(!app.includes("模型配置 JSON"));
   assert(!app.includes("Nitro · SQLite"));
   assert(!app.includes("T1/T2/T3"));
-  assert.match(css, /overscroll-behavior:\s*none/);
+  assert.match(
+    css,
+    /html,\s*body,\s*#app\s*\{[^}]*overscroll-behavior:\s*none/,
+  );
+  assert.doesNotMatch(
+    css,
+    /\*\s*\{[^}]*overscroll-behavior/,
+    "nested truncation/scroll containers must not block touch scroll chaining",
+  );
   assert(
     !readFileSync("web/src/ProviderSettings.vue", "utf8").includes(
       "WorkBuddy.exe",

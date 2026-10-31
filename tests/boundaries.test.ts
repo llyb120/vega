@@ -1,15 +1,9 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { gunzipSync, gzipSync, deflateRawSync } from "node:zlib";
-import sharp from "sharp";
 import { decodeRelayFrame, legacyRelayData } from "../server/core/relay";
 import { ChromeBridge } from "../server/core/chrome-bridge";
-import { imageTool, shell } from "../server/core/tools";
-import { id } from "../server/core/util";
+import { shell } from "../server/core/tools";
 const cleanup: (() => any)[] = [];
 afterEach(async () => {
   for (const f of cleanup.splice(0).reverse()) await f();
@@ -85,73 +79,6 @@ test("Chrome extension bridge pairing, client identity binding and no unauthoriz
   ).text();
   assert.equal((await command).tabs[0].tag, "stable");
   assert.equal(bridge.pending.size, 0);
-});
-test("image generation/edit validate PNG, defaults and authenticated multipart without auto retry", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "vega-image-"));
-  cleanup.push(() => rm(dir, { recursive: true, force: true }));
-  const image = await sharp({
-    create: { width: 2, height: 2, channels: 3, background: "#00ff00" },
-  })
-    .png()
-    .toBuffer();
-  await writeFile(join(dir, "original.png"), image);
-  let calls = 0,
-    form = "";
-  const server = createServer(async (req, res) => {
-    calls++;
-    assert.equal(req.headers.authorization, "Bearer image-key");
-    const chunks = [];
-    for await (const c of req) chunks.push(c);
-    form = Buffer.concat(chunks).toString();
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ data: [{ b64_json: image.toString("base64") }] }));
-  });
-  await new Promise<void>((yes) => server.listen(0, "127.0.0.1", yes));
-  cleanup.push(
-    () =>
-      new Promise<void>((yes) => {
-        server.closeAllConnections();
-        server.close(() => yes());
-      }),
-  );
-  const config = {
-      baseURL: `http://127.0.0.1:${(server.address() as any).port}`,
-      apiKey: "image-key",
-      models: ["img"],
-    },
-    signal = new AbortController().signal;
-  const generated = await imageTool(
-    dir,
-    "generate_image",
-    { prompt: "tiny image" },
-    config,
-    signal,
-  );
-  assert.deepEqual(await readFile(generated.value.path), image);
-  assert.equal(generated.value.model, "img");
-  assert.match(generated.value.markdown, /!\[图片\]/);
-  const edited = await imageTool(
-    dir,
-    "edit_image",
-    { prompt: "change color", referenceImages: ["original.png"] },
-    config,
-    signal,
-  );
-  assert.match(form, /name="image"/);
-  assert.notEqual(edited.value.path, generated.value.path);
-  for (const a of [
-    { prompt: "x", model: "missing" },
-    { prompt: "x", outputDir: "missing" },
-    { prompt: "x", size: "bogus" },
-    { prompt: "x", unknown: true },
-  ])
-    await assert.rejects(() =>
-      imageTool(dir, "generate_image", a, config, signal),
-    );
-  await assert.rejects(() =>
-    imageTool(dir, "edit_image", { prompt: "x" }, config, signal),
-  );
-  assert.equal(calls, 2);
 });
 test("shell uses real PowerShell/POSIX process and preserves split UTF-8 output", async () => {
   const script =

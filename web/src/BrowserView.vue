@@ -1,5 +1,5 @@
 <script setup vapor>
-import { ref, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, onMounted, onBeforeUnmount } from "vue";
 const props = defineProps({ api: Function });
 const status = ref(null),
   tabs = ref([]),
@@ -9,6 +9,20 @@ const status = ref(null),
   error = ref("");
 let version = 0,
   disposed = false;
+const pageURL = computed(
+  () =>
+    screenshot.value?.url ||
+    tabs.value.find((tab) => tab.tag === selected.value)?.url ||
+    "",
+);
+function siteName(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.host || parsed.href;
+  } catch {
+    return "网页地址";
+  }
+}
 const viewable = (tab) =>
   tab?.controllable === true && /^(https?:\/\/|about:blank$)/i.test(tab.url);
 async function capture(tab) {
@@ -96,7 +110,6 @@ onBeforeUnmount(() => {
   <header class="topbar">
     <div>
       <h2>浏览器</h2>
-      <p>查看服务端浏览器，点击标签页获取当前视口截图。</p>
     </div>
     <div class="actions">
       <span :class="['pill', status?.connected ? 'green' : '']">{{
@@ -106,7 +119,6 @@ onBeforeUnmount(() => {
     </div>
   </header>
   <section class="browser-view" :aria-busy="busy">
-    <p class="hint browser-hint">点击标签页查看当前截图。</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <div
       v-if="tabs.length"
@@ -134,7 +146,7 @@ onBeforeUnmount(() => {
       >
         <span class="browser-tab-mark" aria-hidden="true">▣</span
         ><span class="browser-tab-title">{{
-          tab.title || tab.url || "新标签页"
+          tab.title || siteName(tab.url)
         }}</span
         ><small v-if="tab.incognito">无痕</small
         ><small v-if="!viewable(tab)">不可查看</small>
@@ -151,11 +163,14 @@ onBeforeUnmount(() => {
           <strong>{{
             screenshot?.title ||
             tabs.find((t) => t.tag === selected)?.title ||
-            "当前标签页"
+            siteName(pageURL)
           }}</strong>
-          <p>
-            {{ screenshot?.url || tabs.find((t) => t.tag === selected)?.url }}
-          </p>
+          <details :key="selected" class="browser-url">
+            <summary :title="pageURL">
+              {{ siteName(pageURL) }} · 查看地址
+            </summary>
+            <p>{{ pageURL }}</p>
+          </details>
         </div>
         <div class="actions">
           <a
@@ -179,9 +194,7 @@ onBeforeUnmount(() => {
       </div>
       <figure v-else-if="screenshot" class="browser-capture">
         <figcaption>
-          {{ new Date(screenshot.capturedAt).toLocaleString() }} ·
-          {{ screenshot.image.width }} × {{ screenshot.image.height }} ·
-          点击其他 tab 或“刷新截图”更新
+          截图于 {{ new Date(screenshot.capturedAt).toLocaleString() }}
         </figcaption>
         <div class="browser-image">
           <img
@@ -218,22 +231,21 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .browser-view {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
-  overflow: auto;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 18px 28px 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.browser-hint {
-  margin: 0;
-  line-height: 1.7;
 }
 .browser-tabstrip {
   display: flex;
   flex-shrink: 0;
   overflow-x: auto;
+  overscroll-behavior-y: auto;
+  margin-bottom: 12px;
   gap: 5px;
   padding: 4px 2px 8px;
   border-bottom: 1px solid var(--line, #e0e7e2);
@@ -275,11 +287,8 @@ onBeforeUnmount(() => {
   outline-offset: 1px;
 }
 .browser-panel {
-  flex: 1;
-  min-height: 320px;
   border: 1px solid var(--line, #e0e7e2);
   border-radius: 12px;
-  overflow: hidden;
   background: #fff;
 }
 .browser-address {
@@ -290,9 +299,17 @@ onBeforeUnmount(() => {
   padding: 14px 18px;
   background: #f6f9f7;
   border-bottom: 1px solid #e0e7e2;
+  border-radius: 11px 11px 0 0;
 }
 .browser-address > div {
   min-width: 0;
+}
+.browser-address > div:first-child {
+  flex: 1;
+  max-width: 100%;
+}
+.browser-address > .actions {
+  flex-shrink: 0;
 }
 .browser-address strong {
   display: block;
@@ -300,11 +317,24 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.browser-address p {
+.browser-url {
+  margin-top: 4px;
+  min-width: 0;
+}
+.browser-url summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.browser-url p {
   font-size: 12px;
   margin: 5px 0 0;
   color: #6e7b74;
   overflow-wrap: anywhere;
+  max-height: 96px;
+  overflow-y: auto;
+  overscroll-behavior-y: auto;
 }
 .browser-address button {
   flex-shrink: 0;
@@ -337,7 +367,7 @@ onBeforeUnmount(() => {
 .browser-image {
   padding: 14px;
   background: #eaf0ec;
-  overflow: auto;
+  border-radius: 0 0 11px 11px;
 }
 .browser-image img {
   display: block;
@@ -348,24 +378,23 @@ onBeforeUnmount(() => {
   background: #fff;
   user-select: none;
 }
-@media (max-width: 600px) {
+@media (max-width: 760px) {
   .browser-view {
-    padding: 14px 12px;
-    gap: 10px;
+    padding: 12px 10px max(18px, env(safe-area-inset-bottom, 0px));
   }
   .browser-tab {
     min-width: 130px;
     max-width: 190px;
     padding: 10px;
   }
+  .browser-address > div:first-child {
+    width: 100%;
+  }
   .browser-address {
-    padding: 12px;
+    padding: 10px;
+    gap: 8px;
     align-items: flex-start;
     flex-direction: column;
-  }
-  .browser-panel {
-    flex: none;
-    min-height: 240px;
   }
   .browser-placeholder {
     min-height: 200px;

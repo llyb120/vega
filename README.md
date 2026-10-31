@@ -64,10 +64,10 @@ docker run -d --name vega --shm-size=1g \
 | 本地订阅 | CodeBuddy、WorkBuddy、Devin 原生接入，及 Codex / Claude Code 只读 CLI 订阅或自定义 API；不是用通用 API 地址冒充专有协议 |
 | 场景 / Stage | 场景在同一会话切模型、显式 caller follow-up；普通聊天结束/失败恢复原场景，员工同任务保留编码场景。Stage 独立历史，每轮引用来源的用户提示词和结论 |
 | 上下文 | 自动摘要与 billion-context/acp-kernel 风格 ACP；稳定原子单元引用、45%/75% 压力/增长提醒、T1/T2/T3 精炼、92%/输入硬上限应急截断与机械轮廓、provider usage 实测锚点；原文/嵌套账本可逆，fork 复制账本但隔离状态 |
-| 内置命令 | `/skill:name`、`/plan`、`/easy`、`/setup`、`/setup-image`、`/generate-image`、`/edit-image`、`/stage`；SQLite 配置虚拟路径有当轮显式授权/修改分区约束；`/fire ... /target ...` 为独立执行/验收链，最多20轮，可暂停/重启后显式续做 |
-| 工具 | read / bash / edit / write / change_working_directory、同会话持久 MCP 渐进发现、图片生成/编辑、Chrome、employee。**不提供 Polaris / Jianlai** |
+| 内置命令 | `/skill:name`、`/plan`、`/easy`、`/setup`、`/stage`；SQLite 配置虚拟路径有当轮显式授权/修改分区约束；`/fire ... /target ...` 为独立执行/验收链，最多20轮，可暂停/重启后显式续做 |
+| 工具 | read / bash / edit / write / change_working_directory、同会话持久 MCP 渐进发现、Chrome、employee。**不提供 Polaris / Jianlai** |
 | 数字员工 | 用户拥有的职责/备注、不定时/北京时间固定时刻/完成后间隔/动态检查，任务业务 key 去重，最多 3 并发、1 个电脑任务；完整计划、进度、审批、补充、挂起、续做、重新派发、任务时间线；星轨已按要求移除 |
-| 员工会话 | 同任务固定主会话 + 独立固定 Chrome 会话，relay 交接后结束本轮、结果自动回主会话；defer 保存外部作业恢复点、释放名额，到期只检查原作业 |
+| 员工会话 | 与普通聊天隔离：任务固定主会话 + 独立固定 Chrome 会话，仅从员工看板打开执行记录，不混入普通会话列表/默认选中项；relay 交接后结束本轮、结果自动回任务主会话；defer 保存恢复点、释放名额，到期只检查原作业 |
 | 记忆 / 密码本 | 相关性检索、强化/衰减/永久重要性、300 条记忆上限；AES-256-GCM、使用条件/用途审计、X25519 跨机加密支援、任务专属临时条目与清理 |
 | StarLink | 原 v2 HTTP + SSE 中转协议、群组/设备/纪元/游标、gzip 与旧 `_z` 信封、messageId 幂等重传、成员派单、交代人审批/补充、加密凭据支援与任务时间线 |
 | Chrome | 原版 0.1.14 扩展与 DOM 脚本；稳定 tag、多实例/多浏览器、iframe/OOPIF、Shadow DOM、DOM/ref、真实 CDP 输入、焦点/遮挡/像素前检、截图分片/裁剪/长图、上传下载、DevTools、run 短程计划、经验图谱 |
@@ -125,16 +125,20 @@ docker run -d --name vega --shm-size=1g \
 
 该页复用Chrome工具的回环桥接和截图引擎，与agent共享浏览器操作锁，但使用独立观察空间，不覆盖agent已有的ref/截图状态。截图图片继续走登录保护的BLOB接口，浏览器列表与截图入口仅管理员可访问，避免向只读/操作账号泄露共享浏览器的登录页面。获取后台/最小化标签截图时，Chrome可能显示窗口并切到目标页；不会额外提交或重载网页。
 
-### MCP、图片、技能和团队
+### MCP、技能和团队
 
 - MCP 配置为 `{"server": {"command":"node", "args":["server.js"], "env":{}}}` 或 `{"server":{"url":"https://example/mcp","headers":{}}}`。先 list → describe → call；定义变化须重新 describe。只读模式须由用户配置本地 `readOnlyTools` 允许列表，远端 `readOnlyHint` 不是授权。
-- 图片服务为 OpenAI Images 兼容接口，`image.models` 是可用 ID 数组；编辑必须有原图，输出新 PNG，不覆盖原图；失败不自动计费重试。文件产物留在用户指定输出目录，任务/配置/图片历史均存 SQLite。
+- 不提供独立图片生成/改图服务。聊天附图、视觉模型、read图片和Chrome截图不受影响；旧图片服务配置不再使用，历史图片保留。
 - 技能在设置页选择本地ZIP上传，不需要填写服务器目录；**正文和附属脚本/参考资源一起存入SQLite**，同名覆盖须确认。运行时按内容摘要物化可再生缓存，不自动运行导入脚本；拒绝目录穿越、链接和超限资源。原服务端目录/ZIP/SKILL.md导入API与`VEGA_SKILLS_DIR`仍保留供已有部署兼容，不在界面暴露目录配置。先展示元数据，按需读取正文，支持`/skill:name`。
 - `relay: {"server":"https://relay.example","token":"{env:RELAY_TOKEN}","groups":"team-a"}` 接入原中转站。员工页 → 团队员工，只有公开的员工可接指令；对方的补充请求必须来自曾经交代过任务的成员。仅交代人可补充/审批其任务，凭据用密码本加密传回。
 
 员工每天时刻、工作时段和`nextAt`统一按**北京时间 Asia/Shanghai**解释，列表中的日期也按北京时间显示；不再取服务器或浏览器本地时区。旧固定时刻职责升级后按北京时间运行；旧星轨数据保留，但事件职责不再触发，需改成手动/固定/动态安排。
 
 界面适配手机与平板：小屏使用可展开的完整导航及会话列表，内容区独立滚动；触控按钮至少44px，表单输入保持16px以避免iOS自动放大，保留页面缩放。聊天手机回车换行、点击发送，桌面保留Enter发送并防止中文输入法误发；软键盘/地址栏变化按可视视口调整，刘海及底部安全区留白。服务商登录在本标签短期保存不含凭据的发起信息，切回或重载后继续同一次登录；服务端完成回执短期幂等，不重复交换授权码。浏览器截图可打开原图放大。移动回归使用独立Chrome触控模拟，覆盖320–1024px、横屏及键盘缩小视口；未进行iPhone/Safari、Android实体手机实机验收。
+
+浏览器页只默认显示站点名，完整URL按需展开且限高；截图区自然纵向排布，标签栏独立横向滚动。禁用整体回弹只施加到页面边界，不对所有内层元素禁用滑动传递。移动回归包含长URL、40个标签、纵向/横向原生触屏滑动及“重新派发”的确认与取消，避免只检查DOM宽度却遗漏实际操作。
+
+普通会话不依赖数字员工启用、工作时间或员工看板加载；普通聊天无需员工progress/relay流程。只有用户明确“交给员工”或管理员工数据时调用employee，派单不会把当前普通会话转换成任务。查看员工主/电脑记录使用独立只读页面，普通会话的历史和未发送内容保持原样；员工流式事件和错误不刷新或覆盖普通聊天，续做/审批/停止统一回员工看板。
 
 ## billion-context / ACP 与查漏记录
 
@@ -144,7 +148,7 @@ docker run -d --name vega --shm-size=1g \
 
 本轮还补上了：中断工具配对与孤儿修复、完成轮次OpenAI reasoning裁剪、每标签最近2份Chrome DOM投影、413旧图恢复、输出耗尽单次降思考且不重放工具、同会话MCP连接/describe状态保留、候选场景/同模型和只读路由、fork上下文账本、read的50KiB实际行边界与路径归一化。逐项来源和验收边界见`reference/parity-audit.md`。
 
-`/setup`只允许更新provider/model/scenes，`/setup-image`只允许更新image；配置入口是`sqlite:config`，不会误改原Nova JSON文件。`/fire`是原客户端编排功能而非独立Lyra工具，现已接入Nitro持久工作流：独立验收，不将执行者自述当作证据，只由最后阶段续做，停止/错误/重启不自动重放外部操作。
+`/setup`只允许更新provider/model/scenes；配置入口是`sqlite:config`，不会误改原Nova JSON文件。`/fire`是原客户端编排功能而非独立Lyra工具，现已接入Nitro持久工作流：独立验收，不将执行者自述当作证据，只由最后阶段续做，停止/错误/重启不自动重放外部操作。
 
 ## 安全与状态
 

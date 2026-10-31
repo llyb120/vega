@@ -2,6 +2,7 @@
 import { onMounted, ref, watch } from "vue";
 import ProviderSettings from "./ProviderSettings.vue";
 import SceneSettings from "./SceneSettings.vue";
+const confirm = window.confirm.bind(window);
 const props = defineProps({
   api: Function,
   config: Object,
@@ -10,9 +11,7 @@ const props = defineProps({
 });
 const emit = defineEmits(["saved", "error", "notice"]);
 const copy = (value) => JSON.parse(JSON.stringify(value));
-const image = ref({ baseURL: "", apiKey: "", models: [] }),
-  imageModels = ref(""),
-  busy = ref(false),
+const busy = ref(false),
   skills = ref([]),
   replace = ref(false),
   upload = ref(null),
@@ -22,10 +21,6 @@ const image = ref({ baseURL: "", apiKey: "", models: [] }),
 watch(
   () => props.config,
   () => {
-    image.value = copy(
-      props.config.image || { baseURL: "", apiKey: "", models: [] },
-    );
-    imageModels.value = (image.value.models || []).join("\n");
     mcp.value = copy(props.config.mcp || {});
   },
   { immediate: true },
@@ -39,20 +34,6 @@ async function run(fn) {
   } finally {
     busy.value = false;
   }
-}
-async function saveImage() {
-  await run(async () => {
-    const next = copy(props.config);
-    next.image = {
-      ...image.value,
-      models: imageModels.value
-        .split(/[\n,]/)
-        .map((m) => m.trim())
-        .filter(Boolean),
-    };
-    emit("saved", await props.api("/config", "PUT", next));
-    emit("notice", "图片服务已保存");
-  });
 }
 async function refreshSkills() {
   skills.value = await props.api("/skills");
@@ -114,32 +95,6 @@ onMounted(() => void run(refreshSkills));
       @error="emit('error', $event)"
       @notice="emit('notice', $event)"
     />
-    <section class="card">
-      <div class="section-heading">
-        <h3>图片服务</h3>
-        <button :disabled="busy" @click="saveImage">保存</button>
-      </div>
-      <div class="form-grid">
-        <label
-          >API地址<input
-            v-model="image.baseURL"
-            type="url"
-            placeholder="https://api.example.com/v1" /></label
-        ><label
-          >API Key<input
-            v-model="image.apiKey"
-            type="password"
-            autocomplete="off"
-            placeholder="API Key" /></label
-        ><label
-          >图片模型<textarea
-            v-model="imageModels"
-            rows="2"
-            placeholder="每行一个模型，首行为默认模型"
-          ></textarea>
-        </label>
-      </div>
-    </section>
     <section class="card">
       <h3>技能</h3>
       <div class="inline-form">

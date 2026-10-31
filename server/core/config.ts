@@ -7,7 +7,6 @@ export type Config = {
   systemPrompt?: string;
   contextMode?: string;
   mcp?: Record<string, Obj>;
-  image?: Obj;
   relay?: Obj;
   skills?: Obj[];
   skillsDirectory?: string;
@@ -160,10 +159,10 @@ export function validateConfig(c: Config) {
     );
     if (cfg.url) httpURL(cfg.url);
   }
-  if (c.image?.baseURL) httpURL(c.image.baseURL);
 }
 export function maskedConfig(config: Config) {
   const copy = clone(config);
+  delete (copy as Obj).image;
   const mask = (s: any) =>
     typeof s === "string" && s && !s.includes("{env:") && !s.includes("${")
       ? "__stored_secret__"
@@ -174,7 +173,6 @@ export function maskedConfig(config: Config) {
     for (const h of [p.headers, p.options?.headers])
       if (h) for (const k in h) h[k] = mask(h[k]);
   }
-  if (copy.image) copy.image.apiKey = mask(copy.image.apiKey);
   if (copy.relay) copy.relay.token = mask(copy.relay.token);
   for (const m of Object.values(copy.mcp || {}))
     for (const h of [m.env, m.headers])

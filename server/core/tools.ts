@@ -12,12 +12,10 @@ import { existsSync } from "node:fs";
 import { resolve, dirname, extname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { spawn } from "node:child_process";
-import { FormData } from "undici";
 import { windowsShell } from "./presence";
 import sharp from "sharp";
 import chromeDefinition from "../../shared/chrome-tool.json";
 import employeeDefinition from "../../shared/employee-tool.json";
-import imageDefinitions from "../../shared/image-tools.json";
 import { readPath, textSlice } from "./file-read";
 import { materializeSkill, skillEntry } from "./skills";
 import { isDeepStrictEqual } from "node:util";
@@ -26,16 +24,7 @@ import type { Session, Call } from "./store";
 import type { Engine } from "./engine";
 import { Context } from "./context";
 import { MCP } from "./mcp";
-import {
-  assert,
-  clip,
-  id,
-  request,
-  bounded,
-  expand,
-  object,
-  type Obj,
-} from "./util";
+import { assert, clip, id, type Obj } from "./util";
 import type { Config, Model } from "./config";
 import type { Tool } from "./provider";
 export type Outcome = {
@@ -59,7 +48,7 @@ const string = { type: "string" },
   integer = { type: "integer" };
 export class Tools {
   context: Context;
-  setupAccess?: "provider" | "image";
+  setupAccess?: "provider";
   sceneStack: string[] = [];
   mcp: MCP;
   constructor(
@@ -199,11 +188,6 @@ export class Tools {
           description: employeeDefinition.description,
           parameters: employeeDefinition.inputSchema,
         },
-        ...imageDefinitions.map((t) => ({
-          name: t.name,
-          description: t.description,
-          parameters: t.inputSchema,
-        })),
       );
       if (
         (!this.session.taskId || this.session.scene === "computer") &&
@@ -285,7 +269,10 @@ export class Tools {
         );
       delete employee.parameters.properties.events;
       employee.description =
-        "管理数字员工职责、任务、计划、记忆和密码本。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。员工执行前progress保存完整计划，验证成功才标completed；ask等待用户审批、help找交代人补充、defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接，vault_request/发送只限授权支援；密码本改动仅用户可以。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增todo、给自己改期或为所属动态职责安排下次/停用。定时和日期均为北京时间Asia/Shanghai，普通任务中不新建子任务分解步骤；Chrome必须relay，coding用同会话switch_scene。";
+        "管理数字员工职责、待办、记忆和密码本。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
+        (this.session.taskId
+          ? "当前会话属于员工任务。执行前progress保存完整计划，验证成功才标completed；ask等待用户审批、help找交代人补充、defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。vault_request/发送只限授权支援。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增独立todo、给自己改期或为所属动态职责安排下次/停用，不把本任务的步骤拆成todo。Chrome必须relay，coding用同会话switch_scene。"
+          : "当前是用户的普通会话，不是员工任务。普通请求直接在本会话处理，不需要员工启用、工作时间或progress/help/defer/relay流程，Chrome在computer场景直接使用。仅在用户明确派给员工或管理员工数据时调用此工具；用户说“交给员工：xxx”时只add todo并告知，当前会话不转换为员工会话，任务由员工自己的独立会话执行。");
     }
     for (const def of defs) {
       def.parameters = structuredClone(def.parameters);
@@ -312,15 +299,12 @@ export class Tools {
     if (a.path === "sqlite:config" && call.name === "write") {
       assert(
         this.setupAccess && !this.session.readOnly,
-        "Configuration writes require an explicit current /setup or /setup-image user command",
+        "Configuration writes require an explicit current /setup user command",
       );
       const next = JSON.parse(a.content),
         previous = this.engine.config();
       mergeSecrets(next, previous);
-      const allowed =
-        this.setupAccess === "image"
-          ? ["image"]
-          : ["provider", "model", "scenes"];
+      const allowed = ["provider", "model", "scenes"];
       for (const key of new Set([
         ...Object.keys(next),
         ...Object.keys(previous),
@@ -422,14 +406,6 @@ export class Tools {
         error: ["needs_review", "not_executed"].includes(result.status),
       };
     }
-    if (["generate_image", "edit_image"].includes(call.name))
-      return imageTool(
-        this.session.cwd,
-        call.name,
-        a,
-        this.config.image || {},
-        this.signal,
-      );
     throw Error("Runtime-only or unknown tool: " + call.name);
   }
   async read(a: Obj): Promise<Outcome> {
@@ -719,151 +695,4 @@ export async function shell(
     child.on("close", (code) => done(code ?? -1));
     if (signal.aborted) abort();
   });
-}
-export async function imageTool(
-  cwd: string,
-  name: string,
-  a: Obj,
-  config: Obj,
-  signal: AbortSignal,
-): Promise<Outcome> {
-  assert(
-    Object.keys(a).every((k) =>
-      ["prompt", "model", "size", "outputDir", "referenceImages"].includes(k),
-    ),
-    "Unsupported image tool parameter",
-  );
-  assert(
-    (config.baseURL || config.baseUrl) &&
-      expand(config.apiKey || "").trim() &&
-      config.models?.length,
-    "Configure image service first",
-  );
-  assert(
-    typeof a.prompt === "string" &&
-      a.prompt.trim() &&
-      Buffer.byteLength(a.prompt) <= 32000,
-    "Invalid image prompt",
-  );
-  const model = a.model || config.models[0],
-    size = a.size || "auto";
-  assert(
-    config.models.includes(model) &&
-      ["auto", "1024x1024", "1024x1536", "1536x1024"].includes(size),
-    "Image model/size not configured",
-  );
-  const refs = a.referenceImages || [];
-  assert(
-    Array.isArray(refs) &&
-      refs.length <= 16 &&
-      (name !== "edit_image" || refs.length),
-    "Editing requires original image; max16references",
-  );
-  const dir = resolve(cwd, a.outputDir || ".");
-  assert((await stat(dir)).isDirectory(), "outputDir must exist");
-  let body: any,
-    headers: Obj = { Authorization: "Bearer " + expand(config.apiKey || "") },
-    endpoint = (config.baseURL || config.baseUrl).replace(/\/$/, "");
-  if (refs.length) {
-    const form = new FormData();
-    for (const [k, v] of Object.entries({
-      model,
-      prompt: a.prompt,
-      size,
-      n: "1",
-      output_format: "png",
-    }))
-      form.set(k, String(v));
-    let total = 0;
-    for (const [i, file] of refs.entries()) {
-      const path = resolve(cwd, file),
-        st = await stat(path);
-      assert(st.isFile() && st.size <= 25 << 20, "Invalid reference file");
-      total += st.size;
-      assert(total <= 64 << 20, "References exceed64MiB");
-      const data = await readFile(path),
-        meta = await sharp(data, { limitInputPixels: 64000000 }).metadata();
-      assert(
-        ["png", "jpeg", "webp"].includes(meta.format || ""),
-        "Reference must be PNG/JPEG/WebP",
-      );
-      form.append(
-        refs.length === 1 ? "image" : "image[]",
-        new Blob([data], { type: "image/" + meta.format }),
-        `reference-${i}.${meta.format}`,
-      );
-    }
-    body = form;
-    endpoint += "/images/edits";
-  } else {
-    body = JSON.stringify({
-      model,
-      prompt: a.prompt,
-      size,
-      n: 1,
-      output_format: "png",
-    });
-    headers["Content-Type"] = "application/json";
-    endpoint += "/images/generations";
-  }
-  const response = await request(
-    endpoint,
-    { method: "POST", headers, body, signal },
-    600000,
-  );
-  assert(
-    response.ok,
-    `Image API HTTP ${response.status}; do not automatically retry`,
-  );
-  const result = JSON.parse((await bounded(response, 64 << 20)).toString());
-  const image = result.data?.[0];
-  assert(image, "Image API returned no image");
-  let data: Buffer;
-  if (image.b64_json) {
-    assert(
-      typeof image.b64_json === "string" &&
-        /^[A-Za-z0-9+/]+={0,2}$/.test(image.b64_json) &&
-        image.b64_json.length % 4 === 0,
-      "Invalid image base64; inspect original service result before retry",
-    );
-    data = Buffer.from(image.b64_json, "base64");
-  } else {
-    const url = new URL(image.url);
-    assert(
-      ["http:", "https:"].includes(url.protocol) &&
-        !url.username &&
-        !url.password,
-      "Invalid image download URL",
-    );
-    const r = await request(url.href, { signal });
-    assert(r.ok, "Image download failed");
-    data = await bounded(r, 64 << 20);
-  }
-  assert(data.length <= 64 << 20, "Image exceeds64MiB");
-  const meta = await sharp(data, { limitInputPixels: 64000000 }).metadata();
-  assert(
-    meta.format === "png" && meta.width && meta.height,
-    "Expected PNG image",
-  );
-  await sharp(data).raw().toBuffer();
-  const path = resolve(dir, "vega-" + id() + ".png");
-  const file = await open(path, "wx");
-  try {
-    await file.writeFile(data);
-    await file.sync();
-  } catch (error) {
-    await file.close().catch(() => {});
-    await unlink(path).catch(() => {});
-    throw error;
-  } finally {
-    await file.close().catch(() => {});
-  }
-  return {
-    value: {
-      path,
-      model,
-      markdown: `![图片](<${path.replaceAll("\\", "/")}>)`,
-    },
-    images: [{ mime: "image/png", data: data.toString("base64") }],
-  };
 }

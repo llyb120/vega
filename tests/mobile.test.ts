@@ -36,7 +36,7 @@ test(
       db = join(dir, "mobile.db"),
       token = randomBytes(32).toString("base64url");
     const png = await sharp({
-      create: { width: 1568, height: 1000, channels: 3, background: "#b7dfcc" },
+      create: { width: 1568, height: 6000, channels: 3, background: "#b7dfcc" },
     })
       .png()
       .toBuffer();
@@ -151,6 +151,53 @@ test(
       },
       { id: "fixture", origin: "https://example.test" },
     );
+    const worker = store.newSession({
+        title: "员工专属主会话",
+        cwd: dir,
+        taskId: "seeded-worker",
+      }),
+      computer = store.newSession({
+        title: "员工专属电脑会话",
+        cwd: dir,
+        taskId: "seeded-worker",
+        scene: "computer",
+      });
+    store.append(worker.id, {
+      role: "assistant",
+      text: "employee-only work record",
+    });
+    store.append(computer.id, {
+      role: "assistant",
+      text: "employee-only browser record",
+    });
+    store.put("employee", {
+      enabled: false,
+      public: false,
+      workStart: "09:00",
+      workEnd: "18:00",
+      idleMinutes: 10,
+      takeoverSeconds: 15,
+      desktopAskAfter: 0,
+      cwd: dir,
+      duties: [],
+      tasks: [
+        {
+          id: "seeded-worker",
+          text: "seeded employee task",
+          status: "done",
+          createdAt: Date.now(),
+          profile: "lightweight",
+          cwd: dir,
+          owner: { token: "", name: "" },
+          workSession: worker.id,
+          computerSession: computer.id,
+        },
+      ],
+      memories: [],
+      runs: [],
+      orbit: [],
+      links: [],
+    });
     store.close();
     const reserve = createServer();
     await new Promise<void>((yes) => reserve.listen(0, "127.0.0.1", yes));
@@ -194,7 +241,11 @@ test(
       nextId = 0,
       sessionId = "",
       loginComplete = false,
-      imports = 0;
+      imports = 0,
+      acceptDialog = false,
+      employeeLoads = 0,
+      blockEmployee = true;
+    const dialogs: { message: string; type: string }[] = [];
     const waiting = new Map<
         number,
         {
@@ -240,14 +291,21 @@ test(
         "UI timed out: " +
           label +
           "\n" +
-          (await evaluate("document.body.innerText")) +
+          (await evaluate("document.body.innerText")).slice(0, 1600) +
           "\n" +
           logs,
       );
     };
     const tap = async (selector: string) => {
       const p = await evaluate(
-        `(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('Missing '+${JSON.stringify(selector)});e.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});const r=e.getBoundingClientRect();if(!r.width||!r.height||e.closest('[inert]'))throw Error('Not reachable '+${JSON.stringify(selector)});return {x:r.x+r.width/2,y:r.y+r.height/2}})()`,
+        `(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('Missing '+${JSON.stringify(selector)});e.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});const r=e.getBoundingClientRect();if(!r.width||!r.height||e.closest('[inert]'))throw Error('Not reachable '+${JSON.stringify(selector)});const candidates=[{x:r.x+r.width/2,y:r.y+r.height/2},{x:Math.min(innerWidth-8,r.right-8),y:r.y+r.height/2}];const p=candidates.find(p=>document.elementFromPoint(p.x,p.y)?.closest(${JSON.stringify(selector)}));if(!p)throw Error('Occluded '+${JSON.stringify(selector)});return p;})()`,
+      );
+      const hit = await evaluate(
+        `!!document.elementFromPoint(${p.x},${p.y})?.closest(${JSON.stringify(selector)})`,
+      );
+      assert(
+        hit,
+        "touch must start inside " + selector + " " + JSON.stringify(p),
       );
       await command("Input.dispatchTouchEvent", {
         type: "touchStart",
@@ -258,6 +316,45 @@ test(
         touchPoints: [],
       });
       await sleep(30);
+    };
+    const swipe = async (selector: string, horizontal = false) => {
+      await evaluate(
+        "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))",
+      );
+      const p = await evaluate(
+        `(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();const left=Math.max(0,r.left),right=Math.min(innerWidth,r.right),top=Math.max(0,r.top),bottom=Math.min(innerHeight,r.bottom);if(right-left<60||bottom-top<${horizontal ? 24 : 60})throw Error('Swipe area not visible');return {x: ${horizontal} ? right-24:(left+right)/2,y:${horizontal} ? (top+bottom)/2:bottom-24,to:${horizontal} ? left+24:top+24}})()`,
+      );
+      assert(
+        await evaluate(
+          `!!document.elementFromPoint(${p.x},${p.y})?.closest(${JSON.stringify(selector)})`,
+        ),
+        "swipe must hit " + selector + " " + JSON.stringify(p),
+      );
+      await command("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x: p.x, y: p.y }],
+      });
+      for (let step = 1; step <= 10; step++) {
+        await command("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [
+            {
+              x: horizontal ? p.x + ((p.to - p.x) * step) / 10 : p.x,
+              y: horizontal ? p.y : p.y + ((p.to - p.y) * step) / 10,
+            },
+          ],
+        });
+        await sleep(20);
+      }
+      await sleep(180);
+      await command("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+      await evaluate(
+        "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))",
+      );
+      return Math.abs((horizontal ? p.x : p.y) - p.to);
     };
     const byText = async (
       text: string,
@@ -378,33 +475,58 @@ test(
               ": " +
               m.params.exceptionDetails.exception?.description,
           );
+        if (m.method === "Page.javascriptDialogOpening") {
+          dialogs.push({ message: m.params.message, type: m.params.type });
+          void command(
+            "Page.handleJavaScriptDialog",
+            { accept: acceptDialog },
+            m.sessionId,
+          ).catch((e) => errors.push(e.message));
+        }
         if (m.method === "Fetch.requestPaused") {
           void (async () => {
             const { requestId, request } = m.params;
-            let value: any;
-            if (request.url.endsWith("/api/chrome/tabs"))
+            let value: any,
+              responseCode = 200;
+            if (
+              request.url === base + "/api/employee" &&
+              request.method === "GET"
+            ) {
+              employeeLoads++;
+              if (blockEmployee) {
+                responseCode = 503;
+                value = { message: "Employee is unavailable in this test" };
+              }
+            } else if (request.url.endsWith("/api/chrome/tabs"))
               value = {
                 connected: true,
                 browser: "fixture",
-                tabs: [1, 2, 3, 4].map((n) => ({
-                  tag: "tab-" + n,
-                  title: "触屏标签" + n + "-" + "long".repeat(50),
-                  url: "https://example.test/" + n,
-                  active: n === 1,
-                  controllable: true,
-                })),
+                tabs: Array.from({ length: 40 }, (_, index) => index + 1).map(
+                  (n) => ({
+                    tag: "tab-" + n,
+                    title:
+                      n % 2 ? "触屏标签" + n + "-" + "long".repeat(50) : "",
+                    url:
+                      "https://example.test/" +
+                      n +
+                      "?query=" +
+                      "very-long-url-".repeat(200),
+                    active: n === 1,
+                    controllable: true,
+                  }),
+                ),
               };
             else if (request.url.endsWith("/api/chrome/screenshot")) {
               const { tabTag } = JSON.parse(request.postData);
               value = {
                 title: tabTag,
-                url: "https://example.test/" + "long/".repeat(50),
+                url: "https://example.test/" + "long/".repeat(1000),
                 capturedAt: Date.now(),
                 snapshotId: tabTag,
                 image: {
                   url: base + "/api/blobs/mobile-shot",
                   width: 1568,
-                  height: 1000,
+                  height: 6000,
                 },
               };
             } else if (request.url.includes("/api/blobs/mobile-shot")) {
@@ -452,7 +574,7 @@ test(
                 "Fetch.fulfillRequest",
                 {
                   requestId,
-                  responseCode: 200,
+                  responseCode,
                   responseHeaders: [
                     { name: "Content-Type", value: "application/json" },
                   ],
@@ -481,6 +603,7 @@ test(
       await command("Page.enable");
       await command("Fetch.enable", {
         patterns: [
+          { urlPattern: base + "/api/employee" },
           { urlPattern: base + "/api/chrome/*" },
           { urlPattern: base + "/api/blobs/mobile-shot" },
           { urlPattern: base + "/api/providers/login" },
@@ -512,6 +635,61 @@ test(
       await tap(".login-card .primary");
       await until(`document.querySelector('.shell')`);
       await until(`document.querySelector('.message-text')`);
+      assert.equal(
+        employeeLoads,
+        0,
+        "opening ordinary chat must not load or depend on the employee board",
+      );
+      assert(
+        !(await evaluate(
+          `document.querySelector('.topbar').textContent.includes('员工专属')`,
+        )),
+        "newer employee records must not become the default chat",
+      );
+      assert(
+        !(await evaluate(
+          `document.querySelector('.session-list').textContent.includes('员工专属')`,
+        )),
+      );
+      blockEmployee = false;
+      await fill(
+        'textarea[aria-label="消息"]',
+        "ordinary draft stays in its own conversation",
+      );
+      await nav("数字员工");
+      await until(
+        `document.querySelector('.task-card')?.textContent.includes('seeded employee task')`,
+      );
+      await byText("主会话 ↗", ".task-card");
+      await until(
+        `document.querySelector('.employee-session')?.textContent.includes('employee-only work record')`,
+      );
+      assert.equal(
+        await evaluate(`!!document.querySelector('.composer')`),
+        false,
+        "employee record must not expose ordinary sending/stop/Stage controls",
+      );
+      await byText("← 返回数字员工");
+      await until(`document.querySelector('.task-card')`);
+      await byText("Chrome 会话 ↗", ".task-card");
+      await until(
+        `document.querySelector('.employee-session')?.textContent.includes('employee-only browser record')`,
+      );
+      await nav("对话");
+      assert.equal(
+        await evaluate(
+          `document.querySelector('textarea[aria-label="消息"]').value`,
+        ),
+        "ordinary draft stays in its own conversation",
+      );
+      await nav("数字员工");
+      await until(`document.querySelector('.task-card')`);
+      acceptDialog = true;
+      await byText("删除记录", ".task-card");
+      await until(`!document.querySelector('.task-card')`);
+      acceptDialog = false;
+      await nav("对话");
+      await fill('textarea[aria-label="消息"]', "");
       await layout("initial chat");
       await tap('[aria-label="打开导航与会话"]');
       assert.equal(
@@ -579,6 +757,12 @@ test(
         `(()=>{const e=document.querySelector('.provider-form details');e.open=true;return !!e})()`,
       );
       assert(advanced);
+      assert.equal(
+        await evaluate(
+          `[...document.querySelectorAll('.settings h3')].some(e=>e.textContent.includes('图片服务'))`,
+        ),
+        false,
+      );
       await layout("advanced provider parameters");
       await byText("保存服务商");
       await until(
@@ -606,6 +790,14 @@ test(
       await byText("上传技能");
       await until(`document.body.innerText.includes('mobile-upload')`);
       await layout("uploaded skill");
+      await byText("移除", ".skill-items");
+      assert.equal(dialogs.at(-1)?.message, "移除这个技能？");
+      assert(
+        await evaluate(
+          `document.querySelector('.skill-items').innerText.includes('mobile-upload')`,
+        ),
+        "cancelling must retain the skill",
+      );
       await nav("数字员工");
       await fill(
         'input[placeholder="交给员工：一件有明确目标的事"]',
@@ -615,6 +807,23 @@ test(
       await until(
         `document.querySelector('.task-card')?.textContent.includes('手机提交的独立任务')`,
       );
+      await byText("重新派发", ".task-card");
+      assert(
+        dialogs.at(-1)?.message.includes("重新派发"),
+        "Vapor template must call the real confirmation dialog",
+      );
+      assert.equal(
+        await evaluate(`document.querySelectorAll('.task-card').length`),
+        1,
+        "cancel must not redispatch",
+      );
+      acceptDialog = true;
+      await byText("重新派发", ".task-card");
+      await until(
+        `document.querySelectorAll('.task-card').length===2`,
+        "confirmed redispatch",
+      );
+      acceptDialog = false;
       await byText("职责", ".tabs");
       await evaluate(
         `(()=>{const e=[...document.querySelectorAll('.workspace button')].find(e=>e.textContent.includes('职责')&&!e.closest('.tabs'));if(!e)throw Error('Missing duty action');e.dataset.mobileTest='duty'})()`,
@@ -645,6 +854,65 @@ test(
         "_blank",
       );
       await layout("browser screenshot on phone");
+      for (const [width, height] of [
+        [320, 568],
+        [640, 800],
+        [768, 1024],
+        [844, 390],
+      ]) {
+        await resize(width, height);
+        await evaluate(
+          `document.querySelector('.browser-view').scrollTop=0;document.querySelector('.browser-tabstrip').scrollLeft=0`,
+        );
+        assert(
+          await evaluate(
+            `document.querySelector('.browser-address').getBoundingClientRect().height<190`,
+          ),
+          "the full URL must not fill the viewport",
+        );
+        assert.equal(
+          await evaluate(`document.querySelector('.browser-url').open`),
+          false,
+        );
+        assert(
+          await evaluate(
+            `document.querySelector('.browser-image img').getBoundingClientRect().top<innerHeight-40`,
+          ),
+          "screenshot must be visible before scrolling",
+        );
+        assert(
+          await evaluate(
+            `document.querySelector('.browser-tabstrip').getBoundingClientRect().height<72`,
+          ),
+          "tabs must stay in one horizontal row",
+        );
+        const distance = await swipe(".browser-image");
+        await until(
+          `document.querySelector('.browser-view').scrollTop>${Math.min(100, distance / 3)}`,
+          "native touch scroll over screenshot at " + width,
+        );
+        await evaluate(`document.querySelector('.browser-view').scrollTop=0`);
+        await swipe(".browser-tabstrip", true);
+        await until(
+          `document.querySelector('.browser-tabstrip').scrollLeft>100`,
+          "native touch tabstrip swipe at " +
+            width +
+            " " +
+            (await evaluate(
+              `JSON.stringify((()=>{const t=document.querySelector('.browser-tabstrip'),r=t.getBoundingClientRect();return {left:t.scrollLeft,width:t.clientWidth,scroll:t.scrollWidth,top:r.top,height:r.height,pageTop:document.querySelector('.browser-view').scrollTop,viewport:innerHeight,hit:document.elementFromPoint(innerWidth-34,r.y+r.height/2)?.outerHTML.slice(0,180),touch:getComputedStyle(t).touchAction}})())`,
+            )),
+        );
+        await layout("scrolled browser " + width);
+      }
+      await resize(360, 800);
+      await tap(".browser-url summary");
+      assert(await evaluate(`document.querySelector('.browser-url').open`));
+      assert(
+        await evaluate(
+          `document.querySelector('.browser-url p').clientHeight<=96`,
+        ),
+      );
+      await tap(".browser-url summary");
       await nav("对话");
       await tap('.mobile-header [aria-label="新建会话"]');
       await until(`!document.querySelector('.message-text')`);

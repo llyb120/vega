@@ -18,6 +18,11 @@ test(
       token = randomBytes(32).toString("base64url");
     const seeded = new Store(db),
       legacy = seeded.newSession({ title: "legacy admin-only", cwd: dir }),
+      employeeSession = seeded.newSession({
+        title: "employee-owned history",
+        cwd: dir,
+        taskId: "employee-test-task",
+      }),
       secretBlob = seeded.blob(
         "image/png",
         Buffer.from("secret-image-fixture"),
@@ -223,6 +228,48 @@ test(
         csrf: setup.value.csrfToken,
         id: setup.value.user.id,
       };
+      const normalBoot = await ok("/bootstrap", "GET", undefined, admin);
+      assert(
+        normalBoot.sessions.some((session: any) => session.id === legacy.id),
+      );
+      assert(
+        !normalBoot.sessions.some(
+          (session: any) => session.id === employeeSession.id,
+        ),
+      );
+      const employeeRecord = await ok(
+        "/sessions/" + employeeSession.id,
+        "GET",
+        undefined,
+        admin,
+      );
+      assert.equal(employeeRecord.session.taskId, "employee-test-task");
+      assert.equal(employeeRecord.canWrite, false);
+      for (const action of ["messages", "steer", "stage", "fork", "cancel"]) {
+        assert.equal(
+          (
+            await req(
+              "/sessions/" + employeeSession.id + "/" + action,
+              "POST",
+              { text: "must not run" },
+              admin,
+            )
+          ).r.status,
+          400,
+          action + " must use employee controls",
+        );
+      }
+      assert.equal(
+        (
+          await req(
+            "/sessions/" + employeeSession.id,
+            "DELETE",
+            undefined,
+            admin,
+          )
+        ).r.status,
+        400,
+      );
       assert.equal(
         (
           await req("/auth/setup", "POST", {
