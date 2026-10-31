@@ -6,11 +6,13 @@ import { Catalog } from "./catalog";
 import { ChromeBridge } from "./chrome-bridge";
 import { Chrome } from "./chrome";
 import { Engine } from "./engine";
+import { BrowserLive } from "./browser-live";
 export type Application = {
   store: Store;
   engine: Engine;
   token: string;
   auth: Auth;
+  browserLive: BrowserLive;
 };
 let application: Application | undefined;
 export function app() {
@@ -34,7 +36,13 @@ export async function initialize(pageScript: string, helper: string) {
       "[Vega] Create the first administrator using the setup token" +
         (process.env.VEGA_TOKEN ? " configured in VEGA_TOKEN." : ": " + token),
     );
-  application = { store, engine, token, auth };
+  application = {
+    store,
+    engine,
+    token,
+    auth,
+    browserLive: new BrowserLive(chrome, auth),
+  };
   await bridge.start();
   engine.employee.start();
   engine.relay.restart();

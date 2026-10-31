@@ -7,7 +7,7 @@ import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import sharp from "sharp";
 import { zipSync, strToU8 } from "fflate";
 import { Store } from "../server/core/store";
@@ -248,6 +248,76 @@ test(
       browserCapture = 0,
       failRemote = false;
     const remoteInputs: any[] = [];
+    const liveTickets = new Map<string, string>();
+    const liveServer = new WebSocketServer({
+      server: mock,
+      path: "/browser-live",
+    });
+    const liveImage = (
+      await sharp(png).jpeg({ quality: 70 }).toBuffer()
+    ).toString("base64");
+    liveServer.on("connection", (socket, req) => {
+      const ticket = new URL(req.url!, "http://localhost").searchParams.get(
+          "ticket",
+        )!,
+        tabTag = liveTickets.get(ticket)!;
+      liveTickets.delete(ticket);
+      let frameId = 0,
+        pending = false,
+        editable = false,
+        pageURL = "https://example.test/" + "long/".repeat(1000);
+      const frame = () => {
+        if (pending || socket.readyState !== WebSocket.OPEN) return;
+        pending = true;
+        socket.send(
+          JSON.stringify({
+            type: "frame",
+            frameId: ++frameId,
+            tabTag,
+            title: tabTag,
+            url: pageURL,
+            capturedAt: Date.now(),
+            editable,
+            width: 1568,
+            height: 6000,
+            data: liveImage,
+          }),
+        );
+      };
+      const timer = setInterval(frame, 100);
+      socket.send(JSON.stringify({ type: "ready", tabTag, mode: "view" }));
+      frame();
+      socket.on("close", () => clearInterval(timer));
+      socket.on("message", (raw) => {
+        const message = JSON.parse(raw.toString());
+        if (message.type === "frame_ack") {
+          pending = false;
+          return;
+        }
+        if (message.type === "mode") {
+          socket.send(JSON.stringify(message));
+          return;
+        }
+        if (message.type !== "input") return;
+        remoteInputs.push(message);
+        if (failRemote) {
+          socket.terminate();
+          return;
+        }
+        editable = true;
+        if (message.action.action === "goto") pageURL = message.action.url;
+        setTimeout(() => {
+          if (socket.readyState === WebSocket.OPEN)
+            socket.send(
+              JSON.stringify({
+                type: "input_result",
+                seq: message.seq,
+                status: "executed",
+              }),
+            );
+        }, 80);
+      });
+    });
     const dialogs: { message: string; type: string }[] = [];
     const waiting = new Map<
         number,
@@ -409,7 +479,7 @@ test(
         `document.querySelectorAll('[data-mobile-test]').forEach(e=>delete e.dataset.mobileTest)`,
       );
       await until(
-        `!document.querySelector('.workspace').inert&&document.querySelector('.topbar h2')?.textContent.includes(${JSON.stringify(label === "账号" ? "账号与权限" : label === "对话" ? "" : label)})`,
+        `!document.querySelector('.workspace').inert&&(${JSON.stringify(label)}==='对话'?!!document.querySelector('.composer'):document.querySelector('.topbar h2')?.textContent.includes(${JSON.stringify(label === "账号" ? "账号与权限" : label)}))`,
       );
     };
     const layout = async (label: string) => {
@@ -519,7 +589,12 @@ test(
                   }),
                 ),
               };
-            else if (request.url.endsWith("/api/chrome/control")) {
+            else if (request.url.endsWith("/api/chrome/live")) {
+              const { tabTag } = JSON.parse(request.postData),
+                ticket = String(++browserCapture);
+              liveTickets.set(ticket, tabTag);
+              value = { ticket };
+            } else if (request.url.endsWith("/api/chrome/control")) {
               const input = JSON.parse(request.postData);
               remoteInputs.push(input);
               if (failRemote) {
@@ -633,6 +708,9 @@ test(
       sessionId = (
         await command("Target.attachToTarget", { targetId, flatten: true }, "")
       ).sessionId;
+      await command("Page.addScriptToEvaluateOnNewDocument", {
+        source: `(()=>{const Native=window.WebSocket;window.WebSocket=class extends Native{constructor(url,protocols){const u=new URL(url);if(u.pathname==='/api/chrome/live'){u.protocol='ws:';u.host='127.0.0.1:${(mock.address() as any).port}';u.pathname='/browser-live';}super(u.href,protocols);}};})()`,
+      });
       await command("Runtime.enable");
       await command("Page.enable");
       await command("Fetch.enable", {
@@ -676,7 +754,7 @@ test(
       );
       assert(
         !(await evaluate(
-          `document.querySelector('.topbar').textContent.includes('员工专属')`,
+          `(document.querySelector('.topbar')||document.querySelector('.mobile-header')).textContent.includes('员工专属')`,
         )),
         "newer employee records must not become the default chat",
       );
@@ -1006,8 +1084,14 @@ test(
       await until(
         `document.querySelector('.remote-toolbar button')?.disabled===false`,
       );
-      assert.equal(remoteInputs.at(-1).action.action, "drag");
-      assert(remoteInputs.at(-1).action.to_x < remoteInputs.at(-1).action.x);
+      assert.equal(remoteInputs.at(-1).action.action, "pointer");
+      assert.equal(remoteInputs.at(-1).action.phase, "up");
+      const moves = remoteInputs.filter(
+        (input) => input.action.action === "pointer",
+      );
+      assert(moves.some((input) => input.action.phase === "down"));
+      assert(moves.some((input) => input.action.phase === "move"));
+      assert(moves.at(-1).action.x < moves[0].action.x);
       await layout("remote browser controls");
       await fill('select[aria-label="截图操作模式"]', "click");
       const wheelPoint = await evaluate(
@@ -1048,8 +1132,10 @@ test(
         "unconfirmed delivery must not retry",
       );
       assert.equal(
-        await evaluate(`!!document.querySelector('.browser-image img')`),
-        false,
+        await evaluate(
+          `document.querySelector('.browser-image img')?.getAttribute('tabindex')`,
+        ),
+        "-1",
       );
       failRemote = false;
       await nav("对话");
@@ -1175,6 +1261,8 @@ test(
       waiting.clear();
       browser.kill();
       server.kill();
+      for (const socket of liveServer.clients) socket.terminate();
+      await new Promise<void>((yes) => liveServer.close(() => yes()));
       await new Promise<void>((yes) => mock.close(() => yes()));
       await sleep(300);
       await rm(dir, {

@@ -3,6 +3,7 @@ export default defineNitroConfig({
   preset: "node-server",
   srcDir: "server",
   compatibilityDate: "2026-10-30",
+  experimental: { websocket: true },
   publicAssets: [
     { dir: "../web/dist", baseURL: "/", maxAge: 0 },
     { dir: "../extensions", baseURL: "/extension", maxAge: 0 },

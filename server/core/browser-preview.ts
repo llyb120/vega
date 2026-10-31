@@ -11,7 +11,7 @@ const screenshotOptions = {
   maxTextChars: 0,
   feedback: "screenshot",
 };
-const remoteKeys = [
+export const remoteKeys = [
   "Enter",
   "Tab",
   "Shift+Tab",
@@ -31,7 +31,7 @@ const remoteKeys = [
   "Ctrl+Z",
   "Ctrl+Y",
 ];
-async function browserTarget(chrome: Chrome, tabTag: unknown) {
+export async function browserTarget(chrome: Chrome, tabTag: unknown) {
   assert(
     typeof tabTag === "string" && tabTag.length > 0 && tabTag.length <= 200,
     "请从浏览器列表选择标签页",

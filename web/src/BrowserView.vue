@@ -13,7 +13,79 @@ const status = ref(null),
   text = ref(""),
   address = ref(""),
   imageReady = ref(false),
-  dragStart = ref(null);
+  dragStart = ref(null),
+  liveState = ref("offline"),
+  inputBusy = ref(false);
+const inputDisabled = computed(
+  () => busy.value || inputBusy.value || !imageReady.value,
+);
+let socket = null,
+  heartbeat = null,
+  sequence = 0,
+  inflight = 0,
+  pendingPointer = null,
+  connectTimer = null;
+let imageURL = "",
+  previousImageURL = "",
+  shownFrame = null,
+  queuedTextFrame = 0,
+  queuedText = "";
+function disconnect() {
+  queuedText = "";
+  clearInterval(heartbeat);
+  clearTimeout(connectTimer);
+  heartbeat = null;
+  socket?.close();
+  socket = null;
+  inflight = 0;
+  pendingPointer = null;
+  inputBusy.value = false;
+  dragStart.value = null;
+  remote.value = false;
+  liveState.value = "offline";
+}
+function setMode() {
+  queuedText = "";
+  if (socket?.readyState !== WebSocket.OPEN) return;
+  pendingPointer = null;
+  socket.send(
+    JSON.stringify({
+      type: "mode",
+      mode: remote.value || liveState.value === "waiting" ? "view" : "control",
+    }),
+  );
+}
+function loadedImage() {
+  if (previousImageURL) {
+    URL.revokeObjectURL(previousImageURL);
+    previousImageURL = "";
+  }
+  if (!screenshot.value || socket?.readyState !== WebSocket.OPEN) return;
+  imageReady.value = true;
+  shownFrame = screenshot.value;
+  socket.send(
+    JSON.stringify({ type: "frame_ack", frameId: screenshot.value.frameId }),
+  );
+  if (!inflight) {
+    if (pendingPointer) {
+      const next = pendingPointer;
+      pendingPointer = null;
+      void control(next);
+    } else if (queuedText) {
+      const text = queuedText,
+        frameId = queuedTextFrame;
+      queuedText = "";
+      void control({ action: "type", text }, frameId);
+    }
+  }
+}
+function hidden() {
+  if (document.hidden) {
+    disconnect();
+    imageReady.value = false;
+    info.value = "页面已隐藏，实时连接已释放；点击刷新截图重新连接。";
+  }
+}
 const keys = [
   ["Enter", "回车"],
   ["Tab", "Tab"],
@@ -47,26 +119,119 @@ const viewable = (tab) =>
 async function capture(tab) {
   if (busy.value || !viewable(tab)) return;
   const request = ++version;
-  if (selected.value !== tab.tag) {
-    remote.value = false;
-    text.value = "";
-  }
-  dragStart.value = null;
+  disconnect();
+  if (selected.value !== tab.tag) text.value = "";
   imageReady.value = false;
   selected.value = tab.tag;
   screenshot.value = null;
   error.value = "";
   info.value = "";
   busy.value = true;
+  liveState.value = "connecting";
   try {
-    const result = await props.api("/chrome/screenshot", "POST", {
+    const { ticket } = await props.api("/chrome/live", "POST", {
       tabTag: tab.tag,
     });
-    if (!disposed && request === version) acceptScreenshot(result);
+    if (disposed || request !== version) return;
+    const url = new URL("/api/chrome/live", window.location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.searchParams.set("ticket", ticket);
+    const ws = new WebSocket(url);
+    socket = ws;
+    const fail = (reason) => {
+      if (disposed || request !== version || socket !== ws) return;
+      disconnect();
+      imageReady.value = false;
+      busy.value = false;
+      error.value = reason;
+    };
+    connectTimer = setTimeout(
+      () => fail("实时连接超时，请检查反向代理是否支持WebSocket并刷新"),
+      15000,
+    );
+    ws.onopen = () => {
+      clearTimeout(connectTimer);
+      heartbeat = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({ type: "ping" }));
+      }, 5000);
+    };
+    ws.onmessage = async (event) => {
+      if (disposed || request !== version || socket !== ws) return;
+      try {
+        const value = JSON.parse(event.data);
+        if (value.type === "frame") {
+          if (typeof value.data !== "string" || value.data.length > 6000000)
+            throw Error("画面过大");
+          if (previousImageURL) URL.revokeObjectURL(previousImageURL);
+          previousImageURL = imageURL;
+          imageURL = URL.createObjectURL(
+            new Blob(
+              [Uint8Array.from(atob(value.data), (c) => c.charCodeAt(0))],
+              { type: "image/jpeg" },
+            ),
+          );
+          const preview = new Image();
+          preview.src = imageURL;
+          await preview.decode();
+          if (disposed || request !== version || socket !== ws) return;
+          const { data, ...frame } = value;
+          acceptScreenshot({
+            ...frame,
+            snapshotId: "live-" + value.frameId,
+            image: {
+              url: imageURL,
+              width: value.width,
+              height: value.height,
+            },
+          });
+          busy.value = false;
+        } else if (value.type === "ready") {
+          liveState.value = "view";
+        } else if (value.type === "mode") {
+          liveState.value = value.mode;
+          remote.value = value.mode === "control";
+          if (!remote.value) {
+            queuedText = "";
+            pendingPointer = null;
+            dragStart.value = null;
+          }
+          if (value.reason) info.value = value.reason;
+        } else if (value.type === "input_result") {
+          if (value.seq !== inflight) return;
+          inflight = 0;
+          inputBusy.value = false;
+          if (value.status !== "executed") {
+            queuedText = "";
+            dragStart.value = null;
+            pendingPointer = null;
+            error.value =
+              (value.status === "needs_review"
+                ? "结果不确定，不要重复提交："
+                : "未执行：") + (value.reason || "请核对网页");
+          } else if (pendingPointer) {
+            const next = pendingPointer;
+            pendingPointer = null;
+            void control(next);
+          }
+        } else if (value.type === "error") error.value = value.reason;
+      } catch {
+        fail("实时画面格式无效，请重新连接");
+      }
+    };
+    ws.onerror = () => fail("WebSocket连接失败；请确认登录状态和反向代理配置");
+    ws.onclose = () =>
+      fail(
+        inflight
+          ? "连接中断，操作可能已执行，请核对网页，不要重复提交"
+          : error.value || "实时连接已断开，点击刷新截图重新连接",
+      );
   } catch (e) {
-    if (!disposed && request === version) error.value = e.message;
-  } finally {
-    if (!disposed && request === version) busy.value = false;
+    if (!disposed && request === version) {
+      disconnect();
+      busy.value = false;
+      error.value = e.message;
+    }
   }
 }
 async function refresh() {
@@ -121,9 +286,10 @@ function keyboard(event) {
   controls[next]?.click();
 }
 function acceptScreenshot(result) {
+  const changed = result.url !== screenshot.value?.url;
   screenshot.value = result.image ? result : null;
   selected.value = result.tabTag || selected.value;
-  address.value = result.url || "";
+  if (changed) address.value = result.url || "";
   const existing = tabs.value.find((tab) => tab.tag === selected.value);
   if (existing) {
     existing.title = result.title;
@@ -143,47 +309,45 @@ function acceptScreenshot(result) {
       controllable: true,
     });
 }
-async function control(action) {
-  if (!remote.value || busy.value || !screenshot.value || !imageReady.value)
+function control(action, frameId = shownFrame?.frameId) {
+  if (
+    !remote.value ||
+    !screenshot.value ||
+    socket?.readyState !== WebSocket.OPEN
+  )
     return;
-  const shown = screenshot.value,
-    request = ++version;
-  busy.value = true;
-  imageReady.value = false;
-  error.value = "";
-  info.value = "";
-  dragStart.value = null;
-  try {
-    const result = await props.api("/chrome/control", "POST", {
-      tabTag: shown.tabTag,
-      snapshotId: shown.snapshotId,
-      action,
-    });
-    if (disposed || request !== version) return;
-    acceptScreenshot(result);
-    if (result.status === "executed")
-      info.value = result.image
-        ? "操作已发送，截图已更新"
-        : "操作已发送，请刷新截图查看结果";
-    else
-      error.value =
-        (result.status === "not_executed"
-          ? "未操作："
-          : "操作结果需核对，不要重复提交：") +
-        (result.reason || "请刷新截图查看");
-    if (!result.image) remote.value = false;
-  } catch (e) {
-    if (!disposed && request === version) {
-      screenshot.value = null;
-      remote.value = false;
-      error.value = e.message + "；请刷新截图，不要重复提交。";
+  if (inflight || !imageReady.value) {
+    if (action.action === "pointer" && action.phase !== "down")
+      pendingPointer = action;
+    else if (action.action === "type") {
+      if (queuedText.length + action.text.length > 16000) {
+        error.value = "输入过快，请等待文字发送完成";
+        return;
+      }
+      if (!queuedText) queuedTextFrame = frameId;
+      queuedText += action.text;
     }
-  } finally {
-    if (!disposed && request === version) busy.value = false;
+    return;
   }
+  if (socket.bufferedAmount > 65536) {
+    disconnect();
+    error.value = "网络拥堵，已停止操作；请核对网页，不要重复提交。";
+    return;
+  }
+  error.value = "";
+  inflight = ++sequence;
+  inputBusy.value = true;
+  socket.send(
+    JSON.stringify({
+      type: "input",
+      seq: inflight,
+      frameId,
+      action,
+    }),
+  );
 }
 function imagePoint(event) {
-  const image = screenshot.value?.image,
+  const image = shownFrame?.image,
     r = event.currentTarget.getBoundingClientRect();
   if (!image || !r.width || !r.height) return;
   const x = ((event.clientX - r.left) * image.width) / r.width,
@@ -210,6 +374,7 @@ function pointerDown(event) {
     !remote.value ||
     mode.value !== "drag" ||
     busy.value ||
+    inputBusy.value ||
     !imageReady.value ||
     event.button !== 0
   )
@@ -217,26 +382,83 @@ function pointerDown(event) {
   const point = imagePoint(event);
   if (!point) return;
   event.preventDefault();
-  dragStart.value = { ...point, at: performance.now(), id: event.pointerId };
+  dragStart.value = { ...point, id: event.pointerId };
   event.currentTarget.setPointerCapture(event.pointerId);
+  void control({ action: "pointer", phase: "down", ...point });
 }
 function pointerUp(event) {
   const start = dragStart.value;
   dragStart.value = null;
   if (!start || start.id !== event.pointerId) return;
   event.currentTarget.releasePointerCapture(event.pointerId);
-  const end = imagePoint(event);
-  if (!end || Math.hypot(end.x - start.x, end.y - start.y) < 3) return;
-  void control({
-    action: "drag",
-    x: start.x,
-    y: start.y,
-    to_x: end.x,
-    to_y: end.y,
-    duration_ms: Math.round(
-      Math.max(80, Math.min(1500, performance.now() - start.at)),
-    ),
-  });
+  const end = imagePoint(event) || start.last || { x: start.x, y: start.y };
+  void control({ action: "pointer", phase: "up", ...end });
+}
+function pointerMove(event) {
+  if (!dragStart.value || dragStart.value.id !== event.pointerId) return;
+  const point = imagePoint(event);
+  if (point) {
+    dragStart.value.last = point;
+    void control({ action: "pointer", phase: "move", ...point });
+  }
+}
+function pointerCancel() {
+  if (!dragStart.value) return;
+  dragStart.value = null;
+  pendingPointer = null;
+  if (remote.value && socket?.readyState === WebSocket.OPEN)
+    socket.send(JSON.stringify({ type: "mode", mode: "view" }));
+}
+function imageKey(event) {
+  if (
+    !remote.value ||
+    event.isComposing ||
+    event.keyCode === 229 ||
+    event.metaKey ||
+    event.altKey
+  )
+    return;
+  if (event.key === " " && screenshot.value?.editable && !event.ctrlKey) {
+    event.preventDefault();
+    void control({ action: "type", text: " " });
+    return;
+  }
+  const key =
+    (event.ctrlKey ? "Ctrl+" : "") +
+    (event.shiftKey && event.key === "Tab" ? "Shift+" : "") +
+    (event.key === " "
+      ? "Space"
+      : event.key.length === 1 && event.ctrlKey
+        ? event.key.toUpperCase()
+        : event.key);
+  if (
+    [
+      "Enter",
+      "Tab",
+      "Shift+Tab",
+      "Escape",
+      "Backspace",
+      "Delete",
+      "ArrowLeft",
+      "ArrowRight",
+      "ArrowUp",
+      "ArrowDown",
+      "Home",
+      "End",
+      "PageUp",
+      "PageDown",
+      "Space",
+      "Ctrl+A",
+      "Ctrl+Z",
+      "Ctrl+Y",
+    ].includes(key)
+  ) {
+    event.preventDefault();
+    void control({ action: "press", key });
+  } else if (event.key.length === 1 && !event.ctrlKey) {
+    event.preventDefault();
+    void control({ action: "type", text: event.key });
+  }
 }
 function scrollRemote(delta, delta_x = 0) {
   if (!screenshot.value) return;
@@ -251,7 +473,7 @@ function scrollRemote(delta, delta_x = 0) {
 function wheelImage(event) {
   if (!remote.value) return;
   event.preventDefault();
-  if (busy.value) return;
+  if (busy.value || inputBusy.value) return;
   const point = imagePoint(event);
   if (!point) return;
   const delta = Math.round(
@@ -270,7 +492,7 @@ function wheelImage(event) {
 }
 function sendText() {
   const value = text.value;
-  if (!value) return;
+  if (!value || inflight || !imageReady.value) return;
   text.value = "";
   void control({ action: "type", text: value });
 }
@@ -278,13 +500,20 @@ function failedImage() {
   imageReady.value = false;
   remote.value = false;
   screenshot.value = null;
-  error.value =
-    "截图图片加载失败。登录可能已过期，或图片已不可用；请重新登录后刷新截图。";
+  disconnect();
+  error.value = "实时画面加载失败，请刷新截图重新连接。";
 }
-onMounted(() => void refresh());
+onMounted(() => {
+  document.addEventListener("visibilitychange", hidden);
+  void refresh();
+});
 onBeforeUnmount(() => {
   disposed = true;
   version++;
+  disconnect();
+  if (imageURL) URL.revokeObjectURL(imageURL);
+  if (previousImageURL) URL.revokeObjectURL(previousImageURL);
+  document.removeEventListener("visibilitychange", hidden);
 });
 </script>
 
@@ -361,15 +590,25 @@ onBeforeUnmount(() => {
             :aria-pressed="remote"
             :aria-label="remote ? '退出远程操作' : '开启远程操作'"
             :disabled="busy || !screenshot || !imageReady"
-            @click="
-              remote = !remote;
-              dragStart = null;
-            "
+            @click="setMode"
           >
-            {{ remote ? "退出操作" : "远程操作" }}
+            {{
+              liveState === "waiting"
+                ? "等待控制权…"
+                : remote
+                  ? "退出操作"
+                  : "远程操作"
+            }}
           </button>
+          <span :class="['pill', liveState === 'offline' ? '' : 'green']">{{
+            liveState === "offline"
+              ? "已断开"
+              : liveState === "connecting"
+                ? "连接中"
+                : "实时画面"
+          }}</span>
           <a
-            v-if="screenshot"
+            v-if="!!screenshot"
             :href="screenshot.image.url"
             target="_blank"
             rel="noopener noreferrer"
@@ -386,15 +625,19 @@ onBeforeUnmount(() => {
       </div>
       <div v-if="remote" class="remote-controls">
         <div class="remote-toolbar">
-          <select v-model="mode" aria-label="截图操作模式" :disabled="busy">
+          <select
+            v-model="mode"
+            aria-label="截图操作模式"
+            :disabled="inputDisabled"
+          >
             <option value="click">点击</option>
             <option value="double">双击</option>
             <option value="right">右键</option>
             <option value="drag">拖动</option>
           </select>
-          <button :disabled="busy || !imageReady" @click="scrollRemote(-600)">
+          <button :disabled="inputDisabled" @click="scrollRemote(-600)">
             网页上滚</button
-          ><button :disabled="busy || !imageReady" @click="scrollRemote(600)">
+          ><button :disabled="inputDisabled" @click="scrollRemote(600)">
             网页下滚
           </button>
         </div>
@@ -414,7 +657,7 @@ onBeforeUnmount(() => {
               placeholder="要输入到网页的文字"
             ></textarea
             ><button
-              :disabled="busy || !imageReady || !screenshot?.editable || !text"
+              :disabled="inputDisabled || !screenshot?.editable || !text"
             >
               发送文字
             </button>
@@ -423,7 +666,7 @@ onBeforeUnmount(() => {
             <button
               v-for="[key, label] in keys"
               :key="key"
-              :disabled="busy || !imageReady"
+              :disabled="inputDisabled"
               :aria-label="'远程按键 ' + label"
               @click="control({ action: 'press', key })"
             >
@@ -432,17 +675,17 @@ onBeforeUnmount(() => {
           </div>
           <div class="remote-keys">
             <button
-              :disabled="busy || !imageReady"
+              :disabled="inputDisabled"
               @click="control({ action: 'back' })"
             >
               网页后退</button
             ><button
-              :disabled="busy || !imageReady"
+              :disabled="inputDisabled"
               @click="control({ action: 'forward' })"
             >
               网页前进</button
             ><button
-              :disabled="busy || !imageReady"
+              :disabled="inputDisabled"
               @click="control({ action: 'reload' })"
             >
               重载网页
@@ -460,7 +703,7 @@ onBeforeUnmount(() => {
               placeholder="https://example.com"
               autocapitalize="none"
               spellcheck="false"
-            /><button :disabled="busy || !imageReady">前往</button>
+            /><button :disabled="inputDisabled">前往</button>
           </form>
         </details>
         <p class="hint remote-mode-hint">
@@ -474,13 +717,12 @@ onBeforeUnmount(() => {
       <div v-if="busy" class="browser-placeholder" role="status">
         <span class="spinner"></span>正在读取浏览器…
       </div>
-      <figure v-else-if="screenshot" class="browser-capture">
+      <figure v-else-if="!!screenshot" class="browser-capture">
         <figcaption>
-          截图于 {{ new Date(screenshot.capturedAt).toLocaleString() }}
+          实时画面 · {{ new Date(screenshot.capturedAt).toLocaleTimeString() }}
         </figcaption>
         <div class="browser-image">
           <img
-            :key="screenshot.snapshotId"
             :src="screenshot.image.url"
             :width="screenshot.image.width"
             :height="screenshot.image.height"
@@ -490,11 +732,14 @@ onBeforeUnmount(() => {
               'remote-active': remote,
               'remote-drag': remote && mode === 'drag',
             }"
-            @load="imageReady = true"
+            @load="loadedImage"
+            :tabindex="remote ? 0 : -1"
+            @keydown="imageKey"
             @click="clickImage"
             @pointerdown="pointerDown"
+            @pointermove="pointerMove"
             @pointerup="pointerUp"
-            @pointercancel="dragStart = null"
+            @pointercancel="pointerCancel"
             @wheel="wheelImage"
             @contextmenu="remote && $event.preventDefault()"
             @error="failedImage"
@@ -583,6 +828,13 @@ onBeforeUnmount(() => {
   cursor: grab;
 }
 @media (max-width: 760px) {
+  .remote-controls button,
+  .remote-toolbar select,
+  .browser-address button,
+  .browser-address .button-link,
+  .browser-tab {
+    min-height: 44px;
+  }
   .remote-controls {
     padding: 8px 10px;
   }

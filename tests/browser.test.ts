@@ -1,3 +1,6 @@
+import { EventEmitter } from "node:events";
+import { BrowserLive } from "../server/core/browser-live";
+import type { Auth, Principal } from "../server/core/auth";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -194,7 +197,8 @@ test(
     );
     const store = new Store(":memory:"),
       bridge = new FixtureBridge();
-    let submitted = 0;
+    let submitted = 0,
+      live: BrowserLive | undefined;
     const server = createServer((req, res) => {
       res.setHeader("Content-Type", "text/html");
       if (req.url === "/submit") {
@@ -494,11 +498,177 @@ test(
           ).result.value,
         ) > 100,
       );
+      await bridge.send(
+        "Emulation.setDeviceMetricsOverride",
+        { width: 1000, height: 700, deviceScaleFactor: 2, mobile: false },
+        await bridge.attached(tag),
+      );
+      await bridge.send(
+        "Runtime.evaluate",
+        { expression: "window.scrollTo(0,0)" },
+        await bridge.attached(tag),
+      );
+      const principal = {
+        hash: "live-user",
+        user: { id: "live-admin", role: "admin" },
+      } as Principal;
+      const auth = {
+        events: new EventEmitter(),
+        resolveHash: () => principal,
+        authenticate: () => principal,
+      } as unknown as Auth;
+      live = new BrowserLive(engine, auth);
+      const ticket = await live.ticket(principal, tag),
+        frames: Obj[] = [],
+        messages: Obj[] = [];
+      const peer = {
+        id: "live-socket",
+        request: {
+          url: "http://localhost/api/chrome/live?ticket=" + ticket.ticket,
+          headers: new Headers({
+            origin: "http://localhost",
+            cookie: "vega_session=fixture",
+          }),
+        },
+        close: () => {},
+        send: (raw: unknown) => {
+          const value = JSON.parse(String(raw));
+          messages.push(value);
+          if (value.type === "frame") {
+            frames.push(value);
+            queueMicrotask(() =>
+              live!.message(
+                peer,
+                JSON.stringify({ type: "frame_ack", frameId: value.frameId }),
+              ),
+            );
+          }
+        },
+      };
+      const until = async (predicate: () => boolean) => {
+        for (let i = 0; i < 400; i++) {
+          if (predicate()) return;
+          await sleep(10);
+        }
+        throw Error(
+          "Live Chrome timed out " +
+            JSON.stringify(
+              messages.map((m) => ({
+                type: m.type,
+                reason: m.reason,
+                status: m.status,
+              })),
+            ),
+        );
+      };
+      const beforeFrames = Number(
+        store.db.prepare("SELECT COUNT(*) AS n FROM blobs").get()!.n,
+      );
+      live.open(peer);
+      await until(() => frames.length >= 2);
+      assert.equal(
+        frames.at(-1)!.width,
+        1568,
+        "high-DPR frames are resized independently of CSS coordinates",
+      );
+      live.message(peer, JSON.stringify({ type: "mode", mode: "control" }));
+      await until(() =>
+        messages.some((m) => m.type === "mode" && m.mode === "control"),
+      );
+      let sequence = 0;
+      const input = async (action: Obj) => {
+        const seq = ++sequence;
+        live!.message(
+          peer,
+          JSON.stringify({
+            type: "input",
+            seq,
+            frameId: frames.at(-1)!.frameId,
+            action,
+          }),
+        );
+        await until(() =>
+          messages.some((m) => m.type === "input_result" && m.seq === seq),
+        );
+        const result = messages.find(
+          (m) => m.type === "input_result" && m.seq === seq,
+        )!;
+        assert.equal(result.status, "executed", result.reason);
+      };
+      const point = async (selector: string) => {
+        const r = (
+          await bridge.send(
+            "Runtime.evaluate",
+            {
+              expression: `(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,width:innerWidth,height:innerHeight}})()`,
+              returnByValue: true,
+            },
+            await bridge.attached(tag),
+          )
+        ).result.value;
+        const f = frames.at(-1)!;
+        return { x: (r.x * f.width) / r.width, y: (r.y * f.height) / r.height };
+      };
+      await input({
+        action: "click_at",
+        ...(await point("input[aria-label=Name]")),
+      });
+      await until(() => frames.at(-1)!.editable === true);
+      await input({ action: "press", key: "Ctrl+A" });
+      await input({ action: "type", text: "实时WS输入" });
+      assert.equal(
+        (
+          await bridge.send(
+            "Runtime.evaluate",
+            {
+              expression: "document.querySelector('input').value",
+              returnByValue: true,
+            },
+            await bridge.attached(tag),
+          )
+        ).result.value,
+        "实时WS输入",
+      );
+      const sliderLive = await point("#slider");
+      await input({ action: "pointer", phase: "down", ...sliderLive });
+      await input({
+        action: "pointer",
+        phase: "move",
+        x: sliderLive.x + 70,
+        y: sliderLive.y,
+      });
+      await input({
+        action: "pointer",
+        phase: "up",
+        x: sliderLive.x + 70,
+        y: sliderLive.y,
+      });
+      await input({ action: "goto", url: url + "/live" });
+      await until(() => frames.at(-1)!.url === url + "/live");
+      await input({ action: "click_at", ...(await point("button")) });
+      await until(() => submitted === 3);
+      const duplicate = {
+        type: "input",
+        seq: sequence,
+        frameId: frames.at(-1)!.frameId,
+        action: { action: "click_at", ...(await point("button")) },
+      };
+      live.message(peer, JSON.stringify(duplicate));
+      await engine.gate.run(async () => {});
+      assert.equal(submitted, 3, "duplicate WS input cannot submit twice");
+      assert.equal(
+        Number(store.db.prepare("SELECT COUNT(*) AS n FROM blobs").get()!.n),
+        beforeFrames,
+        "continuous live frames must never be saved to SQLite",
+      );
+      await live.close();
+      live = undefined;
       assert(
         archive.images.length === 1,
         "Observation not persisted in SQLite",
       );
     } finally {
+      await live?.close();
       bridge.close();
       store.close();
       await new Promise<void>((yes) => {
