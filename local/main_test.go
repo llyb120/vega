@@ -143,6 +143,35 @@ func TestPermissionPageRequiresLocalOrigin(t *testing.T) {
 	}
 }
 
+func TestClientIdentitySurvivesRestartsAndPermissionMigration(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "vega-local", "trusted-sites.json")
+	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, []byte(`{"trustedOrigins":["https://vega.example"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := newAgent()
+	if err != nil || len(first.config.ClientID) != 32 {
+		t.Fatalf("missing stable client ID: %v", err)
+	}
+	if strings.HasPrefix(first.configToken, first.config.ClientID) {
+		t.Fatal("public device identity must not expose the local permission token")
+	}
+	second, err := newAgent()
+	if err != nil || first.config.ClientID != second.config.ClientID || !second.allowOrigin("https://vega.example") {
+		t.Fatalf("restart changed identity or trusted origins: %v", err)
+	}
+}
+
 func TestOriginValidation(t *testing.T) {
 	for _, origin := range []string{"", "file://", "https://user:pass@example.com", "https://example.com/path", "https://example.com?x=1"} {
 		if validOrigin(origin) {

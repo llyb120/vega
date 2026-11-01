@@ -299,7 +299,8 @@ export class Tools {
   }
   private agent() {
     if (!this.session.localAgent) return;
-    const agent = this.engine.localAgents.active(this.session.ownerId);
+    if (!this.session.clientId) throw new LocalAgentUnavailable("此历史会话尚未绑定客户端，请在输入框旁选择执行客户端后继续；不会自动选择设备或重试操作。");
+    const agent = this.engine.localAgents.active(this.session.ownerId, this.session.clientId);
     if (!agent) throw new LocalAgentUnavailable();
     return agent;
   }

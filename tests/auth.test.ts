@@ -54,6 +54,26 @@ test("initial administrator is one-time and passwords/cookie tokens are not stor
     store.close();
   }
 });
+test("each successful login starts a fresh seven-day period, not the first login date", async (t) => {
+  const store = new Store(":memory:"), auth = new Auth(store, secret);
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  try {
+    const first = await auth.setup({ setupToken: secret, username: "seven-days", password });
+    assert.equal(first.principal.expiresAt, now + 7 * 24 * 60 * 60 * 1000);
+    now += 3 * 24 * 60 * 60 * 1000;
+    const latest = await auth.login({ username: "seven-days", password });
+    assert.equal(latest.principal.expiresAt, now + 7 * 24 * 60 * 60 * 1000);
+    now = first.principal.expiresAt;
+    assert.equal(auth.authenticate(first.token), undefined);
+    assert(auth.authenticate(latest.token));
+    now = latest.principal.expiresAt - 1;
+    assert(auth.authenticate(latest.token));
+    now++;
+    assert.equal(auth.authenticate(latest.token), undefined);
+  } finally { store.close(); }
+});
+
 test("concurrent initial setup cannot create two initial administrators", async () => {
   const store = new Store(":memory:"),
     auth = new Auth(store, secret);

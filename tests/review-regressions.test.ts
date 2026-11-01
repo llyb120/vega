@@ -82,7 +82,7 @@ test("a local response loss stops queued calls and persists the question instead
   const engine = new Engine(store, catalog, chrome);
   engine.employee.closed = true;
   store.put("config", { model: "fixture/model", provider: {} });
-  const session = store.newSession({ ownerId: "alice", localAgent: true, cwd: process.cwd() });
+  const session = store.newSession({ ownerId: "alice", localAgent: true, clientId: "a".repeat(32), cwd: process.cwd() });
   engine.localAgents.connect("alice", { instance: "a".repeat(32), cwd: session.cwd, platform: "windows" });
   let operations = 0, completions = 0;
   engine.localAgents.request = async () => { operations++; throw new LocalAgentUnavailable(); };

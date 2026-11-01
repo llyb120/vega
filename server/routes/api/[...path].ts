@@ -122,6 +122,7 @@ export default defineEventHandler(async (event) => {
             ? maskedConfig(engine.config())
             : { model: engine.config().model, provider: {} },
         cwd: user.role === "viewer" ? "" : process.cwd(),
+        clients: engine.localAgents.list(user.id),
         stack: {
           frontend: "Vue 3.6 Vapor",
           backend: "Nitro",
@@ -139,14 +140,18 @@ export default defineEventHandler(async (event) => {
       if (path.length === 1 && method === "POST") {
         assert(!a.model || typeof a.model === "string", "Invalid model");
         if (a.model) await engine.catalog.resolve(engine.config(), a.model);
-        const agent = engine.localAgents.active(user.id),
-          localAgent = a.localAgent === undefined ? !!agent : a.localAgent;
+        assert(a.clientId === undefined || (typeof a.clientId === "string" && /^[a-f0-9-]{32,36}$/.test(a.clientId)), "Invalid client ID");
+        const clients = engine.localAgents.list(user.id),
+          localAgent = a.localAgent === undefined ? clients.length > 0 : a.localAgent,
+          agent = engine.localAgents.active(user.id, a.clientId);
         assert(typeof localAgent === "boolean", "Invalid execution mode");
-        assert(!localAgent || agent, "客户端未连接，请先连接客户端");
+        assert(!localAgent || agent, "客户端未连接或存在多个客户端，请选择在线执行客户端");
         return store.newSession({
           cwd: localAgent ? agent!.cwd : a.cwd,
           localAgent,
           localPlatform: localAgent ? agent!.platform : undefined,
+          clientId: localAgent ? agent!.clientId : undefined,
+          clientName: localAgent ? agent!.name : undefined,
           ownerId: user.id,
           model: a.model,
           title: a.title,
@@ -191,7 +196,7 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
       if (path[2] === "execution" && method === "POST")
-        return await engine.switchExecution(key, a.localAgent);
+        return await engine.switchExecution(key, a.localAgent, a.clientId, user.id);
       if (path[2] === "stage" && method === "POST")
         return store.stage(key, a.inheritModel === true);
       if (path[2] === "cancel" && method === "POST") {

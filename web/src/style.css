@@ -1425,6 +1425,14 @@ nav button.selected {
 .execution-switch.local .execution-track::after {
   transform: translateX(10px);
 }
+.execution-client {
+  flex: 0 1 200px;
+  min-width: 120px;
+  max-width: 100%;
+  min-height: 36px;
+  font-size: 12px;
+  padding: 4px 7px;
+}
 .execution-warning {
   margin: 6px 0 0;
   font-size: 12px;
@@ -2059,6 +2067,10 @@ summary {
   }
   .execution-switch {
     min-height: 44px;
+  }
+  .execution-client {
+    min-height: 44px;
+    font-size: 16px;
   }
   .composer-bottom .hint {
     display: none;

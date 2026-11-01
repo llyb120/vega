@@ -20,6 +20,7 @@ import (
 )
 
 type Config struct {
+	ClientID       string   `json:"clientId"`
 	TrustedOrigins []string `json:"trustedOrigins"`
 }
 
@@ -39,6 +40,27 @@ func newAgent() (*Agent, error) {
 	}
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
+	}
+	if a.config.ClientID == "" {
+		id := make([]byte, 16)
+		if _, err = rand.Read(id); err != nil {
+			return nil, err
+		}
+		a.config.ClientID = hex.EncodeToString(id)
+		data, err = json.Marshal(a.config)
+		if err == nil {
+			err = os.MkdirAll(filepath.Dir(a.configPath), 0700)
+		}
+		if err == nil {
+			err = os.WriteFile(a.configPath, data, 0600)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	decoded, err := hex.DecodeString(a.config.ClientID)
+	if err != nil || len(decoded) != 16 {
+		return nil, fmt.Errorf("Invalid client ID in local config")
 	}
 	return a, nil
 }
@@ -94,7 +116,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		}
 		origin, remove := r.FormValue("origin"), r.FormValue("remove")
 		a.mu.Lock()
-		next := Config{TrustedOrigins: append([]string{}, a.config.TrustedOrigins...)}
+		next := Config{ClientID: a.config.ClientID, TrustedOrigins: append([]string{}, a.config.TrustedOrigins...)}
 		if origin != "" && a.pendingOrigins[origin] {
 			next.TrustedOrigins = append(next.TrustedOrigins, origin)
 		} else if remove != "" {

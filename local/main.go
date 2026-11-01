@@ -111,7 +111,11 @@ func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
 	_ = conn.SetReadDeadline(time.UnixMilli(proof.ExpiresAt))
 	conn.SetReadLimit(maxBody)
 	cwd, _ := os.Getwd()
-	if conn.WriteJSON(map[string]any{"type": "ready", "instance": proof.Instance, "userId": proof.UserID, "cwd": cwd, "platform": runtime.GOOS}) != nil {
+	name, _ := os.Hostname()
+	if name == "" {
+		name = "Vega " + runtime.GOOS
+	}
+	if conn.WriteJSON(map[string]any{"type": "ready", "instance": proof.Instance, "userId": proof.UserID, "clientId": a.config.ClientID, "name": name, "cwd": cwd, "platform": runtime.GOOS}) != nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(r.Context())

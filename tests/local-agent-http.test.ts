@@ -55,7 +55,8 @@ test("deployed login → frontend WebSocket → local client executes once, paus
   const client = spawn(binary, [], { cwd: clientDir, windowsHide: true, stdio: "ignore", env: { ...process.env, APPDATA: configDir, XDG_CONFIG_HOME: configDir } });
   let logs = "", cookie = "", csrf = "", online = false, dropNext = false;
   backend.stdout!.on("data", (b) => logs += b); backend.stderr!.on("data", (b) => logs += b);
-  const events: any[] = [], sockets: WebSocket[] = [];
+  const events: any[] = [], sockets: WebSocket[] = [], extraJobs: any[] = [];
+  const extraClient = { clientId: "e".repeat(32), instance: "b".repeat(32), name: "Remote Linux", cwd: "/remote/work", platform: "linux" };
   const api = async (path: any, method: any = "GET", data?: any) => {
     const r = await fetch(base + "/api" + path, { method, headers: { cookie, "x-csrf-token": csrf, "content-type": "application/json" }, body: data === undefined ? undefined : JSON.stringify(data) });
     const value = await r.json(); if (!r.ok) throw Error(JSON.stringify(value)); return value;
@@ -75,6 +76,8 @@ test("deployed login → frontend WebSocket → local client executes once, paus
     const setup = await fetch(base + "/api/auth/setup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ setupToken: token, username: "local-fixture", password: "a-long-local-fixture-password" }) });
     assert.equal(setup.status, 200);
     cookie = setup.headers.get("set-cookie")!.split(";")[0]; const login = await setup.json(); csrf = login.csrfToken;
+    const cookieAge = Number(/Max-Age=(\d+)/i.exec(setup.headers.get("set-cookie")!)?.[1]);
+    assert(cookieAge >= 604790 && cookieAge <= 604800, "login cookie must last seven days from this login");
     const denied = await fetch(base + "/api/local-agent/ticket", { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ instance: "a".repeat(32) }) });
     assert.equal(denied.status, 403, "login tickets still require CSRF");
     const once = await api("/local-agent/ticket", "POST", { instance: "a".repeat(32) });
@@ -87,6 +90,11 @@ test("deployed login → frontend WebSocket → local client executes once, paus
     eventsSocket.on("message", (raw) => {
       const event = JSON.parse(raw.toString()); events.push(event);
       if (event.type === "local_agent_request") {
+        if (event.data.instance === extraClient.instance) {
+          const { args, op } = event.data;
+          extraJobs.push(event.data);
+          void api("/local-agent/result", "POST", { ...event.data, result: op === "file" ? { isDir: true, path: args.path } : { output: "remote-device-result", exitCode: 0 } });
+        }
         bridge!.forward(event.data);
         if (dropNext && event.data.op === "exec") {
           dropNext = false;
@@ -141,6 +149,26 @@ test("deployed login → frontend WebSocket → local client executes once, paus
     await api("/sessions/" + session.id + "/messages", "POST", { text: "continue after repair" });
     await until(() => events.some((e) => e.type === "done" && e.session === session.id));
     assert.equal((await readFile(join(clientDir, "loss.txt"), "utf8")).trim(), "once", "reconnect must not replay the original mutation");
+    assert.equal((await api("/sessions/" + session.id)).session.clientId, session.clientId, "reconnect retains stable device identity");
+    await api("/local-agent/connect", "POST", extraClient);
+    const clients = (await api("/bootstrap")).clients;
+    assert.equal(clients.length, 2);
+    assert(clients.some((item: any) => item.id === extraClient.clientId && item.name === extraClient.name));
+    await assert.rejects(api("/sessions", "POST", { localAgent: true }), /多个客户端/);
+    const remote = await api("/sessions", "POST", { localAgent: true, clientId: extraClient.clientId });
+    assert.equal(remote.clientId, extraClient.clientId);
+    assert.equal(remote.cwd, extraClient.cwd);
+    events.length = 0;
+    await api("/sessions/" + remote.id + "/messages", "POST", { text: "execute on the selected remote computer" });
+    await until(() => events.some((e) => e.type === "done" && e.session === remote.id));
+    assert.equal(extraJobs.filter((job) => job.op === "exec").length, 1);
+    assert((await api("/sessions/" + remote.id)).messages.some((item: any) => item.role === "tool" && item.text.includes("remote-device-result")));
+    await api("/local-agent/disconnect", "POST", { instance: extraClient.instance });
+    assert.equal((await api("/bootstrap")).clients.length, 1);
+    assert.equal((await api("/sessions/" + remote.id)).session.clientId, extraClient.clientId, "offline selection must not jump to the remaining client");
+    const rebound = await api("/sessions/" + remote.id + "/execution", "POST", { localAgent: true, clientId: session.clientId });
+    assert.equal(rebound.clientId, session.clientId);
+    assert.equal(rebound.cwd, clientDir);
   } finally {
     bridge?.close(); globalThis.WebSocket = original;
     for (const socket of sockets) socket.terminate();

@@ -1,6 +1,6 @@
 <script setup vapor>
 import SettingsView from "./SettingsView.vue";
-import { LocalAgentBridge } from "./local-agent";
+import { LocalAgentBridge, canBridgeLocal } from "./local-agent";
 import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import TurnProcess from "./TurnProcess.vue";
@@ -26,7 +26,9 @@ const narrow = ref(false),
   menuButton = ref(null),
   imageInput = ref(null),
   uploading = ref(false),
-  localConnected = ref(false);
+  onlineClients = ref([]);
+const localConnected = computed(() => onlineClients.value.length > 0);
+const clientStatus = computed(() => localConnected.value ? `客户端在线 · ${onlineClients.value.length} 台` : "无在线客户端");
 let localBridge;
 const mobileTitles = {
   chat: "对话",
@@ -134,6 +136,7 @@ const sessions = ref([]),
   attachments = ref([]),
   sending = ref(false),
   draftExecution = ref(null),
+  draftClientId = ref(""),
   switchingExecution = ref(false);
 const contextBudget = ref(null),
   fireState = ref(null);
@@ -196,6 +199,11 @@ const isRunning = computed(
 const executionLocal = computed(
   () => current.value ? !!current.value.localAgent : (draftExecution.value ?? localConnected.value),
 );
+const executionClientId = computed(
+  () => current.value ? (current.value.clientId || "") : (draftClientId.value || onlineClients.value[0]?.id || ""),
+);
+const selectedClient = computed(() => onlineClients.value.find((client) => client.id === executionClientId.value));
+const executionUnavailable = computed(() => executionLocal.value && !selectedClient.value);
 const executionBusy = computed(
   () => switchingExecution.value || sending.value || isRunning.value || fireState.value?.status === "running",
 );
@@ -476,8 +484,8 @@ function openEventSocket(url, generation) {
         const reconnect = eventsWasConnected;
         eventsReady = true;
         eventsWasConnected = true;
-        if (!localBridge) {
-          localBridge = new LocalAgentBridge(httpApi, user.value.id, (online) => (localConnected.value = online));
+        if (!localBridge && canBridgeLocal()) {
+          localBridge = new LocalAgentBridge(httpApi, user.value.id);
           void localBridge.connect();
         }
         if (error.value.includes("实时")) error.value = "";
@@ -502,6 +510,7 @@ function openEventSocket(url, generation) {
   ws.onclose = (event) => {
     if (generation !== eventGeneration) return;
     eventsReady = false;
+    onlineClients.value = [];
     localBridge?.close();
     localBridge = null;
     clearInterval(eventsHeartbeat);
@@ -535,6 +544,7 @@ async function bootstrap() {
   user.value = b.user;
   sessions.value = (b.sessions || []).filter((session) => !session.taskId);
   running.value = b.running || {};
+  onlineClients.value = b.clients || [];
   config.value = b.config || {};
   if (!project.value) project.value = b.cwd;
   return b;
@@ -615,6 +625,8 @@ function resetLogin() {
   setupToken.value = "";
   current.value = null;
   draftExecution.value = null;
+  draftClientId.value = "";
+  onlineClients.value = [];
   sessionRequest++;
   sessionLoading.value = false;
   sessions.value = [];
@@ -686,31 +698,40 @@ async function newSession() {
     const s = await api("/sessions", "POST", {
       cwd: project.value,
       localAgent: localConnected.value,
+      clientId: onlineClients.value[0]?.id,
     });
     draftExecution.value = null;
+    draftClientId.value = "";
     await Promise.all([bootstrap(), selectSession(s)]);
   });
 }
 async function toggleExecution() {
+  await changeExecution(!executionLocal.value, selectedClient.value?.id || onlineClients.value[0]?.id);
+}
+async function changeClient(event) {
+  await changeExecution(true, event.target.value);
+  event.target.value = executionClientId.value;
+}
+async function changeExecution(localAgent, clientId) {
   if (!canWriteCurrent.value || executionBusy.value) return;
-  const localAgent = !executionLocal.value;
-  if (localAgent && !localConnected.value) {
-    error.value = "客户端未连接，请先连接客户端";
+  if (localAgent && !onlineClients.value.some((client) => client.id === clientId)) {
+    error.value = "所选客户端未在线，请选择在线客户端";
     return;
   }
   if (!current.value) {
     draftExecution.value = localAgent;
+    draftClientId.value = localAgent ? clientId : "";
     return;
   }
   const id = current.value.id, request = ++sessionRequest;
   switchingExecution.value = true;
   try {
     await attempt(async () => {
-      const session = await api(`/sessions/${id}/execution`, "POST", { localAgent });
+      const session = await api(`/sessions/${id}/execution`, "POST", { localAgent, clientId: localAgent ? clientId : undefined });
       if (current.value?.id !== id || request !== sessionRequest) return;
       current.value = session;
       sessions.value = sessions.value.map((s) => s.id === id ? session : s);
-      notice.value = `已切换到${localAgent ? "客户端" : "服务端"}，工作目录：${session.cwd}。两端文件不会自动同步。`;
+      notice.value = `已切换到${localAgent ? "客户端 " + session.clientName : "服务端"}，工作目录：${session.cwd}。两端文件不会自动同步。`;
     });
   } finally {
     switchingExecution.value = false;
@@ -744,8 +765,8 @@ async function removeSession(s) {
 }
 async function send() {
   if (!canWriteCurrent.value || switchingExecution.value) return;
-  if (executionLocal.value && !localConnected.value) {
-    error.value = "客户端已断开，请重连后继续，或手动切换到服务端；不会自动重试操作";
+  if (executionUnavailable.value) {
+    error.value = "所选客户端已离线或尚未选择，请选择在线客户端，或手动切换到服务端；不会自动重试操作";
     return;
   }
   if (sending.value || (!draft.value.trim() && !attachments.value.length))
@@ -758,8 +779,10 @@ async function send() {
       const s = await api("/sessions", "POST", {
         cwd: project.value,
         localAgent: executionLocal.value,
+        clientId: executionLocal.value ? executionClientId.value : undefined,
       });
       draftExecution.value = null;
+      draftClientId.value = "";
       await Promise.all([bootstrap(), selectSession(s)]);
     }
     const id = current.value.id;
@@ -849,6 +872,10 @@ async function refreshCurrent() {
   running.value[current.value.id] = data.running;
 }
 async function handleEvent(event) {
+  if (event.type === "clients_changed") {
+    await bootstrap();
+    return;
+  }
   if (event.type === "execution_changed") {
     await bootstrap();
     if (event.session === current.value?.id) await refreshCurrent();
@@ -1187,8 +1214,8 @@ onBeforeUnmount(() => {
         class="pill"
         :class="{ green: localConnected }"
         role="status"
-        :title="localConnected ? '本机已连接 · 新建会话将在本机执行' : '本机未连接 · 请启动本地客户端并完成站点授权'"
-      >{{ localConnected ? '本机已连接' : '本机未连接' }}</span>
+        :title="clientStatus + ' · 新会话可选择任意在线客户端，已有会话不会自动切换'"
+      >{{ clientStatus }}</span>
       <span
         v-if="narrow && view === 'chat' && isRunning"
         class="status-dot"
@@ -1409,8 +1436,8 @@ onBeforeUnmount(() => {
               class="pill"
               :class="{ green: localConnected }"
               role="status"
-              :title="localConnected ? '本机已连接 · 新建会话将在本机执行' : '本机未连接 · 请启动本地客户端并完成站点授权'"
-            >{{ localConnected ? '本机已连接' : '本机未连接' }}</span>
+              :title="clientStatus + ' · 新会话可选择任意在线客户端，已有会话不会自动切换'"
+            >{{ clientStatus }}</span>
             <span v-if="isRunning" class="pill green"><span class="status-dot"></span>执行中</span>
             <button v-if="canExecute" class="topbar-new" @click="newSession">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
@@ -1592,6 +1619,21 @@ onBeforeUnmount(() => {
                 <span class="execution-track" aria-hidden="true"></span>
                 <span :class="{ selected: executionLocal }">客户端</span>
               </button>
+              <select
+                v-if="executionLocal"
+                class="execution-client"
+                aria-label="执行客户端"
+                :value="executionClientId"
+                :disabled="executionBusy"
+                @change="changeClient"
+              >
+                <option v-if="!selectedClient" :value="executionClientId" disabled>
+                  {{ current?.clientName ? current.clientName + ' · 离线' : '请选择在线客户端' }}
+                </option>
+                <option v-for="client in onlineClients" :key="client.id" :value="client.id">
+                  {{ client.name }} · {{ client.platform }} · {{ client.id.slice(0, 6) }} · 在线
+                </option>
+              </select>
               <div v-if="!isRunning" class="context-controls"></div>
               <span class="hint">Enter 发送 · Shift + Enter 换行</span>
               <button
@@ -1608,7 +1650,7 @@ onBeforeUnmount(() => {
               ><button
                 class="primary"
                 :disabled="
-                  sending || switchingExecution || uploading || (executionLocal && !localConnected) || (!draft.trim() && !attachments.length)
+                  sending || switchingExecution || uploading || executionUnavailable || (!draft.trim() && !attachments.length)
                 "
               >
                 {{
@@ -1624,8 +1666,8 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </form>
-          <p v-if="executionLocal && !localConnected" class="execution-warning" role="status">
-            客户端已离线，请重连或手动切换到服务端；不会自动切换或重试操作。
+          <p v-if="executionUnavailable" class="execution-warning" role="status">
+            所选客户端已离线或尚未选择，请选择在线客户端或切换到服务端；不会自动切换或重试操作。
           </p>
         </div>
       </template>

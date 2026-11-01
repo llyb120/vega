@@ -101,18 +101,20 @@ export class Engine {
     await entry?.client.close();
   }
 
-  async switchExecution(key: string, localAgent: boolean) {
+  async switchExecution(key: string, localAgent: boolean, clientId?: string, requestingUser?: string) {
     assert(typeof localAgent === "boolean", "Invalid execution mode");
+    assert(clientId === undefined || (typeof clientId === "string" && /^[a-f0-9-]{32,36}$/.test(clientId)), "Invalid client ID");
     assert(!this.closing && !this.executionSwitches.has(key), "执行位置正在切换或服务正在停止，请稍后再试");
     assert(!this.active.has(key) && this.fire.forSession(key)?.status !== "running", "请先停止或等待当前轮执行结束，再切换执行位置");
     const source = this.store.session(key);
     assert(!source.taskId, "员工任务的执行位置由任务控制，不可在会话中切换");
-    if (!!source.localAgent === localAgent) return source;
-    const agent = localAgent ? this.localAgents.active(source.ownerId) : undefined;
-    assert(!localAgent || agent, "客户端未连接，请先连接客户端");
+    const ownerId = source.ownerId || requestingUser;
+    const agent = localAgent ? this.localAgents.active(ownerId, clientId ?? source.clientId) : undefined;
+    assert(!localAgent || agent, "所选客户端未连接，或存在多个客户端；请选择在线客户端");
+    if (!!source.localAgent === localAgent && (!localAgent || source.clientId === agent!.clientId)) return source;
     this.executionSwitches.add(key);
     try {
-      const target = localAgent ? "local" : "server",
+      const target = agent ? "client:" + agent.clientId : "server",
         saved = source.executionCwds?.[target],
         fallback = agent?.cwd || process.cwd(),
         signal = AbortSignal.timeout(10000);
@@ -129,12 +131,16 @@ export class Engine {
       }
       await this.releaseSession(key);
       assert(!this.closing, "服务正在停止，请稍后再试");
-      if (agent) assert(this.localAgents.active(source.ownerId) === agent, "客户端已断开，请重连后再切换");
+      if (agent) assert(this.localAgents.active(ownerId, agent.clientId) === agent, "客户端已断开，请重连后再切换");
       const session = this.store.session(key);
-      session.executionCwds = { ...session.executionCwds, [session.localAgent ? "local" : "server"]: session.cwd, [target]: cwd };
+      const previous = session.localAgent ? (session.clientId ? "client:" + session.clientId : "local") : "server";
+      session.executionCwds = { ...session.executionCwds, [previous]: session.cwd, [target]: cwd };
       session.cwd = cwd;
       session.localAgent = localAgent;
       session.localPlatform = agent?.platform;
+      session.clientId = agent?.clientId;
+      session.clientName = agent?.name;
+      if (agent) session.ownerId ||= agent.userId;
       this.store.saveSession(session);
       this.providers.reset(key);
       this.emit({ type: "execution_changed", session: key, data: session });

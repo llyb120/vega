@@ -13,7 +13,7 @@ import { Tools } from "../server/core/tools";
 import { sessionPrompt } from "../server/core/prompt";
 import { LocalAgentUnavailable } from "../server/core/local-agent";
 
-const client = { instance: "a".repeat(32), cwd: "C:\\client-only", platform: "windows" };
+const client = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Office PC", cwd: "C:\\client-only", platform: "windows" };
 function fixture(t: TestContext) {
   const store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
@@ -72,7 +72,7 @@ test("manual switches validate destination paths, reset cached runtimes and reme
   const server = await engine.switchExecution(session.id, false);
   assert.equal(server.cwd, dir);
   assert.equal(server.localPlatform, undefined);
-  assert.equal(server.executionCwds?.local, localProject);
+  assert.equal(server.executionCwds?.["client:" + client.clientId], localProject);
   assert.match(await sessionPrompt(server, { model: "", provider: {} }, store), /当前执行位置：服务端/);
   const restored = await engine.switchExecution(session.id, true);
   assert.equal(restored.cwd, localProject);
@@ -84,9 +84,9 @@ test("missing remembered directories recover to the destination root; offline sw
   const dir = await mkdtemp(join(tmpdir(), "vega-execution-recover-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { engine, store } = fixture(t);
-  const session = store.newSession({ cwd: dir, ownerId: "alice", executionCwds: { local: "C:\\deleted-project" } });
+  const session = store.newSession({ cwd: dir, ownerId: "alice", executionCwds: { ["client:" + client.clientId]: "C:\\deleted-project" } });
   const original = store.session(session.id);
-  await assert.rejects(engine.switchExecution(session.id, true), /客户端未连接/);
+  await assert.rejects(engine.switchExecution(session.id, true), /未连接/);
   assert.deepEqual(store.session(session.id), original);
   engine.localAgents.connect("alice", client);
   const paths: string[] = [];
@@ -131,6 +131,45 @@ test("execution changes cannot overlap a running turn, Fire, another switch or e
   const task = store.newSession({ ownerId: "alice", taskId: "task" });
   await assert.rejects(engine.switchExecution(task.id, true), /员工任务/);
   await assert.rejects(engine.switchExecution(session.id, "server" as any), /Invalid execution mode/);
+});
+
+test("switching between computers keeps independent paths and never substitutes an offline target", async (t) => {
+  const { engine, store } = fixture(t), session = store.newSession({ ownerId: "alice" });
+  const home = { ...client, clientId: "e".repeat(32), instance: "b".repeat(32), cwd: "/home/project", name: "Home", platform: "linux" };
+  engine.localAgents.connect("alice", client);
+  engine.localAgents.connect("alice", home);
+  engine.localAgents.request = async (agent, _op, args) => {
+    assert.equal(args.cwd, agent.cwd);
+    return { isDir: true, path: args.path };
+  };
+  await assert.rejects(engine.switchExecution(session.id, true), /多个客户端/);
+  const office = await engine.switchExecution(session.id, true, client.clientId);
+  assert.equal(office.clientName, client.name);
+  office.cwd = client.cwd + "\\office-project";
+  store.saveSession(office);
+  const switched = await engine.switchExecution(session.id, true, home.clientId);
+  assert.equal(switched.clientId, home.clientId);
+  assert.equal(switched.cwd, home.cwd);
+  assert.equal(switched.localPlatform, "linux");
+  assert.equal(store.stage(session.id).clientId, home.clientId);
+  assert.equal(store.fork(session.id).clientId, home.clientId);
+  const restored = await engine.switchExecution(session.id, true, client.clientId);
+  assert.equal(restored.cwd, office.cwd);
+  engine.localAgents.disconnect("alice", home.instance);
+  await assert.rejects(engine.switchExecution(session.id, true, home.clientId), /未连接/);
+  assert.equal(store.session(session.id).clientId, client.clientId);
+  assert.equal(store.session(session.id).cwd, office.cwd);
+});
+
+test("an authorized admin can bind a legacy ownerless session without guessing another account's device", async (t) => {
+  const { engine, store } = fixture(t), session = store.newSession();
+  engine.localAgents.connect("alice", client);
+  engine.localAgents.request = async (_agent, _op, args) => ({ isDir: true, path: args.path });
+  await assert.rejects(engine.switchExecution(session.id, true, client.clientId, "bob"), /未连接/);
+  assert.equal(store.session(session.id).ownerId, undefined);
+  const bound = await engine.switchExecution(session.id, true, client.clientId, "alice");
+  assert.equal(bound.ownerId, "alice");
+  assert.equal(bound.clientId, client.clientId);
 });
 
 test("a client lost after path validation or a session deleted during validation is not resurrected", async (t) => {

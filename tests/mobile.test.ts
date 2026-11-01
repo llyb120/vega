@@ -759,8 +759,12 @@ test(
       sessionId = (
         await command("Target.attachToTarget", { targetId, flatten: true }, "")
       ).sessionId;
+      await command("Emulation.setUserAgentOverride", {
+        userAgent: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+        platform: "Android",
+      });
       await command("Page.addScriptToEvaluateOnNewDocument", {
-        source: `(()=>{const Native=window.WebSocket;window.WebSocket=class extends Native{constructor(url,protocols){const u=new URL(url);if(u.pathname==='/api/chrome/live'){u.protocol='ws:';u.host='127.0.0.1:${(mock.address() as any).port}';u.pathname='/browser-live';}super(u.href,protocols);}send(data){const u=new URL(this.url),value=JSON.parse(data);if(u.pathname==='/api/events'&&value.type==='request'&&(value.path.startsWith('/chrome/')||['/providers/login','/providers/import'].includes(value.path))){void fetch('/api'+value.path,{method:value.method||'GET',headers:value.data===undefined?{}:{'Content-Type':'application/json'},body:value.data===undefined?undefined:JSON.stringify(value.data)}).then(async response=>{this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'response',id:value.id,status:response.status,statusText:response.statusText,contentType:response.headers.get('content-type')||'',body:await response.text()})}));}).catch(error=>{this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'response',id:value.id,status:0,error:error.message})}));});return;}super.send(data);}};})()`,
+        source: `(()=>{window.__localClientAttempts=0;const Native=window.WebSocket;window.WebSocket=class extends Native{constructor(url,protocols){const u=new URL(url);if(u.port==='47673')window.__localClientAttempts++;if(u.pathname==='/api/chrome/live'){u.protocol='ws:';u.host='127.0.0.1:${(mock.address() as any).port}';u.pathname='/browser-live';}super(u.href,protocols);}send(data){const u=new URL(this.url),value=JSON.parse(data);if(u.pathname==='/api/events'&&value.type==='request'&&(value.path.startsWith('/chrome/')||['/providers/login','/providers/import'].includes(value.path))){void fetch('/api'+value.path,{method:value.method||'GET',headers:value.data===undefined?{}:{'Content-Type':'application/json'},body:value.data===undefined?undefined:JSON.stringify(value.data)}).then(async response=>{this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'response',id:value.id,status:response.status,statusText:response.statusText,contentType:response.headers.get('content-type')||'',body:await response.text()})}));}).catch(error=>{this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'response',id:value.id,status:0,error:error.message})}));});return;}super.send(data);}};})()`,
       });
       await command("Runtime.enable");
       await command("Page.enable");
@@ -897,6 +901,45 @@ test(
       assert(await evaluate(`(()=>{const e=document.querySelector('.markdown-table');e.scrollLeft=40;return e.scrollWidth>e.clientWidth&&e.scrollLeft>0})()`), "wide markdown tables scroll independently on mobile");
       assert.equal(await evaluate(`document.querySelector('.execution-switch').getAttribute('aria-checked')`), "false", "offline new sessions default to the server");
       assert.equal(await evaluate(`document.querySelector('.execution-switch').disabled`), true, "an offline client cannot be selected");
+      assert.equal(await evaluate("window.__localClientAttempts"), 0, "mobile pages must not try their loopback client");
+      const remoteLoginResponse = await fetch(base + "/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "phone-admin", password: "Phone-regression-password-2026" }) });
+      const remoteLogin = await remoteLoginResponse.json(), remoteCookie = remoteLoginResponse.headers.get("set-cookie")!.split(";")[0];
+      const remoteApi = async (path: string, body: any) => {
+        const response = await fetch(base + "/api" + path, { method: "POST", headers: { cookie: remoteCookie, "x-csrf-token": remoteLogin.csrfToken, "content-type": "application/json" }, body: JSON.stringify(body) });
+        const value = await response.json();
+        assert.equal(response.ok, true, JSON.stringify(value));
+        return value;
+      };
+      const office = { clientId: "d".repeat(32), instance: "a".repeat(32), name: "Office PC", cwd: "C:\\office", platform: "windows" };
+      const home = { clientId: "e".repeat(32), instance: "b".repeat(32), name: "Home PC", cwd: "/home/project", platform: "linux" };
+      const remoteTicket = await remoteApi("/events", {});
+      const remoteSocket = new WebSocket(base.replace("http:", "ws:") + "/api/events?ticket=" + remoteTicket.ticket, { headers: { cookie: remoteCookie, origin: base } });
+      try {
+        await new Promise<void>((yes, no) => { remoteSocket.once("open", yes); remoteSocket.once("error", no); });
+        remoteSocket.on("message", (raw) => {
+          const event = JSON.parse(raw.toString());
+          if (event.type === "local_agent_request") void remoteApi("/local-agent/result", { ...event.data, result: { isDir: true, path: event.data.args.path } }).catch((e) => errors.push(e.message));
+        });
+        await remoteApi("/local-agent/connect", office);
+        await remoteApi("/local-agent/connect", home);
+        await until(`document.querySelector('.execution-switch')?.disabled===false`);
+        assert.equal(await evaluate(`document.querySelector('.execution-switch').getAttribute('aria-checked')`), "false", "remote clients coming online must not migrate a server conversation");
+        await tap(".execution-switch");
+        await until(`document.querySelector('.execution-client')?.value===${JSON.stringify(office.clientId)}`);
+        await fill('[aria-label="执行客户端"]', home.clientId);
+        await until(`document.querySelector('.chat-topbar p')?.textContent.includes('/home/project')||document.querySelector('.notice')?.textContent.includes('/home/project')`);
+        assert.equal(await evaluate(`document.querySelector('.execution-client').value`), home.clientId);
+        await layout("mobile remote client selection");
+        await remoteApi("/local-agent/disconnect", { instance: home.instance });
+        await until(`document.querySelector('.execution-warning')?.textContent.includes('已离线')`);
+        assert.equal(await evaluate(`document.querySelector('.execution-client').value`), home.clientId);
+        assert.equal(await evaluate(`document.querySelector('.composer .primary').disabled`), true, "offline selected client must not use another online computer");
+        await tap(".execution-switch");
+        await until(`document.querySelector('.execution-switch').getAttribute('aria-checked')==='false'`);
+        await remoteApi("/local-agent/disconnect", { instance: office.instance });
+        await until(`document.querySelector('.execution-switch').disabled`);
+        assert.equal(await evaluate("window.__localClientAttempts"), 0);
+      } finally { remoteSocket.terminate(); }
       await tap('[aria-label="打开导航与会话"]');
       assert.equal(
         await evaluate(`document.querySelector('.workspace').inert`),

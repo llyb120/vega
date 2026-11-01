@@ -43,7 +43,7 @@ export const equal = (left: string, right: string) => {
     b = Buffer.from(right);
   return a.length === b.length && timingSafeEqual(a, b);
 };
-const TTL = 12 * 60 * 60 * 1000;
+const TTL = 7 * 24 * 60 * 60 * 1000;
 const dummy =
   "scrypt1:" +
   Buffer.alloc(16).toString("hex") +

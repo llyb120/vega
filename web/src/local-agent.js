@@ -1,3 +1,9 @@
+export function canBridgeLocal(device = globalThis.navigator) {
+  return !device?.userAgentData?.mobile &&
+    !/Android|iPhone|iPad|iPod|Mobile/i.test(device?.userAgent || "") &&
+    !(device?.platform === "MacIntel" && device?.maxTouchPoints > 1);
+}
+
 // Only relays requests for the current login and bridge instance; reconnect never replays a job.
 export class LocalAgentBridge {
   constructor(api, userId, status = (_online) => {}) {
@@ -41,7 +47,7 @@ export class LocalAgentBridge {
           const message = JSON.parse(data);
           if (message.type === "ready" && !this.ready) {
             if (message.instance !== instance || message.userId !== this.userId) throw Error("Local login mismatch");
-            const details = { instance, cwd: message.cwd, platform: message.platform };
+            const details = { instance, clientId: message.clientId || instance, name: message.name, cwd: message.cwd, platform: message.platform };
             await this.api("/local-agent/connect", "POST", details);
             if (this.closed || generation !== this.generation) return;
             clearTimeout(this.timeout);
