@@ -130,7 +130,7 @@ func (a *Agent) allowOrigin(origin string) bool {
 	return false
 }
 
-var pairingPage = template.Must(template.New("pairing").Parse(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Vega 本机连接授权</title><style>body{font:16px system-ui;background:#f5f6fa;color:#202431;margin:0;padding:32px}main{max-width:520px;margin:auto;background:white;padding:28px;border-radius:16px}button{font:inherit;padding:10px 18px;border:0;border-radius:8px;background:#5147dd;color:white}code{overflow-wrap:anywhere}form{padding:16px 0;border-top:1px solid #ddd}p{line-height:1.7}</style><main><h1>Vega 本机连接授权</h1><p>只允许你信任的 Vega 站点。允许后，该站点登录的账号可在本机读写文件、执行命令。无需配置 Key。</p>{{range .Pending}}<form method="post"><p>请求连接的站点：<br><strong><code>{{.}}</code></strong></p><button name="origin" value="{{.}}">允许此站点</button></form>{{else}}<p>当前没有新的连接请求。请保持客户端运行，并登录 Vega 网站。</p>{{end}}{{if .Trusted}}<h2>已信任站点</h2>{{range .Trusted}}<form method="post"><code>{{.}}</code> <button name="remove" value="{{.}}">撤销授权</button></form>{{end}}{{end}}</main></html>`))
+var pairingPage = template.Must(template.New("pairing").Parse(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Vega 本机连接授权</title><style>body{font:16px system-ui;background:#f5f6fa;color:#202431;margin:0;padding:32px}main{max-width:520px;margin:auto;background:white;padding:28px;border-radius:16px}button{font:inherit;padding:10px 18px;border:0;border-radius:8px;background:#5147dd;color:white}code{overflow-wrap:anywhere}form{padding:16px 0;border-top:1px solid #ddd}p{line-height:1.7}</style><main><h1>Vega 本机连接授权</h1><p>只允许你信任的 Vega 站点。允许后，该站点登录的账号可在本机读写文件、执行命令。无需配置 Key。</p>{{if .Approved}}<p role="status"><strong>站点权限已保存。</strong>请回到 Vega 网站查看登录验证和后端连接结果；允许站点不代表后端已经连通。公网网站必须使用 HTTPS。</p>{{end}}{{if .Revoked}}<p role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</p>{{end}}{{range .Pending}}<form method="post"><p>请求连接的站点：<br><strong><code>{{.}}</code></strong></p><button name="origin" value="{{.}}">允许此站点</button></form>{{else}}<p>当前没有新的连接请求。请保持客户端运行，并登录 Vega 网站。</p>{{end}}{{if .Trusted}}<h2>已信任站点</h2>{{range .Trusted}}<form method="post"><code>{{.}}</code> <button name="remove" value="{{.}}">撤销授权</button></form>{{end}}{{end}}</main></html>`))
 
 func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -191,7 +191,11 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		a.mu.Unlock()
-		http.Redirect(w, r, r.URL.Path, http.StatusSeeOther)
+		result := "approved"
+		if remove != "" {
+			result = "revoked"
+		}
+		http.Redirect(w, r, r.URL.Path+"?"+result+"=1", http.StatusSeeOther)
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -206,7 +210,10 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	trusted := append([]string{}, a.config.TrustedOrigins...)
 	a.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = pairingPage.Execute(w, struct{ Pending, Trusted []string }{pending, trusted})
+	_ = pairingPage.Execute(w, struct {
+		Pending, Trusted  []string
+		Approved, Revoked bool
+	}{pending, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1"})
 }
 
 type loginProof struct {
@@ -216,31 +223,38 @@ type loginProof struct {
 	DeviceToken string `json:"deviceToken"`
 }
 
+type pairingError struct{ connectionStatus }
+
+func (err *pairingError) Error() string { return err.Code }
+
 func verifyLogin(origin, ticket, clientID, deviceToken string) (loginProof, error) {
 	var proof loginProof
-	if !secureOrigin(origin) || len(ticket) != 72 {
-		return proof, fmt.Errorf("Invalid or insecure pairing origin/ticket")
+	if !secureOrigin(origin) {
+		return proof, &pairingError{connectionStatus{Code: "insecure_origin"}}
+	}
+	if len(ticket) != 72 {
+		return proof, &pairingError{connectionStatus{Code: "login_invalid"}}
 	}
 	data, _ := json.Marshal(map[string]string{"ticket": ticket, "clientId": clientID, "deviceToken": deviceToken})
 	req, err := http.NewRequest(http.MethodPost, origin+"/api/local-agent/verify", bytes.NewReader(data))
 	if err != nil {
-		return proof, err
+		return proof, &pairingError{connectionStatus{Code: "login_invalid"}}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(req)
 	if err != nil {
-		return proof, err
+		return proof, &pairingError{connectionStatus{Code: "login_network"}}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
-		return proof, fmt.Errorf("Login expired")
+		return proof, &pairingError{connectionStatus{Code: "login_http", HTTPStatus: response.StatusCode}}
 	}
 	err = json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&proof)
-	if err == nil && (proof.UserID == "" || len(proof.Instance) < 32 || proof.ClientID != clientID || len(proof.DeviceToken) != 43) {
-		err = fmt.Errorf("Invalid login proof")
+	if err != nil || proof.UserID == "" || len(proof.Instance) < 32 || proof.ClientID != clientID || len(proof.DeviceToken) != 43 {
+		return loginProof{}, &pairingError{connectionStatus{Code: "login_invalid"}}
 	}
-	return proof, err
+	return proof, nil
 }
 func openBrowser(address string) {
 	var cmd *exec.Cmd

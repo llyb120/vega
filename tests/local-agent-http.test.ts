@@ -100,8 +100,12 @@ test("native client pairs once, runs with every webpage closed, survives restart
     sockets.push(webpage); webpage.on("message", (raw) => events.push(JSON.parse(raw.toString())));
     await until(() => events.some((event) => event.type === "ready"));
     const serverSession = await api("/sessions", "POST", { cwd: serverDir });
-    pairing = new LocalAgentPairing(api, login.user.id);
+    const pairingStates: any[] = [];
+    pairing = new LocalAgentPairing(api, login.user.id, (status) => pairingStates.push(status));
     await pairing.connect(); await until(() => !!(pairing as any).paired);
+    assert.equal(pairingStates.at(-1).code, "connected", JSON.stringify(pairingStates));
+    assert(pairingStates.some((status) => status.code === "authorizing"));
+    assert(pairingStates.some((status) => status.code === "backend_connecting"));
     await until(async () => (await api("/bootstrap")).clients.length === 1);
     const device = (await api("/bootstrap")).clients[0];
     assert.equal((await api("/sessions/" + serverSession.id)).session.localAgent, false);

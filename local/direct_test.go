@@ -93,9 +93,9 @@ func TestNativeClientContinuesAfterPairingPageClosesAndReconnectsAfterRestart(t 
 		t.Fatal(err)
 	}
 	_ = browser.WriteJSON(map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"})
-	var paired map[string]any
-	if err = browser.ReadJSON(&paired); err != nil || paired["type"] != "paired" || paired["deviceToken"] != nil {
-		t.Fatalf("unsafe pairing response: %v %v", paired, err)
+	paired := readPairing(t, browser)
+	if paired["type"] != "paired" || paired["connected"] != true || paired["deviceToken"] != nil {
+		t.Fatalf("unsafe pairing response: %v", paired)
 	}
 	_ = browser.Close()
 	pairing.Close() // There is now no frontend or loopback connection at all.

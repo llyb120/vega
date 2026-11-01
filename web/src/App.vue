@@ -1,6 +1,6 @@
 <script setup vapor>
 import SettingsView from "./SettingsView.vue";
-import { LocalAgentPairing, canBridgeLocal } from "./local-agent";
+import { LocalAgentPairing, canBridgeLocal, pairingStatusText } from "./local-agent";
 import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import TurnProcess from "./TurnProcess.vue";
@@ -26,10 +26,29 @@ const narrow = ref(false),
   menuButton = ref(null),
   imageInput = ref(null),
   uploading = ref(false),
-  onlineClients = ref([]);
+  onlineClients = ref([]),
+  clientListReady = ref(false),
+  localPairing = ref(null);
 const localConnected = computed(() => onlineClients.value.length > 0);
-const clientStatus = computed(() => localConnected.value ? `客户端在线 · ${onlineClients.value.length} 台` : "无在线客户端");
+const clientStatus = computed(() => !clientListReady.value ? "客户端状态同步中" : localConnected.value ? `客户端在线 · ${onlineClients.value.length} 台` : "无在线客户端");
+const localPairingText = computed(() => pairingStatusText(localPairing.value));
 let localBridge;
+function startLocalPairing() {
+  if (!localBridge && canBridgeLocal() && canExecute.value) {
+    const bridge = new LocalAgentPairing(httpApi, user.value.id, (status) => {
+      if (localBridge !== bridge) return;
+      localPairing.value = status;
+      if (status.code === "connected") void attempt(bootstrap);
+    });
+    localBridge = bridge;
+    void bridge.connect();
+  }
+}
+function retryLocalPairing() {
+  localBridge?.close();
+  localBridge = null;
+  startLocalPairing();
+}
 const mobileTitles = {
   chat: "对话",
   employee: "数字员工",
@@ -494,10 +513,6 @@ function openEventSocket(url, generation) {
         const reconnect = eventsWasConnected;
         eventsReady = true;
         eventsWasConnected = true;
-        if (!localBridge && canBridgeLocal()) {
-          localBridge = new LocalAgentPairing(httpApi, user.value.id);
-          void localBridge.connect();
-        }
         if (error.value.includes("实时")) error.value = "";
         if (reconnect)
           void attempt(async () => {
@@ -520,9 +535,8 @@ function openEventSocket(url, generation) {
   ws.onclose = (event) => {
     if (generation !== eventGeneration) return;
     eventsReady = false;
+    clientListReady.value = false;
     onlineClients.value = [];
-    localBridge?.close();
-    localBridge = null;
     clearInterval(eventsHeartbeat);
     rejectSocketRequests("实时连接已中断");
     if (closed || !authenticated.value) return;
@@ -555,6 +569,7 @@ async function bootstrap() {
   sessions.value = (b.sessions || []).filter((session) => !session.taskId);
   running.value = b.running || {};
   onlineClients.value = b.clients || [];
+  clientListReady.value = true;
   config.value = b.config || {};
   if (!project.value) project.value = b.cwd;
   return b;
@@ -567,6 +582,7 @@ async function enter(result) {
   authenticated.value = true;
   void connectEvents();
   await bootstrap();
+  startLocalPairing();
   if (isAdmin.value) startPresence();
   await Promise.all([
     loadModels(),
@@ -617,6 +633,8 @@ function resetLogin() {
   closeNavigation();
   localBridge?.close();
   localBridge = null;
+  localPairing.value = null;
+  clientListReady.value = false;
   stopPresence();
   clearTimeout(employeeRefreshTimer);
   closed = true;
@@ -1431,6 +1449,10 @@ onBeforeUnmount(() => {
         }}<button class="icon" aria-label="关闭提示" @click="notice = ''">
           ×
         </button>
+      </div>
+      <div v-if="view === 'chat' && localPairing && localPairing.code !== 'connected'" class="banner notice" role="status">
+        <span>{{ localPairingText }}</span>
+        <button type="button" @click="retryLocalPairing">重新检测</button>
       </div>
       <template v-if="view === 'chat'">
         <header v-if="!narrow" class="topbar chat-topbar">

@@ -79,12 +79,14 @@ func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET required", 405)
 		return
 	}
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return a.allowOrigin(r.Header.Get("Origin")) }}
+	// Unapproved sites receive only permission status; no login exchange or jobs.
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return validOrigin(r.Header.Get("Origin")) }}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer conn.Close()
+	origin := r.Header.Get("Origin")
 	conn.SetReadLimit(4096)
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var auth struct {
@@ -92,10 +94,18 @@ func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
 		Ticket string `json:"ticket"`
 		UserID string `json:"userId"`
 	}
-	if conn.ReadJSON(&auth) != nil || auth.Type != "auth" {
+	if conn.ReadJSON(&auth) != nil || auth.Type != "auth" || auth.UserID == "" {
+		pairingStatus(conn, connectionStatus{Code: "login_invalid"})
 		return
 	}
-	origin := r.Header.Get("Origin")
+	if !secureOrigin(origin) {
+		pairingStatus(conn, connectionStatus{Code: "insecure_origin"})
+		return
+	}
+	if !a.allowOrigin(origin) {
+		pairingStatus(conn, connectionStatus{Code: "permission_required"})
+		return
+	}
 	a.mu.Lock()
 	var existing string
 	for _, saved := range a.config.Servers {
@@ -105,17 +115,62 @@ func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
 	}
 	clientID := a.config.ClientID
 	a.mu.Unlock()
+	pairingStatus(conn, connectionStatus{Code: "authorizing"})
 	proof, err := verifyLogin(origin, auth.Ticket, clientID, existing)
 	if err != nil {
+		if failure, ok := err.(*pairingError); ok {
+			pairingStatus(conn, failure.connectionStatus)
+		} else {
+			pairingStatus(conn, connectionStatus{Code: "login_invalid"})
+		}
+		return
+	}
+	if proof.UserID != auth.UserID {
+		pairingStatus(conn, connectionStatus{Code: "login_invalid"})
 		return
 	}
 	saved, err := a.saveCredential(origin, proof)
 	if err != nil {
+		pairingStatus(conn, connectionStatus{Code: "credential_save"})
 		return
 	}
-	a.startConnection(saved, proof.DeviceToken)
+	connection := a.startConnection(saved, proof.DeviceToken)
+	if connection == nil {
+		pairingStatus(conn, connectionStatus{Code: "permission_required"})
+		return
+	}
+	pairingStatus(conn, connectionStatus{Code: "backend_connecting"})
+	deadline := time.NewTimer(20 * time.Second)
+	defer deadline.Stop()
+	for {
+		a.mu.Lock()
+		status, changed := connection.status, connection.changed
+		a.mu.Unlock()
+		if status.Code == "connected" {
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			_ = conn.WriteJSON(map[string]any{"type": "paired", "instance": proof.Instance, "userId": proof.UserID, "clientId": clientID, "connected": true})
+			return
+		}
+		if status.Code != "backend_connecting" {
+			pairingStatus(conn, status)
+			return
+		}
+		select {
+		case <-changed:
+		case <-r.Context().Done():
+			return
+		case <-deadline.C:
+			pairingStatus(conn, connectionStatus{Code: "backend_timeout"})
+			return
+		}
+	}
+}
+func pairingStatus(conn *websocket.Conn, status connectionStatus) {
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_ = conn.WriteJSON(map[string]any{"type": "paired", "instance": proof.Instance, "userId": proof.UserID, "clientId": clientID})
+	_ = conn.WriteJSON(struct {
+		Type string `json:"type"`
+		connectionStatus
+	}{Type: "status", connectionStatus: status})
 }
 func execute(ctx context.Context, j job) map[string]any {
 	if j.Op == "exec" {

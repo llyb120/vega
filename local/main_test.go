@@ -62,6 +62,23 @@ func TestWebSocketRequiresTrustedOriginAndOneTimeWebsiteLogin(t *testing.T) {
 	ticket := strings.Repeat("a", 72)
 	used := false
 	website := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/local-agent/socket" {
+			conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			var hello map[string]any
+			if conn.ReadJSON(&hello) != nil {
+				return
+			}
+			_ = conn.WriteJSON(map[string]string{"type": "ready", "userId": "alice", "clientId": strings.Repeat("c", 32)})
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}
 		var body struct {
 			Ticket string `json:"ticket"`
 		}
@@ -83,19 +100,27 @@ func TestWebSocketRequiresTrustedOriginAndOneTimeWebsiteLogin(t *testing.T) {
 		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{"Origin": []string{origin}})
 		return conn, err
 	}
-	if conn, err := connect("https://untrusted.test"); err == nil {
-		conn.Close()
-		t.Fatal("untrusted website accepted")
+	untrusted, err := connect("https://untrusted.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = untrusted.WriteJSON(map[string]string{"type": "auth", "ticket": ticket, "userId": "alice"})
+	if status := readPairing(t, untrusted); status["code"] != "permission_required" {
+		t.Fatalf("untrusted site did not receive permission-only status: %v", status)
+	}
+	_ = untrusted.Close()
+	if len(agent.config.Servers) != 0 {
+		t.Fatal("untrusted site was paired")
 	}
 	conn, err := connect(website.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	_ = conn.WriteJSON(map[string]string{"type": "auth", "ticket": ticket})
-	var ready map[string]any
-	if err = conn.ReadJSON(&ready); err != nil || ready["userId"] != "alice" || ready["type"] != "paired" {
-		t.Fatalf("pairing failed: %v %v", ready, err)
+	_ = conn.WriteJSON(map[string]string{"type": "auth", "ticket": ticket, "userId": "alice"})
+	ready := readPairing(t, conn)
+	if ready["userId"] != "alice" || ready["type"] != "paired" || ready["connected"] != true {
+		t.Fatalf("pairing failed: %v", ready)
 	}
 	if ready["deviceToken"] != nil {
 		t.Fatal("device credential leaked to the webpage")
@@ -111,9 +136,9 @@ func TestWebSocketRequiresTrustedOriginAndOneTimeWebsiteLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer duplicate.Close()
-	_ = duplicate.WriteJSON(map[string]string{"type": "auth", "ticket": ticket})
-	if duplicate.ReadJSON(&ready) == nil {
-		t.Fatal("used login ticket was accepted")
+	_ = duplicate.WriteJSON(map[string]string{"type": "auth", "ticket": ticket, "userId": "alice"})
+	if status := readPairing(t, duplicate); status["code"] != "login_http" || status["httpStatus"] != float64(401) {
+		t.Fatalf("used login ticket was accepted or failed silently: %v", status)
 	}
 }
 func TestPermissionPageRequiresLocalOrigin(t *testing.T) {
@@ -140,8 +165,13 @@ func TestPermissionPageRequiresLocalOrigin(t *testing.T) {
 	request.Header.Set("Origin", "http://"+localAddress)
 	allowed := httptest.NewRecorder()
 	agent.configure(allowed, request)
-	if allowed.Code != 303 || !agent.allowOrigin(origin) {
+	if allowed.Code != 303 || len(agent.config.TrustedOrigins) != 1 || !agent.allowOrigin(origin) {
 		t.Fatalf("explicit site approval failed: %d", allowed.Code)
+	}
+	page = httptest.NewRecorder()
+	agent.configure(page, httptest.NewRequest("GET", "http://"+localAddress+allowed.Header().Get("Location"), nil))
+	if !strings.Contains(page.Body.String(), "站点权限已保存") {
+		t.Fatal("approval must explain the next connection stage")
 	}
 	saved, err := os.ReadFile(agent.configPath)
 	if err != nil || !strings.Contains(string(saved), origin) {

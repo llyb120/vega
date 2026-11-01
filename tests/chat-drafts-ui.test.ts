@@ -35,7 +35,7 @@ function mount(handler: (path: string, method: string, data: any) => any = () =>
     localBridge: null, stopPresence() {}, employeeRefreshTimer: undefined, closed: false, eventGeneration: 0,
     eventReconnect: undefined, eventsHeartbeat: undefined, eventsSocket: null, eventsReady: false, eventsWasConnected: false,
     clearTimeout, clearInterval, rejectSocketRequests() {}, authenticated: ref(true), password: ref(""), setupToken: ref(""),
-    onlineClients: ref([]), config: ref({}), catalogModels: ref([]), activeTaskCount: ref(null), employeeSession: ref(""), employeeError: ref(""),
+    onlineClients: ref([]), localPairing: ref(null), clientListReady: ref(true), config: ref({}), catalogModels: ref([]), activeTaskCount: ref(null), employeeSession: ref(""), employeeError: ref(""),
   };
   context.attempt = async (fn: any) => { try { return await fn(); } catch (e: any) { context.error.value = e.message; } };
   const state = vm.runInNewContext([

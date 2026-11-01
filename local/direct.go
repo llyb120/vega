@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -20,10 +22,24 @@ type ServerCredential struct {
 	UserID string `json:"userId"`
 	Token  string `json:"token"`
 }
+type connectionStatus struct {
+	Code       string `json:"code"`
+	HTTPStatus int    `json:"httpStatus,omitempty"`
+}
 type directConnection struct {
-	origin string
-	token  string
-	cancel context.CancelFunc
+	origin  string
+	token   string
+	cancel  context.CancelFunc
+	status  connectionStatus
+	changed chan struct{}
+}
+
+func (a *Agent) connectionStatus(connection *directConnection, status connectionStatus) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	connection.status = status
+	close(connection.changed)
+	connection.changed = make(chan struct{})
 }
 
 func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredential, error) {
@@ -69,18 +85,18 @@ func (a *Agent) startConnections(ctx context.Context) {
 		}
 	}
 }
-func (a *Agent) startConnection(saved ServerCredential, token string) {
+func (a *Agent) startConnection(saved ServerCredential, token string) *directConnection {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !secureOrigin(saved.Origin) {
-		return
+		return nil
 	}
 	trusted := false
 	for _, origin := range a.config.TrustedOrigins {
 		trusted = trusted || origin == saved.Origin
 	}
 	if !trusted {
-		return
+		return nil
 	}
 	if a.direct == nil {
 		a.direct = make(map[string]*directConnection)
@@ -88,7 +104,7 @@ func (a *Agent) startConnection(saved ServerCredential, token string) {
 	key := saved.Origin + "\x00" + saved.UserID
 	if old := a.direct[key]; old != nil {
 		if old.token == token {
-			return
+			return old
 		}
 		old.cancel()
 	}
@@ -97,7 +113,7 @@ func (a *Agent) startConnection(saved ServerCredential, token string) {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
-	connection := &directConnection{origin: saved.Origin, token: token, cancel: cancel}
+	connection := &directConnection{origin: saved.Origin, token: token, cancel: cancel, status: connectionStatus{Code: "backend_connecting"}, changed: make(chan struct{})}
 	a.direct[key] = connection
 	go func() {
 		defer cancel()
@@ -110,7 +126,7 @@ func (a *Agent) startConnection(saved ServerCredential, token string) {
 		}()
 		delay := time.Second
 		for ctx.Err() == nil {
-			if !a.connectBackend(ctx, saved, token) {
+			if !a.connectBackend(ctx, saved, connection) {
 				return // Revoked credentials need a new explicit website handshake.
 			}
 			timer := time.NewTimer(delay)
@@ -128,8 +144,9 @@ func (a *Agent) startConnection(saved ServerCredential, token string) {
 			}
 		}
 	}()
+	return connection
 }
-func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, token string) bool {
+func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, connection *directConnection) bool {
 	u, _ := url.Parse(saved.Origin + "/api/local-agent/socket")
 	if u.Scheme == "https" {
 		u.Scheme = "wss"
@@ -138,25 +155,32 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, toke
 	}
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 8 * time.Second
-	conn, response, err := dialer.DialContext(ctx, u.String(), http.Header{"Authorization": {"Bearer " + token}})
+	conn, response, err := dialer.DialContext(ctx, u.String(), http.Header{"Authorization": {"Bearer " + connection.token}})
 	if err != nil {
+		status := connectionStatus{Code: "backend_network"}
 		if response != nil {
 			_ = response.Body.Close()
-			if response.StatusCode == 401 || response.StatusCode == 403 {
-				return false
+			status = connectionStatus{Code: "backend_http", HTTPStatus: response.StatusCode}
+		} else {
+			var certificateError *tls.CertificateVerificationError
+			if errors.As(err, &certificateError) {
+				status.Code = "backend_tls"
 			}
 		}
-		return true
+		a.connectionStatus(connection, status)
+		return response == nil || (response.StatusCode != 401 && response.StatusCode != 403)
 	}
 	defer conn.Close()
 	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopClose()
 	id := make([]byte, 16)
 	if _, err = rand.Read(id); err != nil {
+		a.connectionStatus(connection, connectionStatus{Code: "backend_internal"})
 		return true
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
+		a.connectionStatus(connection, connectionStatus{Code: "backend_cwd"})
 		return true
 	}
 	name, _ := os.Hostname()
@@ -168,12 +192,14 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, toke
 	a.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if conn.WriteJSON(map[string]any{"type": "hello", "instance": hex.EncodeToString(id), "clientId": clientID, "name": name, "cwd": cwd, "platform": runtime.GOOS}) != nil {
+		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true
 	}
 	conn.SetReadLimit(maxBody)
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var ready struct{ Type, UserID, ClientID string }
 	if conn.ReadJSON(&ready) != nil || ready.Type != "ready" || ready.UserID != saved.UserID || ready.ClientID != clientID {
+		a.connectionStatus(connection, connectionStatus{Code: "backend_protocol"})
 		return true
 	}
 	a.mu.Lock()
@@ -186,7 +212,9 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, toke
 		setState(len(a.connections) > 0)
 		a.mu.Unlock()
 	}()
+	a.connectionStatus(connection, connectionStatus{Code: "connected"})
 	runJobs(ctx, conn)
+	a.connectionStatus(connection, connectionStatus{Code: "backend_disconnected"})
 	return true
 }
 func runJobs(parent context.Context, conn *websocket.Conn) {
