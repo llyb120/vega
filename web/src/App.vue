@@ -138,7 +138,7 @@ const live = ref(""),
   activeTools = ref([]),
   transcript = ref(null),
   project = ref(""),
-  chosenModel = ref(""),
+
   config = ref({});
 const employee = ref({
     duties: [],
@@ -247,50 +247,14 @@ const stagePath = computed(() => {
 const conversationTitle = computed(
   () => rootSession.value?.title || current.value?.title || "对话",
 );
+
 const catalogModels = ref([]);
-function configuredModels(models, prefix = "") {
-  return Object.entries(models || {}).flatMap(([id, m]) =>
-    Object.keys(m || {}).some((k) =>
-      [
-        "limit",
-        "api",
-        "name",
-        "reasoning",
-        "options",
-        "supportsImages",
-        "variants",
-        "modalities",
-        "contextWindow",
-        "maxOutputTokens",
-      ].includes(k),
-    ) || !Object.keys(m || {}).length
-      ? [prefix + id]
-      : configuredModels(m, prefix + id + "/"),
-  );
-}
-const models = computed(() => [
-  ...new Set([
-    ...catalogModels.value
-      .filter((m) => m.id && m.available !== false)
-      .flatMap((m) => [
-        m.id,
-        ...(m.variants || []).map((v) => m.id + "/variant/" + v),
-      ]),
-    ...Object.entries(config.value.provider || {}).flatMap(([id, p]) =>
-      configuredModels(p.models).map((m) => id + "/" + m),
-    ),
-  ]),
-]);
 async function loadModels() {
-  if (!canExecute.value) {
+  if (!isAdmin.value) {
     catalogModels.value = [];
     return;
   }
   catalogModels.value = await api("/providers/models");
-}
-function providerSaved(value) {
-  config.value = value;
-  void attempt(loadModels);
 }
 let activityAt = Date.now(),
   presenceTimer;
@@ -560,7 +524,15 @@ async function enter(result) {
   await Promise.all([
     loadModels(),
     sessions.value.length
-      ? selectSession(rootSessions.value[0] || sessions.value[0])
+      ? selectSession(
+          sessions.value.find(
+            (s) =>
+              !s.stageSource &&
+              s.id === sessionStorage.getItem("vega:session:" + user.value.id),
+          ) ||
+            rootSessions.value[0] ||
+            sessions.value[0],
+        )
       : null,
   ]);
   try {
@@ -593,6 +565,7 @@ async function login() {
 function resetLogin() {
   try {
     sessionStorage.removeItem("vega:provider-login:" + user.value?.id);
+    sessionStorage.removeItem("vega:session:" + user.value?.id);
   } catch {}
   closeNavigation();
   stopPresence();
@@ -650,6 +623,9 @@ async function selectSession(session) {
   const request = ++sessionRequest;
   closeNavigation();
   current.value = session;
+  try {
+    sessionStorage.setItem("vega:session:" + user.value.id, session.id);
+  } catch {}
   messages.value = [];
   folds.value = [];
   contextBudget.value = null;
@@ -679,7 +655,6 @@ async function newSession() {
   await attempt(async () => {
     const s = await api("/sessions", "POST", {
       cwd: project.value,
-      model: chosenModel.value,
     });
     await Promise.all([bootstrap(), selectSession(s)]);
   });
@@ -706,7 +681,6 @@ async function send() {
     if (!current.value) {
       const s = await api("/sessions", "POST", {
         cwd: project.value,
-        model: chosenModel.value,
       });
       await Promise.all([bootstrap(), selectSession(s)]);
     }
@@ -1504,12 +1478,7 @@ onBeforeUnmount(() => {
                 hidden
                 @change="upload"
               />
-              <div v-if="!isRunning" class="context-controls">
-                <select v-model="chosenModel" aria-label="新会话模型">
-                  <option value="">默认模型</option>
-                  <option v-for="m in models" :key="m">{{ m }}</option>
-                </select>
-              </div>
+              <div v-if="!isRunning" class="context-controls"></div>
               <span class="hint">Enter 发送 · Shift + Enter 换行</span>
               <button
                 v-if="isRunning"
@@ -1913,7 +1882,7 @@ onBeforeUnmount(() => {
         :config="config"
         :user-id="user.id"
         :models="catalogModels"
-        @saved="providerSaved"
+        @saved="config = $event"
         @error="error = $event"
         @notice="notice = $event"
       />
