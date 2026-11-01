@@ -84,6 +84,7 @@ test("employee conversation delegates through the existing engine without leakin
     let calls = 0;
     engine.providers.chat = async (_model, system, _messages, definitions) => {
       assert(system.includes("Alice worker") && system.includes("Keep work isolated"));
+      assert(system.includes("图片和截图用 Markdown 内嵌") && system.includes("只引用实际返回的图片"), "employee chat shares the image-output rules with execution sessions");
       assert(!system.includes("Bob worker"));
       assert(!definitions.some((tool) => ["bash", "write", "chrome", "vault", "mcp"].includes(tool.name)));
       return calls++ === 0

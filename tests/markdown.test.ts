@@ -198,6 +198,26 @@ test("Markdown images support web, authenticated archive and raster data URLs wi
   assert(renderInline("[![photo](https://example.com/photo.png)](https://example.com)").includes('rel="noopener noreferrer"><img'));
 });
 
+test("legacy employee reports display standalone archived screenshot URLs inline without rewriting the report", () => {
+  const first = "/api/blobs/blob-" + "1".repeat(32);
+  const second = "sqlite:blob/blob-" + "2".repeat(32);
+  const report = `证据截图：Bing 结果页 ${first}；新标签验证页 ${second}。`;
+  const { html } = renderMarkdown(report);
+  assert.equal((html.match(/<img /g) || []).length, 2);
+  assert(html.includes(`src="${first}"`));
+  assert(html.includes(`src="${second.replace("sqlite:blob/", "/api/blobs/")}"`));
+  assert(html.includes("证据截图：Bing 结果页") && html.includes("；新标签验证页"));
+  assert(html.includes('alt="存档图片" loading="lazy" decoding="async" referrerpolicy="no-referrer"'));
+  assert.equal((renderInline(`![证据](<${first}>)`).match(/<img /g) || []).length, 1, "valid Markdown is not expanded twice");
+  assert.equal(renderMarkdown(`\`\`\`txt\n${first}\n\`\`\``).codes[0], first);
+  assert(!renderInline(`\`${first}\``).includes("<img"));
+  for (const value of [
+    `https://other.test${first}`, `prefix${first}`, `[图片地址](${first})`,
+    `${first}/../secret`, `${first}?download=true`, `${first}#private`, `${first}.txt`, `${first}a`,
+    "/api/blobs/blob-", "/api/blobs/blob-made-up", "/api/auth/logout", "/workspace/photo.png",
+  ]) assert(!renderInline(value).includes("<img"), value);
+});
+
 test("Markdown image URLs cannot inject markup or access arbitrary local/API paths", () => {
   for (const url of [
     "javascript:alert(1)", "file:///C:/secret.png", "C:/secret.png", "/etc/secret.png",

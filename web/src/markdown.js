@@ -33,6 +33,11 @@ export function renderInline(text) {
         const title = (doubleTitle ?? singleTitle)?.replace(TOKEN, (_, i) => fragments[i].plain);
         return protect(`<img src="${escape(url)}" alt="${escape(alt)}"${title === undefined ? "" : ` title="${escape(title)}"`} loading="lazy" decoding="async" referrerpolicy="no-referrer">`, alt);
       },
+    )
+    // Older task reports printed archive URLs instead of Markdown images.
+    .replace(
+      /(^|[\s：:])((?:\/api\/blobs\/|sqlite:blob\/)blob-[a-f\d]{32})(?=$|[\s，。；！？、]|[.,;!?](?=\s|$))/g,
+      (_, prefix, url) => prefix + protect(`<img src="${escape(imageURL(url))}" alt="存档图片" loading="lazy" decoding="async" referrerpolicy="no-referrer">`, url),
     );
   const html = escape(source)
     .replace(
