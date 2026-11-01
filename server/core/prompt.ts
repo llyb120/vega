@@ -9,7 +9,7 @@ import { resolve, dirname, join, basename } from "node:path";
 import type { Config } from "./config";
 import type { Session, Store } from "./store";
 import { clip, assert, type Obj } from "./util";
-export const CODING_RULES = `先理解再修改，保持改动聚焦。未知位置先用 rg/git grep 定位，再 read 必要行段；搜索须限定路径/类型并排除依赖、构建与缓存，禁止无界递归。已有文件局部修改用 edit，oldText 唯一且所有 edits 针对原文件；同一文件禁止并发 edit，改动完成后不为确认重复 read。read 支持行段；本地图片用 read，不打开后截图。长编译/测试不要接过滤管道吞进度。按最小影响面验证，不虚报成功。最终采用例外汇报，先说用户可感知的结果，不罗列过程；图片用 Markdown 内联地址，不编造文件路径。`;
+export const CODING_RULES = `先理解再修改，保持改动聚焦。未知位置先用 rg/git grep 定位，再 read 必要行段；搜索须限定路径/类型并排除依赖、构建与缓存，禁止无界递归。已有文件局部修改用 edit，oldText 唯一且所有 edits 针对原文件；同一文件禁止并发 edit，改动完成后不为确认重复 read。read 支持行段；本地图片用 read，不打开后截图。长编译/测试不要接过滤管道吞进度。按最小影响面验证，不虚报成功。最终采用例外汇报，先说用户可感知的结果，不罗列过程；图片用 Markdown 内联展示；本地图片先 read，再使用工具返回的 url（/api/blobs/...），不要把磁盘路径当成网页地址，也不编造路径或 URL。`;
 async function regular(path: string, max: number) {
   try {
     const st = await stat(path);

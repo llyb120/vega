@@ -25,3 +25,9 @@ async function copy(event) {
     <span v-if="streaming" class="cursor">▍</span>
   </div>
 </template>
+<style scoped>
+.markdown-body :deep(img) {
+  max-width: 100%;
+  height: auto;
+}
+</style>

@@ -3,23 +3,45 @@ const MARK = String.fromCharCode(0);
 const escape = (value) =>
   String(value).replace(/[&<>"]/g, (c) => ESCAPES[c]);
 
+const TOKEN = new RegExp(MARK + "(\\d+)" + MARK, "g");
+function imageURL(value) {
+  const archived = /^(?:\/api\/blobs\/|sqlite:blob\/)(blob-[\w-]+)$/.exec(value);
+  if (archived) return "/api/blobs/" + archived[1];
+  if (/^data:image\/(?:png|jpeg|gif|webp|bmp|avif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value))
+    return value;
+  if (!/^https?:\/\//i.test(value) || /[\u0000-\u001f\u007f\\]/.test(value)) return;
+  try {
+    const url = new URL(value);
+    if (url.hostname && !url.username && !url.password) return url.href;
+  } catch {}
+}
+
 export function renderInline(text) {
-  const codes = [];
-  const source = String(text).replace(/`([^`\n]+)`/g, (_, code) => {
-    codes.push(code);
-    return MARK + (codes.length - 1) + MARK;
-  });
+  const fragments = [];
+  const protect = (html, plain) => {
+    fragments.push({ html, plain });
+    return MARK + (fragments.length - 1) + MARK;
+  };
+  const source = String(text).replace(/\u0000/g, "")
+    .replace(/`([^`\n]+)`/g, (_, code) => protect(`<code>${escape(code)}</code>`, code))
+    .replace(
+      /!\[([^\]\n]*)\]\([ \t]*(?:<([^<>\n]+)>|((?:\\[()\\]|[^()\s\\]|\([^()\s]*\))+))(?:[ \t]+(?:"([^"\n]*)"|'([^'\n]*)'))?[ \t]*\)/g,
+      (match, alt, bracketed, bare, doubleTitle, singleTitle) => {
+        const url = imageURL((bracketed || bare).replace(/\\([()\\])/g, "$1"));
+        if (!url) return protect(escape(match), match);
+        alt = alt.replace(TOKEN, (_, i) => fragments[i].plain);
+        const title = (doubleTitle ?? singleTitle)?.replace(TOKEN, (_, i) => fragments[i].plain);
+        return protect(`<img src="${escape(url)}" alt="${escape(alt)}"${title === undefined ? "" : ` title="${escape(title)}"`} loading="lazy" decoding="async" referrerpolicy="no-referrer">`, alt);
+      },
+    );
   const html = escape(source)
     .replace(
-      /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      /\[([^\]\n]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g,
       (_, label, url) =>
         `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`,
     )
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  return html.replace(
-    new RegExp(MARK + "(\\d+)" + MARK, "g"),
-    (_, i) => `<code>${escape(codes[i])}</code>`,
-  );
+  return html.replace(TOKEN, (_, i) => fragments[i].html);
 }
 
 function tableRow(line) {
@@ -41,8 +63,8 @@ function tableRow(line) {
   if (cells.length) return cells.map((cell) => cell.trim());
 }
 
-// shortcut: chat-oriented Markdown subset (no raw HTML or images); upgrade to a
-// full parser only if message formatting requires it.
+// shortcut: chat-oriented Markdown subset (no raw HTML or reference-style images);
+// upgrade to a full parser if richer message formatting is required.
 export function renderMarkdown(text) {
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n"),
     html = [],

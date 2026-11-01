@@ -539,7 +539,7 @@ export class Tools {
         assert(blob, "Archived blob missing");
         this.engine.store.grantBlob(match[2], this.session.id);
         return {
-          value: { path: a.path },
+          value: { path: a.path, url: `/api/blobs/${match[2]}` },
           images: [{ mime: blob.mime, blobId: match[2] }],
         };
       }
@@ -565,7 +565,7 @@ export class Tools {
       );
       this.engine.store.grantBlob(blobId, this.session.id);
       return {
-        value: { path },
+        value: { path, url: `/api/blobs/${blobId}` },
         images: [
           {
             mime:

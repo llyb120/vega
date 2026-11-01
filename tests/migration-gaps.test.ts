@@ -220,6 +220,7 @@ test("removed image service is hidden and unavailable while reading image pixels
     await writeFile(join(dir, "photo.png"), image);
     const read = await tools.read({ path: "photo.png" });
     assert.equal(read.images?.[0].mime, "image/png");
+    assert.equal(read.value.url, "/api/blobs/" + read.images![0].blobId);
     assert.equal(
       Buffer.from(store.blobData(read.images![0].blobId!)!.data).toString(
         "base64",
@@ -227,10 +228,9 @@ test("removed image service is hidden and unavailable while reading image pixels
       image.toString("base64"),
     );
     const id = store.blob("image/png", image);
-    assert.equal(
-      (await tools.read({ path: "sqlite:blob/" + id })).images?.[0].blobId,
-      id,
-    );
+    const archived = await tools.read({ path: "sqlite:blob/" + id });
+    assert.equal(archived.images?.[0].blobId, id);
+    assert.equal(archived.value.url, "/api/blobs/" + id);
     assert(tools.definitions(model).some((tool) => tool.name === "chrome"));
     assert(!("image" in (await e.saveConfig(legacy))));
     assert(!("image" in store.get<any>("config", {})));

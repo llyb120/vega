@@ -125,6 +125,8 @@ test(
         model: config.model,
       });
     store.put("config", config);
+    const inlineBlob = store.blob("image/png", png);
+    store.grantBlob(inlineBlob, session.id);
     store.append(session.id, {
       role: "user",
       at: 1000,
@@ -147,7 +149,7 @@ test(
     store.append(session.id, {
       role: "assistant",
       at: 4000,
-      text: "已有历史正文\n".repeat(300) + "\n| **项目** | 数量 | 状态 | 说明 | 路径 | 备注 |\n| :--- | :---: | ---: | --- | --- | --- |\n| `read` | 12 | 完成 | 表格内容 | example.txt | 可横向滚动 |\n",
+      text: "已有历史正文\n".repeat(300) + "\n| **项目** | 数量 | 状态 | 说明 | 路径 | 备注 |\n| :--- | :---: | ---: | --- | --- | --- |\n| `read` | 12 | 完成 | 表格内容 | example.txt | 可横向滚动 |\n\n![Markdown 图片](</api/blobs/" + inlineBlob + ">)\n",
       usage: { input: 50, output: 10, totalTokens: 60 },
     });
     new Experiences(store).execute(
@@ -924,6 +926,10 @@ test(
       assert.equal(await evaluate(`getComputedStyle(document.querySelector('.markdown-table th:nth-child(2)')).textAlign`), "center");
       assert.equal(await evaluate(`getComputedStyle(document.querySelector('.markdown-table th:nth-child(3)')).textAlign`), "right");
       assert(await evaluate(`(()=>{const e=document.querySelector('.markdown-table');e.scrollLeft=40;return e.scrollWidth>e.clientWidth&&e.scrollLeft>0})()`), "wide markdown tables scroll independently on mobile");
+      await evaluate(`document.querySelector('.markdown-body img[alt="Markdown 图片"]').scrollIntoView({block:'center'})`);
+      await until(`document.querySelector('.markdown-body img[alt="Markdown 图片"]')?.naturalWidth===1568`);
+      assert(await evaluate(`(()=>{const e=document.querySelector('.markdown-body img[alt="Markdown 图片"]'),r=e.getBoundingClientRect();return e.complete&&r.width>0&&r.width<=e.parentElement.clientWidth+1&&Math.abs(r.height/r.width-6000/1568)<0.01})()`), "authenticated Markdown images load and fit the mobile bubble without distortion");
+      assert.equal(await evaluate(`document.querySelector('.markdown-body img[alt="Markdown 图片"]').referrerPolicy`), "no-referrer");
       assert.equal(await evaluate(`document.querySelector('.execution-switch').getAttribute('aria-checked')`), "false", "offline new sessions default to the server");
       assert.equal(await evaluate(`document.querySelector('.execution-switch').disabled`), true, "an offline client cannot be selected");
       assert.equal(await evaluate("window.__localClientAttempts"), 0, "mobile pages must not try their loopback client");

@@ -141,6 +141,45 @@ test("tables escape HTML and unsafe links and do not consume code blocks, invali
   assert.match(renderMarkdown("a | b\n--- | ---\n1 | 2").html, /<td>1<\/td><td>2<\/td>/);
 });
 
+test("Markdown images support web, authenticated archive and raster data URLs with safe attributes", () => {
+  const html = renderInline('![图 "片" & <tag>](<https://example.com/my photo(1).png?a=1&b=2> "标题 & 说明")');
+  assert.match(html, /<img src="https:\/\/example.com\/my%20photo\(1\).png\?a=1&amp;b=2"/);
+  assert(html.includes('alt="图 &quot;片&quot; &amp; &lt;tag&gt;"'));
+  assert(html.includes('title="标题 &amp; 说明"'));
+  assert(html.includes('loading="lazy" decoding="async" referrerpolicy="no-referrer"'));
+  assert(!html.includes("<a"));
+  for (const url of ["/api/blobs/blob-fixture", "sqlite:blob/blob-fixture"])
+    assert(renderInline(`![图片](<${url}>)`).includes('src="/api/blobs/blob-fixture"'));
+  assert(renderInline("![](data:image/png;base64,YQ==)").includes('src="data:image/png;base64,YQ==" alt=""'));
+  assert(renderInline("![photo](https://example.com/pic(1).png)").includes('src="https://example.com/pic(1).png"'));
+  assert(renderInline("[![photo](https://example.com/photo.png)](https://example.com)").includes('rel="noopener noreferrer"><img'));
+});
+
+test("Markdown image URLs cannot inject markup or access arbitrary local/API paths", () => {
+  for (const url of [
+    "javascript:alert(1)", "file:///C:/secret.png", "C:/secret.png", "/etc/secret.png",
+    "//example.com/photo.png", "/api/auth/logout", "/api/blobs/blob-x/../secret", "sqlite:message/1",
+    "data:image/svg+xml;base64,PHN2Zz4=", "data:text/html;base64,YQ==", "data:image/png;base64,!!!",
+    "https://user:password@example.com/photo.png", "https://example.com/\\evil.png", "https://",
+  ]) assert(!renderInline(`![alt](<${url}>)`).includes("<img"), url);
+  const html = renderInline('![\" onerror=\"alert(1)](https://example.com/photo.png)');
+  assert(html.includes('alt="&quot; onerror=&quot;alert(1)"'));
+  assert(!/<img[^>]*\sonerror="/.test(html));
+  assert(!renderInline("<img src=x onerror=alert(1)>").includes("<img"));
+  assert(!renderInline('[label](https://example.com/![alt](https://other.test/pic.png))').includes('<a href='), "image placeholders must never expand inside link attributes");
+  assert(!renderInline("\u00000\u0000").includes("undefined"));
+});
+
+test("image syntax stays literal in code and incomplete streams, but works in paragraphs and tables", () => {
+  assert.equal(renderInline("`![image](https://example.com/a.png)`"), "<code>![image](https://example.com/a.png)</code>");
+  assert(!renderMarkdown("```md\n![image](https://example.com/a.png)\n```").html.includes("<img"));
+  assert(!renderMarkdown("![image](https://example.com/a.png").html.includes("<img"));
+  const { html } = renderMarkdown("说明\n![image](https://example.com/a.png)\n\n| 图片 |\n| --- |\n| ![preview](/api/blobs/blob-fixture) |");
+  assert.match(html, /<p>说明<br><img/);
+  assert.match(html, /<td><img src="\/api\/blobs\/blob-fixture"/);
+  assert(renderInline("![`code` **label**](https://example.com/a.png)").includes('alt="code **label**"'));
+});
+
 test("inline code is protected from formatting and plain digits survive", () => {
   assert.equal(
     renderInline("`**not bold**` 与 **bold** 以及 0 和 12"),
