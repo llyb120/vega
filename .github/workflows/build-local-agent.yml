@@ -18,7 +18,6 @@ jobs:
         include:
           # Windows: real tray icon (getlantern/systray).
           - { name: windows-amd64, os: windows-latest, goos: windows, goarch: amd64, out: vega-local-windows-amd64.exe, cgo: "1" }
-          - { name: windows-arm64, os: windows-latest, goos: windows, goarch: arm64, out: vega-local-windows-arm64.exe, cgo: "1" }
           # Linux / macOS: tray_other.go runs headless; tray deps are excluded by
           # build tags, so plain CGO-disabled builds work cross-platform.
           - { name: linux-amd64, os: ubuntu-latest, goos: linux, goarch: amd64, out: vega-local-linux-amd64, cgo: "0" }
@@ -49,3 +48,26 @@ jobs:
           name: ${{ matrix.name }}
           path: local/${{ matrix.out }}
           if-no-files-found: error
+
+  release:
+    name: rolling release
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Rolling latest: assets are replaced on every push to master. The tag itself
+      # stays on the first commit of the release (shortcut: fixed tag, switch to
+      # v* tags if real version history is needed).
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: local-latest
+          name: vega-local latest
+          body: Rolling build of vega-local from ${{ github.sha }}
+          files: dist/*
