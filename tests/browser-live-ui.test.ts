@@ -265,7 +265,7 @@ test(
       );
     const contextMenu = (pointerType: string) =>
       evaluate(
-        `(()=>{const e=document.querySelector('.browser-image img'),r=e.getBoundingClientRect(),event=new PointerEvent('contextmenu',{bubbles:true,cancelable:true,pointerType:${JSON.stringify(pointerType)},button:2,clientX:r.x+r.width/2,clientY:r.y+r.height/2});e.dispatchEvent(event);return event.defaultPrevented;})()`,
+        `(()=>{const e=document.querySelector('.browser-image'),r=e.querySelector('img').getBoundingClientRect();if(${JSON.stringify(pointerType)}==='mouse')e.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'mouse',button:2}));const event=new PointerEvent('contextmenu',{bubbles:true,cancelable:true,pointerType:${JSON.stringify(pointerType)},button:2,clientX:r.x+r.width/2,clientY:r.y+r.height/2});e.dispatchEvent(event);return event.defaultPrevented;})()`,
       );
     try {
       let endpoint = "";
@@ -348,12 +348,6 @@ test(
       await until(
         `document.querySelector('.browser-image img')?.complete===true`,
       );
-      const controlsHeight = await evaluate(
-        `document.querySelector('.remote-controls').getBoundingClientRect().height`,
-      );
-      const imageTop = await evaluate(
-        `document.querySelector('.browser-image img').getBoundingClientRect().top+document.querySelector('.browser-view').scrollTop`,
-      );
       assert.equal(
         await contextMenu("touch"),
         true,
@@ -361,7 +355,7 @@ test(
       );
       assert.equal(inputs.length, 0, "long press must not claim control");
       assert.equal(modes.length, 0);
-      await tap(".browser-image img");
+      await tap(".browser-image");
       await sleep(100);
       assert.equal(modes.length, 0, "a view click must not request control");
       assert.equal(inputs.length, 0, "a view click must not reach the webpage");
@@ -376,28 +370,35 @@ test(
       assert.equal(inputs.length, 0, "preview zoom and panning must not reach the webpage");
       await tap(".browser-address button:nth-of-type(2)");
       assert(await evaluate(`document.querySelector('.browser-image img').style.transform.includes('scale(1)')`));
+      const pinch = await evaluate(`(()=>{const e=document.querySelector('.browser-image');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return{x:r.x+r.width/2,y:(Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2}})()`);
+      await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ id: 1, x: pinch.x - 25, y: pinch.y }, { id: 2, x: pinch.x + 25, y: pinch.y }] });
+      for (let step = 1; step <= 5; step++) {
+        await command("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ id: 1, x: pinch.x - 25 - step * 6, y: pinch.y }, { id: 2, x: pinch.x + 25 + step * 6, y: pinch.y }] });
+        await sleep(20);
+      }
+      await command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      assert(await evaluate(`Number(/scale\\(([^)]+)\\)/.exec(document.querySelector('.browser-image img').style.transform)[1])>1.5`), "two fingers zoom only the preview");
+      assert.equal(await evaluate("visualViewport.scale"), 1, "the surrounding application stays fixed");
+      const beforePan = await evaluate(`document.querySelector('.browser-image img').style.transform`);
+      await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: pinch.x, y: pinch.y }] });
+      await command("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: pinch.x + 30, y: pinch.y - 25 }] });
+      await command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      assert.notEqual(await evaluate(`document.querySelector('.browser-image img').style.transform`), beforePan, "one finger pans the zoomed preview");
+      assert.equal(inputs.length, 0);
+      assert.equal(modes.length, 0);
       await tap(".browser-address button");
       await sleep(350);
       assert.equal(modes.at(-1)?.mode, "control", JSON.stringify(modes));
       assert.equal(await evaluate(`document.querySelector('.browser-address button').textContent.trim()`), "退出操作");
-      await until(
-        `getComputedStyle(document.querySelector('.remote-controls')).visibility==='visible'`,
-      );
-      assert.equal(
-        await evaluate(
-          `document.querySelector('.remote-controls').getBoundingClientRect().height`,
-        ),
-        controlsHeight,
-        "showing remote controls must not change the layout",
-      );
-      assert.equal(
-        await evaluate(
-          `document.querySelector('.browser-image img').getBoundingClientRect().top+document.querySelector('.browser-view').scrollTop`,
-        ),
-        imageTop,
-        "showing remote controls must not move the screenshot",
-      );
-      await tap(".browser-image img");
+      await until(`document.querySelector('.remote-text textarea')?.getClientRects().length>0`);
+      assert.equal(await evaluate(`document.querySelector('.remote-input').open`), false, "auxiliary input is visible without opening advanced controls");
+      const held = await evaluate(`(()=>{const e=document.querySelector('.browser-image');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return{x:r.x+r.width/2,y:(Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2}})()`);
+      await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [held] });
+      await sleep(650);
+      assert.equal(await contextMenu(""), true, "legacy touch context menus without pointerType are blocked too");
+      await command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      assert.equal(inputs.length, 0, "a real touch long press must not turn into a click or a remote right click");
+      await tap(".browser-image");
       for (
         let i = 0;
         i < 100 && !inputs.some((m) => m.action.action === "click_at");
@@ -434,11 +435,15 @@ test(
         1,
         "only a mouse context menu must send a remote right click",
       );
-      await tap(".remote-input summary");
+      await tap('textarea[aria-label="远程输入文字"]');
+      assert.equal(await evaluate(`document.activeElement.getAttribute('aria-label')`), "远程输入文字", "the auxiliary field can open a phone keyboard");
       await until(
         `!document.querySelector('.remote-text button').disabled||document.querySelector('.browser-image img').naturalWidth===900`,
       );
+      const typedBeforeSend = inputs.length;
       await fill('textarea[aria-label="远程输入文字"]', "即时输入：你好");
+      await sleep(80);
+      assert.equal(inputs.length, typedBeforeSend, "composition and draft edits must not type into the remote page before Send");
       await until(`!document.querySelector('.remote-text button').disabled`);
       await tap(".remote-text button");
       for (
@@ -448,6 +453,7 @@ test(
       )
         await sleep(10);
       assert(inputs.some((m) => m.action.text === "即时输入：你好"));
+      assert.equal(inputs.some((m) => m.action.key === "Enter"), false, "sending text does not submit the remote form");
       await sleep(140);
       await tap('[aria-label="远程按键 回车"]');
       for (
@@ -457,6 +463,7 @@ test(
       )
         await sleep(10);
       assert(inputs.some((m) => m.action.key === "Enter"));
+      await tap(".remote-input summary");
       await fill(
         'input[aria-label="远程网页地址"]',
         "https://example.test/new-draft",
@@ -556,7 +563,7 @@ test(
             "touch controls at least 44px",
           );
       }
-      await evaluate(`document.querySelector('.browser-image img').focus()`);
+      await evaluate(`document.querySelector('.browser-image').focus()`);
       for (const key of "abc")
         await command("Input.dispatchKeyEvent", {
           type: "keyDown",
@@ -589,7 +596,7 @@ test(
       await tap(".browser-address button");
       await until(`document.querySelector('.browser-address button').textContent.trim()==='开始操作'`);
       const afterExit = inputs.length;
-      await tap(".browser-image img");
+      await tap(".browser-image");
       await sleep(100);
       assert.equal(inputs.length, afterExit, "exit returns to view-only mode immediately");
       assert.equal(modes.at(-1)?.mode, "view");

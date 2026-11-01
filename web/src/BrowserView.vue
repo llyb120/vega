@@ -39,6 +39,8 @@ let socket = null,
   outbox = [],
   connectTimer = null,
   gesture = null,
+  touchGesture = null,
+  lastTouchAt = 0,
   suppressClick = false;
 let imageURL = "",
   previousImageURL = "",
@@ -46,6 +48,7 @@ let imageURL = "",
 function resetInput() {
   outbox = [];
   gesture = null;
+  touchGesture = null;
   suppressClick = false;
 }
 function disconnect() {
@@ -68,7 +71,7 @@ function resetView() {
 function zoomView(event, factor) {
   const next = Math.max(0.1, Math.min(4, zoom.value * factor)),
     ratio = next / zoom.value,
-    rect = event.currentTarget.getBoundingClientRect(),
+    rect = imageRect(event),
     x = event.clientX ?? rect.left + rect.width / 2,
     y = event.clientY ?? rect.top + rect.height / 2;
   panX.value += (x - rect.left) * (1 - ratio);
@@ -115,7 +118,6 @@ function hidden() {
   }
 }
 const keys = [
-  ["Enter", "回车"],
   ["Tab", "Tab"],
   ["Shift+Tab", "上一个输入框"],
   ["Escape", "Esc"],
@@ -365,9 +367,12 @@ function control(action, frameId = shownFrame?.frameId) {
     }),
   );
 }
+function imageRect(event) {
+  return event.currentTarget.querySelector("img").getBoundingClientRect();
+}
 function imagePoint(event, clamp = false) {
   const image = shownFrame?.image,
-    r = event.currentTarget.getBoundingClientRect();
+    r = imageRect(event);
   if (!image || !r.width || !r.height) return;
   let x = ((event.clientX - r.left) * image.width) / r.width,
     y = ((event.clientY - r.top) * image.height) / r.height;
@@ -381,7 +386,7 @@ function imagePoint(event, clamp = false) {
   };
 }
 function clickImage(event) {
-  if (!remote.value) return;
+  if (!remote.value || Date.now() - lastTouchAt < 1000) return;
   if (suppressClick) {
     suppressClick = false;
     return;
@@ -398,14 +403,16 @@ function clickImage(event) {
 }
 function contextImage(event) {
   event.preventDefault();
-  if (!remote.value || event.pointerType === "touch") return;
+  if (!remote.value || event.pointerType === "touch" || event.sourceCapabilities?.firesTouchEvents || Date.now() - lastTouchAt < 1000) return;
   const point = imagePoint(event);
   if (point)
     void control({ action: "click_at", ...point, button: "right", click_count: 1 });
 }
 function pointerDown(event) {
+  if (event.pointerType === "touch") return;
+  lastTouchAt = 0;
   suppressClick = false;
-  if (event.button !== 0 || event.pointerType === "touch") return;
+  if (event.button !== 0) return;
   const point = imagePoint(event);
   if (!point) return;
   if (liveState.value === "waiting") return;
@@ -461,6 +468,56 @@ function pointerCancel(event) {
   const { dragging, last, view } = gesture;
   gesture = null;
   if (dragging && !view) void control({ action: "pointer", phase: "up", ...last });
+}
+function touchStart(event) {
+  lastTouchAt = Date.now();
+  const points = [...event.touches].slice(0, 2);
+  if (!points.length) return;
+  const x = points.reduce((sum, p) => sum + p.clientX, 0) / points.length,
+    y = points.reduce((sum, p) => sum + p.clientY, 0) / points.length;
+  touchGesture = {
+    x, y, zoom: zoom.value, panX: panX.value, panY: panY.value,
+    rect: imageRect(event),
+    distance: points.length === 2 ? Math.hypot(points[0].clientX - points[1].clientX, points[0].clientY - points[1].clientY) : 0,
+    view: !operating.value,
+    multiple: points.length > 1 || !!touchGesture?.multiple,
+    moved: !!touchGesture?.moved,
+    at: touchGesture?.at || Date.now(),
+    frameId: shownFrame?.frameId,
+    point: imagePoint({ currentTarget: event.currentTarget, clientX: x, clientY: y }),
+  };
+}
+function touchMove(event) {
+  lastTouchAt = Date.now();
+  if (!touchGesture || !event.touches.length) return;
+  const points = [...event.touches].slice(0, 2),
+    x = points.reduce((sum, p) => sum + p.clientX, 0) / points.length,
+    y = points.reduce((sum, p) => sum + p.clientY, 0) / points.length,
+    g = touchGesture;
+  if (Math.hypot(x - g.x, y - g.y) >= DRAG_PX || points.length > 1) g.moved = true;
+  if (!g.view || !g.moved) return;
+  const distance = points.length === 2 ? Math.hypot(points[0].clientX - points[1].clientX, points[0].clientY - points[1].clientY) : 0,
+    next = Math.max(0.1, Math.min(4, g.zoom * (g.distance && distance ? distance / g.distance : 1))),
+    ratio = next / g.zoom;
+  panX.value = g.panX + x - g.x + (g.x - g.rect.left) * (1 - ratio);
+  panY.value = g.panY + y - g.y + (g.y - g.rect.top) * (1 - ratio);
+  zoom.value = next;
+}
+function touchEnd(event) {
+  lastTouchAt = Date.now();
+  const g = touchGesture;
+  if (!g) return;
+  if (event.touches.length) {
+    touchStart(event);
+    return;
+  }
+  touchGesture = null;
+  if (g.view || !remote.value || g.multiple || g.moved || Date.now() - g.at >= 500 || !g.point) return;
+  void control({ action: "click_at", ...g.point, button: "left", click_count: 1 }, g.frameId);
+}
+function touchCancel() {
+  lastTouchAt = Date.now();
+  touchGesture = null;
 }
 function imageKey(event) {
   if (!remote.value) {
@@ -550,7 +607,7 @@ function wheelImage(event) {
 }
 function sendText() {
   const value = text.value;
-  if (!remote.value || !value || inflight || !imageReady.value) return;
+  if (!remote.value || !screenshot.value?.editable || !value || inflight || !imageReady.value) return;
   text.value = "";
   void control({ action: "type", text: value });
 }
@@ -679,27 +736,29 @@ onBeforeUnmount(() => {
             网页下滚
           </button>
         </div>
-        <details class="remote-input">
-          <summary>文字、按键与网址</summary>
-          <p class="hint">
-            先点截图中的输入框，再发送文字；不会自动按回车。操作会直接影响共享浏览器。
-          </p>
-          <form @submit.prevent="sendText" class="remote-text">
+        <form @submit.prevent="sendText" class="remote-text">
+          <label>
+            辅助输入
             <textarea
               v-model="text"
-              rows="2"
+              rows="1"
               maxlength="16000"
               aria-label="远程输入文字"
               autocomplete="off"
+              autocapitalize="none"
               spellcheck="false"
-              placeholder="要输入到网页的文字"
-            ></textarea
-            ><button
-              :disabled="inputDisabled || !screenshot?.editable || !text"
-            >
-              发送文字
-            </button>
-          </form>
+              :disabled="!remote"
+              :placeholder="screenshot?.editable ? '点此打开手机键盘，输入后点“发送文字”' : '先点击画面中的网页输入框，再在此输入'"
+            ></textarea>
+          </label>
+          <button :disabled="inputDisabled || !screenshot?.editable || !text">发送文字</button>
+          <button type="button" :disabled="inputDisabled" aria-label="远程按键 回车" @click="control({ action: 'press', key: 'Enter' })">回车</button>
+        </form>
+        <p class="hint remote-text-hint" role="status">
+          {{ screenshot?.editable ? '已选中网页输入框。发送文字只输入内容，不会提交；需要提交时再点“回车”。' : '点选网页输入框后，用辅助输入框打开手机键盘；中文、粘贴均可。' }}
+        </p>
+        <details class="remote-input">
+          <summary>更多按键与网址</summary>
           <div class="remote-keys">
             <button
               v-for="[key, label] in keys"
@@ -745,7 +804,7 @@ onBeforeUnmount(() => {
           </form>
         </details>
         <p class="hint remote-mode-hint">
-          点击、滚轮和鼠标拖动会直接同步到网页；触屏滑动用于查看截图，翻页请用上滚/下滚。
+          点击、滚轮和鼠标拖动会直接同步到网页；触屏短按点击网页，翻页请用上滚/下滚，查看模式支持双指缩放和单指拖动。
         </p>
       </div>
       <div v-if="busy" class="browser-placeholder" role="status">
@@ -756,28 +815,36 @@ onBeforeUnmount(() => {
           实时画面 · {{ new Date(screenshot.capturedAt).toLocaleTimeString() }}{{
             remote ? ' · 操作模式' : ' · 查看模式'
           }}
-          <span :style="{ visibility: operating ? 'hidden' : 'visible' }"> · 滚轮缩放，按住鼠标拖动</span>
+          <span :style="{ visibility: operating ? 'hidden' : 'visible' }"> · 双指缩放、单指拖动；鼠标滚轮缩放</span>
         </figcaption>
-        <div class="browser-image">
+        <div
+          class="browser-image"
+          role="region"
+          :class="{ 'remote-active': remote }"
+          :tabindex="liveState === 'offline' ? -1 : 0"
+          aria-label="浏览器画面：查看时双指缩放、单指拖动，操作时短按点击网页"
+          @keydown="imageKey"
+          @click="clickImage"
+          @pointerdown="pointerDown"
+          @pointermove="pointerMove"
+          @pointerup="pointerUp"
+          @pointercancel="pointerCancel"
+          @touchstart.prevent="touchStart"
+          @touchmove.prevent="touchMove"
+          @touchend.prevent="touchEnd"
+          @touchcancel.prevent="touchCancel"
+          @wheel.prevent="wheelImage"
+          @contextmenu.prevent.stop="contextImage"
+          @dragstart.prevent
+        >
           <img
             :src="screenshot.image.url"
             :width="screenshot.image.width"
             :height="screenshot.image.height"
             :alt="'标签页当前截图：' + screenshot.title"
             draggable="false"
-            :class="{ 'remote-active': remote }"
             :style="{ transform: `translate(${panX}px, ${panY}px) scale(${zoom})` }"
-            title="查看模式可滚轮缩放、鼠标拖动；键盘 +/- 缩放，方向键平移，0 还原"
             @load="loadedImage"
-            :tabindex="liveState === 'offline' ? -1 : 0"
-            @keydown="imageKey"
-            @click="clickImage"
-            @pointerdown="pointerDown"
-            @pointermove="pointerMove"
-            @pointerup="pointerUp"
-            @pointercancel="pointerCancel"
-            @wheel="wheelImage"
-            @contextmenu="contextImage"
             @error="failedImage"
           />
         </div>
@@ -805,12 +872,15 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .remote-controls {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--surface, #fff);
 }
 .remote-controls-hidden {
-  visibility: hidden;
+  display: none;
 }
 .remote-toolbar,
 .remote-keys,
@@ -832,12 +902,24 @@ onBeforeUnmount(() => {
   margin: 4px 0 10px;
 }
 .remote-text {
-  align-items: stretch;
+  align-items: flex-end;
+  margin-top: 8px;
+}
+.remote-text label {
+  flex: 1 1 180px;
+  min-width: 0;
+  font-size: 12px;
 }
 .remote-text textarea {
+  display: block;
   width: 100%;
   min-width: 0;
-  flex: 1 1 200px;
+  min-height: 44px;
+  margin-top: 3px;
+}
+.remote-text-hint {
+  margin: 5px 0 0;
+  font-size: 11px;
 }
 .remote-keys {
   margin: 10px 0;
@@ -1028,6 +1110,15 @@ onBeforeUnmount(() => {
   padding: 18px;
   background: #f0f1f5;
   overflow: hidden;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: grab;
+}
+.browser-image:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .browser-image img {
   display: block;
@@ -1042,12 +1133,13 @@ onBeforeUnmount(() => {
   -webkit-user-select: none;
   user-select: none;
   transform-origin: 0 0;
-  cursor: grab;
+  pointer-events: none;
+  -webkit-user-drag: none;
 }
-.browser-image img:active {
+.browser-image:active {
   cursor: grabbing;
 }
-.browser-image img.remote-active {
+.browser-image.remote-active {
   cursor: crosshair;
 }
 @media (max-width: 760px) {
@@ -1119,12 +1211,22 @@ onBeforeUnmount(() => {
     padding: 6px 10px;
     gap: 6px;
   }
-  .remote-controls {
+  .remote-controls:not(.remote-controls-hidden) {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding: 4px 10px;
+  }
+  .remote-text,
+  .remote-text-hint {
+    flex-basis: 100%;
+  }
+  .remote-text label {
+    flex-basis: 120px;
+  }
+  .remote-text button {
+    padding: 8px;
   }
   .remote-input {
     margin-top: 0;

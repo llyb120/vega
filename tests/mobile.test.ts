@@ -1150,11 +1150,11 @@ test(
           ),
           "tabs must stay in one horizontal row",
         );
-        const distance = await swipe(".browser-image");
-        await until(
-          `document.querySelector('.browser-view').scrollTop>${Math.min(100, distance / 3)}`,
-          "native touch scroll over screenshot at " + width,
-        );
+        const beforePan = await evaluate(`document.querySelector('.browser-image img').style.transform`);
+        await swipe(".browser-image");
+        assert.notEqual(await evaluate(`document.querySelector('.browser-image img').style.transform`), beforePan, "one-finger gestures pan the preview at " + width);
+        assert.equal(await evaluate("visualViewport.scale"), 1, "preview gestures must not resize the app");
+        await byText("还原视图 · 100%", ".browser-address");
         await evaluate(`document.querySelector('.browser-view').scrollTop=0`);
         await swipe(".browser-tabstrip", true);
         await until(
@@ -1180,11 +1180,11 @@ test(
       await until(
         `[...document.querySelectorAll('.browser-address .pill')].some(e=>e.textContent.trim()==="查看中")&&document.querySelector('.browser-image img')?.naturalWidth===1568`,
       );
-      await tap(".browser-image img");
+      await tap(".browser-image");
       assert.equal(remoteInputs.length, 0, "viewing the preview must not operate the website");
       await byText("开始操作", ".browser-address");
       await until(`document.querySelector('.browser-address button')?.textContent.trim()==='退出操作'`);
-      await tap(".browser-image img");
+      await tap(".browser-image");
       await until(
         `document.querySelector('.remote-controls')&&document.querySelector('.browser-image img')?.naturalWidth===1568`,
       );
@@ -1201,7 +1201,9 @@ test(
           Math.abs(remoteInputs.at(-1).action.y - 3000) <= 4,
         "displayed screenshot coordinates must map to its original image pixels: " + JSON.stringify(remoteInputs.at(-1)),
       );
-      await tap(".remote-input summary");
+      assert.equal(await evaluate(`document.querySelector('.remote-input').open`), false);
+      await tap('textarea[aria-label="远程输入文字"]');
+      assert.equal(await evaluate(`document.activeElement.getAttribute('aria-label')`), "远程输入文字");
       await fill('textarea[aria-label="远程输入文字"]', "远程输入：你好");
       await byText("发送文字", ".remote-text");
       await until(
@@ -1234,6 +1236,7 @@ test(
             input.action.action === "scroll_at" && input.action.delta === 600,
         ),
       );
+      await tap(".remote-input summary");
       await fill(
         'input[aria-label="远程网页地址"]',
         "https://example.test/new",
@@ -1243,6 +1246,7 @@ test(
         `document.querySelector('.browser-url').textContent.includes('/new')`,
       );
       assert.equal(remoteInputs.at(-1).action.action, "goto");
+      await tap(".remote-input summary");
       await dragMouse(".browser-image");
       for (
         let i = 0;
@@ -1301,7 +1305,7 @@ test(
       );
       assert.equal(
         await evaluate(
-          `document.querySelector('.browser-image img')?.getAttribute('tabindex')`,
+          `document.querySelector('.browser-image')?.getAttribute('tabindex')`,
         ),
         "-1",
       );
