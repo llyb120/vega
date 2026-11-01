@@ -894,6 +894,15 @@ test(
       await nav("对话");
       await fill('textarea[aria-label="消息"]', "");
       await layout("initial chat");
+      assert.equal(await evaluate("getComputedStyle(document.documentElement).touchAction"), "pan-x pan-y", "the mobile viewport permits scrolling, not browser gesture zoom");
+      const pinchPoint = await evaluate(`(()=>{const r=document.querySelector('.transcript').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+      await command("Input.synthesizePinchGesture", { ...pinchPoint, scaleFactor: 1.6, relativeSpeed: 800, gestureSourceType: "touch" });
+      await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+      assert.equal(await evaluate("visualViewport.scale"), 1, "touch gestures must not zoom the entire application");
+      await command("Input.synthesizeTapGesture", { ...pinchPoint, tapCount: 2, gestureSourceType: "touch" });
+      assert.equal(await evaluate("visualViewport.scale"), 1, "double taps must not zoom the entire application");
+      assert(await evaluate(`!/(?:user-scalable\\s*=\\s*no|maximum-scale\\s*=)/i.test(document.querySelector('meta[name=viewport]').content)`), "browser accessibility zoom must remain available");
+      await layout("fixed mobile viewport after gestures");
       await until(`document.querySelector('.message.assistant .markdown-table th')?.textContent==='项目'`);
       assert.equal(await evaluate(`document.querySelectorAll('.markdown-table tbody td').length`), 6);
       assert.equal(await evaluate(`getComputedStyle(document.querySelector('.markdown-table th:nth-child(2)')).textAlign`), "center");
