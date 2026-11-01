@@ -53,6 +53,88 @@ test("live control idle and uncertain delivery release the shared gate without r
   assert.equal(attempts, 1);
   assert(s.closed.length);
 });
+for (const [stage, reason] of [
+  ["state", "Cannot find context with specified id"],
+  ["observe", "Execution context was destroyed."],
+  ["screenshot", "Unable to capture screenshot"],
+  ["after", "Inspected target navigated or closed"],
+]) test(`Enter navigation recovers ${stage} reads on the same live connection without replay`, async () => {
+  const f = await fixture(), s = await f.open();
+  await s.wait("frame");
+  s.message({ type: "mode", mode: "control" });
+  await s.wait("mode", m => m.mode === "control");
+  const session = f.hub.sessions.get(s.socket.id)!;
+  const evaluate = f.chrome.evaluate.bind(f.chrome), observe = f.chrome.observe.bind(f.chrome), cdp = f.chrome.cdp.bind(f.chrome);
+  let navigating = false, afterShot = false, remaining = 3, enters = 0;
+  f.chrome.key = async (_tag, key) => {
+    assert.equal(key, "Enter");
+    enters++;
+    navigating = true;
+    f.state.url = "https://example.test/submitted";
+    f.state.document = "submitted document";
+    f.state.stamp = "submitted viewport";
+    if (stage === "observe") session.observation = undefined;
+  };
+  f.chrome.observe = async (...args) => {
+    if (navigating && stage === "observe" && remaining > 0) {
+      remaining--;
+      throw Error(reason);
+    }
+    return observe(...args);
+  };
+  f.chrome.evaluate = async (...args) => {
+    if (navigating && (stage === "state" || stage === "after" && afterShot) && remaining > 0) {
+      remaining--;
+      afterShot = false;
+      throw Error(reason);
+    }
+    return evaluate(...args);
+  };
+  f.chrome.cdp = async (...args) => {
+    if (navigating && args[1] === "Page.captureScreenshot") {
+      if (stage === "screenshot" && remaining > 0) {
+        remaining--;
+        throw Error(reason);
+      }
+      afterShot = true;
+    }
+    return cdp(...args);
+  };
+  s.message({ type: "input", seq: 1, frameId: s.frame().frameId, action: { action: "press", key: "Enter" } });
+  assert.equal((await s.wait("input_result", m => m.seq === 1)).status, "executed");
+  const frame = await s.wait("frame", m => m.url === f.state.url);
+  await s.wait("frame", m => m.frameId > frame.frameId);
+  assert.equal(remaining, 0);
+  assert.equal(enters, 1, "only read-only observation may retry, never the submitted key");
+  assert.equal(f.hub.sessions.get(s.socket.id), session);
+  assert.equal(session.locked, true);
+  assert.deepEqual(s.closed, []);
+  assert.equal(s.messages.some(m => m.type === "error"), false);
+  assert.equal(session.presented!.state.document, f.state.document);
+});
+
+test("persistent navigation read failures are bounded and real extension disconnects still close the live session", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  for (const reason of ["Execution context was destroyed.", "浏览器扩展已断开"]) {
+    const f = await fixture(), s = await f.open();
+    await s.wait("frame");
+    const cdp = f.chrome.cdp.bind(f.chrome);
+    let failures = 0;
+    f.chrome.cdp = async (...args) => {
+      if (args[1] === "Page.captureScreenshot") {
+        if (failures++) now += 5001;
+        throw Error(reason);
+      }
+      return cdp(...args);
+    };
+    await s.wait("error", m => m.reason === reason);
+    assert.equal(failures, reason.startsWith("Execution") ? 2 : 1);
+    assert.equal(s.closed.at(-1)?.code, 1011);
+    assert.equal(f.hub.sessions.has(s.socket.id), false);
+  }
+});
+
 test("control of another tab runs while an agent task owns a different tab", async () => {
   const f = await fixture(),
     a = await f.open(),
@@ -117,6 +199,7 @@ async function fixture() {
   const calls: Obj[] = [],
     state = {
       stamp: "viewport",
+      viewport: "[1,0,0]",
       document: "document",
       focus: { identity: 1, editable: true },
       width: 2000,
@@ -359,6 +442,50 @@ test("live input maps displayed pixels, streams drag phases, types once and rele
   );
   assert.equal(f.hub.controllers.size, 0);
 });
+test("live drag retains its accepted frame across scroll, expiry and acknowledgement eviction", async () => {
+  const f = await fixture(), s = await f.open();
+  const frame = await s.wait("frame");
+  s.message({ type: "mode", mode: "control" });
+  await s.wait("mode", m => m.mode === "control");
+  const session = f.hub.sessions.get(s.socket.id)!;
+  let seq = 0;
+  const input = async (phase: string) => {
+    s.message({ type: "input", seq: ++seq, frameId: frame.frameId, action: { action: "pointer", phase, x: 200, y: 100 } });
+    return s.wait("input_result", m => m.seq === seq);
+  };
+  assert.equal((await input("down")).status, "executed");
+  const accepted = session.acknowledged.get(frame.frameId)!;
+  accepted.at = Date.now() - 4000;
+  session.acknowledged.clear();
+  f.state.stamp = "scrolled while dragging";
+  assert.equal((await input("move")).status, "executed");
+  assert.equal((await input("up")).status, "executed");
+  assert.deepEqual(f.calls.filter(c => c.method === "Input.dispatchMouseEvent").map(c => c.params.type), ["mousePressed", "mouseMoved", "mouseReleased"]);
+  assert.equal(session.mouse, undefined);
+  assert.equal((await input("down")).status, "not_executed", "a new gesture still requires a fresh acknowledged frame");
+  session.acknowledged.set(frame.frameId, accepted);
+  assert.equal((await input("down")).status, "not_executed", "expiry still blocks a new press even if its frame remains acknowledged");
+});
+
+for (const change of ["document", "url", "width", "height", "viewport", "frameId"]) test(`live drag stops and releases the mouse when ${change} changes`, async () => {
+  const f = await fixture(), s = await f.open();
+  const frame = await s.wait("frame");
+  s.message({ type: "mode", mode: "control" });
+  await s.wait("mode", m => m.mode === "control");
+  const session = f.hub.sessions.get(s.socket.id)!;
+  s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
+  assert.equal((await s.wait("input_result", m => m.seq === 1)).status, "executed");
+  if (change === "document") session.observation!.pages[0].document = "new document";
+  else if (change === "url") f.state.url = "https://other.test/";
+  else if (change === "width" || change === "height") f.state[change] += 100;
+  else if (change === "viewport") f.state.viewport = "[2,0,0]";
+  if (change !== "frameId") f.state.stamp = "changed " + change;
+  s.message({ type: "input", seq: 2, frameId: change === "frameId" ? -1 : frame.frameId, action: { action: "pointer", phase: "move", x: 150, y: 100 } });
+  assert.equal((await s.wait("input_result", m => m.seq === 2)).status, "not_executed");
+  assert.equal(session.mouse, undefined);
+  assert.deepEqual(f.calls.filter(c => c.method === "Input.dispatchMouseEvent").map(c => c.params.type), ["mousePressed", "mouseReleased"]);
+});
+
 test("live controls reject stale frames, changed focus, arbitrary scripts and duplicates, and auth revocation closes a live lease", async () => {
   const f = await fixture(),
     s = await f.open();

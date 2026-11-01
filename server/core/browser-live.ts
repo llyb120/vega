@@ -18,7 +18,7 @@ type Frame = {
   observation: Awaited<ReturnType<Chrome["observe"]>>;
 };
 const stateExpression =
-  "({stamp:__novaWebview.stamp(),focus:__novaWebview.inputState(),width:innerWidth,height:innerHeight,url:location.href,title:document.title})";
+  "({stamp:__novaWebview.stamp(),viewport:JSON.stringify([visualViewport?.scale,visualViewport?.offsetLeft,visualViewport?.offsetTop]),focus:__novaWebview.inputState(),width:innerWidth,height:innerHeight,url:location.href,title:document.title})";
 
 // shortcut: JPEG snapshot stream (at most 10 fps); use screencast/WebRTC for video-grade motion.
 // Frames are ephemeral and acknowledged one at a time; video must never fill SQLite or an input queue.
@@ -139,7 +139,7 @@ class LiveSession {
   inputPending = false;
   lastMessage = Date.now();
   lastInput = Date.now();
-  mouse?: { x: number; y: number; button: string };
+  mouse?: { x: number; y: number; button: string; frame: Frame };
   constructor(
     public hub: BrowserLive,
     public socket: Socket,
@@ -158,6 +158,7 @@ class LiveSession {
   async run() {
     try {
       this.send({ type: "ready", tabTag: this.tabTag, mode: "view" });
+      let captureFailedAt = 0;
       while (this.active) {
         assert(this.valid(), "登录已失效");
         assert(Date.now() - this.lastMessage < 20000, "连接已中断，请重新连接");
@@ -169,7 +170,19 @@ class LiveSession {
             "画面传输超时，请重新连接",
           );
         } else if (!this.stopping && (!this.wantsControl || this.locked)) {
-          const capture = () => this.io.run(() => this.capture());
+          const capture = () => this.io.run(async () => {
+            try {
+              await this.capture();
+              captureFailedAt = 0;
+            } catch (e: any) {
+              // Navigation may destroy the context or surface; retry only these read-only captures.
+              if (!/Cannot find (?:context with specified id|default execution context)|Execution context was destroyed|Inspected target navigated or closed|No frame for given id found|Unable to capture screenshot|Page not ready/i.test(e.message))
+                throw e;
+              captureFailedAt ||= Date.now();
+              if (Date.now() - captureFailedAt >= 5000) throw e;
+              this.observation = undefined;
+            }
+          });
           if (this.locked) await capture();
           else
             await this.hub.chrome.tabGate(this.tabTag).run(async () => {
@@ -223,12 +236,7 @@ class LiveSession {
     if (!this.active || this.stopping) return;
     const chrome = this.hub.chrome;
     await browserTarget(chrome, this.tabTag);
-    let before: Obj;
-    try {
-      before = await this.pageState();
-    } catch {
-      before = await this.pageState();
-    }
+    const before = await this.pageState();
     const shot = await chrome.cdp(this.tabTag, "Page.captureScreenshot", {
       format: "jpeg",
       quality: 70,
@@ -382,7 +390,10 @@ class LiveSession {
       await this.hub.chrome
         .cdp(this.tabTag, "Input.dispatchMouseEvent", {
           type: "mouseReleased",
-          ...mouse,
+          x: mouse.x,
+          y: mouse.y,
+          button: mouse.button,
+          buttons: 0,
           clickCount: 1,
         })
         .catch(() => {});
@@ -394,20 +405,32 @@ class LiveSession {
         this.valid() && this.locked && this.wantsControl,
         "远程控制已停止",
       );
-      const frame = this.acknowledged.get(message.frameId);
-      assert(
-        frame && frame.id === message.frameId && Date.now() - frame.at < 3000,
-        "画面已过期，请等待实时画面更新",
-      );
-      const state = await this.pageState();
-      assert(
-        frame.state.document === state.document &&
-          frame.state.stamp === state.stamp,
-        "网页或视口已变化，请等待实时画面更新",
-      );
       const chrome = this.hub.chrome,
         raw = message.action;
       assert(raw && typeof raw === "object" && !Array.isArray(raw), "操作无效");
+      const drag =
+        raw.action === "pointer" && ["move", "up"].includes(raw.phase)
+          ? this.mouse
+          : undefined;
+      const frame = drag?.frame || this.acknowledged.get(message.frameId);
+      assert(
+        frame &&
+          frame.id === message.frameId &&
+          (drag || Date.now() - frame.at < 3000),
+        "画面已过期，请等待实时画面更新",
+      );
+      const state = await this.pageState();
+      // A held drag may scroll its own page; only new inputs require an unchanged, fresh frame.
+      assert(
+        frame.state.document === state.document &&
+          (drag
+            ? frame.state.url === state.url &&
+              frame.state.width === state.width &&
+              frame.state.height === state.height &&
+              frame.state.viewport === state.viewport
+            : frame.state.stamp === state.stamp),
+        "网页或视口已变化，请等待实时画面更新",
+      );
       if (raw.action === "pointer") {
         assert(
           Object.keys(raw).every((key) =>
@@ -423,7 +446,7 @@ class LiveSession {
         );
         attempted = true;
         this.invalidate();
-        this.mouse = { x, y, button: "left" };
+        this.mouse = { x, y, button: "left", frame };
         await chrome.cdp(this.tabTag, "Input.dispatchMouseEvent", {
           type:
             raw.phase === "down"

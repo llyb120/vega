@@ -18,7 +18,7 @@ function preview() {
   state.remote = { get value() { return state.operating.value && state.liveState.value === "control"; } };
   const functions = source.slice(source.indexOf("function resetView()"), source.indexOf("function loadedImage()")) +
     source.slice(source.indexOf("function control("), source.indexOf("function failedImage()"));
-  const handlers = vm.runInNewContext(functions + "\n({resetView,zoomView,requestControl,releaseControl,clickImage,contextImage,pointerDown,pointerMove,pointerUp,pointerCancel,touchStart,touchMove,touchEnd,touchCancel,wheelImage,imageKey,sendText})", state);
+  const handlers = vm.runInNewContext(functions + "\n({resetView,zoomView,requestControl,releaseControl,control,clickImage,contextImage,pointerDown,pointerMove,pointerUp,pointerCancel,touchStart,touchMove,touchEnd,touchCancel,wheelImage,imageKey,sendText})", state);
   const image = { getBoundingClientRect: () => ({ left: 100 + state.panX.value, top: 50 + state.panY.value, width: 300 * state.zoom.value, height: 200 * state.zoom.value }) };
   const target = { querySelector: () => image, setPointerCapture: () => {} };
   const event = { currentTarget: target, clientX: 250, clientY: 150, preventDefault() {}, pointerId: 1, pointerType: "mouse", button: 0, detail: 1 };
@@ -57,6 +57,29 @@ test("view mode clicks, keys, wheel zoom and pointer pans never claim control or
   handlers.clickImage(event);
   assert.deepEqual(sent, []);
   assert.equal(state.operating.value, false);
+});
+
+for (const finish of ["pointerUp", "pointerCancel"]) test(`remote drag coalesces rapid moves across repaints and preserves its release on ${finish}`, () => {
+  const { state, handlers, event, sent } = preview();
+  state.operating.value = true; state.liveState.value = "control";
+  handlers.pointerDown(event);
+  for (let i = 0; i < 200; i++) {
+    state.shownFrame = { ...state.shownFrame, frameId: "repaint-" + i };
+    handlers.pointerMove({ ...event, clientX: 270 + i / 10, clientY: 170 });
+  }
+  handlers[finish]({ ...event, clientX: 290, clientY: 170 });
+  handlers.clickImage(event);
+  assert.equal(sent.length, 1, "only the press is sent while awaiting its result");
+  assert.equal(state.outbox.length, 2, "pending moves must collapse without dropping the release");
+  assert.equal(state.error.value, "");
+  while (state.outbox.length) {
+    state.inflight = 0;
+    const next = state.outbox.shift();
+    handlers.control(next.action, next.frameId);
+  }
+  assert.deepEqual(sent.map(m => m.action.phase), ["down", "move", "up"]);
+  assert(sent.every(m => m.frameId === "frame"), "the entire gesture uses the frame seen when it started");
+  assert.equal(sent[1].action.x, 569, "only the latest unsent position is kept");
 });
 
 test("touch pinches and one-finger pans change only the preview and continue smoothly after a finger lifts", () => {

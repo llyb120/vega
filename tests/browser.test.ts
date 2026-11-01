@@ -198,7 +198,7 @@ test(
     const store = new Store(":memory:"),
       bridge = new FixtureBridge();
     store.db.prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)").run("fixture", "fixture", "test-only", "admin", 0, Date.now(), 0);
-    let submitted = 0,
+    let submitted = 0, liveSubmitted = 0,
       live: BrowserLive | undefined;
     const server = createServer((req, res) => {
       res.setHeader("Content-Type", "text/html");
@@ -209,6 +209,15 @@ test(
       }
       if (req.url === "/frame") {
         res.end("<button>Frame action</button>");
+        return;
+      }
+      if (req.url === "/live-form") {
+        res.end(`<form action="/live-submitted" method="post" onkeydown="if(event.key==='Enter'){event.preventDefault();this.requestSubmit()}"><input aria-label="Query"><button>Submit</button></form>`);
+        return;
+      }
+      if (req.url === "/live-submitted") {
+        liveSubmitted++;
+        setTimeout(() => res.end('<title>Submitted</title><input aria-label="Next input">'), 200);
         return;
       }
       res.end(
@@ -671,6 +680,19 @@ test(
         x: sliderLive.x + 70,
         y: sliderLive.y,
       });
+      await input({ action: "goto", url: url + "/live-form" });
+      await until(() => frames.at(-1)!.url === url + "/live-form");
+      await input({ action: "click_at", ...(await point('input[aria-label="Query"]')) });
+      await until(() => frames.at(-1)!.editable === true);
+      const liveSession = live.sessions.get(peer.id);
+      await input({ action: "press", key: "Enter" });
+      await until(() => frames.at(-1)!.url === url + "/live-submitted");
+      const submittedFrame = frames.at(-1)!;
+      await until(() => frames.at(-1)!.frameId > submittedFrame.frameId);
+      assert.equal(liveSubmitted, 1, "Enter must submit once even when navigation interrupts live observation");
+      assert.equal(live.sessions.get(peer.id), liveSession, "navigation must retain the same connection and control lease");
+      assert.equal(liveSession!.locked, true);
+      assert.equal(messages.some(m => m.type === "error"), false);
       await input({ action: "goto", url: url + "/live" });
       await until(() => frames.at(-1)!.url === url + "/live");
       await input({ action: "click_at", ...(await point("button")) });

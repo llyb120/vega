@@ -386,8 +386,13 @@ test(
       assert.notEqual(await evaluate(`document.querySelector('.browser-image img').style.transform`), beforePan, "one finger pans the zoomed preview");
       assert.equal(inputs.length, 0);
       assert.equal(modes.length, 0);
+      const geometry = () => evaluate(`(()=>{const image=document.querySelector('.browser-image'),controls=document.querySelector('.remote-controls'),panel=document.querySelector('.browser-panel');return{imageTop:image.getBoundingClientRect().top-panel.getBoundingClientRect().top,imageHeight:image.getBoundingClientRect().height,controlsHeight:controls.getBoundingClientRect().height,panelHeight:panel.getBoundingClientRect().height}})()`);
+      const beforeControl = await geometry();
+      assert(beforeControl.controlsHeight > 0, "view mode reserves the auxiliary controls without enabling remote input");
+      assert.equal(await evaluate(`document.querySelector('.remote-text textarea').disabled`), true);
       await tap(".browser-address button");
       await sleep(350);
+      assert.deepEqual(await geometry(), beforeControl, "starting control must not move or resize the browser image");
       assert.equal(modes.at(-1)?.mode, "control", JSON.stringify(modes));
       assert.equal(await evaluate(`document.querySelector('.browser-address button').textContent.trim()`), "退出操作");
       await until(`document.querySelector('.remote-text textarea')?.getClientRects().length>0`);
@@ -415,6 +420,8 @@ test(
           )),
       );
       assert.equal(inputs[0].action.action, "click_at");
+      await until(`!document.querySelector('.remote-text textarea').placeholder.startsWith('先点击')`);
+      assert.deepEqual(await geometry(), beforeControl, "selecting an editable target must not reflow the auxiliary controls");
       assert(Math.abs(inputs[0].action.x - 450) < 3);
       assert.equal(await contextMenu("touch"), true);
       await sleep(250);
@@ -502,11 +509,11 @@ test(
         buttons: 1,
         clickCount: 1,
       });
-      for (let n = 1; n <= 6; n++) {
-        await sleep(60);
+      for (let n = 1; n <= 100; n++) {
+        if (n % 10 === 0) await sleep(30);
         await command("Input.dispatchMouseEvent", {
           type: "mouseMoved",
-          x: p.x - n * 20,
+          x: p.x - n * 1.2,
           y: p.y,
           button: "left",
           buttons: 1,
@@ -527,6 +534,8 @@ test(
       )
         await sleep(10);
       assert(inputs.some((m) => m.action.phase === "down"));
+      const dragInputs = inputs.filter(m => m.action.action === "pointer");
+      assert(dragInputs.every(m => m.frameId === dragInputs[0].frameId), "repaints must not relabel an ongoing mouse gesture");
       assert(inputs.some((m) => m.action.phase === "move"));
       assert(
         inputs.some((m) => m.action.phase === "up"),
@@ -563,6 +572,13 @@ test(
             "touch controls at least 44px",
           );
       }
+      const desktopControl = await geometry();
+      await tap(".browser-address button");
+      await until(`document.querySelector('.browser-address button').textContent.trim()==='开始操作'`);
+      assert.deepEqual(await geometry(), desktopControl, "exiting desktop control keeps the image geometry");
+      await tap(".browser-address button");
+      await until(`document.querySelector('[aria-label="远程按键 回车"]').disabled===false`);
+      assert.deepEqual(await geometry(), desktopControl, "entering desktop control keeps the image geometry");
       await evaluate(`document.querySelector('.browser-image').focus()`);
       for (const key of "abc")
         await command("Input.dispatchKeyEvent", {

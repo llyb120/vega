@@ -343,6 +343,15 @@ function control(action, frameId = shownFrame?.frameId) {
   if (!remote.value || !screenshot.value || socket?.readyState !== WebSocket.OPEN)
     return;
   if (inflight || !imageReady.value) {
+    const last = outbox.at(-1);
+    if (
+      action.action === "pointer" && action.phase === "move" &&
+      last?.action.action === "pointer" && last.action.phase === "move" &&
+      last.frameId === frameId
+    ) {
+      last.action = action;
+      return;
+    }
     if (outbox.length >= 64) {
       error.value = "操作过快，请等待网页响应";
       return;
@@ -416,6 +425,7 @@ function pointerDown(event) {
   const point = imagePoint(event);
   if (!point) return;
   if (liveState.value === "waiting") return;
+  event.currentTarget.setPointerCapture(event.pointerId);
   gesture = {
     view: !remote.value,
     panX: panX.value,
@@ -423,6 +433,7 @@ function pointerDown(event) {
     id: event.pointerId,
     x: event.clientX,
     y: event.clientY,
+    frameId: shownFrame?.frameId,
     start: point,
     last: point,
     dragging: false,
@@ -433,7 +444,6 @@ function pointerMove(event) {
   if (gesture.view) {
     if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) < DRAG_PX && !gesture.dragging) return;
     gesture.dragging = true;
-    event.currentTarget.setPointerCapture(event.pointerId);
     panX.value = gesture.panX + event.clientX - gesture.x;
     panY.value = gesture.panY + event.clientY - gesture.y;
     return;
@@ -444,15 +454,14 @@ function pointerMove(event) {
     if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) < DRAG_PX)
       return;
     gesture.dragging = true;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    void control({ action: "pointer", phase: "down", ...gesture.start });
+    void control({ action: "pointer", phase: "down", ...gesture.start }, gesture.frameId);
   }
   gesture.last = point;
-  void control({ action: "pointer", phase: "move", ...point });
+  void control({ action: "pointer", phase: "move", ...point }, gesture.frameId);
 }
 function pointerUp(event) {
   if (!gesture || gesture.id !== event.pointerId) return;
-  const { dragging, last, view } = gesture;
+  const { dragging, last, view, frameId } = gesture;
   gesture = null;
   if (!dragging) return;
   suppressClick = true;
@@ -461,13 +470,14 @@ function pointerUp(event) {
     action: "pointer",
     phase: "up",
     ...(imagePoint(event, true) || last),
-  });
+  }, frameId);
 }
 function pointerCancel(event) {
   if (!gesture || gesture.id !== event.pointerId) return;
-  const { dragging, last, view } = gesture;
+  const { dragging, last, view, frameId } = gesture;
   gesture = null;
-  if (dragging && !view) void control({ action: "pointer", phase: "up", ...last });
+  if (dragging) suppressClick = true;
+  if (dragging && !view) void control({ action: "pointer", phase: "up", ...last }, frameId);
 }
 function touchStart(event) {
   lastTouchAt = Date.now();
@@ -728,7 +738,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-      <div class="remote-controls" :class="{ 'remote-controls-hidden': !remote }">
+      <div class="remote-controls">
         <div class="remote-toolbar">
           <button :disabled="inputDisabled" @click="scrollRemote(-600)">
             网页上滚</button
@@ -755,7 +765,7 @@ onBeforeUnmount(() => {
           <button type="button" :disabled="inputDisabled" aria-label="远程按键 回车" @click="control({ action: 'press', key: 'Enter' })">回车</button>
         </form>
         <p class="hint remote-text-hint" role="status">
-          {{ screenshot?.editable ? '已选中网页输入框。发送文字只输入内容，不会提交；需要提交时再点“回车”。' : '点选网页输入框后，用辅助输入框打开手机键盘；中文、粘贴均可。' }}
+          先点选网页输入框，再用辅助输入；发送文字仅输入、不提交，提交请点“回车”。
         </p>
         <details class="remote-input">
           <summary>更多按键与网址</summary>
@@ -797,6 +807,7 @@ onBeforeUnmount(() => {
               type="url"
               required
               aria-label="远程网页地址"
+              :disabled="!remote"
               placeholder="https://example.com"
               autocapitalize="none"
               spellcheck="false"
@@ -829,6 +840,7 @@ onBeforeUnmount(() => {
           @pointermove="pointerMove"
           @pointerup="pointerUp"
           @pointercancel="pointerCancel"
+          @lostpointercapture="pointerCancel"
           @touchstart.prevent="touchStart"
           @touchmove.prevent="touchMove"
           @touchend.prevent="touchEnd"
@@ -878,9 +890,6 @@ onBeforeUnmount(() => {
   padding: 12px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--surface, #fff);
-}
-.remote-controls-hidden {
-  display: none;
 }
 .remote-toolbar,
 .remote-keys,
@@ -1211,7 +1220,7 @@ onBeforeUnmount(() => {
     padding: 6px 10px;
     gap: 6px;
   }
-  .remote-controls:not(.remote-controls-hidden) {
+  .remote-controls {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
