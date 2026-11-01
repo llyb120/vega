@@ -12,9 +12,11 @@ The client only listens on loopback. Trusted website origins are saved in the cu
 
 ## Build
 
+Windows (system tray only, no console window):
+
 ```powershell
 go test ./...
-go build -o vega-local.exe .
+go build -ldflags="-H=windowsgui" -o vega-local.exe .
 ```
 
-CI builds Windows tray and Linux/macOS headless binaries. Linux/macOS require a browser to approve a new site; when automatic opening is unavailable, the client prints the local permission-page address.
+CI builds Windows tray and Linux/macOS headless binaries. Linux/macOS use `go build -o vega-local .` and require a browser to approve a new site; when automatic opening is unavailable, the client prints the local permission-page address.

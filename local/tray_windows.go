@@ -6,6 +6,7 @@ package main
 import (
 	_ "embed"
 	"os"
+	"sync"
 
 	"github.com/getlantern/systray"
 )
@@ -17,7 +18,10 @@ func systrayRun(configure, onQuit func()) {
 	systray.Run(func() {
 		systray.SetIcon(iconData)
 		systray.SetTitle("Vega Local")
-		systray.SetTooltip("Vega 本地执行端")
+		trayState.Lock()
+		trayState.ready = true
+		systray.SetTooltip(connectionTooltip(trayState.connected))
+		trayState.Unlock()
 		mConfigure := systray.AddMenuItem("连接授权", "查看或撤销已信任的 Vega 站点")
 		mQuit := systray.AddMenuItem("退出", "Stop local agent")
 		go func() {
@@ -31,15 +35,27 @@ func systrayRun(configure, onQuit func()) {
 				}
 			}
 		}()
-		// Show connection state in tooltip.
-		setState = func(v bool) {
-			if v {
-				systray.SetTooltip("Vega 本地执行端 · 已连接")
-			} else {
-				systray.SetTooltip("Vega 本地执行端 · 未连接")
-			}
-		}
 	}, func() { os.Exit(0) })
 }
 
-var setState = func(bool) {}
+var trayState struct {
+	sync.Mutex
+	ready     bool
+	connected bool
+}
+
+func connectionTooltip(connected bool) string {
+	if connected {
+		return "Vega 本地执行端 · 已连接"
+	}
+	return "Vega 本地执行端 · 未连接"
+}
+
+func setState(connected bool) {
+	trayState.Lock()
+	defer trayState.Unlock()
+	trayState.connected = connected
+	if trayState.ready {
+		systray.SetTooltip(connectionTooltip(connected))
+	}
+}
