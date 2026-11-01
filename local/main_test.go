@@ -113,15 +113,23 @@ func TestWebSocketRequiresTrustedOriginAndOneTimeWebsiteLogin(t *testing.T) {
 func TestPermissionPageRequiresLocalOrigin(t *testing.T) {
 	origin := "https://vega.example"
 	agent := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), pendingOrigins: map[string]bool{origin: true}, connections: make(map[*websocket.Conn]struct{})}
-	form := "origin=https%3A%2F%2Fvega.example"
-	request := httptest.NewRequest("POST", "http://"+localAddress+"/config/token", strings.NewReader(form))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	denied := httptest.NewRecorder()
-	agent.configure(denied, request)
-	if denied.Code != 403 || len(agent.config.TrustedOrigins) != 0 {
-		t.Fatal("cross-site approval accepted")
+	page := httptest.NewRecorder()
+	agent.configure(page, httptest.NewRequest("GET", "http://"+localAddress+"/config/token", nil))
+	if page.Code != 200 || page.Header().Get("Referrer-Policy") != "same-origin" {
+		t.Fatalf("permission page must preserve same-origin form origins: %d %v", page.Code, page.Header())
 	}
-	request = httptest.NewRequest("POST", "http://"+localAddress+"/config/token", strings.NewReader(form))
+	form := "origin=https%3A%2F%2Fvega.example"
+	for _, origin := range []string{"", "null", "https://evil.example", "http://localhost:47673"} {
+		request := httptest.NewRequest("POST", "http://"+localAddress+"/config/token", strings.NewReader(form))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.Header.Set("Origin", origin)
+		denied := httptest.NewRecorder()
+		agent.configure(denied, request)
+		if denied.Code != 403 || len(agent.config.TrustedOrigins) != 0 {
+			t.Fatalf("invalid approval origin accepted: %q", origin)
+		}
+	}
+	request := httptest.NewRequest("POST", "http://"+localAddress+"/config/token", strings.NewReader(form))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Origin", "http://"+localAddress)
 	allowed := httptest.NewRecorder()

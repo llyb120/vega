@@ -1130,7 +1130,12 @@ onBeforeUnmount(() => {
         </svg>
       </button>
       <strong>{{ view === 'chat' ? conversationTitle : mobileTitles[view] }}</strong>
-      <span v-if="localConnected" class="pill green" title="新建会话将在本机执行">本机已连接</span>
+      <span
+        class="pill"
+        :class="{ green: localConnected }"
+        role="status"
+        :title="localConnected ? '本机已连接 · 新建会话将在本机执行' : '本机未连接 · 请启动本地客户端并完成站点授权'"
+      >{{ localConnected ? '本机已连接' : '本机未连接' }}</span>
       <span
         v-if="narrow && view === 'chat' && isRunning"
         class="status-dot"
@@ -1347,7 +1352,12 @@ onBeforeUnmount(() => {
             </select>
           </div>
           <div class="actions">
-            <span v-if="localConnected" class="pill green" title="新建会话将在本机执行">本机已连接</span>
+            <span
+              class="pill"
+              :class="{ green: localConnected }"
+              role="status"
+              :title="localConnected ? '本机已连接 · 新建会话将在本机执行' : '本机未连接 · 请启动本地客户端并完成站点授权'"
+            >{{ localConnected ? '本机已连接' : '本机未连接' }}</span>
             <span v-if="isRunning" class="pill green"><span class="status-dot"></span>执行中</span>
             <button v-if="canExecute" class="topbar-new" @click="newSession">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>

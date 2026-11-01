@@ -95,18 +95,17 @@ func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
 	valid := len(a.connections) < 8
 	if valid {
 		a.connections[conn] = struct{}{}
+		setState(true)
 	}
 	a.mu.Unlock()
 	if !valid {
 		return
 	}
-	setState(true)
 	defer func() {
 		a.mu.Lock()
 		delete(a.connections, conn)
-		connected := len(a.connections) > 0
+		setState(len(a.connections) > 0)
 		a.mu.Unlock()
-		setState(connected)
 	}()
 	_ = conn.SetReadDeadline(time.UnixMilli(proof.ExpiresAt))
 	conn.SetReadLimit(maxBody)

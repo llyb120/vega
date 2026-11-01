@@ -41,7 +41,7 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo }}
         run: |
           go vet ./...
-          go build -trimpath -ldflags="-s -w" -o "${{ matrix.out }}" .
+          go build -trimpath -ldflags="-s -w ${{ matrix.goos == 'windows' && '-H=windowsgui' || '' }}" -o "${{ matrix.out }}" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

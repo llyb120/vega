@@ -76,7 +76,8 @@ var pairingPage = template.Must(template.New("pairing").Parse(`<!doctype html><h
 func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	// Preserve the local Origin on form POSTs instead of turning it into "null".
+	w.Header().Set("Referrer-Policy", "same-origin")
 	if r.Host != localAddress {
 		http.Error(w, "Invalid host", 403)
 		return
