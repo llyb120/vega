@@ -261,6 +261,37 @@ test("wire history preserves tool-call IDs, images and signed reasoning without 
     assert(!JSON.stringify(body).includes("call|item"));
   }
 });
+test("native reasoning is replayed only to its source model and remains untouched in history", () => {
+  for (const api of ["openai-responses", "anthropic-messages"]) {
+    const m = model(api, "https://example.test/v1");
+    const opaque = api === "openai-responses"
+      ? { type: "reasoning", id: "rs-native", encrypted_content: "native-secret", summary: [] }
+      : { type: "thinking", thinking: "visible", signature: "native-secret" };
+    const history = [{ role: "assistant" as const, model: m.selection, text: "answer", opaque: [opaque] }];
+    const before = structuredClone(history);
+    assert(JSON.stringify(bodyFor(m, "sys", history, []).body).includes("native-secret"));
+    assert(!JSON.stringify(bodyFor({ ...m, selection: "other/model" }, "sys", history, []).body).includes("native-secret"));
+    assert.deepEqual(history, before);
+  }
+});
+test("Devin model resolution enables native reasoning replay for configured models", async () => {
+  const store = new Store(":memory:");
+  cleanup.push(() => store.close());
+  const catalog = new Catalog(store, new Subscriptions(store, ""));
+  catalog.models = async () => ({
+    models: {}, raw: [{ variants: [{ model_uid: "m" }] }], version: "fixture-version",
+  });
+  const m = await catalog.resolve({
+    model: "p/m", provider: { p: { api: "devin", baseURL: "https://fixture.test", models: { m: {} } } },
+  });
+  assert.equal(m.options.requiresReasoningContentOnAssistantMessages, true);
+  const { body } = bodyFor(m, "sys", [{ role: "assistant", text: "answer", thinking: "visible reasoning" }], []);
+  assert.equal(body.messages[1].reasoning_content, "visible reasoning");
+  const wire = encodeDevin(body, "fixture-key", "fixture-version");
+  const message = decodeProto(wire.subarray(5)).find(([f]) => f === 3)![1] as Buffer;
+  const thinking = decodeProto(message).find(([f]) => f === 5)![1] as Buffer;
+  assert.equal(thinking.toString(), "visible reasoning");
+});
 test("Devin protobuf request fields and fragmented gzip Connect trailer validation", () => {
   const raw = encodeDevin(
     {
@@ -271,6 +302,7 @@ test("Devin protobuf request fields and fragmented gzip Connect trailer validati
         {
           role: "assistant",
           content: "",
+          reasoning_content: "fixture reasoning",
           tool_calls: [
             { id: "c", function: { name: "read", arguments: '{"path":"x"}' } },
           ],
@@ -306,6 +338,9 @@ test("Devin protobuf request fields and fragmented gzip Connect trailer validati
         f === 3 && Buffer.isBuffer(v) && v.toString() === "secret-key",
     ),
   );
+  const thinking = fields.filter(([f]) => f === 3).flatMap(([, v]) => decodeProto(v as Buffer)).filter(([f]) => f === 5);
+  assert.equal(thinking.length, 1);
+  assert.equal((thinking[0][1] as Buffer).toString(), "fixture reasoning");
   const text = fieldBytes(3, "answer"),
     good = Buffer.concat([
       envelope(gzipSync(text), 1),

@@ -348,7 +348,9 @@ export function bodyFor(
         continue;
       }
       if (m.model === model.selection)
-        items.push(...(m.opaque || []).filter((v) => v.type === "reasoning"));
+        items.push(...(m.opaque || [])
+          .filter((v) => v.type === "reasoning")
+          .map(({ id, ...item }) => item));
       const content: Obj[] = [];
       if (m.text)
         content.push({

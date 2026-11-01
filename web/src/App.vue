@@ -132,12 +132,26 @@ const sessions = ref([]),
   sessionLoading = ref(false),
   folds = ref([]),
   running = ref({}),
-  draft = ref(""),
-  attachments = ref([]),
+  composer = ref({ text: "", images: [] }),
+  draft = computed({
+    get: () => composer.value.text,
+    set: (text) => { composer.value.text = text; },
+  }),
+  attachments = computed({
+    get: () => composer.value.images,
+    set: (images) => { composer.value.images = images; },
+  }),
   sending = ref(false),
   draftExecution = ref(null),
   draftClientId = ref(""),
   switchingExecution = ref(false);
+// shortcut: drafts live only in this page; add persistence if reload recovery is required.
+const drafts = new Map([["", composer.value]]);
+function restoreDraft() {
+  const id = current.value?.id || "";
+  composer.value = drafts.get(id) || { text: "", images: [] };
+  drafts.set(id, composer.value);
+}
 const contextBudget = ref(null),
   fireState = ref(null);
 const live = ref(""),
@@ -634,8 +648,8 @@ function resetLogin() {
   activeTaskCount.value = null;
   employeeSession.value = "";
   employeeError.value = "";
-  draft.value = "";
-  attachments.value = [];
+  drafts.clear();
+  restoreDraft();
   view.value = "chat";
 }
 async function logout() {
@@ -671,8 +685,7 @@ async function selectSession(session) {
   live.value = "";
   thinking.value = "";
   activeTools.value = [];
-  draft.value = "";
-  attachments.value = [];
+  restoreDraft();
   view.value = "chat";
   sessionLoading.value = true;
   try {
@@ -753,10 +766,11 @@ async function removeSession(s) {
       live.value = "";
       thinking.value = "";
       activeTools.value = [];
-      draft.value = "";
-      attachments.value = [];
+      restoreDraft();
     }
     await bootstrap();
+    for (const id of drafts.keys())
+      if (id && !sessions.value.some((session) => session.id === id)) drafts.delete(id);
   });
 }
 async function send() {
@@ -769,23 +783,38 @@ async function send() {
     return;
   if (uploading.value) return;
   sending.value = true;
-  const body = { text: draft.value, images: attachments.value };
+  const pending = composer.value,
+    body = { text: pending.text, images: [...pending.images] },
+    account = csrfToken.value,
+    request = sessionRequest;
+  let session = current.value;
   await attempt(async () => {
-    if (!current.value) {
-      const s = await api("/sessions", "POST", {
+    if (!session) {
+      session = await api("/sessions", "POST", {
         cwd: project.value,
         localAgent: executionLocal.value,
         clientId: executionLocal.value ? executionClientId.value : undefined,
       });
+      if (csrfToken.value !== account) return;
+      drafts.set(session.id, pending);
+      if (drafts.get("") === pending) drafts.delete("");
       draftExecution.value = null;
       draftClientId.value = "";
-      await Promise.all([bootstrap(), selectSession(s)]);
+      if (!current.value && request === sessionRequest)
+        await Promise.all([bootstrap(), selectSession(session)]);
+      else await bootstrap();
     }
-    const id = current.value.id;
-    const path = isRunning.value ? "steer" : "messages";
+    if (csrfToken.value !== account) return;
+    const id = session.id;
+    const path = running.value[id] ? "steer" : "messages";
     const result = await api(`/sessions/${id}/${path}`, "POST", body);
-    draft.value = "";
-    attachments.value = [];
+    if (csrfToken.value !== account) return;
+    if (pending.text === body.text && pending.images.length === body.images.length &&
+        pending.images.every((image, i) => image === body.images[i])) {
+      pending.text = "";
+      pending.images = [];
+    }
+    if (current.value?.id !== id) return;
     if (result.id && result.id !== id) {
       await Promise.all([bootstrap(), selectSession({ id: result.id })]);
     } else {
@@ -813,14 +842,16 @@ function messageKey(event) {
 async function upload(event) {
   if (uploading.value) return;
   uploading.value = true;
-  const target = attachments.value;
+  const target = composer.value,
+    id = current.value?.id || "",
+    account = csrfToken.value;
   await attempt(async () => {
     const files = [...event.target.files];
-    if (files.length + attachments.value.length > 16)
+    if (files.length + target.images.length > 16)
       throw Error("每条消息最多16张图片");
     if (
       files.reduce((n, f) => n + f.size, 0) +
-        attachments.value.reduce((n, f) => n + (f.data.length * 3) / 4, 0) >
+        target.images.reduce((n, f) => n + (f.data.length * 3) / 4, 0) >
       64 * 1024 * 1024
     )
       throw Error("图片总大小不能超过64MiB");
@@ -842,8 +873,8 @@ async function upload(event) {
         reader.onerror = reject;
         reader.readAsDataURL(file);
       });
-      if (attachments.value !== target) return;
-      target.push({ mime: file.type, data });
+      if (csrfToken.value !== account || drafts.get(id) !== target) return;
+      target.images.push({ mime: file.type, data });
     }
   });
   event.target.value = "";

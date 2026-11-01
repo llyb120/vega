@@ -55,11 +55,7 @@ function resultBody(m: Message): { prefix: string; value: Obj } | undefined {
 }
 export function promptHistory(
   input: Message[],
-  options: {
-    completedBefore?: number;
-    stripReasoning?: boolean;
-    trimImages?: boolean;
-  } = {},
+  options: { trimImages?: boolean } = {},
 ): Message[] {
   const rows: Message[] = [],
     pending = new Map<string, string>();
@@ -83,15 +79,6 @@ export function promptHistory(
       continue;
     }
     close();
-    if (
-      m.role === "assistant" &&
-      options.stripReasoning &&
-      (m.seq ?? Infinity) < (options.completedBefore ?? 0)
-    ) {
-      m.thinking = undefined;
-      m.signature = undefined;
-      m.opaque = undefined;
-    }
     if (m.calls?.length) {
       const seen = new Set<string>();
       m.calls = m.calls.filter((c) => {

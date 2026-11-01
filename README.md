@@ -70,10 +70,10 @@ docker run -d --name vega --shm-size=1g \
 |---|---|
 | Lyra agent | 持久会话、流式文本/思考/工具事件、取消、执行中插入消息、模型重试/场景候选降级、工具最多 4 并发、1 基 `_after`、文件身份冲突与串行屏幕资源、只读模式、技能索引和 `/skill:name` |
 | provider | OpenAI Chat Completions、Responses、Anthropic Messages；多工具分片、原生参数、厂商 thinking 格式、签名思考/无签名重试、缓存断点、图片历史、输出预算、代理动态切换 |
-| Responses | 每会话 4 scope / 总计 512 的 30 分钟 continuation 缓存、前缀/认证指纹、lease 防旧请求覆盖、无效 previous_response_id 仅完整重试一次、场景/压缩后重置 |
+| Responses | 每会话 4 scope / 总计 512 的 30 分钟 continuation 缓存、前缀/认证指纹、lease 防旧请求覆盖、无效 previous_response_id 仅完整重试一次、场景/压缩后重置；普通跨轮保留原生推理状态，`store:false` 回放不携带上游 item ID |
 | 本地订阅 | CodeBuddy、WorkBuddy、Devin 原生接入，及 Codex / Claude Code 只读 CLI 订阅或自定义 API；不是用通用 API 地址冒充专有协议 |
 | 场景 / Stage | 场景在同一会话切模型、显式 caller follow-up；普通聊天结束/失败恢复原场景，员工同任务保留编码场景。Stage 独立历史，每轮引用来源的用户提示词和结论 |
-| 上下文 | 自动摘要与 billion-context/acp-kernel 风格 ACP；稳定原子单元引用、45%/75% 压力/增长提醒、T1/T2/T3 精炼、92%/输入硬上限应急截断与机械轮廓、provider usage 实测锚点；原文/嵌套账本可逆，fork 复制账本但隔离状态 |
+| 上下文 | 自动摘要与 billion-context/acp-kernel 风格 ACP；摘要沿用用户语言，保留决策理由、否决方案、未验证风险与执行证据，归并摘要时也不混淆计划与成功；稳定原子单元引用、45%/75% 压力/增长提醒、T1/T2/T3 精炼、92%/输入硬上限应急截断与机械轮廓、provider usage 实测锚点；原文/嵌套账本可逆，fork 复制账本但隔离状态 |
 | 内置命令 | `/skill:name`、`/plan`、`/easy`、`/setup`、`/stage`；SQLite 配置虚拟路径有当轮显式授权/修改分区约束；`/fire ... /target ...` 为独立执行/验收链，最多20轮，可暂停/重启后显式续做 |
 | 工具 | read / bash / edit / write / change_working_directory、同会话持久 MCP 渐进发现、Chrome、employee。**不提供 Polaris / Jianlai** |
 | 数字员工 | 用户拥有的职责/备注、不定时/北京时间固定时刻/完成后间隔/动态检查，任务业务 key 去重，最多 3 并发、1 个电脑任务；完整计划、进度、审批、补充、挂起、续做、重新派发、任务时间线；星轨已按要求移除 |
@@ -81,6 +81,8 @@ docker run -d --name vega --shm-size=1g \
 | 记忆 / 密码本 | 相关性检索、强化/衰减/永久重要性、300 条记忆上限；AES-256-GCM、使用条件/用途审计、X25519 跨机加密支援、任务专属临时条目与清理 |
 | StarLink | 原 v2 HTTP + SSE 中转协议、群组/设备/纪元/游标、gzip 与旧 `_z` 信封、messageId 幂等重传、成员派单、交代人审批/补充、加密凭据支援与任务时间线 |
 | Chrome | 原版 0.1.14 扩展与 DOM 脚本；稳定 tag、多实例/多浏览器、iframe/OOPIF、Shadow DOM、DOM/ref、真实 CDP 输入、焦点/遮挡/像素前检、截图分片/裁剪/长图、上传下载、DevTools、run 短程计划、经验图谱 |
+
+普通会话的未发送文字和图片按会话保存在当前页面内存中，切换后可恢复；发送失败、发送中继续编辑或切到别的会话都不会误清草稿，退出登录与删除对应会话会清理。刷新或关闭页面不保留草稿，不写入浏览器长期存储。
 
 这是所请求的 agent/provider/工具/Stage/员工与 Chrome 的迁移，不是整个 Nova 桌面产品的重做；桌面窗口、Jianlai、Polaris、原产品其它小应用发布/桌面装饰/会话漫游等不属于此应用。
 
@@ -115,7 +117,7 @@ docker run -d --name vega --shm-size=1g \
 
 - **CodeBuddy**：CLI 环境/登录优先，缺少时使用应用内登录；续期、账号/企业请求头、`/v3/config` 和本地 product 默认模型合并、CLI 可用模型过滤、reasoning summary、重复工具 ID/包装 JSON 归一化。
 - **WorkBuddy**：独立认证与模型目录，不能误用 CodeBuddy 的账号；自动查找 `resources/app.asar.unpacked/cli`，使用 WorkBuddy 自己的 Electron helper 只读解密登录。设置页可指定安装目录/`WorkBuddy.exe`/内置 CLI 路径；`WORKBUDDY_EXE` 可显式指定解密运行时。
-- **Devin**：读取 CLI TOML 或应用内登录；直接执行 Connect/Protobuf 推理，校验 gzip 帧、trailer、停止原因与工具完整性；CLI 不可用时使用原项目的版本化模型快照。**Adaptive 自动路由与参考项目一样不支持，必须选具体模型。**
+- **Devin**：读取 CLI TOML 或应用内登录；直接执行 Connect/Protobuf 推理，回传历史可见 reasoning（消息字段 5），校验 gzip 帧、trailer、停止原因与工具完整性；CLI 不可用时使用原项目的版本化模型快照。**Adaptive 自动路由与参考项目一样不支持，必须选具体模型。**
 - **Codex / Claude Code**：按 CLI 配置识别自定义 API，否则在每次请求前只读订阅认证。官方端点固定，不执行 apiKeyHelper，不代替 CLI 轮换 refresh token；过期须先在 CLI 更新。macOS 支持原项目覆盖的钥匙串形态，其它 keyring 后端不会猜测。
 
 支持原项目的 `CODEBUDDY_CONFIG_DIR`、`WORKBUDDY_CONFIG_DIR`、`NOVA_*_AUTH_FILE`、`NOVA_*_PACKAGE`、`*_MODEL`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DEVIN_CONFIG_HOME` 等定位方式。HTTP(S)/ALL/NO_PROXY 环境变量优先，否则读取 Windows/macOS 静态系统 HTTP(S) 代理，下一次请求重新判断；不跟随专有订阅请求的重定向。

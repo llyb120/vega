@@ -22,7 +22,7 @@ test(
       process.env.VEGA_TEST_CHROME !== "1" ||
       process.env.VEGA_TEST_DEPLOYED !== "1",
   },
-  async () => {
+  async (t) => {
     const binary =
       process.env.VEGA_CHROME_PATH ||
       [
@@ -859,6 +859,22 @@ test(
         'textarea[aria-label="消息"]',
         "ordinary draft stays in its own conversation",
       );
+      await t.test("chat drafts restore text and images across real mobile session switches", async () => {
+        await upload(".composer input[type=file]", photo);
+        await until(`document.querySelector('.attachments')?.innerText.includes('图片 1')`);
+        await evaluate(`document.querySelector('.session-row.active').dataset.draftTest='original'`);
+        await tap('.mobile-header [aria-label="新建会话"]');
+        await until(`document.querySelector('textarea[aria-label="消息"]')?.value===''&&!document.querySelector('.attachments')`);
+        await fill('textarea[aria-label="消息"]', "另一个会话的未发送草稿");
+        await tap('[aria-label="打开导航与会话"]');
+        await until(`document.querySelector('.sidebar').classList.contains('mobile-open')&&Math.abs(document.querySelector('.sidebar').getBoundingClientRect().left)<1`);
+        await tap('[data-draft-test="original"] > button:first-child');
+        await until(`document.querySelector('textarea[aria-label="消息"]')?.value==='ordinary draft stays in its own conversation'`);
+        await until(`!document.querySelector('.workspace').inert&&document.querySelector('.sidebar').getBoundingClientRect().right<=1`);
+        assert(await evaluate(`document.querySelector('.attachments')?.innerText.includes('图片 1')`), "switching sessions must restore both text and images");
+        assert.equal(requests.length, 0, "switching must not submit any draft");
+        await tap(".attachments button");
+      });
       await nav("数字员工");
       await until(
         `document.querySelector('.task-card')?.textContent.includes('seeded employee task')`,

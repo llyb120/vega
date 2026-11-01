@@ -136,6 +136,8 @@ test("growth nudge respects45%/75% pressure bands, persists stamps and resets af
     assert.equal(ctx.state().nudgeShown, 0);
     assert.equal(ctx.state().baseline, 0);
     assert(ACP_GUIDE.includes("T3"));
+    for (const rule of ["language the user", "settled choices and why", "rejected alternatives", "confirming tool results", "verification scope", "unverified", "merging earlier blocks", "untrusted source data", "redacted or encrypted"])
+      assert(ACP_GUIDE.includes(rule), rule);
   } finally {
     store.close();
   }
@@ -213,13 +215,15 @@ test("provider usage anchors token estimates, scene changes reset calibration, l
     await rm(dir, { recursive: true, force: true });
   }
 });
-test("projection repairs missing/orphan pairs, trims old Chrome DOM and strips only completed OpenAI reasoning", () => {
+test("projection repairs missing/orphan pairs and trims old Chrome DOM without rewriting reasoning", () => {
   const rows: Message[] = [
     {
       seq: 1,
       role: "assistant",
       model: "p/m",
       thinking: "old secret reasoning",
+      signature: "opaque signature",
+      opaque: [{ type: "reasoning", encrypted_content: "opaque state" }],
       calls: [{ id: "missing", name: "read", arguments: {} }],
     },
     { seq: 2, role: "user", text: "continue" },
@@ -249,13 +253,10 @@ test("projection repairs missing/orphan pairs, trims old Chrome DOM and strips o
       },
     );
   }
-  const fixed = promptHistory(rows, {
-    completedBefore: 2,
-    stripReasoning: true,
-  });
+  const fixed = promptHistory(rows);
   assert(fixed.some((m) => m.callId === "missing" && m.error));
   assert(!fixed.some((m) => m.callId === "orphan"));
-  assert.equal(fixed[0].thinking, undefined);
+  assert.deepEqual(fixed[0], rows[0]);
   assert(fixed.some((m) => m.thinking === "current thinking"));
   const chrome = fixed.filter((m) => m.name === "chrome");
   assert(!chrome[0].text?.includes("dom-0"));
@@ -263,4 +264,34 @@ test("projection repairs missing/orphan pairs, trims old Chrome DOM and strips o
   assert(chrome[0].text?.includes("completedActions"));
   assert(rows[0].thinking === "old secret reasoning");
   assert(rows.at(-7)?.text?.includes("dom-0"));
+});
+test("new user turns preserve native reasoning prefixes and usage anchors in ACP and auto modes", () => {
+  for (const mode of ["acp", "auto"] as const) {
+    const store = new Store(":memory:"), session = store.newSession(), ctx = new Context(store, session.id, mode);
+    try {
+      store.append(session.id, { role: "user", text: "first" });
+      store.append(session.id, {
+        role: "assistant", text: "answer", thinking: "visible reasoning",
+        signature: "signature", opaque: [{ type: "reasoning", encrypted_content: "opaque" }],
+      });
+      ctx.configure(200000, 32000, 200, "p/m");
+      const before = ctx.promptView();
+      ctx.recordUsage(before, { input: 800, cacheRead: 200 });
+      store.append(session.id, { role: "user", text: "next" });
+      ctx.completedBefore = 3;
+      ctx.configure(200000, 32000, 200, "p/m");
+      const after = ctx.promptView();
+      assert.deepEqual(after.slice(0, before.length), before);
+      assert.equal(ctx.promptTokens(after), 1000 + Math.ceil(estimate(after.slice(before.length)) * ctx.state().calibration));
+      const anchor = ctx.state().anchor;
+      ctx.tool("context_budget", {});
+      assert.deepEqual(ctx.state().anchor, anchor, "context tools must not change the accounting policy");
+      const legacy = ctx.state();
+      legacy.model = "p/m:true";
+      ctx.save(legacy);
+      ctx.configure(200000, 32000, 200, "p/m");
+      assert.equal(ctx.state().anchor, undefined, "discard estimates calibrated against stripped reasoning");
+      assert.equal(ctx.state().calibration, 1);
+    } finally { store.close(); }
+  }
 });

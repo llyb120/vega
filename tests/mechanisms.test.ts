@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { readFileSync, readdirSync } from "node:fs";
 import { MCP } from "../server/core/mcp";
 import { Store } from "../server/core/store";
+import { Context } from "../server/core/context";
 import { Providers } from "../server/core/provider";
 import { resolveModel } from "../server/core/config";
 import { Subscriptions } from "../server/core/subscriptions";
@@ -172,8 +173,9 @@ test("MCP stdio lifecycle closes helper and does not auto-retry calls", async ()
   await m.close();
   assert.equal(m.connections.size, 0);
 });
-test("Responses continuation survives SQLite seq/at metadata; invalid continuation falls back once", async () => {
+test("Responses reasoning survives new user turns and invalid continuation falls back once without upstream item IDs", async () => {
   const requests: any[] = [];
+  const reasoning = { type: "reasoning", id: "rs-fixture", encrypted_content: "opaque-fixture", summary: [{ type: "summary_text", text: "visible summary" }] };
   let count = 0;
   const url = await http(async (req: any, res: any) => {
     const b = await body(req);
@@ -186,6 +188,7 @@ test("Responses continuation survives SQLite seq/at metadata; invalid continuati
     }
     res.setHeader("Content-Type", "text/event-stream");
     res.end(
+      (count === 1 ? "data: " + JSON.stringify({ type: "response.output_item.done", output_index: 0, item: reasoning }) + "\n\n" : "") +
       "data: " +
         JSON.stringify({
           type: "response.output_text.delta",
@@ -211,26 +214,25 @@ test("Responses continuation survives SQLite seq/at metadata; invalid continuati
     }),
     p = new Providers(),
     signal = new AbortController().signal;
-  const user = { role: "user", text: "one" },
-    first = await p.chat(
-      model,
-      "sys",
-      [user],
-      [],
-      signal,
-      undefined,
-      "session",
-    );
-  const prior = [
-    { ...user, seq: 1, at: 1 },
-    { ...first, seq: 2, at: 2 },
-    { role: "user", text: "two" },
-  ];
-  await p.chat(model, "sys", prior, [], signal, undefined, "session");
+  const store = new Store(":memory:"), session = store.newSession(), ctx = new Context(store, session.id);
+  cleanup.push(() => store.close());
+  ctx.configure(128000, 8192, 100, model.selection);
+  store.append(session.id, { role: "user", text: "one" });
+  const first = await p.chat(model, "sys", ctx.promptView(), [], signal, undefined, session.id);
+  store.append(session.id, first);
+  const before = ctx.promptView();
+  store.append(session.id, { role: "user", text: "two" });
+  ctx.completedBefore = 3;
+  assert.deepEqual(ctx.promptView().slice(0, before.length), before);
+  await p.chat(model, "sys", ctx.promptView(), [], signal, undefined, session.id);
   assert.equal(requests[1].previous_response_id, "r1");
   assert.equal(requests[1].input.length, 1);
   assert.equal(requests[2].previous_response_id, undefined);
   assert(requests[2].input.length >= 3);
+  assert.deepEqual(requests[2].input.find((item: any) => item.type === "reasoning"), {
+    type: "reasoning", encrypted_content: reasoning.encrypted_content, summary: reasoning.summary,
+  });
+  assert.deepEqual(store.messages(session.id)[1].opaque, [reasoning], "wire normalization must not alter stored native state");
   assert.equal(count, 3);
 });
 test("employee external-job defer and Chrome relay reuse exactly two isolated sessions", async () => {

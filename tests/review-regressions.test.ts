@@ -110,12 +110,17 @@ test("deleting a root clears a selected descendant Stage and invalidates pending
     messages: { value: ["deleted transcript"] }, folds: { value: ["fold"] },
     contextBudget: { value: {} }, fireState: { value: {} }, live: { value: "stale" }, thinking: { value: "stale" },
     activeTools: { value: ["stale"] }, draft: { value: "stale" }, attachments: { value: ["stale"] },
+    drafts: new Map([["leaf", { text: "private draft" }], ["root", { text: "root draft" }]]),
+    restoreDraft: () => { state.draft.value = ""; state.attachments.value = []; },
     sessionRequest: 4, confirm: () => true, attempt: (fn: any) => fn(), api: async () => ({ ok: true }), bootstrap: async () => {},
   };
+  state.bootstrap = async () => { state.sessions.value = []; };
   const context = vm.createContext(state);
   const remove = vm.runInContext(block + "\nremoveSession", context);
   await remove({ id: "root" });
   assert.equal(state.current.value, null);
   assert.equal(state.messages.value.length, 0);
   assert.equal(state.sessionRequest, 5);
+  assert.equal(state.drafts.size, 0);
+  assert.equal(state.draft.value, "");
 });

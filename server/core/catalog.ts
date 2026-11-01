@@ -468,6 +468,7 @@ export class Catalog {
         model.options.reasoningEffort || model.options.reasoning_effort,
       );
       model.options.__devinVersion = dynamic.version;
+      model.options.requiresReasoningContentOnAssistantMessages ??= true;
     }
     return model;
   }

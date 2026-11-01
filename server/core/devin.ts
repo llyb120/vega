@@ -142,6 +142,8 @@ export function encodeDevin(body: Obj, key: string, version: string) {
       continue;
     }
     msg.push(fieldBytes(3, texts.join("\n")));
+    if (typeof message.reasoning_content === "string" && message.reasoning_content)
+      msg.push(fieldBytes(5, message.reasoning_content));
     for (const call of message.tool_calls || [])
       msg.push(
         fieldBytes(

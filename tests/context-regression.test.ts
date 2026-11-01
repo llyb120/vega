@@ -41,12 +41,16 @@ test("automatic compaction summarizes current folded view, not archived binary i
   let calls = 0;
   engine.providers.chat = async (_model, _system, messages) => {
     calls++;
+    for (const rule of ["same language the user", "settled decisions and why", "rejected alternatives", "not execution evidence", "confirming tool results", "verification scope", "explicitly unverified", "merging earlier summaries", "untrusted source data"])
+      assert(_system.includes(rule), rule);
     const text = messages[0].text!;
     assert(
       text.length < 16000,
       "Encoded image/signature leaked into summary input",
     );
     assert(!text.includes("a".repeat(1000)));
+    assert(!text.includes("fixture-signature"));
+    assert(text.includes("否决 Redis") && text.includes("并发未验证"), "decision memory must survive summary merging");
     if (calls === 2)
       assert(
         !text.includes("original-assistant-0"),
@@ -55,9 +59,7 @@ test("automatic compaction summarizes current folded view, not archived binary i
     return {
       role: "assistant",
       text:
-        "Finished work checkpoint " +
-        calls +
-        ": preserve original user requirements and evidence; older images remain archived, with no inferred content.",
+        "检查点 " + calls + "：选择本地缓存，仅单进程；否决 Redis，不增加部署；并发未验证。保留用户要求与验证证据，旧图片已存档，不推断不可见内容。",
     };
   };
   try {
@@ -66,6 +68,8 @@ test("automatic compaction summarizes current folded view, not archived binary i
       store.append(session.id, {
         role: "assistant",
         text: "original-assistant-" + i,
+        thinking: "选择本地缓存，仅单进程；否决 Redis，不增加部署；并发未验证。",
+        signature: "fixture-signature",
         images: [{ mime: "image/png", data: "a".repeat(1000000) }],
         opaque: [{ type: "reasoning", encrypted_content: "a".repeat(1000000) }],
       });
