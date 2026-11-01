@@ -22,6 +22,25 @@ export function renderInline(text) {
   );
 }
 
+function tableRow(line) {
+  if (!line.includes("|")) return;
+  const cells = [""];
+  let pipes = 0;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === "\\" && ["\\", "|"].includes(line[i + 1]))
+      cells[cells.length - 1] += line[++i];
+    else if (char === "|") {
+      cells.push("");
+      pipes++;
+    } else cells[cells.length - 1] += char;
+  }
+  if (!pipes) return;
+  if (!cells[0].trim()) cells.shift();
+  if (cells.length && !cells[cells.length - 1].trim()) cells.pop();
+  if (cells.length) return cells.map((cell) => cell.trim());
+}
+
 // shortcut: chat-oriented Markdown subset (no raw HTML or images); upgrade to a
 // full parser only if message formatting requires it.
 export function renderMarkdown(text) {
@@ -97,6 +116,34 @@ export function renderMarkdown(text) {
     if (quoted) {
       if (paragraph.length || list) flush();
       quote.push(quoted[1]);
+      continue;
+    }
+    const header = tableRow(line),
+      divider = header && tableRow(lines[i + 1] || "");
+    if (
+      header && divider?.length === header.length &&
+      divider.every((cell) => /^:?-+:?$/.test(cell))
+    ) {
+      flush();
+      const align = divider.map((cell) => {
+        if (cell.endsWith(":")) return cell.startsWith(":") ? "center" : "right";
+        return cell.startsWith(":") ? "left" : "";
+      });
+      const row = (cells, tag) => `<tr>${header.map((_, column) => {
+        const scope = tag === "th" ? ' scope="col"' : "",
+          style = align[column] ? ` style="text-align:${align[column]}"` : "";
+        return `<${tag}${scope}${style}>${renderInline(cells[column] || "")}</${tag}>`;
+      }).join("")}</tr>`;
+      const body = [];
+      i++;
+      while (i + 1 < lines.length) {
+        if (/^\s{0,3}(?:```|#{1,4}\s|>|[-*+]\s|\d+[.)]\s)/.test(lines[i + 1])) break;
+        const cells = tableRow(lines[i + 1]);
+        if (!cells) break;
+        body.push(row(cells, "td"));
+        i++;
+      }
+      html.push(`<div class="markdown-table" role="region" aria-label="表格" tabindex="0"><table><thead>${row(header, "th")}</thead><tbody>${body.join("")}</tbody></table></div>`);
       continue;
     }
     if (list || quote.length) flush();

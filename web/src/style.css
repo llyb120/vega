@@ -1177,6 +1177,35 @@ nav button.selected {
   border-top: 1px solid var(--border);
   margin: 18px 0;
 }
+.markdown-table {
+  width: 100%;
+  overflow-x: auto;
+  margin: 10px 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.markdown-table table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.markdown-table th,
+.markdown-table td {
+  min-width: 96px;
+  max-width: 40ch;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.markdown-table th {
+  background: var(--surface-sunken);
+  font-weight: 650;
+}
+.markdown-table tbody tr:nth-child(even) {
+  background: var(--surface-raised);
+}
 .markdown-body a {
   color: var(--accent);
   text-decoration: none;
@@ -1191,6 +1220,7 @@ nav button.selected {
 }
 .markdown-body p code,
 .markdown-body li code,
+.markdown-table code,
 .markdown-body h3 code {
   padding: 2px 6px;
   border-radius: 6px;

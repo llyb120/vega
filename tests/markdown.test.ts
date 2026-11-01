@@ -96,6 +96,51 @@ test("long prompts and code stay compact until explicitly expanded", () => {
   assert.equal(codes.length, 1);
 });
 
+test("chat markdown renders pipe tables with aligned headers, inline formatting and surrounding blocks", () => {
+  const { html, codes } = renderMarkdown([
+    "表格前说明", "",
+    "| **项目** | 数量 | 状态 |",
+    "| :--- | :---: | ---: |",
+    "| `read` | 12 | [完成](https://example.com) |",
+    "| write | 0 | 待处理 |", "", "表格后说明",
+  ].join("\r\n"));
+  assert.match(html, /<p>表格前说明<\/p><div class="markdown-table"/);
+  assert.match(html, /role="region"[^>]*tabindex="0"/);
+  assert.match(html, /<table><thead><tr><th scope="col" style="text-align:left"><strong>项目<\/strong><\/th><th scope="col" style="text-align:center">数量<\/th><th scope="col" style="text-align:right">状态<\/th><\/tr><\/thead><tbody>/);
+  assert.match(html, /<td style="text-align:left"><code>read<\/code><\/td>/);
+  assert.match(html, /<td style="text-align:center">12<\/td>/);
+  assert.match(html, /<td style="text-align:right"><a href="https:\/\/example.com"/);
+  assert.equal((html.match(/<tr>/g) || []).length, 3);
+  assert.match(html, /<\/tbody><\/table><\/div><p>表格后说明<\/p>$/);
+  assert.deepEqual(codes, []);
+});
+
+test("tables accept optional outer pipes, escaped pipes and short or excess rows without losing following text", () => {
+  const { html } = renderMarkdown("名称 | 内容\n--- | ---\nA\\|B | `x\\|y`\nshort |\nC | first | extra\n\n结束");
+  assert.match(html, /<td>A\|B<\/td><td><code>x\|y<\/code><\/td>/);
+  assert.match(html, /<tr><td>short<\/td><td><\/td><\/tr>/);
+  assert.match(html, /<tr><td>C<\/td><td>first<\/td><\/tr>/);
+  assert(!html.includes("extra"));
+  assert(html.endsWith("<p>结束</p>"));
+  assert.match(renderMarkdown("| 标题 |\n| --- |\n| 内容 |").html, /<th scope="col">标题<\/th>/);
+});
+
+test("tables escape HTML and unsafe links and do not consume code blocks, invalid delimiters or incomplete streams", () => {
+  const { html } = renderMarkdown('| <img src=x onerror=alert(1)> | 链接 |\n| --- | --- |\n| <script>alert(1)</script> | [bad](javascript:alert(1)) |');
+  assert.match(html, /<table>/);
+  assert(!/<(?:img|script)\b/i.test(html));
+  assert(!html.includes('href="javascript:'));
+  assert.match(html, /&lt;script&gt;/);
+  for (const text of ["普通文字 | 不是表格", "a | b\n--- | invalid", "a | b\n| --- |", "a | b\n| --"]) {
+    assert(!renderMarkdown(text).html.includes("<table>"), text);
+  }
+  const { html: code, codes } = renderMarkdown("```md\n| a | b |\n| --- | --- |\n| 1 | 2 |\n```");
+  assert(!code.includes("<table>"));
+  assert.equal(codes[0], "| a | b |\n| --- | --- |\n| 1 | 2 |");
+  assert.match(renderMarkdown("a | b\n--- | ---").html, /<tbody><\/tbody>/);
+  assert.match(renderMarkdown("a | b\n--- | ---\n1 | 2").html, /<td>1<\/td><td>2<\/td>/);
+});
+
 test("inline code is protected from formatting and plain digits survive", () => {
   assert.equal(
     renderInline("`**not bold**` 与 **bold** 以及 0 和 12"),

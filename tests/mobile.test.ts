@@ -147,7 +147,7 @@ test(
     store.append(session.id, {
       role: "assistant",
       at: 4000,
-      text: "已有历史正文\n".repeat(300),
+      text: "已有历史正文\n".repeat(300) + "\n| **项目** | 数量 | 状态 | 说明 | 路径 | 备注 |\n| :--- | :---: | ---: | --- | --- | --- |\n| `read` | 12 | 完成 | 表格内容 | example.txt | 可横向滚动 |\n",
       usage: { input: 50, output: 10, totalTokens: 60 },
     });
     new Experiences(store).execute(
@@ -890,6 +890,11 @@ test(
       await nav("对话");
       await fill('textarea[aria-label="消息"]', "");
       await layout("initial chat");
+      await until(`document.querySelector('.message.assistant .markdown-table th')?.textContent==='项目'`);
+      assert.equal(await evaluate(`document.querySelectorAll('.markdown-table tbody td').length`), 6);
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector('.markdown-table th:nth-child(2)')).textAlign`), "center");
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector('.markdown-table th:nth-child(3)')).textAlign`), "right");
+      assert(await evaluate(`(()=>{const e=document.querySelector('.markdown-table');e.scrollLeft=40;return e.scrollWidth>e.clientWidth&&e.scrollLeft>0})()`), "wide markdown tables scroll independently on mobile");
       assert.equal(await evaluate(`document.querySelector('.execution-switch').getAttribute('aria-checked')`), "false", "offline new sessions default to the server");
       assert.equal(await evaluate(`document.querySelector('.execution-switch').disabled`), true, "an offline client cannot be selected");
       await tap('[aria-label="打开导航与会话"]');
