@@ -157,9 +157,8 @@ const employee = ref({
   importance = ref(1),
   activeTaskCount = ref(null);
 const duty = ref(emptyDuty()),
-  dutyOpen = ref(false),
-  vault = ref([]),
-  vaultForm = ref({ name: "", condition: "", content: "" });
+  dutyOpen = ref(false);
+
 let eventsSocket,
   eventsReady = false,
   eventsWasConnected = false,
@@ -619,7 +618,6 @@ function resetLogin() {
   messages.value = [];
   folds.value = [];
   running.value = {};
-  vault.value = [];
   config.value = {};
   catalogModels.value = [];
   activeTaskCount.value = null;
@@ -1050,18 +1048,6 @@ async function saveEmployeeSettings() {
     toast("员工设置已保存");
   });
 }
-async function loadVault() {
-  const result = await api("/employee", "POST", { action: "vault_list" });
-  vault.value = result.entries || result;
-}
-async function saveVault() {
-  await attempt(async () => {
-    await employeeAction({ action: "vault_save", ...vaultForm.value });
-    vaultForm.value = { name: "", condition: "", content: "" };
-    await loadVault();
-    toast("凭据已加密保存");
-  });
-}
 
 onBeforeUnmount(() => {
   closed = true;
@@ -1359,7 +1345,7 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </header>
-        <div ref="transcript" class="transcript" aria-live="polite">
+        <div ref="transcript" :key="current?.id ?? 'none'" class="transcript" aria-live="polite">
           <div v-if="sessionLoading" class="context-note">正在加载会话…</div>
           <div
             v-if="!sessionLoading && !messages.length && !live"
@@ -1439,7 +1425,10 @@ onBeforeUnmount(() => {
                 </template>
               </TurnProcess>
               <template v-for="entry in turn.conclusion" :key="entry.key">
-                <article :class="['message', entry.message.role, { continuation: entry.continuation }]">
+                <article
+                  v-if="entry.kind === 'message'"
+                  :class="['message', entry.message.role, { continuation: entry.continuation }]"
+                >
                   <MessageText :text="entry.message.displayText || entry.message.text" />
                 </article>
               </template>
@@ -1610,13 +1599,11 @@ onBeforeUnmount(() => {
                 ['tasks', '任务'],
                 ['duties', '职责'],
                 ['memories', '长期记忆'],
-                ['vault', '密码本'],
               ]"
               :key="id"
               :class="{ selected: employeeTab === id }"
               @click="
                 employeeTab = id;
-                id === 'vault' && attempt(loadVault);
               "
             >
               {{ label }}
@@ -1913,50 +1900,6 @@ onBeforeUnmount(() => {
             </article></template
           >
 
-          <template v-if="employeeTab === 'vault'">
-            <form class="card form-grid" @submit.prevent="saveVault">
-              <label
-                >名称<input
-                  v-model="vaultForm.name"
-                  required
-                  maxlength="100"
-                  placeholder="不要包含密钥内容" /></label
-              ><label
-                >允许使用的条件<input
-                  v-model="vaultForm.condition"
-                  required
-                  maxlength="500" /></label
-              ><label
-                >凭据<textarea
-                  v-model="vaultForm.content"
-                  required
-                  rows="3"
-                  maxlength="16000"
-                  autocomplete="off"
-                ></textarea></label
-              ><button class="primary">加密保存</button>
-            </form>
-            <article v-for="item in vault" :key="item.id" class="card">
-              <h3>{{ item.name }}</h3>
-              <p>{{ item.condition }}</p>
-              <button
-                class="link"
-                @click="
-                  attempt(async () => {
-                    if (confirm('永久删除此凭据？')) {
-                      await employeeAction({
-                        action: 'vault_delete',
-                        id: item.id,
-                      });
-                      await loadVault();
-                    }
-                  })
-                "
-              >
-                删除凭据
-              </button>
-            </article></template
-          >
         </div></template
       >
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" />

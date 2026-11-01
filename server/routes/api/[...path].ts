@@ -78,7 +78,7 @@ export default defineEventHandler(async (event) => {
   if (["POST", "PUT", "PATCH"].includes(method))
     a = await bodyJSON(event, 90 << 20);
   try {
-    if (["config", "providers", "skills", "employee"].includes(path[0]))
+    if (["config", "providers", "skills", "employee", "vault"].includes(path[0]))
       check(user.role === "admin", 403, "Administrator permission required");
     if (path[0] === "bootstrap" && method === "GET")
       return {
@@ -386,6 +386,17 @@ export default defineEventHandler(async (event) => {
         return engine.employee.transcript(a.threadId);
       const out = await engine.employee.execute("", a);
       return out.secret ? JSON.parse(out.secret) : out.value;
+    }
+    if (path[0] === "vault") {
+      const vault = engine.vault;
+      if (method === "GET" && path.length === 1)
+        return { entries: vault.list() };
+      if (method === "POST" && path.length === 1) return vault.save(a);
+      if (method === "DELETE" && path.length === 2) {
+        vault.remove(path[1]);
+        return { ok: true };
+      }
+      check(false, 404, "Vault route not found");
     }
     if (path[0] === "chrome") {
       if (path.length === 2 && path[1] === "tabs" && method === "GET")

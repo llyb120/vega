@@ -120,6 +120,55 @@ export class Vault {
     assert(this.store.object("vault", key), "Vault entry not found");
     this.store.remove("vault", key);
   }
+  toolDefinition() {
+    return {
+      name: "vault",
+      description:
+        "本机密码本，可存账号密码、API Key、Token、私钥等自由文本凭据。需要凭据时先用 action=list 查看条目（不含内容），每条的 condition 是使用条件，当前这件事符合才用 action=get（text 写清用途）取出 content。凭据只用于当前授权操作，不写进回复、记忆或备注。此工具不能增删改凭据；需要变更时请用户在「设置 → 密码本」操作。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "get"] },
+          id: { type: "string", description: "get 必填：list 返回的条目 id" },
+          text: {
+            type: "string",
+            minLength: 1,
+            maxLength: 8000,
+            description: "get 必填：这次取用的用途",
+          },
+        },
+        required: ["action"],
+        additionalProperties: false,
+      },
+    };
+  }
+  executeTool(a: Obj) {
+    const action = a.action;
+    if (action === "list")
+      return {
+        value: {
+          entries: this.list(),
+          tip: "condition 是使用条件：当前这件事符合才可 get；列表里不含凭据内容",
+        },
+      };
+    if (action === "get") {
+      const id = typeof a.id === "string" ? a.id.trim() : "",
+        purpose = typeof a.text === "string" ? a.text.trim() : "";
+      assert(id, "缺少 id：先 list 查看密码本");
+      assert(purpose, "缺少 text：写明这次取用的用途");
+      const value = this.get(id, purpose);
+      return {
+        value: {
+          name: value.name,
+          condition: value.condition,
+          content:
+            "[withheld from transcript; available only to current turn]",
+        },
+        secret: JSON.stringify(value),
+      };
+    }
+    throw Error("action 应为 list 或 get；增删改请用户在「设置 → 密码本」操作");
+  }
   request(req: string) {
     const { privateKey, publicKey } = generateKeyPairSync("x25519");
     const rawPrivate = privateKey

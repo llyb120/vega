@@ -189,6 +189,7 @@ export class Tools {
           parameters: employeeDefinition.inputSchema,
         },
       );
+      if (!this.session.taskId) defs.push(this.engine.vault.toolDefinition());
       if (
         (!this.session.taskId || this.session.scene === "computer") &&
         (this.session.scene === "computer" ||
@@ -387,6 +388,10 @@ export class Tools {
         { ...a, ...(a.action === "add" ? { cwd: this.session.cwd } : {}) },
       );
       return { value: result.value, stop: result.stop, secret: result.secret };
+    }
+    if (call.name === "vault") {
+      assert(!this.session.taskId, "Use the employee vault tools here");
+      return this.engine.vault.executeTool(a);
     }
     if (call.name === "chrome") {
       const result = await this.engine.chrome.execute(

@@ -423,13 +423,7 @@ export class Employee {
           secret: JSON.stringify(value),
         };
       }
-      assert(!caller, "Only user can modify vault");
-      if (action === "vault_save") return { value: this.vault.save(a) };
-      if (action === "vault_delete") {
-        this.vault.remove(a.id);
-        return { value: { ok: true } };
-      }
-      throw Error("Unknown vault action");
+      throw Error("User-only vault action; use the settings page");
     }
     let stop = false,
       pendingSend: { to: string; type: string; data: any } | undefined;

@@ -17,7 +17,9 @@ const busy = ref(false),
   upload = ref(null),
   mcp = ref({}),
   mcpName = ref(""),
-  mcpURL = ref("");
+  mcpURL = ref(""),
+  vault = ref([]),
+  vaultForm = ref({ name: "", condition: "", content: "" });
 watch(
   () => props.config,
   () => {
@@ -74,7 +76,29 @@ function addMcp() {
   mcpName.value = "";
   mcpURL.value = "";
 }
-onMounted(() => void run(refreshSkills));
+async function loadVault() {
+  const result = await props.api("/vault");
+  vault.value = result.entries || result;
+}
+async function saveVault() {
+  await run(async () => {
+    await props.api("/vault", "POST", { ...vaultForm.value });
+    vaultForm.value = { name: "", condition: "", content: "" };
+    await loadVault();
+    emit("notice", "凭据已加密保存");
+  });
+}
+async function removeVault(item) {
+  if (!confirm('永久删除此凭据？')) return;
+  await run(async () => {
+    await props.api("/vault/" + encodeURIComponent(item.id), "DELETE");
+    await loadVault();
+  });
+}
+onMounted(() => void run(async () => {
+  await refreshSkills();
+  await loadVault();
+}));
 </script>
 <template>
   <header class="topbar"><h2>设置</h2></header>
@@ -123,6 +147,45 @@ onMounted(() => void run(refreshSkills));
           >
             移除
           </button>
+        </li>
+      </ul>
+    </section>
+    <section class="card">
+      <h3>密码本</h3>
+      <p class="hint">
+        凭据加密保存，供数字员工在符合条件时取用；只有管理员能修改。
+      </p>
+      <form class="form-grid" @submit.prevent="saveVault">
+        <label
+          >名称<input
+            v-model="vaultForm.name"
+            required
+            maxlength="100"
+            placeholder="不要包含密钥内容"
+        /></label>
+        <label
+          >允许使用的条件<input
+            v-model="vaultForm.condition"
+            required
+            maxlength="500"
+        /></label>
+        <label
+          >凭据<textarea
+            v-model="vaultForm.content"
+            required
+            rows="3"
+            maxlength="16000"
+            autocomplete="off"
+          ></textarea
+        ></label>
+        <button class="primary" :disabled="busy">加密保存</button>
+      </form>
+      <p v-if="!vault.length" class="hint">还没有凭据</p>
+      <ul class="skill-items">
+        <li v-for="item in vault" :key="item.id">
+          <strong>{{ item.name }}</strong
+          ><small>{{ item.condition }}</small
+          ><button @click="removeVault(item)">删除凭据</button>
         </li>
       </ul>
     </section>

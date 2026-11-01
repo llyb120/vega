@@ -69,6 +69,17 @@ test("ordinary conversations do not depend on employee state, schedule or task r
     assert(description.includes("普通会话"));
     assert(description.includes("不需要员工启用"));
     assert(tools.definitions(model).some((tool) => tool.name === "chrome"));
+    assert(tools.definitions(model).some((tool) => tool.name === "vault"));
+    const readOnlyTools = new Tools(
+      engine,
+      store.newSession({ title: "readonly", readOnly: true }),
+      config,
+      new AbortController().signal,
+      () => {},
+    );
+    assert(
+      !readOnlyTools.definitions(model).some((tool) => tool.name === "vault"),
+    );
     engine.employee.state = originalState;
     const delegated = await tools.execute(
       {
@@ -108,6 +119,9 @@ test("ordinary conversations do not depend on employee state, schedule or task r
         .definitions(model)
         .find((tool) => tool.name === "employee")!
         .description.includes("当前会话属于员工任务"),
+    );
+    assert(
+      !taskTools.definitions(model).some((tool) => tool.name === "vault"),
     );
     await engine.run(taskSession.id, {
       role: "user",
