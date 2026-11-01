@@ -37,6 +37,8 @@ let socket = null,
   sequence = 0,
   inflight = 0,
   outbox = [],
+  remoteDrag = null,
+  afterInput = 0,
   connectTimer = null,
   gesture = null,
   touchGesture = null,
@@ -46,6 +48,10 @@ let imageURL = "",
   previousImageURL = "",
   shownFrame = null;
 function resetInput() {
+  clearTimeout(remoteDrag?.timer);
+  remoteDrag = null;
+  afterInput = 0;
+  inputBusy.value = false;
   outbox = [];
   gesture = null;
   touchGesture = null;
@@ -104,10 +110,7 @@ function loadedImage() {
   socket.send(
     JSON.stringify({ type: "frame_ack", frameId: screenshot.value.frameId }),
   );
-  if (!inflight) {
-    const next = outbox.shift();
-    if (next) void control(next.action, next.frameId);
-  }
+  flushInput();
 }
 function hidden() {
   if (document.hidden) {
@@ -229,20 +232,8 @@ async function capture(tab) {
             resetInput();
           }
           info.value = value.reason || "";
-        } else if (value.type === "input_result") {
-          if (value.seq !== inflight) return;
-          inflight = 0;
-          inputBusy.value = false;
-          if (value.status !== "executed") {
-            resetInput();
-            error.value =
-              (value.status === "needs_review"
-                ? "结果不确定，不要重复提交："
-                : "未执行：") + (value.reason || "请核对网页");
-          } else if (outbox.length) {
-            const next = outbox.shift();
-            void control(next.action, next.frameId);
-          }
+        } else if (value.type === "input_result" || value.type === "pointer_result") {
+          inputResult(value);
         } else if (value.type === "error") error.value = value.reason;
       } catch {
         fail("实时画面格式无效，请重新连接");
@@ -251,7 +242,7 @@ async function capture(tab) {
     ws.onerror = () => fail("WebSocket连接失败；请确认登录状态和反向代理配置");
     ws.onclose = () =>
       fail(
-        inflight
+        inflight || remoteDrag
           ? "连接中断，操作可能已执行，请核对网页，不要重复提交"
           : error.value || "实时连接已断开，点击刷新截图重新连接",
       );
@@ -338,19 +329,82 @@ function acceptScreenshot(result) {
       controllable: true,
     });
 }
+function flushInput() {
+  if (afterInput && shownFrame?.inputSeq >= afterInput) afterInput = 0;
+  inputBusy.value = !!(inflight || remoteDrag || afterInput || outbox.length);
+  if (inflight || remoteDrag || afterInput || !imageReady.value) return;
+  const next = outbox.shift();
+  if (next) void control(next.action, next.frameId);
+}
+function inputResult(value) {
+  const stream = value.type === "pointer_result",
+    drag = remoteDrag;
+  if (stream) {
+    if (!drag || value.dragSeq !== drag.seq || !drag.sent.includes(value.seq)) return;
+    drag.sent = drag.sent.filter((seq) => seq > value.seq);
+  } else {
+    if (value.seq !== inflight) return;
+    inflight = 0;
+  }
+  if (value.status !== "executed") {
+    resetInput();
+    error.value = (value.status === "needs_review" ? "结果不确定，不要重复提交：" : "未执行：") + (value.reason || "请核对网页");
+    if (stream || drag) releaseControl();
+    return;
+  }
+  if (stream && value.seq === drag.release) {
+    clearTimeout(drag.timer);
+    remoteDrag = null;
+    afterInput = value.seq;
+  } else if (drag && (stream || value.seq === drag.seq)) {
+    drag.ready = true;
+    schedulePointer();
+  }
+  flushInput();
+}
+function schedulePointer() {
+  const drag = remoteDrag;
+  if (!drag?.ready || !drag.pending || drag.release) return;
+  if (drag.pending.phase === "up") {
+    clearTimeout(drag.timer);
+    drag.timer = null;
+    sendPointer();
+  } else if (!drag.timer && drag.sent.length < 4) {
+    // Keep only the latest sample, with at most four moves awaiting cumulative confirmation.
+    drag.timer = setTimeout(() => {
+      if (remoteDrag !== drag) return;
+      drag.timer = null;
+      sendPointer();
+    }, 40);
+  }
+}
+function sendPointer() {
+  const drag = remoteDrag;
+  if (!drag?.ready || !drag.pending || drag.release || !remote.value || socket?.readyState !== WebSocket.OPEN) return;
+  if (drag.pending.phase !== "up" && drag.sent.length >= 4) return;
+  if (socket.bufferedAmount > 65536) {
+    disconnect();
+    error.value = "网络拥堵，已停止操作；请核对网页，不要重复提交。";
+    return;
+  }
+  const action = drag.pending, seq = ++sequence;
+  drag.pending = null;
+  drag.sent.push(seq);
+  if (action.phase === "up") drag.release = seq;
+  socket.send(JSON.stringify({ type: "pointer", seq, dragSeq: drag.seq, frameId: drag.frameId, action }));
+}
 function control(action, frameId = shownFrame?.frameId) {
   if (!remote.value || !screenshot.value || socket?.readyState !== WebSocket.OPEN)
     return;
+  if (action.action === "pointer" && action.phase !== "down") {
+    if (!remoteDrag || remoteDrag.frameId !== frameId || remoteDrag.release) return;
+    remoteDrag.pending = action;
+    schedulePointer();
+    return;
+  }
+  if (remoteDrag || afterInput) return;
+  if (action.action === "pointer" && (inflight || !imageReady.value || outbox.length)) return;
   if (inflight || !imageReady.value) {
-    const last = outbox.at(-1);
-    if (
-      action.action === "pointer" && action.phase === "move" &&
-      last?.action.action === "pointer" && last.action.phase === "move" &&
-      last.frameId === frameId
-    ) {
-      last.action = action;
-      return;
-    }
     if (outbox.length >= 64) {
       error.value = "操作过快，请等待网页响应";
       return;
@@ -365,6 +419,8 @@ function control(action, frameId = shownFrame?.frameId) {
   }
   error.value = "";
   inflight = ++sequence;
+  if (action.action === "pointer")
+    remoteDrag = { seq: inflight, frameId, ready: false, pending: null, sent: [], release: 0, timer: null };
   inputBusy.value = true;
   socket.send(
     JSON.stringify({
@@ -423,7 +479,7 @@ function pointerDown(event) {
   if (event.button !== 0) return;
   const point = imagePoint(event);
   if (!point) return;
-  if (liveState.value === "waiting") return;
+  if (liveState.value === "waiting" || (remote.value && inputBusy.value)) return;
   event.currentTarget.setPointerCapture(event.pointerId);
   gesture = {
     view: !remote.value,
@@ -482,7 +538,7 @@ function touchStart(event) {
   lastTouchAt = Date.now();
   const previous = touchGesture;
   if (previous?.dragging) touchCancel();
-  if (operating.value && !remote.value) {
+  if (operating.value && (!remote.value || inputBusy.value)) {
     touchGesture = null;
     return;
   }
@@ -655,7 +711,7 @@ function wheelImage(event) {
 }
 function sendText() {
   const value = text.value;
-  if (!remote.value || !screenshot.value?.editable || !value || inflight || !imageReady.value) return;
+  if (!remote.value || !screenshot.value?.editable || !value || inputBusy.value || inflight || !imageReady.value) return;
   text.value = "";
   void control({ action: "type", text: value });
 }
@@ -853,7 +909,7 @@ onBeforeUnmount(() => {
           </form>
         </details>
         <p class="hint remote-mode-hint">
-          点击、滚轮和鼠标拖动会直接同步到网页；触屏短按点击，按住约半秒再移动可像鼠标按住拖动，松手即释放；翻页请用上滚/下滚。查看模式支持双指缩放和单指拖动。
+          点击、滚轮和鼠标拖动会直接同步到网页；触屏短按点击，按住约半秒再移动可像鼠标按住拖动。松手后等待“同步中…”结束再开始下一次；翻页请用上滚/下滚。查看模式支持双指缩放和单指拖动。
         </p>
       </div>
       <div v-if="busy" class="browser-placeholder" role="status">

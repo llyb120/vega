@@ -32,7 +32,8 @@ test(
       modes: Obj[] = [],
       clients = new Set<WebSocket>();
     let frames = 0,
-      broken = false;
+      broken = false,
+      inputDelay = 100;
     const image = await sharp({
       create: { width: 900, height: 2500, channels: 3, background: "#c7dafa" },
     })
@@ -116,6 +117,7 @@ test(
       )!;
       let pending = false,
         frameId = 0,
+        inputSeq = 0,
         editable = false,
         url = tabs[0].url;
       const send = () => {
@@ -126,6 +128,7 @@ test(
           JSON.stringify({
             type: "frame",
             frameId: ++frameId,
+            inputSeq,
             tabTag,
             title: "远程网页",
             url,
@@ -155,7 +158,7 @@ test(
           socket.send(JSON.stringify(m));
           return;
         }
-        if (m.type !== "input") return;
+        if (!["input", "pointer"].includes(m.type)) return;
         inputs.push(m);
         if (broken) {
           socket.terminate();
@@ -164,15 +167,17 @@ test(
         editable = true;
         if (m.action.action === "goto") url = m.action.url;
         setTimeout(() => {
+          inputSeq = m.seq;
           if (socket.readyState === WebSocket.OPEN)
             socket.send(
               JSON.stringify({
-                type: "input_result",
+                type: m.type === "pointer" ? "pointer_result" : "input_result",
+                dragSeq: m.dragSeq,
                 seq: m.seq,
                 status: "executed",
               }),
             );
-        }, 100);
+        }, inputDelay);
       });
     });
     const chrome = spawn(
@@ -446,6 +451,7 @@ test(
         1,
         "only a mouse context menu must send a remote right click",
       );
+      await until(`!document.querySelector('[aria-label="远程按键 回车"]').disabled`);
       const touchDragStart = inputs.length;
       const dragPoint = await evaluate(`(()=>{const e=document.querySelector('.browser-image');e.scrollIntoView({block:'center',behavior:'instant'});const r=e.getBoundingClientRect(),image=e.querySelector('img'),picture=image.getBoundingClientRect(),x=r.x+r.width/2,y=Math.min(innerHeight-30,Math.max(30,r.y+r.height/2));return{x,y,rawX:Math.floor((x-picture.left)*image.naturalWidth/picture.width),rawY:Math.floor((y-picture.top)*image.naturalHeight/picture.height)}})()`);
       await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ id: 1, x: dragPoint.x, y: dragPoint.y }] });
@@ -574,6 +580,32 @@ test(
         clicksBeforeDrag,
         "a drag must not also send a click",
       );
+      inputDelay = 600;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await until(`!document.querySelector('[aria-label="远程按键 回车"]').disabled`);
+        const start = inputs.length;
+        const point = await evaluate(`(()=>{const e=document.querySelector('.browser-image');e.scrollIntoView({block:'center',behavior:'instant'});const r=e.getBoundingClientRect();return{x:r.x+r.width/2,y:Math.min(innerHeight-40,Math.max(40,r.y+r.height/2))}})()`);
+        await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ id: 1, ...point }] });
+        await sleep(600);
+        await command("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ id: 1, x: point.x - 10, y: point.y }] });
+        await sleep(650);
+        for (let n = 1; n <= 10; n++) {
+          await command("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ id: 1, x: point.x - 10 - n * 4, y: point.y }] });
+          await sleep(25);
+        }
+        const beforeRelease: number = inputs.length;
+        await command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        for (let i = 0; i < 20 && !inputs.slice(start).some(m => m.action.phase === "up"); i++) await sleep(10);
+        const drag = inputs.slice(start);
+        assert.equal(drag.filter(m => m.action.phase === "down").length, 1, "each repeated touch starts its own gesture");
+        assert(drag.filter(m => m.action.phase === "move").length >= 2, "slow acknowledgements must not serialize every movement round trip");
+        assert.equal(drag.at(-1)?.action.phase, "up", "release is sent ahead of the delayed movement acknowledgements");
+        assert.equal(inputs.length, beforeRelease + 1);
+        assert(drag.every(m => m.action.action === "pointer" && m.frameId === drag[0].frameId));
+        await until(`!document.querySelector('[aria-label="远程按键 回车"]').disabled`);
+        assert.equal(await evaluate(`document.querySelector('.browser-view [role=alert]')?.textContent||''`), "");
+      }
+      inputDelay = 100;
       for (const [width, height] of [
         [320, 568],
         [390, 844],

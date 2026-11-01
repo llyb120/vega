@@ -286,30 +286,31 @@ test(
         calls.filter((c) => c.method === "Input.insertText").length,
         1,
       );
+      const dragFrame = live.frame().frameId;
       assert.equal(
         (await input(2, { action: "pointer", phase: "down", x: 100, y: 100 }))
           .status,
         "executed",
       );
+      for (let seq = 3; seq <= 20; seq++)
+        live.send({ type: "pointer", seq, dragSeq: 2, frameId: dragFrame, action: { action: "pointer", phase: "move", x: 100 + seq, y: 100 } });
+      live.send({ type: "pointer", seq: 21, dragSeq: 2, frameId: dragFrame, action: { action: "pointer", phase: "up", x: 150, y: 120 } });
+      assert.equal((await live.wait("pointer_result", m => m.seq === 21)).status, "executed");
+      await live.wait("frame", m => m.inputSeq === 21);
+      assert.equal((await input(22, { action: "pointer", phase: "down", x: 100, y: 100 })).status, "executed", "a second drag starts cleanly on the post-release frame");
+      const releasesBeforeClose = calls.filter(c => c.method === "Input.dispatchMouseEvent" && c.params.type === "mouseReleased").length;
       live.ws.close();
       for (
         let i = 0;
         i < 100 &&
-        !calls.some(
-          (c) =>
-            c.method === "Input.dispatchMouseEvent" &&
-            c.params.type === "mouseReleased",
-        );
+        calls.filter(c => c.method === "Input.dispatchMouseEvent" && c.params.type === "mouseReleased").length === releasesBeforeClose;
         i++
       )
         await sleep(10);
-      assert(
-        calls.some(
-          (c) =>
-            c.method === "Input.dispatchMouseEvent" &&
-            c.params.type === "mouseReleased",
-        ),
-        "disconnect releases pointer and browser lease",
+      assert.equal(
+        calls.filter(c => c.method === "Input.dispatchMouseEvent" && c.params.type === "mouseReleased").length,
+        releasesBeforeClose + 1,
+        "disconnect releases the second held pointer and browser lease",
       );
       const next = await request(
           "/chrome/live",

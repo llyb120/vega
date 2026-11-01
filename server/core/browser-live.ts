@@ -136,10 +136,14 @@ class LiveSession {
   pendingFrame?: Frame;
   frameNumber = 0;
   sequence = 0;
+  completedInput = 0;
+  pointerPending?: Obj;
+  pointerTask = false;
+  pointerReleasing = false;
   inputPending = false;
   lastMessage = Date.now();
   lastInput = Date.now();
-  mouse?: { x: number; y: number; button: string; frame: Frame };
+  mouse?: { x: number; y: number; button: string; frame: Frame; seq: number };
   constructor(
     public hub: BrowserLive,
     public socket: Socket,
@@ -171,6 +175,7 @@ class LiveSession {
           );
         } else if (!this.stopping && (!this.wantsControl || this.locked)) {
           const capture = () => this.io.run(async () => {
+            if (this.inputPending || this.pointerTask) return;
             try {
               await this.capture();
               captureFailedAt = 0;
@@ -270,6 +275,7 @@ class LiveSession {
     this.send({
       type: "frame",
       frameId: frame.id,
+      inputSeq: this.completedInput,
       capturedAt: frame.at,
       tabTag: this.tabTag,
       title: after.title,
@@ -310,13 +316,39 @@ class LiveSession {
       return;
     }
     assert(
-      message.type === "input" &&
+      ["input", "pointer"].includes(message.type) &&
         Number.isSafeInteger(message.seq) &&
         message.seq > this.sequence,
       "不能重复发送操作",
     );
     this.sequence = message.seq;
-    assert(this.locked && !this.inputPending, "请等待操作完成后再输入");
+    if (message.type === "pointer") {
+      const mouse = this.mouse, action = message.action;
+      assert(this.locked && this.wantsControl && mouse && !this.pointerReleasing &&
+        message.dragSeq === mouse.seq && message.frameId === mouse.frame.id &&
+        action?.action === "pointer" && ["move", "up"].includes(action.phase) &&
+        Object.keys(action).every(key => ["action", "phase", "x", "y"].includes(key)), "拖动状态已失效");
+      this.point(mouse.frame, mouse.frame.state, action.x, action.y);
+      this.pointerPending = message;
+      this.pointerReleasing = action.phase === "up";
+      this.lastInput = Date.now();
+      if (!this.pointerTask) {
+        this.pointerTask = true;
+        void this.io.run(async () => {
+          while (this.pointerPending) {
+            const next = this.pointerPending;
+            this.pointerPending = undefined;
+            await this.input(next);
+            if (!this.mouse) this.pointerPending = undefined;
+          }
+        }).finally(() => {
+          this.pointerTask = false;
+          this.pointerReleasing = false;
+        });
+      }
+      return;
+    }
+    assert(this.locked && !this.inputPending && !this.pointerTask, "请等待操作完成后再输入");
     this.inputPending = true;
     this.lastInput = Date.now();
     void this.io
@@ -374,6 +406,7 @@ class LiveSession {
   releaseControl(reason?: string) {
     this.stopping = !!this.claimTask;
     this.wantsControl = false;
+    this.pointerPending = undefined;
     this.release?.();
     this.release = undefined;
     if (this.hub.controllers.get(this.tabTag) === this && !this.locked)
@@ -447,7 +480,9 @@ class LiveSession {
         );
         attempted = true;
         this.invalidate();
-        this.mouse = { x, y, button: "left", frame };
+        this.mouse = { x, y, button: "left", frame, seq: this.mouse?.seq ?? message.seq };
+        if (raw.phase === "up" && drag && (drag.x !== x || drag.y !== y))
+          await chrome.cdp(this.tabTag, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "left", buttons: 1 });
         await chrome.cdp(this.tabTag, "Input.dispatchMouseEvent", {
           type:
             raw.phase === "down"
@@ -540,11 +575,14 @@ class LiveSession {
           }
         }
       }
-      this.send({ type: "input_result", seq: message.seq, status: "executed" });
+      this.completedInput = message.seq;
+      this.send({ type: message.type === "pointer" ? "pointer_result" : "input_result", seq: message.seq, dragSeq: message.dragSeq, status: "executed" });
     } catch (e: any) {
       await this.releaseMouse();
+      this.completedInput = message.seq;
       this.send({
-        type: "input_result",
+        type: message.type === "pointer" ? "pointer_result" : "input_result",
+        dragSeq: message.dragSeq,
         seq: message.seq,
         status: attempted ? "needs_review" : "not_executed",
         reason: e.message,

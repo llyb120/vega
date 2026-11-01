@@ -6,23 +6,35 @@ import vm from "node:vm";
 function preview() {
   const source = readFileSync("web/src/BrowserView.vue", "utf8");
   const sent: any[] = [];
-  let clock = 10000;
+  let clock = 10000, timerId = 0;
+  const timers = new Map<number, { fn: () => void; at: number }>();
   const state: any = {
     zoom: { value: 1 }, panX: { value: 0 }, panY: { value: 0 }, operating: { value: false }, liveState: { value: "view" },
     busy: { value: false }, inputBusy: { value: false }, imageReady: { value: true }, screenshot: { value: { image: { width: 900, height: 600 } } },
-    shownFrame: { frameId: "frame", image: { width: 900, height: 600 } }, gesture: null, touchGesture: null, lastTouchAt: 0, suppressClick: false, DRAG_PX: 6,
+    shownFrame: { frameId: "frame", inputSeq: 0, image: { width: 900, height: 600 } }, gesture: null, touchGesture: null, lastTouchAt: 0, suppressClick: false, DRAG_PX: 6,
     Date: { now: () => clock }, text: { value: "" },
+    setTimeout: (fn: () => void, ms: number) => { const id = ++timerId; timers.set(id, { fn, at: clock + ms }); return id; },
+    clearTimeout: (id: number) => timers.delete(id),
     socket: { readyState: 1, bufferedAmount: 0, send: (raw: string) => sent.push(JSON.parse(raw)) }, WebSocket: { OPEN: 1 },
-    outbox: [], inflight: 0, sequence: 0, error: { value: "" }, resetInput: () => { state.outbox = []; state.gesture = null; state.touchGesture = null; state.suppressClick = false; },
+    outbox: [], inflight: 0, sequence: 0, error: { value: "" }, remoteDrag: null, afterInput: 0,
   };
   state.remote = { get value() { return state.operating.value && state.liveState.value === "control"; } };
-  const functions = source.slice(source.indexOf("function resetView()"), source.indexOf("function loadedImage()")) +
-    source.slice(source.indexOf("function control("), source.indexOf("function failedImage()"));
-  const handlers = vm.runInNewContext(functions + "\n({resetView,zoomView,requestControl,releaseControl,control,clickImage,contextImage,pointerDown,pointerMove,pointerUp,pointerCancel,touchStart,touchMove,touchEnd,touchCancel,wheelImage,imageKey,sendText})", state);
+  const functions = source.slice(source.indexOf("function resetInput()"), source.indexOf("function disconnect()")) +
+    source.slice(source.indexOf("function resetView()"), source.indexOf("function loadedImage()")) +
+    source.slice(source.indexOf("function flushInput()"), source.indexOf("function failedImage()"));
+  const handlers = vm.runInNewContext(functions + "\n({resetInput,resetView,zoomView,requestControl,releaseControl,control,flushInput,inputResult,clickImage,contextImage,pointerDown,pointerMove,pointerUp,pointerCancel,touchStart,touchMove,touchEnd,touchCancel,wheelImage,imageKey,sendText})", state);
   const image = { getBoundingClientRect: () => ({ left: 100 + state.panX.value, top: 50 + state.panY.value, width: 300 * state.zoom.value, height: 200 * state.zoom.value }) };
   const target = { querySelector: () => image, setPointerCapture: () => {} };
   const event = { currentTarget: target, clientX: 250, clientY: 150, preventDefault() {}, pointerId: 1, pointerType: "mouse", button: 0, detail: 1 };
-  return { state, sent, handlers, event, source, advance: (ms: number) => { clock += ms; } };
+  return { state, sent, handlers, event, source, advance: (ms: number) => {
+    const until = clock + ms;
+    for (;;) {
+      const next = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      timers.delete(next[0]); clock = next[1].at; next[1].fn();
+    }
+    clock = until;
+  } };
 }
 
 test("preview zoom stays anchored at the pointer, is bounded and resets its position", () => {
@@ -70,16 +82,92 @@ for (const finish of ["pointerUp", "pointerCancel"]) test(`remote drag coalesces
   handlers[finish]({ ...event, clientX: 290, clientY: 170 });
   handlers.clickImage(event);
   assert.equal(sent.length, 1, "only the press is sent while awaiting its result");
-  assert.equal(state.outbox.length, 2, "pending moves must collapse without dropping the release");
+  assert.equal(state.remoteDrag.pending.phase, "up", "release replaces unsent old moves");
+  assert.equal(state.outbox.length, 0);
   assert.equal(state.error.value, "");
-  while (state.outbox.length) {
-    state.inflight = 0;
-    const next = state.outbox.shift();
-    handlers.control(next.action, next.frameId);
-  }
-  assert.deepEqual(sent.map(m => m.action.phase), ["down", "move", "up"]);
+  handlers.inputResult({ type: "input_result", seq: sent[0].seq, status: "executed" });
+  assert.deepEqual(sent.map(m => m.action.phase), ["down", "up"]);
   assert(sent.every(m => m.frameId === "frame"), "the entire gesture uses the frame seen when it started");
-  assert.equal(sent[1].action.x, 569, "only the latest unsent position is kept");
+  assert.equal(sent[1].action.x, finish === "pointerUp" ? 570 : 569, "release carries the final position instead of waiting for another movement round trip");
+});
+
+test("weak-network drag streams a bounded latest-position window and prioritizes release without another RTT", () => {
+  const { state, handlers, event, sent, advance } = preview();
+  state.operating.value = true; state.liveState.value = "control";
+  handlers.pointerDown(event);
+  handlers.pointerMove({ ...event, clientX: 270 });
+  handlers.inputResult({ type: "input_result", seq: 1, status: "executed" });
+  for (let i = 0; i < 100; i++) {
+    handlers.pointerMove({ ...event, clientX: 270 + i });
+    advance(40);
+  }
+  assert.equal(sent.length, 5, "only four movement samples may be unconfirmed");
+  assert.equal(state.remoteDrag.sent.length, 4);
+  assert.equal(state.outbox.length, 0);
+  const lastAck = sent.at(-1);
+  handlers.inputResult({ type: "pointer_result", seq: lastAck.seq, dragSeq: 1, status: "executed" });
+  advance(40);
+  assert.equal(sent.length, 6);
+  assert.equal(sent.at(-1).action.x, 807, "after a delayed ACK, send the latest position, not 96 stale moves");
+  handlers.pointerUp({ ...event, clientX: 380 });
+  assert.equal(sent.length, 7, "release goes out immediately, before the final move is acknowledged");
+  assert.equal(sent.at(-1).action.phase, "up");
+  assert.equal(sent.at(-1).action.x, 840);
+  assert.equal(sent.at(-1).dragSeq, 1);
+  advance(5000);
+  assert.equal(sent.length, 7, "no retry or delayed movement after release");
+});
+
+for (const touch of [false, true]) test(`second ${touch ? "touch" : "mouse"} drag starts only after the first release and its resulting frame, with fresh gesture identity`, () => {
+  const { state, handlers, event, sent, advance } = preview();
+  state.operating.value = true; state.liveState.value = "control";
+  const start = () => {
+    if (touch) { handlers.touchStart({ ...event, touches: [{ clientX: 250, clientY: 150 }] }); advance(600); handlers.touchMove({ ...event, touches: [{ clientX: 280, clientY: 150 }] }); }
+    else { handlers.pointerDown(event); handlers.pointerMove({ ...event, clientX: 280 }); }
+  };
+  const finish = () => touch ? handlers.touchEnd({ ...event, touches: [], changedTouches: [{ clientX: 290, clientY: 150 }] }) : handlers.pointerUp({ ...event, clientX: 290 });
+  start(); finish();
+  handlers.inputResult({ type: "input_result", seq: 1, status: "executed" });
+  const release = sent.at(-1);
+  start(); finish();
+  assert.equal(sent.length, 2, "do not queue a second gesture while the first release is outstanding");
+  handlers.inputResult({ type: "pointer_result", seq: release.seq, dragSeq: 1, status: "executed" });
+  start(); finish();
+  assert.equal(sent.length, 2, "a release ACK alone cannot authorize the old pre-drag picture");
+  assert.equal(state.inputBusy.value, true);
+  state.screenshot.value.editable = true;
+  state.text.value = "keep unsent text";
+  handlers.sendText();
+  assert.equal(state.text.value, "keep unsent text", "waiting for the post-release frame must not erase auxiliary drafts");
+  state.shownFrame = { ...state.shownFrame, frameId: "after-release", inputSeq: release.seq };
+  handlers.flushInput();
+  assert.equal(state.inputBusy.value, false);
+  start(); finish();
+  assert.equal(sent[2].action.phase, "down");
+  assert.equal(sent[2].frameId, "after-release");
+  assert.notEqual(sent[2].seq, 1);
+  handlers.inputResult({ type: "input_result", seq: sent[2].seq, status: "executed" });
+  assert.equal(sent[3].action.phase, "up");
+  assert.equal(sent[3].dragSeq, sent[2].seq);
+  assert.equal(state.error.value, "");
+});
+
+test("failed streamed input drops pending samples, releases control and never replays after a late acknowledgement", () => {
+  const { state, handlers, event, sent, advance } = preview();
+  state.operating.value = true; state.liveState.value = "control";
+  handlers.pointerDown(event); handlers.pointerMove({ ...event, clientX: 280 });
+  handlers.inputResult({ type: "input_result", seq: 1, status: "executed" });
+  advance(40);
+  handlers.pointerMove({ ...event, clientX: 290 });
+  handlers.inputResult({ type: "pointer_result", seq: 2, dragSeq: 1, status: "needs_review", reason: "delivery uncertain" });
+  const count = sent.length;
+  advance(1000);
+  handlers.inputResult({ type: "pointer_result", seq: 2, dragSeq: 1, status: "executed" });
+  assert.equal(sent.length, count);
+  assert.equal(state.remoteDrag, null);
+  assert.equal(state.remote.value, false);
+  assert.equal(sent.at(-1).mode, "view");
+  assert.match(state.error.value, /结果不确定/);
 });
 
 test("touch pinches and one-finger pans change only the preview and continue smoothly after a finger lifts", () => {
@@ -145,7 +233,7 @@ for (const finish of ["touchEnd", "touchCancel", "secondFinger"]) test(`touch ho
     handlers.touchMove(touches([touch(270 + i / 10, 170)]));
   }
   assert.equal(sent.length, 1, "press goes first; moves wait for confirmation");
-  assert.equal(state.outbox.length, 1, "unsent moves coalesce");
+  assert.equal(state.remoteDrag.pending.x, 224, "unsent moves keep only the latest position");
   if (finish === "secondFinger") {
     handlers.touchStart(touches([touch(290, 170), touch(300, 180)]));
     handlers.touchEnd(touches([touch(290, 170)]));
@@ -155,17 +243,12 @@ for (const finish of ["touchEnd", "touchCancel", "secondFinger"]) test(`touch ho
   } else handlers[finish]({ ...touches([]), changedTouches: [touch(300, 190)] });
   handlers.touchEnd(touches([]));
   handlers.clickImage(event);
-  while (state.outbox.length) {
-    state.inflight = 0;
-    const next = state.outbox.shift();
-    handlers.control(next.action, next.frameId);
-  }
-  assert.deepEqual(sent.map((m) => m.action.phase), ["down", "move", "up"]);
+  handlers.inputResult({ type: "input_result", seq: sent[0].seq, status: "executed" });
+  assert.deepEqual(sent.map((m) => m.action.phase), ["down", "up"]);
   assert(sent.every((m) => m.frameId === "frame"), "repaint must not relabel a touch gesture");
   assert.equal(sent[0].action.x, 165);
   assert.equal(sent[0].action.y, 180);
-  assert.equal(sent[1].action.x, 224);
-  assert.equal(sent[2].action.x, finish === "touchEnd" ? 240 : 224);
+  assert.equal(sent[1].action.x, finish === "touchEnd" ? 240 : 224);
   assert.equal(state.zoom.value, 2, "remote drag must not pan or zoom the preview");
   assert.equal(state.panX.value, 40);
   assert.equal(state.panY.value, -20);

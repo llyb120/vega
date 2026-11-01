@@ -282,6 +282,7 @@ test(
         tabTag = liveTickets.get(ticket)!;
       liveTickets.delete(ticket);
       let frameId = 0,
+        inputSeq = 0,
         pending = false,
         editable = false,
         pageURL = "https://example.test/" + "long/".repeat(1000);
@@ -292,6 +293,7 @@ test(
           JSON.stringify({
             type: "frame",
             frameId: ++frameId,
+            inputSeq,
             tabTag,
             title: tabTag,
             url: pageURL,
@@ -317,7 +319,7 @@ test(
           socket.send(JSON.stringify(message));
           return;
         }
-        if (message.type !== "input") return;
+        if (!["input", "pointer"].includes(message.type)) return;
         remoteInputs.push(message);
         if (failRemote) {
           socket.terminate();
@@ -326,10 +328,12 @@ test(
         editable = true;
         if (message.action.action === "goto") pageURL = message.action.url;
         setTimeout(() => {
+          inputSeq = message.seq;
           if (socket.readyState === WebSocket.OPEN)
             socket.send(
               JSON.stringify({
-                type: "input_result",
+                type: message.type === "pointer" ? "pointer_result" : "input_result",
+                dragSeq: message.dragSeq,
                 seq: message.seq,
                 status: "executed",
               }),

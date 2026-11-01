@@ -442,6 +442,79 @@ test("live input maps displayed pixels, streams drag phases, types once and rele
   );
   assert.equal(f.hub.controllers.size, 0);
 });
+test("weak-network pointer samples coalesce server-side and release applies the final position before the next frame", async () => {
+  const f = await fixture(), s = await f.open();
+  const frame = await s.wait("frame");
+  s.message({ type: "mode", mode: "control" });
+  await s.wait("mode", m => m.mode === "control");
+  const session = f.hub.sessions.get(s.socket.id)!;
+  s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
+  assert.equal((await s.wait("input_result", m => m.seq === 1)).status, "executed");
+  let unblock!: () => void;
+  const blocked = session.io.run(() => new Promise<void>(yes => { unblock = yes; }));
+  while (!unblock) await sleep(1);
+  for (let seq = 2; seq <= 101; seq++)
+    s.message({ type: "pointer", seq, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "move", x: 100 + seq, y: 100 } });
+  assert.equal(session.pointerPending?.seq, 101, "keep one latest sample, not an unbounded movement queue");
+  s.message({ type: "pointer", seq: 102, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "up", x: 250, y: 150 } });
+  unblock(); await blocked;
+  assert.equal((await s.wait("pointer_result", m => m.seq === 102)).status, "executed");
+  assert.deepEqual(f.calls.filter(c => c.method === "Input.dispatchMouseEvent").map(c => [c.params.type, c.params.x, c.params.y]), [
+    ["mousePressed", 200, 200], ["mouseMoved", 500, 300], ["mouseReleased", 500, 300],
+  ]);
+  assert.equal(session.mouse, undefined);
+  assert.equal(session.pointerPending, undefined);
+  const after = await s.wait("frame", m => m.inputSeq === 102);
+  assert(after.frameId > frame.frameId);
+  assert(!s.messages.some(m => m.type === "pointer_result" && m.seq < 102), "dropped samples must not be falsely reported as executed");
+  f.state.stamp = "result of first drag";
+  // A second gesture uses the new picture, never a frame re-labeled from the first gesture.
+  const nextFrame = await s.wait("frame", m => m.inputSeq === 102 && m.frameId > after.frameId);
+  s.message({ type: "input", seq: 103, frameId: nextFrame.frameId, action: { action: "pointer", phase: "down", x: 200, y: 100 } });
+  assert.equal((await s.wait("input_result", m => m.seq === 103)).status, "executed");
+  s.message({ type: "pointer", seq: 104, dragSeq: 103, frameId: nextFrame.frameId, action: { action: "pointer", phase: "up", x: 210, y: 100 } });
+  assert.equal((await s.wait("pointer_result", m => m.seq === 104)).status, "executed");
+});
+
+test("a queued weak-network release fails closed on navigation and does not replay discarded moves", async () => {
+  const f = await fixture(), s = await f.open(), frame = await s.wait("frame");
+  s.message({ type: "mode", mode: "control" });
+  await s.wait("mode", m => m.mode === "control");
+  s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
+  await s.wait("input_result", m => m.seq === 1);
+  const session = f.hub.sessions.get(s.socket.id)!;
+  let unblock!: () => void;
+  const blocked = session.io.run(() => new Promise<void>(yes => { unblock = yes; }));
+  while (!unblock) await sleep(1);
+  for (let seq = 2; seq <= 4; seq++)
+    s.message({ type: "pointer", seq, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: seq === 4 ? "up" : "move", x: 150 + seq, y: 100 } });
+  f.state.url = "https://other.test/";
+  unblock(); await blocked;
+  assert.equal((await s.wait("pointer_result", m => m.seq === 4)).status, "not_executed");
+  assert.equal(session.pointerPending, undefined);
+  assert.equal(session.mouse, undefined);
+  assert.deepEqual(f.calls.filter(c => c.method === "Input.dispatchMouseEvent").map(c => c.params.type), ["mousePressed", "mouseReleased"]);
+});
+
+for (const mutation of ["wrong drag", "wrong frame", "invalid phase", "invalid coordinates", "duplicate"]) test(`pointer stream rejects ${mutation} and releases any held mouse without replay`, async () => {
+  const f = await fixture(), s = await f.open();
+  const frame = await s.wait("frame");
+  s.message({ type: "mode", mode: "control" });
+  await s.wait("mode", m => m.mode === "control");
+  s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
+  await s.wait("input_result", m => m.seq === 1);
+  const message = { type: "pointer", seq: 2, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "move", x: 150, y: 100 } };
+  if (mutation === "wrong drag") message.dragSeq = 999;
+  if (mutation === "wrong frame") message.frameId = -1;
+  if (mutation === "invalid phase") message.action.phase = "down";
+  if (mutation === "invalid coordinates") message.action.x = -1;
+  if (mutation === "duplicate") message.seq = 1;
+  s.message(message);
+  await f.chrome.tabGate("C1").run(async () => {});
+  assert.equal(s.closed.at(-1)?.code, 4400);
+  assert.deepEqual(f.calls.filter(c => c.method === "Input.dispatchMouseEvent").map(c => c.params.type), ["mousePressed", "mouseReleased"]);
+});
+
 test("a held touch can start from its displayed frame after stream repaints without relaxing freshness or page checks", async () => {
   const f = await fixture(), s = await f.open();
   const frame = await s.wait("frame");
