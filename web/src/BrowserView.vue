@@ -374,8 +374,8 @@ function clickImage(event) {
   void control(action);
 }
 function contextImage(event) {
-  if (!remote.value) return;
   event.preventDefault();
+  if (!remote.value || event.pointerType === "touch") return;
   const point = imagePoint(event);
   if (point)
     void control({ action: "click_at", ...point, button: "right", click_count: 1 });
@@ -1008,6 +1008,8 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   box-shadow: 0 2px 10px #30334b0a;
   background: #fff;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
   user-select: none;
 }
 @media (max-width: 760px) {

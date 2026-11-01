@@ -263,6 +263,10 @@ test(
       evaluate(
         `(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.value=${JSON.stringify(text)};e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));})()`,
       );
+    const contextMenu = (pointerType: string) =>
+      evaluate(
+        `(()=>{const e=document.querySelector('.browser-image img'),r=e.getBoundingClientRect(),event=new PointerEvent('contextmenu',{bubbles:true,cancelable:true,pointerType:${JSON.stringify(pointerType)},button:2,clientX:r.x+r.width/2,clientY:r.y+r.height/2});e.dispatchEvent(event);return event.defaultPrevented;})()`,
+      );
     try {
       let endpoint = "";
       for (let i = 0; i < 100; i++) {
@@ -350,6 +354,13 @@ test(
       const imageTop = await evaluate(
         `document.querySelector('.browser-image img').getBoundingClientRect().top+document.querySelector('.browser-view').scrollTop`,
       );
+      assert.equal(
+        await contextMenu("touch"),
+        true,
+        "view mode must suppress the local image context menu",
+      );
+      assert.equal(inputs.length, 0, "long press must not claim control");
+      assert.equal(modes.length, 0);
       await tap(".browser-image img");
       await sleep(350);
       assert.equal(modes.at(-1)?.mode, "control", JSON.stringify(modes));
@@ -387,6 +398,25 @@ test(
       );
       assert.equal(inputs[0].action.action, "click_at");
       assert(Math.abs(inputs[0].action.x - 450) < 3);
+      assert.equal(await contextMenu("touch"), true);
+      await sleep(250);
+      assert.equal(
+        inputs.filter((m) => m.action.button === "right").length,
+        0,
+        "touch long press must not send a remote right click",
+      );
+      assert.equal(await contextMenu("mouse"), true);
+      for (
+        let i = 0;
+        i < 100 && !inputs.some((m) => m.action.button === "right");
+        i++
+      )
+        await sleep(10);
+      assert.equal(
+        inputs.filter((m) => m.action.button === "right").length,
+        1,
+        "only a mouse context menu must send a remote right click",
+      );
       await tap(".remote-input summary");
       await until(
         `!document.querySelector('.remote-text button').disabled||document.querySelector('.browser-image img').naturalWidth===900`,
