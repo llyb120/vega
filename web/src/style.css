@@ -858,6 +858,7 @@ nav button.selected {
   padding-top: 4px;
 }
 .message.user {
+  width: fit-content;
   margin: 8px 0 18px auto;
   max-width: min(78%, 720px);
   padding: 11px 15px;

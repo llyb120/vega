@@ -1411,6 +1411,14 @@ test(
       );
       for (let i = 0; i < 40 && requests.length < 2; i++) await sleep(50);
       assert.equal(requests.length, 2);
+      for (const [width, height] of [[320, 568], [1440, 900]]) {
+        await resize(width, height, width < 760);
+        const bubble = await evaluate(`(()=>{const e=[...document.querySelectorAll('.message.user')].at(-1),text=e.querySelector('.message-text'),r=document.createRange();r.selectNodeContents(text);return{text:text.textContent,width:e.getBoundingClientRect().width,contentWidth:r.getBoundingClientRect().width,rightGap:Math.abs(e.getBoundingClientRect().right-e.parentElement.getBoundingClientRect().right)}})()`);
+        assert.equal(bubble.text, "desktop IME");
+        assert(bubble.width <= bubble.contentWidth + 34, "short user bubbles fit their contents at " + width + "px: " + JSON.stringify(bubble));
+        assert(bubble.rightGap < 1, "user bubbles remain right-aligned");
+        await layout("compact user bubble at " + width);
+      }
       assert.equal(
         await evaluate(`document.querySelectorAll('.mobile-stage,.chat-topbar button:not(.topbar-new)').length`),
         0,
