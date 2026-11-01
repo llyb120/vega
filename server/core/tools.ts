@@ -24,6 +24,13 @@ import type { Session, Call } from "./store";
 import type { Engine } from "./engine";
 import { Context } from "./context";
 import { MCP } from "./mcp";
+import {
+  localShell,
+  localRead,
+  localWrite,
+  localEdit,
+  localCwdExists,
+} from "./local-agent";
 import { assert, clip, id, type Obj } from "./util";
 import type { Config, Model } from "./config";
 import type { Tool } from "./provider";
@@ -288,6 +295,14 @@ export class Tools {
     }
     return defs;
   }
+  // A live vega-local on this machine takes over filesystem/shell for normal
+  // sessions. SQLite virtual paths always stay on the server; chrome is not
+  // delegated. If the local call fails (agent died mid-request), the caller
+  // falls back to the normal server path so a flaky agent never stalls a turn.
+  private agent() {
+    return this.engine.localAgents.active();
+  }
+
   async execute(call: Call, model: Model): Promise<Outcome> {
     this.signal.throwIfAborted();
     const a = { ...call.arguments };
@@ -296,7 +311,8 @@ export class Tools {
       this.definitions(model).some((t) => t.name === call.name),
       "Tool unavailable in this scene",
     );
-    if (call.name === "read") return this.read(a);
+    if (call.name === "read")
+      return this.read(a);
     if (a.path === "sqlite:config" && call.name === "write") {
       assert(
         this.setupAccess && !this.session.readOnly,
@@ -317,16 +333,49 @@ export class Tools {
           );
       return { value: await this.engine.saveConfig(next) };
     }
-    if (["write", "edit"].includes(call.name))
+    if (["write", "edit"].includes(call.name)) {
+      const agent = this.agent();
+      if (agent) {
+        try {
+          const path = resolve(this.session.cwd, a.path);
+          return call.name === "write"
+            ? (assert(typeof a.path === "string" && a.path, "path required"),
+               assert(typeof a.content === "string", "content required"),
+               await localWrite(agent, path, a.content))
+            : (assert(Array.isArray(a.edits) && a.edits.length, "edits required"),
+               await localEdit(agent, path, a.edits));
+        } catch (e: any) {
+          if (e?.statusCode === 400 || /required|must match|Overlapping|exceeds|UTF-8|not a regular/i.test(e.message)) throw e;
+          // agent unreachable -> fall through to server execution
+        }
+      }
       return { value: await mutate(this.session.cwd, call.name, a) };
-    if (call.name === "bash")
+    }
+    if (call.name === "bash") {
+      const agent = this.agent();
+      if (agent) {
+        try {
+          return await localShell(agent, this.session.cwd, a);
+        } catch {
+          // fall through to server execution
+        }
+      }
       return shell(this.session.cwd, a, this.signal, this.emit);
+    }
     if (call.name === "change_working_directory") {
       const path = resolve(this.session.cwd, a.path || "");
-      assert(
-        a.path && (await stat(path)).isDirectory(),
-        "Existing cwd directory required",
-      );
+      const agent = this.agent();
+      if (agent) {
+        try {
+          await localCwdExists(agent, path);
+        } catch (e: any) {
+          if (!/local machine/.test(e.message)) throw e; // e.g. genuinely missing dir
+          // agent unreachable -> verify on server instead
+          assert(a.path && (await stat(path)).isDirectory(), "Existing cwd directory required");
+        }
+      } else {
+        assert(a.path && (await stat(path)).isDirectory(), "Existing cwd directory required");
+      }
       this.session.cwd = path;
       this.engine.store.saveSession(this.session);
       return { value: { cwd: path } };
@@ -515,6 +564,7 @@ export class Tools {
     if (
       [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"].includes(extension)
     ) {
+      // Images always processed on the server: they need the SQLite blob store.
       assert(st.size <= 25 << 20, "Image exceeds25MiB");
       const data = await readFile(path),
         metadata = await sharp(data, { limitInputPixels: 64000000 }).metadata();
@@ -534,6 +584,15 @@ export class Tools {
           },
         ],
       };
+    }
+    const agent = this.agent();
+    if (agent) {
+      try {
+        return await localRead(agent, path, a);
+      } catch (e: any) {
+        if (/UTF-8|exceeds|not a regular/i.test(e.message)) throw e;
+        // agent unreachable -> fall back to server read below
+      }
     }
     assert(
       st.size <= 32 << 20,

@@ -20,6 +20,7 @@ import {
 } from "h3";
 import { app } from "../../core/application";
 import { assert, object, type Obj } from "../../core/util";
+import { getRequestIP } from "h3";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
 import presets from "../../../shared/provider-presets.json";
@@ -77,6 +78,32 @@ export default defineEventHandler(async (event) => {
   let a: Obj = {};
   if (["POST", "PUT", "PATCH"].includes(method))
     a = await bodyJSON(event, 90 << 20);
+  // Local execution agent (vega-local): same-machine loopback only, no login.
+  // A running agent registers a port+secret, then pings ~every 2s. Sessions
+  // delegate read/bash/write/edit to it while it is online.
+  if (path[0] === "local-agent") {
+    const ip = getRequestIP(event) || "";
+    check(
+      ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1",
+      403,
+      "local-agent endpoints only accept loopback",
+    );
+    const la = engine.localAgents;
+    if (path[1] === "status" && method === "GET")
+      return { online: la.online() };
+    if (method === "POST" && (path[1] === "register" || path[1] === "ping")) {
+      const agent =
+        path[1] === "register"
+          ? la.register(Number(a.port), String(a.token || ""), String(a.cwd || ""))
+          : la.ping(Number(a.port), String(a.token || ""), String(a.cwd || ""));
+      return { ok: true, port: agent.port };
+    }
+    if (method === "DELETE" && path[1]) {
+      la.remove(Number(path[1]), String(getRequestURL(event).searchParams.get("token") || ""));
+      return { ok: true };
+    }
+    throw createError({ statusCode: 404, statusMessage: "Not found" });
+  }
   try {
     if (["config", "providers", "skills", "employee", "vault"].includes(path[0]))
       check(user.role === "admin", 403, "Administrator permission required");

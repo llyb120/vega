@@ -1,4 +1,5 @@
 import { Fire } from "./fire";
+import { LocalAgents } from "./local-agent";
 import { builtinCommand, expandBuiltin } from "./builtins";
 import { maskedConfig, mergeSecrets } from "./config";
 import { createHash } from "node:crypto";
@@ -80,6 +81,7 @@ export class Engine {
   vault: Vault;
   relay: Relay;
   fire: Fire;
+  localAgents = new LocalAgents();
   closing = false;
   mcpSessions = new Map<string, { key: string; client: MCP }>();
   mcpFor(session: Session, config: Config) {
