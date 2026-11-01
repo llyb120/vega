@@ -4,8 +4,20 @@ import { cp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { platform } from "node:os";
+import { fileURLToPath } from "node:url";
 import type { Duplex } from "node:stream";
 import { assert } from "./util";
+
+export function extensionDirectory(moduleUrl = import.meta.url, entry = process.argv[1]) {
+  const candidates = [
+    fileURLToPath(new URL("../../extensions/nova-chrome", moduleUrl)),
+    fileURLToPath(new URL("../../../public/extension/nova-chrome", moduleUrl)),
+    ...(entry ? [resolve(dirname(entry), "../public/extension/nova-chrome"), resolve(dirname(entry), "../../extension")] : []),
+  ];
+  const directory = candidates.find((path) => existsSync(join(path, "manifest.json")) && existsSync(join(path, "worker.js")));
+  assert(directory, "找不到随应用打包的 Chrome 扩展，请完整部署 .output（包含 public/extension/nova-chrome）");
+  return directory;
+}
 
 type PrivateBrowser = { profile: string; port: number; token: string };
 export function privateWorker(source: string, instance: Pick<PrivateBrowser, "port" | "token">) {
@@ -111,7 +123,7 @@ export class HeadlessBrowser {
     }
     this.dir = instance?.profile || join(dirname(resolve(dbPath)), "chromium");
     await mkdir(this.dir, { recursive: true });
-    let extension = resolve("extensions/nova-chrome");
+    let extension = extensionDirectory();
     if (instance) {
       const source = extension;
       extension = join(this.dir, "vega-extension");

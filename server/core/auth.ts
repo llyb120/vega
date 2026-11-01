@@ -357,6 +357,16 @@ export class Auth {
     this.revoke(id);
   }
   canRead(user: User, session: Session) {
+    if (session.employeeId) {
+      const employee = session.employeeId === "default"
+        ? this.store.get<any>("employee", {})
+        : this.store.object<any>("employee", session.employeeId);
+      if (employee) {
+        const owner = employee.ownerId ? this.user(employee.ownerId) : undefined;
+        if (employee.scope === "team" || (!employee.scope && (session.employeeId === "default" || owner?.role === "admin"))) return true;
+        if (user.role === "admin" || employee.ownerId === user.id) return true;
+      }
+    }
     return (
       session.ownerId === user.id ||
       (user.role === "admin" && (!session.ownerId || !!session.taskId))

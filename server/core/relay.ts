@@ -289,7 +289,7 @@ export class Relay {
     if (command === "info") {
       const s = employee.state();
       return {
-        status: s.enabled ? "enabled" : "disabled",
+        status: "ready",
         tasks: s.tasks.filter(
           (t) => !["done", "failed", "stopped", "cancelled"].includes(t.status),
         ).length,
@@ -298,7 +298,7 @@ export class Relay {
     if (command === "employee_get") {
       const s = employee.state();
       return {
-        id: s.id, name: s.name, enabled: s.enabled, public: s.public,
+        id: s.id, name: s.name, public: s.public,
         duties: [], memories: [], runs: [], orbit: [], links: [],
         tasks: s.tasks.filter((task) => task.owner.token === owner.token).map(({ checkpoint, ...task }) => task),
       };

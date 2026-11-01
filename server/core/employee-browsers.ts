@@ -1,4 +1,5 @@
 import { dirname, join, resolve } from "node:path";
+import { rm } from "node:fs/promises";
 import type { Store } from "./store";
 import { Chrome } from "./chrome";
 import { ChromeBridge } from "./chrome-bridge";
@@ -9,6 +10,7 @@ import { assert, sleep } from "./util";
 export class EmployeeBrowsers {
   entries = new Map<string, { chrome: Chrome; browser: HeadlessBrowser; starting?: Promise<Chrome>; stopping?: boolean }>();
   closed = false;
+  removed = new Set<string>();
   constructor(public store: Store, public pageScript: string) {}
   profile(id: string) {
     assert(/^(default|e[a-zA-Z0-9_-]+)$/.test(id), "Invalid employee browser ID");
@@ -16,7 +18,7 @@ export class EmployeeBrowsers {
   }
   peek(id: string) { return this.entries.get(id)?.chrome; }
   async get(id: string): Promise<Chrome> {
-    assert(!this.closed, "Browser manager stopped");
+    assert(!this.closed && !this.removed.has(id), "Browser manager stopped or employee deleted");
     let entry = this.entries.get(id);
     if (!entry) {
       this.profile(id);
@@ -57,6 +59,14 @@ export class EmployeeBrowsers {
     entry.chrome.bridge.close();
     entry.chrome.observations.clear();
     entry.stopping = false;
+  }
+  async remove(id: string) {
+    this.removed.add(id);
+    try {
+      await this.stop(id);
+      await rm(this.profile(id), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      this.entries.delete(id);
+    } catch (error) { this.removed.delete(id); throw error; }
   }
   async close() {
     this.closed = true;

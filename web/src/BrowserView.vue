@@ -969,8 +969,9 @@ onBeforeUnmount(() => {
         </div>
       </figure>
       <div v-else-if="!status?.connected && !error" class="browser-placeholder">
-        <strong>浏览器扩展尚未连接</strong>
-        <p>
+        <strong>{{ employeeId ? '员工浏览器未启动' : '浏览器扩展尚未连接' }}</strong>
+        <p v-if="employeeId">点击“刷新标签页”自动启动该员工的独立浏览器。登录数据会保留，无需手动安装扩展。</p>
+        <p v-else>
           Windows：在本机 Chrome 加载项目
           extensions/nova-chrome。Docker：等待容器 Chromium
           和扩展自动连接，然后刷新标签页。

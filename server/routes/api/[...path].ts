@@ -99,6 +99,18 @@ export default defineEventHandler(async (event) => {
   try {
     if (["config", "providers", "skills", "employee", "vault"].includes(path[0]))
       check(user.role === "admin", 403, "Administrator permission required");
+    if (path[0] === "debug") {
+      check(user.role === "admin", 403, "Administrator permission required");
+      check(method === "GET" && path[1] === "sessions" && path.length === 2, 404, "Debug route not found");
+      const employees = engine.employee.all().map((employee) => employee.state());
+      const names = new Map(employees.map((employee) => [employee.id, employee.name]));
+      const tasks = new Map(employees.flatMap((employee) => employee.tasks.map((task) => [task.id, { task, employeeId: employee.id }] as const)));
+      return store.sessions().filter((session) => session.employeeId || session.taskId).map((session) => {
+        const linked = session.taskId ? tasks.get(session.taskId) : undefined;
+        const employeeId = session.employeeId || linked?.employeeId || "";
+        return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联员工", taskText: linked?.task.text || "", kind: !session.taskId ? "chat" : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
+      });
+    }
     if (path[0] === "bootstrap" && method === "GET")
       return {
         user,
@@ -137,17 +149,35 @@ export default defineEventHandler(async (event) => {
       return send(event, Buffer.from(blob.data));
     }
     if (path[0] === "employees") {
-      check(user.role !== "viewer", 403, "Execution permission required");
       if (path.length === 1) {
         if (method === "GET") return engine.employee.all().filter((employee) => employee.accessible(user)).map((employee) => {
           const s = employee.state();
-          return { id: s.id, name: s.name, instruction: s.instruction, enabled: s.enabled, activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length };
+          return { id: s.id, name: s.name, instruction: s.instruction, scope: s.scope, canManage: employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
         });
-        if (method === "POST") return engine.employee.create(a, user.id);
+        if (method === "POST") {
+          check(user.role !== "viewer", 403, "Execution permission required");
+          return engine.employee.create(a, user.id, user.role === "admin" ? "team" : "personal");
+        }
       }
-      const employee = engine.employee.for(path[1]);
-      check(employee.accessible(user), 404, "Employee not found");
+      const employee = engine.employee.all().find((employee) => employee.employeeId === path[1]);
+      check(employee && employee.accessible(user), 404, "Employee not found");
+      check(!employee.deleting, 409, "员工正在删除，请稍候");
       const state = employee.state();
+      if (method !== "GET") check(user.role !== "viewer", 403, "只读账号不能执行操作");
+      if (path[2] === "execution" && method === "POST") {
+        check(employee.manageable(user), 403, "只有员工管理者可以切换默认执行位置");
+        return engine.switchEmployeeExecution(employee.employeeId, a.localAgent, a.clientId, user.id);
+      }
+      if (path.length === 2 && method === "DELETE") {
+        check(employee.manageable(user), 403, "只有员工管理者可以删除员工");
+        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认删除员工及其任务、会话和浏览器登录数据");
+        check(!employee.busy.size && !(state.chatSession && engine.active.has(state.chatSession)), 409, "员工仍在执行，请先停止任务和当前对话，再删除员工");
+        await engine.removeEmployee(employee.employeeId, async () => {
+          const live = app().employeeLives.get(employee.employeeId);
+          if (live) { await live.close(); app().employeeLives.delete(employee.employeeId); }
+        });
+        return { ok: true };
+      }
       if (path[2] === "chat" && method === "GET") {
         const session = employee.chat(user.id);
         return { session, messages: store.messages(session.id), running: engine.active.has(session.id) };
@@ -155,6 +185,7 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "messages" && method === "POST") {
         const session = employee.chat(user.id);
         const message = await inputMessage(a, store, session.id);
+        check(!employee.deleting, 409, "员工正在删除，请稍候");
         if (engine.active.has(session.id)) engine.steer(session.id, message);
         else await engine.launch(session.id, message);
         return { id: session.id };
@@ -164,12 +195,16 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
       if (path[2] === "chrome") {
+        check(employee.manageable(user), 403, "只有员工管理者可以查看和控制浏览器登录环境");
         if (method === "POST" && a.operation === "close") {
           check(!employee.busy.size, 409, "Stop browser tasks first");
+          const live = app().employeeLives.get(employee.employeeId);
+          if (live) { await live.close(); app().employeeLives.delete(employee.employeeId); }
           await engine.browsers.stop(employee.employeeId);
           return { ok: true };
         }
         const browser = await engine.browsers.get(employee.employeeId);
+        check(!employee.deleting, 409, "员工正在删除，请稍候");
         if (path[3] === "tabs" && method === "GET") return browserTabs(browser);
         if (path[3] === "live" && method === "POST") return employeeLive(employee.employeeId).ticket(who, a.tabTag);
         if (path[3] === "screenshot" && method === "POST") return browserScreenshot(browser, "employee-view:" + user.id, a.tabTag);
@@ -179,12 +214,17 @@ export default defineEventHandler(async (event) => {
         check(false, 404, "Browser route not found");
       }
       if (path[2] === "control" && method === "POST") {
+        if (["settings", "fire"].includes(a.action)) check(employee.manageable(user), 403, "只有员工管理者可以修改设置或触发职责");
         if (a.vaultIds !== undefined) check(user.role === "admin", 403, "Only administrators grant credentials");
         return employee.control(a);
       }
       if (path[2] === "transcript" && method === "POST") return employee.transcript(a.threadId);
-      if (path.length === 2 && method === "GET") return { ...state, busy: [...employee.busy.keys()] };
+      if (path.length === 2 && method === "GET") {
+        const { enabled, workStart, workEnd, ...visible } = state;
+        return { ...visible, canManage: employee.manageable(user), executionClients: employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
+      }
       if (path.length === 2 && method === "POST") {
+        if (!employee.manageable(user)) check(a.action === "list" || (a.action === "add" && a.kind === "todo"), 403, "只有员工管理者可以修改职责、记忆和凭据");
         const result = await employee.execute("", a);
         return result.secret ? JSON.parse(result.secret) : result.value;
       }

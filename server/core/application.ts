@@ -70,7 +70,7 @@ export function employeeLive(employeeId?: string) {
   if (!live) {
     const chrome = application.engine.browsers.peek(employeeId);
     if (!chrome) throw Error("员工浏览器尚未启动");
-    live = new BrowserLive(chrome, application.auth, (principal) => employee.accessible(principal.user));
+    live = new BrowserLive(chrome, application.auth, (principal) => employee.manageable(principal.user));
     application.employeeLives.set(employeeId, live);
   }
   return live;

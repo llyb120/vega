@@ -4,8 +4,8 @@ import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import ToolSteps from "./ToolSteps.vue";
 import { groupTurns } from "./conversation";
-const props = defineProps({ api: Function, employeeId: String, name: String, revision: Number, event: Object, composer: Object });
-const messages = ref([]), running = ref(false), busy = ref(false), error = ref(""), live = ref(""), transcript = ref(null), fileInput = ref(null);
+const props = defineProps({ api: Function, employeeId: String, name: String, revision: Number, event: Object, composer: Object, readonly: Boolean });
+const messages = ref([]), running = ref(false), busy = ref(false), error = ref(""), live = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
 const files = computed({ get: () => props.composer.images, set: (images) => props.composer.images = images });
 const turns = computed(() => groupTurns(messages.value));
@@ -73,7 +73,7 @@ onBeforeUnmount(() => { disposed = true; request++; });
   <section class="employee-chat">
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <div ref="transcript" class="employee-transcript" aria-live="polite">
-      <div v-if="!messages.length" class="empty-card"><h3>把工作交给 {{ name }}</h3><p>直接说目标。我会安排任务、跟进结果，在需要你决定时回来。</p></div>
+      <div v-if="!messages.length" class="employee-welcome"><span class="welcome-avatar" aria-hidden="true">{{ name?.slice(0, 1) }}</span><span class="welcome-label">你的数字搭档已就位</span><h3>今天，想交给我什么？</h3><p>直接告诉我目标。我会安排任务、跟进结果，<br />需要你决定时再回来。</p><div v-if="!readonly" class="welcome-prompts"><button @click="draft = '帮我处理一项工作：'; input?.focus()"><span aria-hidden="true">↗</span> 交代新工作</button><button @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><span aria-hidden="true">☷</span> 看看工作进度</button></div></div>
       <section v-for="turn in turns" :key="turn.user?.seq || 'reply'" class="conversation-turn">
         <article v-if="turn.user" class="message user">
           <UserMessage :text="turn.user.displayText || turn.user.text || ''" />
@@ -87,18 +87,36 @@ onBeforeUnmount(() => { disposed = true; request++; });
       <article v-if="live" class="message assistant"><MessageText :text="live" streaming /></article>
       <p v-if="running" class="hint" role="status">正在处理你的消息… 后台任务可在“工作”中查看。</p>
     </div>
-    <form class="employee-composer card" @submit.prevent="send">
+    <p v-if="readonly" class="readonly-note">当前账号仅可查看团队员工的对话和任务。</p>
+    <form v-else class="employee-composer" @submit.prevent="send">
       <div class="attachments"><button v-for="(file, index) in files" :key="index" type="button" @click="files.splice(index, 1)">{{ file.name }} ×</button></div>
-      <textarea v-model="draft" aria-label="给员工的消息" placeholder="交代工作、补充要求，或询问进度…" rows="3" @keydown="keydown"></textarea>
-      <div class="actions"><input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden multiple @change="upload" /><button type="button" @click="fileInput.click()">添加图片</button><button v-if="running" type="button" @click="stop">停止本轮</button><button class="primary" :disabled="busy || (!draft.trim() && !files.length)">{{ busy ? '提交中…' : '发送' }}</button></div>
+      <textarea ref="input" v-model="draft" aria-label="给员工的消息" placeholder="告诉我目标，剩下的交给我…" rows="2" @keydown="keydown"></textarea>
+      <div class="composer-tools"><input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden multiple @change="upload" /><button type="button" class="attach-button" @click="fileInput.click()"><span aria-hidden="true">＋</span> 添加图片</button><span class="composer-hint">Enter 发送 · Shift + Enter 换行</span><button v-if="running" type="button" @click="stop">停止本轮</button><button class="primary" :disabled="busy || (!draft.trim() && !files.length)">{{ busy ? '提交中…' : '发送' }} <span aria-hidden="true">↑</span></button></div>
     </form>
   </section>
 </template>
 <style scoped>
-.employee-chat { display: flex; flex-direction: column; min-height: 0; height: min(68dvh, 850px); }
-.employee-transcript { overflow-y: auto; flex: 1; min-height: 140px; padding: 16px 4px; }
-.employee-composer { flex: none; margin: 0; }
-.employee-composer textarea { width: 100%; resize: vertical; }
-.employee-composer .actions { justify-content: flex-end; margin-top: 8px; }
+.readonly-note { color: var(--muted); text-align: center; padding: 16px; font-size: 12px; }
+.employee-chat { display: flex; flex-direction: column; min-height: 0; min-width: 0; height: 100%; padding: 0 28px 22px; }
+.employee-transcript { overflow-y: auto; flex: 1; min-height: 0; padding: 26px max(4px, calc((100% - 800px) / 2)); scrollbar-width: thin; }
+.employee-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100%; padding: 28px 0; text-align: center; }
+.welcome-avatar { display: grid; place-items: center; width: 58px; height: 62px; margin-bottom: 20px; border-radius: 19px; background: var(--accent-soft); color: var(--accent); font-size: 25px; font-weight: 650; }
+.welcome-label { color: var(--muted); font-size: 11px; letter-spacing: .03em; }
+.employee-welcome h3 { font-size: clamp(22px, 2.2vw, 30px); letter-spacing: -.04em; margin: 12px 0; font-weight: 600; }
+.employee-welcome p { font-size: 13px; color: var(--text-secondary); line-height: 1.9; margin: 0; }
+.welcome-prompts { display: flex; gap: 10px; margin-top: 26px; flex-wrap: wrap; justify-content: center; }
+.welcome-prompts button { background: var(--surface); font-size: 12px; border-radius: 10px; min-height: 42px; }
+.welcome-prompts span { color: var(--accent); margin-right: 6px; }
+.employee-composer { flex: none; width: 100%; max-width: 840px; align-self: center; margin: 0; padding: 14px 16px 10px; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--surface); box-shadow: var(--sh-sm); }
+.employee-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.employee-composer textarea { width: 100%; min-height: 62px; max-height: 180px; resize: vertical; border: 0; box-shadow: none; background: transparent; padding: 5px 2px; line-height: 1.7; }
+.employee-composer textarea:focus { box-shadow: none; }
+.composer-tools { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.composer-tools button { min-height: 36px; font-size: 12px; }
+.attach-button { background: transparent; border-color: transparent; color: var(--text-secondary); padding-left: 0; }
+.composer-hint { color: var(--muted); font-size: 10px; flex: 1; text-align: right; }
+.composer-tools .primary { margin-left: auto; min-width: 72px; }
 .message img { max-width: 100%; max-height: 360px; object-fit: contain; }
+@media (max-width: 700px) { .employee-chat { padding: 0 14px 14px; } .employee-transcript { padding: 18px 0; } .employee-welcome { padding: 20px 0; } .welcome-avatar { width: 46px; height: 48px; margin-bottom: 12px; font-size: 21px; } .employee-welcome h3 { font-size: 23px; } .welcome-prompts { margin-top: 18px; } .composer-hint { display: none; } .composer-tools button { min-height: 44px; } .employee-composer textarea { font-size: 16px; } }
+@media (max-height: 600px) { .employee-welcome { min-height: 160px; padding: 10px 0; } .welcome-avatar, .welcome-label, .welcome-prompts { display: none; } }
 </style>

@@ -4,10 +4,11 @@ import {
   beijingDateTime,
 } from "../../shared/time";
 import { systemPresence, type Presence } from "./presence";
-import type { Store } from "./store";
+import type { Store, Session } from "./store";
 import { resolve } from "node:path";
 import { assert, id, clone, clip, type Obj } from "./util";
 import { Vault } from "./vault";
+export type Execution = Pick<Session, "localAgent" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
 export type Owner = { token: string; name: string };
 export type Task = Obj & {
   id: string;
@@ -23,6 +24,9 @@ export type EmployeeState = {
   name: string;
   instruction: string;
   ownerId: string;
+  scope?: "team" | "personal";
+  execution?: Execution;
+  executionCwds?: Record<string, string>;
   chatSession?: string;
   vaultIds: string[];
   enabled: boolean;
@@ -251,6 +255,8 @@ export class Employee {
   rerun = false;
   cursor = 0;
   stopping = false;
+  deleting = false;
+  deleted = false;
   timer?: ReturnType<typeof setTimeout>;
   closed = false;
   takeovers = new Map<string, { until: number; accepted: boolean }>();
@@ -272,7 +278,7 @@ export class Employee {
           root.members.set(row.id, new Employee(this.store, this.vault, this.runtime, row.id, root));
       root.membersLoaded = true;
     }
-    return [root, ...root.members.values()];
+    return [...(this.store.get("employee:default-deleted", false) ? [] : [root]), ...root.members.values()];
   }
   for(key = "default"): Employee {
     const member = this.all().find((e) => e.employeeId === key);
@@ -281,22 +287,43 @@ export class Employee {
   }
   accessible(user: { id: string; role: string }) {
     const s = this.state();
-    return user.role === "admin" || (user.role === "operator" && s.ownerId === user.id);
+    return user.role === "admin" || s.scope === "team" || s.ownerId === user.id;
   }
-  create(a: Obj, ownerId: string) {
+  manageable(user: { id: string; role: string }) {
+    const s = this.state();
+    return user.role === "admin" || (user.role === "operator" && s.scope !== "team" && s.ownerId === user.id);
+  }
+  create(a: Obj, ownerId: string, scope: "team" | "personal" = "personal") {
     assert(typeof a.name === "string" && a.name.trim() && a.name.length <= 80, "Employee name requires 1–80 characters");
     assert(a.instruction === undefined || (typeof a.instruction === "string" && a.instruction.length <= 8000), "Invalid employee instruction");
     assert(a.cwd === undefined || (typeof a.cwd === "string" && a.cwd.length <= 4096), "Invalid cwd");
     assert(this.all().length < 50, "Employee capacity reached");
     const key = id("e"), employee = new Employee(this.store, this.vault, this.runtime, key, this.root || this);
     const s = employee.state();
-    Object.assign(s, { name: a.name.trim(), instruction: a.instruction || "", ownerId, cwd: a.cwd || process.cwd(), enabled: true, workStart: "00:00", workEnd: "00:00" });
+    Object.assign(s, { name: a.name.trim(), instruction: a.instruction || "", ownerId, scope, cwd: a.cwd || process.cwd(), enabled: true, workStart: "00:00", workEnd: "00:00" });
     employee.save(s);
     (this.root || this).members.set(key, employee);
     employee.emitChanged(s);
     return s;
   }
+  forget() {
+    assert(this.deleting && !this.busy.size, "Employee deletion requires an idle employee");
+    const state = this.state();
+    this.store.transaction(() => {
+      for (const task of state.tasks) this.vault.dropTemp(task.id);
+      this.store.db.prepare("DELETE FROM objects WHERE kind=?").run("experience:" + this.employeeId);
+      if (this.employeeId === "default") {
+        this.store.db.prepare("DELETE FROM settings WHERE key='employee'").run();
+        this.store.put("employee:default-deleted", true);
+      } else this.store.remove("employee", this.employeeId);
+    });
+    this.deleted = true;
+    this.takeovers.clear();
+    (this.root || this).members.delete(this.employeeId);
+    this.runtime.emit("employee_changed", { employeeId: this.employeeId, deleted: true, scope: state.scope, ownerId: state.ownerId });
+  }
   chat(ownerId: string) {
+    assert(!this.deleting, "Employee is being deleted");
     const existing = this.state().chatSession;
     if (existing) return this.store.session(existing);
     return this.update((s) => {
@@ -360,16 +387,17 @@ export class Employee {
   }
   // shortcut: task history shares one SQLite document; normalize tasks when histories become large.
   state(): EmployeeState {
+    assert(!this.deleted && !(this.employeeId === "default" && this.store.get("employee:default-deleted", false)), "Employee not found");
     const fallback: EmployeeState = {
       id: this.employeeId,
       name: "默认员工",
       instruction: "",
       ownerId: "",
       vaultIds: [],
-      enabled: false,
+      enabled: true,
       public: false,
-      workStart: "09:00",
-      workEnd: "18:00",
+      workStart: "00:00",
+      workEnd: "00:00",
       idleMinutes: 10,
       takeoverSeconds: 15,
       desktopAskAfter: 0,
@@ -384,6 +412,14 @@ export class Employee {
     const state = this.employeeId === "default"
       ? this.store.get<EmployeeState>("employee", fallback)
       : this.store.object<EmployeeState>("employee", this.employeeId) || fallback;
+    if (!state.scope) {
+      const owner = this.store.db.prepare("SELECT role FROM web_users WHERE id=?").get(state.ownerId) as { role: string } | undefined;
+      state.scope = this.employeeId === "default" || owner?.role === "admin" ? "team" : "personal";
+      this.save(state);
+    }
+    // Legacy availability fields no longer gate employees; only duty schedules determine when work is due.
+    state.enabled = true;
+    state.workStart = state.workEnd = "00:00";
     Object.assign(state, { id: this.employeeId, name: state.name || fallback.name, instruction: state.instruction || "", ownerId: state.ownerId || "", vaultIds: (state.vaultIds || []).filter((key) => this.store.object("vault", key)) });
     // Retain legacy data but do not fire removed Orbit subscriptions.
     for (const duty of state.duties)
@@ -397,6 +433,7 @@ export class Employee {
     return state;
   }
   update<T>(fn: (s: EmployeeState) => T): T {
+    assert(!this.deleting, "Employee is being deleted");
     const result = this.store.transaction(() => {
       const s = this.state(),
         value = fn(s);
@@ -410,7 +447,7 @@ export class Employee {
   start() {
     this.closed = false;
     this.stopping = false;
-    this.update((s) => {
+    if (!this.store.get("employee:default-deleted", false) || this.root) this.update((s) => {
       for (const t of s.tasks)
         if (t.status === "running") {
           this.recover(t, "服务中断：原会话续做，先检查外部状态；中断不代表提交/发送未执行。");
@@ -421,7 +458,7 @@ export class Employee {
           r.ended = Date.now();
         }
     });
-    if (!this.root) for (const employee of this.all().slice(1)) employee.start();
+    if (!this.root) for (const employee of this.all().filter((employee) => employee !== this)) employee.start();
     this.schedule();
   }
   close() {
@@ -513,6 +550,7 @@ export class Employee {
     owner: Owner = { token: "", name: "" },
   ): Promise<{ value: any; stop?: boolean; secret?: string }> {
     const action = a.action;
+    assert(!this.deleting, "Employee is being deleted");
     assert(typeof action === "string", "employee action required");
     assert(!action.startsWith("orbit_"), "星轨功能已移除");
     if (a.text !== undefined)
@@ -616,6 +654,7 @@ export class Employee {
             cwd: t?.cwd || a.cwd || s.cwd,
             owner: t?.owner || owner,
             employeeId: this.employeeId,
+            execution: t ? { ...(t.execution || {} ) } : { ...(s.execution || {}) },
             key: a.key || "",
             origin: t?.id || "",
             fromDuty: t?.dutyId || t?.fromDuty || "",
@@ -928,14 +967,9 @@ export class Employee {
     const value = this.update((s) => {
       if (a.action === "settings") {
         assert(!owner.token, "Only host user can change employee settings");
-        for (const k of ["enabled", "public"])
+        for (const k of ["public"])
           if (k in a) {
             assert(typeof a[k] === "boolean", "Boolean setting required");
-            (s as any)[k] = a[k];
-          }
-        for (const k of ["workStart", "workEnd"])
-          if (k in a) {
-            assert(hhmm(a[k]), "Work hours require HH:MM");
             (s as any)[k] = a[k];
           }
         for (const [k, min, max] of [
@@ -957,14 +991,6 @@ export class Employee {
         if ("vaultIds" in a) {
           assert(Array.isArray(a.vaultIds) && a.vaultIds.every((key: string) => this.vault.list().some((entry) => entry.id === key)), "Invalid credential grants");
           s.vaultIds = [...new Set<string>(a.vaultIds)];
-        }
-        if (a.enabled === false) {
-          for (const task of s.tasks) if (task.status === "running") {
-            task.status = "stopped";
-            task.result = "员工已停用；用户确认后才能续做。";
-            this.runtime.cancel(task.side === "computer" ? task.computerSession : task.workSession);
-          }
-          if (s.chatSession) this.runtime.cancel(s.chatSession);
         }
         return { ok: true };
       }
@@ -1061,9 +1087,10 @@ export class Employee {
             text: t.text,
             status: "queued",
             profile: t.profile,
-            cwd: t.cwd,
+            cwd: s.cwd,
             owner: t.owner,
             employeeId: this.employeeId,
+            execution: { ...(s.execution || {}) },
             createdAt: Date.now(),
             plan: [],
             progress: [],
@@ -1098,6 +1125,7 @@ export class Employee {
       cwd: s.cwd,
       owner: d.owner || { token: "", name: "" },
       employeeId: this.employeeId,
+      execution: { ...(s.execution || {}) },
       createdAt: now,
       dutyId: d.id,
       event: event || "",
@@ -1110,12 +1138,10 @@ export class Employee {
     return t;
   }
   async tick(now = Date.now()) {
-    if (this.closed) return;
+    if (this.closed || this.deleting || this.deleted) return;
     const initial = this.state();
     let desk: Presence | undefined;
     if (
-      initial.enabled &&
-      workSlot(initial.workStart, initial.workEnd, now) === now &&
       (initial.desktopAskAfter || 0) <= now &&
       initial.tasks.some(
         (t) =>
@@ -1137,12 +1163,7 @@ export class Employee {
         this.emitChanged(initial);
     }
     const s = this.state();
-    if (!s.enabled) return;
-    const slot = workSlot(s.workStart, s.workEnd, now);
-    if (slot > now) {
-      this.wake(slot);
-      return;
-    }
+    if (this.deleting || this.deleted) return;
     let next = Infinity,
       changed = false;
     for (const task of s.tasks) {
@@ -1262,7 +1283,7 @@ export class Employee {
           const stored = this.store.session(session);
           assert(stored.taskId === task.id && (!stored.employeeId || stored.employeeId === this.employeeId), "Execution session belongs to another task or employee");
           stored.employeeId = this.employeeId;
-          stored.ownerId ||= state.ownerId || undefined;
+          stored.ownerId ||= task.execution?.ownerId || state.ownerId || undefined;
           this.store.saveSession(stored);
         }
         catch {
@@ -1277,12 +1298,14 @@ export class Employee {
         const created = this.store.newSession({
           title:
             state.name + " · " + [...task.text.split("\n")[0]].slice(0, 30).join(""),
-          cwd: task.cwd,
+          cwd: computer && task.execution?.localAgent ? process.cwd() : task.cwd,
+          ...task.execution,
+          localAgent: computer ? false : task.execution?.localAgent,
           scene,
           model,
           taskId: task.id,
           employeeId: this.employeeId,
-          ownerId: state.ownerId || undefined,
+          ownerId: task.execution?.ownerId || state.ownerId || undefined,
         });
         session = created.id;
         if (computer) task.computerSession = session;
@@ -1322,7 +1345,7 @@ export class Employee {
         this.busy.delete(job.id);
         if (!t) return;
         const computer = job.side === "computer" || job.profile === "computer";
-        if (session) {
+        if (session && !computer) {
           const stored = this.store.session(session);
           t.cwd = stored.cwd;
         }

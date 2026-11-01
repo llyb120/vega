@@ -152,6 +152,32 @@ export class Engine {
     }
   }
 
+  async switchEmployeeExecution(key: string, localAgent: boolean, clientId: string | undefined, userId: string) {
+    assert(typeof localAgent === "boolean", "Invalid execution mode");
+    assert(clientId === undefined || (typeof clientId === "string" && /^[a-f0-9-]{32,36}$/.test(clientId)), "Invalid client ID");
+    const employee = this.employee.for(key), state = employee.state(), lock = "employee:" + key;
+    assert(!this.executionSwitches.has(lock) && !employee.deleting && !this.closing, "执行位置正在切换或员工正在删除");
+    // Change defaults only; every task/session keeps its creation-time execution binding.
+    const ownerId = state.ownerId || userId;
+    const agent = localAgent ? this.localAgents.active(ownerId, clientId || state.execution?.clientId) : undefined;
+    assert(!localAgent || agent, "所选客户端未连接，请选择在线客户端");
+    this.executionSwitches.add(lock);
+    try {
+      const target = agent ? "client:" + agent.clientId : "server";
+      const previous = state.execution?.localAgent ? "client:" + state.execution.clientId : "server";
+      const cwd = state.executionCwds?.[target] || (agent ? agent.cwd : target === previous ? state.cwd : process.cwd());
+      const path = agent ? await localCwdExists(this.localAgents, agent, agent.cwd, cwd, AbortSignal.timeout(10000)) : cwd;
+      if (!agent) assert((await stat(path)).isDirectory(), "服务端工作目录不存在");
+      if (agent) assert(this.localAgents.active(ownerId, agent.clientId) === agent, "客户端已断开，请重连后再切换");
+      assert(!employee.deleting && !this.closing, "员工正在删除或服务已停止");
+      return employee.update((next) => {
+        next.executionCwds = { ...next.executionCwds, [previous]: state.cwd, [target]: path };
+        next.cwd = path;
+        next.execution = { localAgent, ownerId, clientId: agent?.clientId, clientName: agent?.name, localPlatform: agent?.platform };
+        return { execution: next.execution, cwd: path };
+      });
+    } finally { this.executionSwitches.delete(lock); }
+  }
   constructor(
     public store: Store,
     public catalog: Catalog,
@@ -272,6 +298,28 @@ export class Engine {
     this.catalog.auth.close();
     this.chrome.bridge.close();
     await this.browsers.close();
+  }
+  async removeEmployee(key: string, beforeRemove: () => Promise<void> = async () => {}) {
+    const employee = this.employee.for(key), state = employee.state();
+    const taskIds = new Set(state.tasks.map((task) => task.id));
+    const sessions = this.store.sessions().filter((session) => session.employeeId === key || (session.taskId && taskIds.has(session.taskId)) || session.id === state.chatSession);
+    assert(!employee.deleting && !this.executionSwitches.has("employee:" + key), "员工正在删除或切换执行位置，请勿重复操作");
+    assert(!employee.busy.size && !sessions.some((session) => this.active.has(session.id)), "员工仍在执行，请先停止任务和当前对话，再删除员工");
+    employee.deleting = true;
+    try {
+      await beforeRemove();
+      for (const session of sessions) await this.releaseSession(session.id);
+      await this.browsers.remove(key);
+      this.store.transaction(() => {
+        for (const session of sessions) {
+          this.store.db.prepare("DELETE FROM sessions WHERE id=?").run(session.id);
+          this.store.remove("context-state", session.id);
+          this.providers.reset(session.id);
+        }
+        employee.forget();
+      });
+      this.employee.schedule();
+    } catch (error) { employee.deleting = false; throw error; }
   }
   employeeFor(session: Session) {
     if (session.employeeId) return this.employee.for(session.employeeId);

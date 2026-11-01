@@ -4,6 +4,7 @@ const props = defineProps({
   api: Function,
   sessionId: String,
   revision: Number,
+  debug: Boolean,
 });
 const emit = defineEmits(["back"]);
 const session = ref(null),
@@ -26,7 +27,7 @@ async function refresh() {
       "/sessions/" + encodeURIComponent(props.sessionId),
     );
     if (request !== version) return;
-    if (!result.session.taskId) throw Error("这不是员工任务的会话");
+    if (!result.session.taskId && !(props.debug && result.session.employeeId)) throw Error("这不是员工的会话");
     session.value = result.session;
     messages.value = result.messages || [];
     running.value = result.running;
@@ -45,7 +46,7 @@ onBeforeUnmount(() => version++);
 </script>
 <template>
   <header class="topbar">
-      <button class="link" @click="emit('back')">← 返回数字员工</button>
+      <button class="link" @click="emit('back')">← {{ debug ? '返回调试会话' : '返回数字员工' }}</button>
       <h2>{{ session?.title || "员工会话记录" }}</h2>
     <div class="actions">
       <span :class="['pill', running ? 'green' : '']">{{
@@ -60,8 +61,9 @@ onBeforeUnmount(() => version++);
     :aria-busy="busy"
   >
     <p class="context-note">
-      这是员工任务的执行记录；补充、审批或续做请返回数字员工看板，不会改变你的普通会话。
+      只读执行记录；补充、审批或续做请返回对应员工，不能在这里输入或重放操作。
     </p>
+    <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>员工 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>模型 / 场景</dt><dd>{{ session.model || '默认' }} / {{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="busy && !messages.length" role="status">正在加载记录…</p>
     <article
@@ -93,9 +95,10 @@ onBeforeUnmount(() => version++);
           <pre>{{ message.thinking }}</pre>
         </details>
         <div class="message-text">
-          {{ message.displayText || message.text }}
+          {{ debug ? message.text : message.displayText || message.text }}
         </div>
-        <div v-if="message.calls?.length" class="calls">
+        <details v-if="debug && message.calls?.length" class="tool-block"><summary>原始工具参数</summary><pre>{{ JSON.stringify(message.calls, null, 2) }}</pre></details>
+        <div v-else-if="message.calls?.length" class="calls">
           <span v-for="call in message.calls" :key="call.id"
             >↳ {{ call.name }}</span
           >
@@ -116,3 +119,9 @@ onBeforeUnmount(() => version++);
     </p>
   </section>
 </template>
+<style scoped>
+.debug-metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-sunken); font-size: 12px; }
+.debug-metadata dt { color: var(--muted); }
+.debug-metadata dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+@media (max-width: 600px) { .debug-metadata { grid-template-columns: 1fr; gap: 5px; } }
+</style>

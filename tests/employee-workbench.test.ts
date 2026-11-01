@@ -43,7 +43,8 @@ test("employees isolate state, business keys, conversations, credentials and own
     const b = employee.for(employee.create({ name: "B" }, "bob").id);
     assert(a.accessible({ id: "alice", role: "operator" }));
     assert(!a.accessible({ id: "bob", role: "operator" }));
-    assert(!a.accessible({ id: "alice", role: "viewer" }));
+    assert(a.accessible({ id: "alice", role: "viewer" }));
+    assert(!a.manageable({ id: "alice", role: "viewer" }));
     assert(a.accessible({ id: "root", role: "admin" }));
     assert.equal(employee.state().memories[0].text, "legacy");
     await a.execute("", { action: "remember", text: "A-only" });
@@ -156,7 +157,8 @@ test("restart recovery never restarts human stops, approvals or cancellations", 
     assert.deepEqual(employee.state().tasks.map((t) => t.status), ["recovering", "stopped", "cancelled", "approval"]);
     assert.equal(employee.task(employee.state(), jobs[0].id).recovery.attempts, 1);
     await employee.control({ action: "settings", enabled: false });
-    assert.equal(employee.state().enabled, false);
+    assert.equal(employee.state().enabled, true, "legacy disable flags cannot gate employees anymore");
+    assert.equal(employee.state().workStart, employee.state().workEnd);
   } finally { employee.close(); store.close(); }
 });
 

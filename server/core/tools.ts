@@ -430,6 +430,8 @@ export class Tools {
         "Credentials may not be copied to employee memory/notes/checkpoints",
       );
       const employee = this.engine.employeeFor(this.session);
+      if (this.session.employeeId && !this.session.taskId && employee.state().scope === "team")
+        assert(["list", "resume", "answer"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "团队员工对话仅用于派单和续做，职责、记忆和凭据请管理员设置");
       if (this.session.employeeId && !this.session.taskId && ["resume", "answer"].includes(a.action)) {
         const task = employee.task(employee.state(), a.id);
         assert(!task.owner.token, "Remote tasks require their assigning member");
@@ -437,7 +439,7 @@ export class Tools {
       }
       const result = await employee.execute(
         this.session.taskId || "",
-        { ...a, ...(a.action === "add" ? { cwd: this.session.cwd } : {}) },
+        { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) },
       );
       return { value: result.value, stop: result.stop, secret: result.secret };
     }

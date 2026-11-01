@@ -406,12 +406,26 @@ test(
       const workerB = await ok("/employees", "POST", { name: "Bob worker", cwd: dir }, b);
       assert.notEqual(workerA.id, workerB.id);
       assert.equal((await req("/employees/" + workerA.id, "GET", undefined, b)).r.status, 404);
-      assert.equal((await req("/employees", "GET", undefined, v)).r.status, 403);
-      assert.deepEqual((await ok("/employees", "GET", undefined, a)).map((employee: any) => employee.id), [workerA.id]);
+      assert.equal((await req("/employees", "GET", undefined, v)).r.status, 200);
+      assert.deepEqual((await ok("/employees", "GET", undefined, a)).filter((employee: any) => employee.scope === "personal").map((employee: any) => employee.id), [workerA.id]);
+      const team = await ok("/employees", "POST", { name: "Team worker", cwd: dir, scope: "personal" }, admin);
+      assert.equal(team.scope, "team");
+      for (const login of [a, b, v]) {
+        assert((await ok("/employees", "GET", undefined, login)).some((employee: any) => employee.id === team.id));
+        assert.equal((await ok(`/employees/${team.id}`, "GET", undefined, login)).canManage, false);
+        assert.equal((await req(`/employees/${team.id}?confirmed=true`, "DELETE", undefined, login)).r.status, 403);
+      }
+      const teamChat = await ok(`/employees/${team.id}/chat`, "GET", undefined, v);
+      for (const login of [a, b, v]) assert.equal((await req('/debug/sessions', 'GET', undefined, login)).r.status, 403);
+      const debugSessions = await ok('/debug/sessions', 'GET', undefined, admin);
+      assert(debugSessions.some((session: any) => session.id === teamChat.session.id && session.kind === 'chat' && session.employeeName === 'Team worker'));
+      assert(debugSessions.some((session: any) => session.id === employeeSession.id && session.taskId === 'employee-test-task'));
+      assert.equal((await req(`/sessions/${teamChat.session.id}`, "GET", undefined, b)).r.status, 200);
+      assert.equal((await req(`/employees/${team.id}/messages`, "POST", { text: "must not execute" }, v)).r.status, 403);
+      assert.equal((await req(`/employees/${team.id}/control`, "POST", { action: "settings", name: "unauthorized" }, a)).r.status, 403);
       assert.equal((await req(`/employees/${workerA.id}/control`, "POST", { action: "settings", vaultIds: [] }, a)).r.status, 403);
       for (const [worker, login] of [[workerA, a], [workerB, b]] as const) {
-        await ok(`/employees/${worker.id}/control`, "POST", { action: "settings", enabled: false }, login);
-        await ok(`/employees/${worker.id}`, "POST", { action: "add", kind: "todo", text: "isolated work", key: "same-key" }, login);
+        await ok(`/employees/${worker.id}`, "POST", { action: "add", kind: "todo", text: "isolated work", key: "same-key", nextCheckInMinutes: 60 }, login);
       }
       const stateA = await ok(`/employees/${workerA.id}`, "GET", undefined, a);
       const stateB = await ok(`/employees/${workerB.id}`, "GET", undefined, b);
@@ -422,6 +436,12 @@ test(
       assert.equal((await req(`/sessions/${chat.session.id}/messages`, "POST", { text: "must use employee" }, a)).r.status, 400);
       assert(!(await ok("/bootstrap", "GET", undefined, a)).sessions.some((session: any) => session.id === chat.session.id));
       assert.equal((await req(`/sessions/${chat.session.id}`, "GET", undefined, b)).r.status, 404);
+      assert.equal((await req(`/employees/${workerA.id}`, "DELETE", undefined, a)).r.status, 400);
+      assert.equal((await req(`/employees/${workerA.id}?confirmed=true`, "DELETE", undefined, b)).r.status, 404);
+      await ok(`/employees/${workerA.id}?confirmed=true`, "DELETE", undefined, a);
+      assert.equal((await req(`/employees/${workerA.id}`, "GET", undefined, a)).r.status, 404);
+      assert.equal((await req(`/sessions/${chat.session.id}`, "GET", undefined, a)).r.status, 404);
+      assert((await ok("/employees", "GET", undefined, b)).some((employee: any) => employee.id === workerB.id));
       assert(
         !JSON.stringify(await ok("/users", "GET", undefined, admin)).includes(
           "scrypt1:",

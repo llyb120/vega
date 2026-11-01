@@ -10,6 +10,8 @@ import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
 import EmployeeChat from "./EmployeeChat.vue";
+import EmployeeTaskCard from "./EmployeeTaskCard.vue";
+import DebugSessions from "./DebugSessions.vue";
 import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
 import {
@@ -53,6 +55,7 @@ function retryLocalPairing() {
 const mobileTitles = {
   chat: "对话",
   employee: "数字员工",
+  debug: "调试会话",
   browser: "浏览器",
   experiences: "经验图谱",
   account: "账号",
@@ -145,7 +148,7 @@ const canWriteCurrent = computed(
 const authenticated = ref(false),
   error = ref(""),
   notice = ref(""),
-  view = ref("chat");
+  view = ref("employee");
 watch(view, closeNavigation);
 const sessions = ref([]),
   current = ref(null),
@@ -190,6 +193,11 @@ const employee = ref({
     runs: [],
   }),
   employeeTab = ref("chat"),
+  employeeTaskFilter = ref("active"),
+  employeeSaving = ref(false),
+  employeeDeleting = ref(false),
+  employeeExecutionBusy = ref(false),
+  debugRevision = ref(0),
   employees = ref([]),
   selectedEmployee = ref(""),
   employeeEvent = ref(null),
@@ -350,6 +358,11 @@ const activeTasks = computed(() =>
 const historyTasks = computed(() =>
   (employee.value.tasks || []).filter((t) => ended(t.status)).toReversed(),
 );
+const attentionTasks = computed(() => activeTasks.value.filter((task) => ["waiting", "approval"].includes(task.status)));
+const visibleEmployeeTasks = computed(() => employeeTaskFilter.value === "history" ? historyTasks.value : employeeTaskFilter.value === "attention" ? attentionTasks.value : activeTasks.value);
+const employeeStatus = computed(() => attentionTasks.value.length ? "需要你处理" : activeTasks.value.some((task) => task.status === "running") ? "正在工作" : "随时待命");
+const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['duties', '职责'], ['memories', '记忆']]);
+const employeeGroups = computed(() => [['team', '团队员工'], ['personal', isAdmin.value ? '个人员工' : '我的员工']].map(([scope, label]) => ({ scope, label, entries: employees.value.filter((employee) => employee.scope === scope) })).filter((group) => group.entries.length));
 const labels = {
   queued: "排队中",
   running: "执行中",
@@ -595,22 +608,8 @@ async function enter(result) {
   await bootstrap();
   startLocalPairing();
   if (isAdmin.value) startPresence();
-  await Promise.all([
-    loadModels(),
-    canExecute.value ? refreshEmployee() : null,
-    !canExecute.value && sessions.value.length
-      ? selectSession(
-          sessions.value.find(
-            (s) =>
-              !s.stageSource &&
-              s.id === sessionStorage.getItem("vega:session:" + user.value.id),
-          ) ||
-            rootSessions.value[0] ||
-            sessions.value[0],
-        )
-      : null,
-  ]);
-  if (canExecute.value) view.value = "employee";
+  await Promise.all([loadModels(), refreshEmployee()]);
+  view.value = "employee";
   try {
     const pending = JSON.parse(
       sessionStorage.getItem("vega:provider-login:" + user.value.id) || "null",
@@ -945,12 +944,14 @@ async function refreshCurrent() {
   running.value[current.value.id] = data.running;
 }
 async function handleEvent(event) {
+  if (view.value === "debug" && ["started", "message_end", "tool_end", "done", "employee_changed"].includes(event.type)) debugRevision.value++;
   if (event.session && event.session === employee.value.chatSession) {
     employeeEvent.value = event;
     return;
   }
   if (event.type === "clients_changed") {
     await bootstrap();
+    if (view.value === "employee") await refreshEmployee();
     return;
   }
   if (event.type === "execution_changed") {
@@ -1077,7 +1078,7 @@ async function handleEvent(event) {
   }
 }
 async function loadEmployee() {
-  if (!canExecute.value) return;
+  if (!user.value) return;
   const owner = user.value.id;
   const list = await api("/employees");
   if (user.value?.id !== owner) return;
@@ -1085,11 +1086,16 @@ async function loadEmployee() {
   activeTaskCount.value = list.reduce((count, employee) => count + employee.activeTasks, 0);
   if (!list.some((entry) => entry.id === selectedEmployee.value)) selectedEmployee.value = list[0]?.id || "";
   const id = selectedEmployee.value;
-  if (!id) return;
+  if (!id) {
+    employee.value = { duties: [], tasks: [], memories: [], runs: [] };
+    employeeSession.value = "";
+    return;
+  }
   employeeComposers.value[id] ||= { text: "", images: [] };
   const data = await api(`/employees/${id}`);
   if (user.value?.id !== owner || selectedEmployee.value !== id) return;
   if (employeeTab.value !== "settings" || employee.value.id !== id) employee.value = data;
+  else { employee.value.tasks = data.tasks; employee.value.busy = data.busy; employee.value.chatRunning = data.chatRunning; employee.value.executionClients = data.executionClients; employee.value.execution = data.execution; }
 }
 function employeeApi(path, method = "GET", data) {
   if (!selectedEmployee.value) throw Error("请先创建员工");
@@ -1103,6 +1109,7 @@ async function chooseEmployee(id) {
   employeeSession.value = "";
   employeeEvent.value = null;
   employeeTab.value = "chat";
+  employeeTaskFilter.value = "active";
   dutyOpen.value = false;
   memoryID.value = "";
   taskText.value = "";
@@ -1113,12 +1120,53 @@ async function chooseEmployee(id) {
   await refreshEmployee();
 }
 async function createEmployee() {
-  await attempt(async () => {
+  if (employeeSaving.value) return;
+  employeeSaving.value = true;
+  try { await attempt(async () => {
     const created = await api("/employees", "POST", { name: newEmployeeName.value, instruction: newEmployeeInstruction.value, cwd: project.value });
     newEmployeeName.value = "";
     newEmployeeInstruction.value = "";
     await chooseEmployee(created.id);
+  }); } finally { employeeSaving.value = false; }
+}
+async function deleteEmployee() {
+  if (employeeDeleting.value || !employee.value.id) return;
+  const id = employee.value.id, name = employee.value.name;
+  if (!confirm(`永久删除「${name}」？\n\n将删除该员工的职责、记忆、所有任务和执行会话，并清除其浏览器登录数据。项目文件和共享密码本不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
+  employeeDeleting.value = true;
+  try {
+    await api(`/employees/${id}?confirmed=true`, "DELETE");
+    delete employeeComposers.value[id];
+    if (selectedEmployee.value === id) {
+      selectedEmployee.value = "";
+      employee.value = { duties: [], tasks: [], memories: [], runs: [] };
+      employeeSession.value = "";
+      employeeTab.value = "chat";
+    }
+    await loadEmployee();
+    toast(`已删除「${name}」`);
+  } catch (error) { employeeError.value = error.message; }
+  finally { employeeDeleting.value = false; }
+}
+async function employeeTaskAction(task, action, text) {
+  return attempt(async () => {
+    if (action === "remove" && !confirm("永久删除此任务记录？")) return;
+    if (action === "redispatch" && !confirm("重新派发为新任务？此前外部操作不会回滚。")) return;
+    await control({ id: task.id, action: action === "reject" ? "approve" : action, ...(action === "approve" || action === "reject" ? { approved: action === "approve" } : {}), ...(text ? { text } : {}), ...(action === "redispatch" ? { confirmed: true } : {}) });
+    return true;
   });
+}
+async function changeEmployeeExecution(localAgent, clientId) {
+  if (employeeExecutionBusy.value) return;
+  const id = selectedEmployee.value;
+  employeeExecutionBusy.value = true;
+  try {
+    await api(`/employees/${id}/execution`, "POST", { localAgent, ...(localAgent ? { clientId: clientId || employee.value.executionClients?.[0]?.id } : {}) });
+    const updated = await api(`/employees/${id}`);
+    if (selectedEmployee.value === id) employee.value = updated;
+    toast("已切换新任务的默认执行位置；已有和正在进行的任务不变。");
+  } catch (error) { employeeError.value = error.message; }
+  finally { employeeExecutionBusy.value = false; }
 }
 async function employeeTabChanged(id) {
   employeeTab.value = id;
@@ -1167,22 +1215,6 @@ async function addTask() {
       cwd: employee.value.cwd,
     });
     taskText.value = "";
-  });
-}
-async function taskAction(t, action) {
-  await attempt(async () => {
-    if (action === "remove" && !confirm("永久删除此任务记录？")) return;
-    const data = { id: t.id, action };
-    if (action === "answer") {
-      const text = prompt(t.waiting);
-      if (!text) return;
-      data.text = text;
-    }
-    if (action === "approve")
-      data.approved = confirm(
-        `仅批准以下操作？\n${t.approval}\n\n取消表示驳回。`,
-      );
-    await control(data);
   });
 }
 function editDuty(d) {
@@ -1241,19 +1273,21 @@ async function addMemory() {
   });
 }
 async function saveEmployeeSettings() {
-  await attempt(async () => {
+  if (employeeSaving.value) return;
+  const id = employee.value.id;
+  employeeSaving.value = true;
+  try { await attempt(async () => {
     await control({
       action: "settings",
       name: employee.value.name,
       instruction: employee.value.instruction,
       cwd: employee.value.cwd,
       ...(isAdmin.value ? { vaultIds: employee.value.vaultIds || [] } : {}),
-      enabled: employee.value.enabled,
-      workStart: employee.value.workStart,
-      workEnd: employee.value.workEnd,
     });
     toast("员工设置已保存");
-  });
+    const updated = await api(`/employees/${id}`);
+    if (selectedEmployee.value === id) employee.value = updated;
+  }); } finally { employeeSaving.value = false; }
 }
 
 onBeforeUnmount(() => {
@@ -1409,44 +1443,13 @@ onBeforeUnmount(() => {
         </svg>
         <span>创建员工</span>
       </button>
-      <div v-if="canExecute" class="sidebar-heading"><span>我的员工</span><span>{{ employees.length }}</span></div>
-      <div v-if="canExecute" class="employee-list">
-        <button v-for="entry in employees" :key="entry.id" class="session-row" :class="{ active: view === 'employee' && selectedEmployee === entry.id }" @click="chooseEmployee(entry.id)">
-          <span :class="['dot', { working: entry.enabled && entry.activeTasks }]" aria-hidden="true"></span><span class="truncate">{{ entry.name }}</span><span class="count">{{ entry.activeTasks }}</span>
-        </button>
+      <div class="employee-list">
+        <template v-for="group in employeeGroups" :key="group.scope"><div class="employee-group-label"><span>{{ group.label }}</span><span>{{ group.entries.length }}</span></div>
+        <button v-for="entry in group.entries" :key="entry.id" class="session-row" :class="{ active: view === 'employee' && selectedEmployee === entry.id }" @click="chooseEmployee(entry.id)">
+          <span class="employee-nav-avatar" aria-hidden="true">{{ entry.name.slice(0, 1) }}</span><span class="employee-nav-info"><strong class="truncate">{{ entry.name }}</strong><small>{{ entry.attentionTasks ? entry.attentionTasks + ' 项待处理' : entry.activeTasks ? entry.activeTasks + ' 项进行中' : '随时待命' }}</small></span><span v-if="entry.activeTasks" :class="['count', { attention: entry.attentionTasks }]">{{ entry.activeTasks }}</span>
+        </button></template>
       </div>
       <nav aria-label="主导航" @click="closeNavigation">
-        <button :class="{ selected: view === 'chat' }" @click="view = 'chat'">
-          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M20 15a3 3 0 0 1-3 3H9l-5 3v-6a3 3 0 0 1-1-2V7a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3Z" />
-          </svg>
-          <span>历史对话</span>
-        </button>
-        <button
-          v-if="canExecute"
-          :class="{ selected: view === 'employee' }"
-          @click="openEmployee()"
-        >
-          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="8" r="3" />
-            <path d="M5 20v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2M4 4l2 2M20 4l-2 2" />
-          </svg>
-          <span>数字员工</span
-          ><span v-if="activeTaskCount !== null" class="count">{{
-            activeTaskCount
-          }}</span>
-        </button>
-        <button
-          v-if="isAdmin"
-          :class="{ selected: view === 'browser' }"
-          @click="employeeTab = 'browser'; openEmployee()"
-        >
-          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <path d="M3 9h18M7 6.5h.01M10 6.5h.01" />
-          </svg>
-          <span>浏览器</span>
-        </button>
         <button
           v-if="isAdmin"
           :class="{ selected: view === 'experiences' }"
@@ -1460,6 +1463,7 @@ onBeforeUnmount(() => {
           </svg>
           <span>经验图谱</span>
         </button>
+        <button v-if="isAdmin" :class="{ selected: view === 'debug' }" @click="view = 'debug'"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5-6 7 6 7M16 5l6 7-6 7M14 3l-4 18" /></svg><span>调试会话</span></button>
         <button
           :class="{ selected: view === 'account' }"
           @click="view = 'account'"
@@ -1813,24 +1817,25 @@ onBeforeUnmount(() => {
         @signed-out="resetLogin"
         @changed="attempt(bootstrap)"
       />
+      <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" />
       <EmployeeSessionView
-        v-else-if="view === 'employee' && canExecute && employeeSession"
+        v-else-if="view === 'employee' && employeeSession"
         :api="api"
         :session-id="employeeSession"
         :revision="employeeSessionVersion"
         @back="openEmployee()"
       />
-      <template v-else-if="view === 'employee' && canExecute"
-        ><header class="topbar">
-          <div>
-            <h2>{{ employee.name || '我的员工' }}</h2>
-            <p>交代目标，员工安排任务、持续推进并自动恢复。</p>
-          </div>
-          <span :class="['pill', employee.enabled ? 'green' : '']">{{
-            employee.enabled ? "已启用" : "已停用"
-          }}</span>
+      <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
+        <header class="employee-header">
+          <div class="employee-identity"><span class="employee-avatar" aria-hidden="true">{{ (creatingEmployee ? '+' : employee.name?.slice(0, 1)) || '员' }}</span><div><span class="employee-eyebrow">{{ employee.scope === 'team' ? '团队数字员工' : '个人数字员工' }}</span><h2>{{ creatingEmployee || !employees.length ? '创建新员工' : employee.name || '加载中…' }}</h2><p>{{ creatingEmployee || !employees.length ? '取个名字，交代他的工作方向，就可以开始了。' : employee.instruction || '把目标交给我，任务由我安排。' }}</p></div></div>
+          <div v-if="employees.length && !creatingEmployee" class="employee-header-actions"><span class="employee-status" :class="{ attention: attentionTasks.length }"><span aria-hidden="true">●</span> {{ employeeStatus }}</span><button v-if="employee.canManage" @click="employeeTabChanged('settings')" :aria-pressed="employeeTab === 'settings'" title="编辑员工资料">员工设置</button><button v-if="employee.canManage" class="employee-delete" :disabled="employeeDeleting" @click="deleteEmployee">{{ employeeDeleting ? '正在删除…' : '删除员工' }}</button></div>
         </header>
-        <div class="page-scroll">
+        <nav v-if="employees.length && !creatingEmployee" class="employee-tabs" aria-label="员工工作空间">
+          <button v-for="[id, label] in employeeTabs" :key="id" :aria-current="employeeTab === id ? 'page' : undefined" :class="{ selected: employeeTab === id }" @click="employeeTabChanged(id)">{{ label }}<span v-if="id === 'tasks' && activeTasks.length" class="tab-count">{{ activeTasks.length }}</span></button>
+          <span v-if="employeeTab === 'settings'" class="employee-settings-label">员工设置</span>
+        </nav>
+        <div v-if="employees.length && !creatingEmployee" class="employee-execution-bar"><span>新任务执行于</span><button v-if="employee.canManage" type="button" class="execution-switch" role="switch" aria-label="客户端执行（仅影响新任务）" :aria-checked="!!employee.execution?.localAgent" :disabled="employeeExecutionBusy || (!employee.execution?.localAgent && !employee.executionClients?.length)" @click="changeEmployeeExecution(!employee.execution?.localAgent)"><span :class="{ selected: !employee.execution?.localAgent }">服务端</span><span class="execution-track" aria-hidden="true"></span><span :class="{ selected: employee.execution?.localAgent }">客户端</span></button><span v-else class="execution-readonly">{{ employee.execution?.localAgent ? employee.execution.clientName || '客户端' : '服务端' }}</span><select v-if="employee.canManage && employee.execution?.localAgent" aria-label="员工执行客户端" :value="employee.execution.clientId" :disabled="employeeExecutionBusy" @change="changeEmployeeExecution(true, $event.target.value)"><option v-if="!employee.executionClients?.some((client) => client.id === employee.execution.clientId)" :value="employee.execution.clientId" disabled>{{ employee.execution.clientName }} · 离线</option><option v-for="client in employee.executionClients || []" :key="client.id" :value="client.id">{{ client.name }} · {{ client.platform }}</option></select><small>{{ employeeExecutionBusy ? '正在验证执行环境…' : employee.canManage && !employee.executionClients?.length && !employee.execution?.localAgent ? '无在线客户端，连接后可切换；只影响新任务' : '只影响之后的新任务，已有任务不变' }}</small></div>
+        <div class="employee-content" :class="{ 'is-chat': employeeTab === 'chat' && !creatingEmployee && employees.length, 'is-browser': employeeTab === 'browser' && !creatingEmployee }">
           <p v-if="employeeError" class="banner error" role="alert">
             {{ employeeError
             }}<button
@@ -1841,45 +1846,29 @@ onBeforeUnmount(() => {
               ×
             </button>
           </p>
-          <form v-if="creatingEmployee || !employees.length" class="card form-grid" @submit.prevent="createEmployee">
-            <h3>创建数字员工</h3>
-            <label>员工名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发员工" /></label>
-            <label>主要负责什么<textarea v-model="newEmployeeInstruction" maxlength="8000" placeholder="职责方向、工作原则和偏好"></textarea></label>
-            <div class="actions"><button class="primary">创建</button><button v-if="employees.length" type="button" @click="creatingEmployee = false">取消</button></div>
+          <div v-if="!employees.length && !canExecute" class="employee-empty"><h3>还没有团队员工</h3><p>管理员创建的团队员工会出现在这里。</p></div>
+          <form v-if="(creatingEmployee || !employees.length) && canExecute" class="employee-create card form-grid" @submit.prevent="createEmployee">
+            <span class="employee-eyebrow">{{ isAdmin ? '团队员工 · 所有成员可见' : '个人员工 · 仅本人和管理员可见' }}</span><h3>你想把什么交给他？</h3>
+            <label>员工名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
+            <label>工作方向<textarea v-model="newEmployeeInstruction" rows="4" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
+            <p class="hint">创建后即可接活。独立记忆、任务和浏览器会自动准备，无需设置启用或工作时间。</p>
+            <div class="actions"><button v-if="employees.length" type="button" @click="creatingEmployee = false">取消</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '正在创建…' : '创建员工' }}</button></div>
           </form>
-          <div v-if="employeeTab === 'settings' && employees.length" class="card form-grid">
+          <form v-if="employeeTab === 'settings' && employee.canManage && employees.length && !creatingEmployee" class="employee-settings-form card form-grid" @submit.prevent="saveEmployeeSettings">
+            <div><h3>员工资料</h3><p class="hint">保存后，新任务会使用更新的工作原则和目录。</p></div>
             <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
             <label>工作原则<textarea v-model="employee.instruction" maxlength="8000"></textarea></label>
             <label>工作目录<input v-model="employee.cwd" required /></label>
-            <label><input v-model="employee.enabled" type="checkbox" /> 启用员工</label>
-            <label>工作时间（北京时间，起止相同表示全天）<span><input v-model="employee.workStart" type="time" /> — <input v-model="employee.workEnd" type="time" /></span></label>
             <fieldset v-if="isAdmin && vaultEntries.length"><legend>允许使用的密码本条目</legend><label v-for="entry in vaultEntries" :key="entry.id"><input v-model="employee.vaultIds" type="checkbox" :value="entry.id" /> {{ entry.name }} · {{ entry.condition }}</label></fieldset>
-            <button @click="saveEmployeeSettings">保存员工设置</button>
+            <div class="actions"><button type="button" @click="employeeTab = 'chat'">返回对话</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '保存中…' : '保存修改' }}</button></div>
+          </form>
+          <div v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee && !creatingEmployee" class="employee-chat-layout">
+            <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" />
+            <aside class="employee-work-summary" aria-label="当前工作"><div class="summary-heading"><h3>当前工作</h3><button class="link" @click="employeeTab = 'tasks'">全部任务 ↗</button></div><button v-if="attentionTasks.length" class="attention-shortcut" @click="employeeTaskFilter = 'attention'; employeeTab = 'tasks'"><strong>{{ attentionTasks.length }} 项需要你处理</strong><span>补充信息或审批后继续 →</span></button><div v-if="!activeTasks.length" class="summary-empty"><span aria-hidden="true">✓</span><strong>手头很清爽</strong><p>交代一个目标，我会在这里更新进度。</p></div><button v-for="task in activeTasks.slice(0, 5)" :key="task.id" class="summary-task" @click="employeeTaskFilter = ['waiting', 'approval'].includes(task.status) ? 'attention' : 'active'; employeeTab = 'tasks'"><span :class="['summary-task-status', task.status]">{{ labels[task.status] }}</span><strong>{{ task.text }}</strong><span v-if="task.progress?.length">{{ task.progress.at(-1).text }}</span></button></aside>
           </div>
-          <div v-if="!employee.enabled" class="context-note">
-            员工当前停用，新任务只保存、不执行。启用并进入工作时间后开始处理。
-          </div>
-          <div v-if="employees.length && !creatingEmployee" class="tabs" role="tablist">
-            <button
-              v-for="[id, label] in [
-                ['chat', '对话'],
-                ['tasks', '工作'],
-                ['browser', '浏览器'],
-                ['duties', '职责'],
-                ['memories', '长期记忆'],
-                ['settings', '设置'],
-              ]"
-              :key="id"
-              :class="{ selected: employeeTab === id }"
-              @click="employeeTabChanged(id)"
-            >
-              {{ label }}
-            </button>
-          </div>
-          <EmployeeChat v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee && !creatingEmployee" :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" />
-          <BrowserView v-if="employeeTab === 'browser' && selectedEmployee && !creatingEmployee" :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" />
+          <div v-if="employeeTab === 'browser' && selectedEmployee && !creatingEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" /></div>
           <template v-if="employeeTab === 'tasks' && !creatingEmployee"
-            ><form class="inline-form" @submit.prevent="addTask">
+            ><div class="employee-section-heading"><div><h3>任务</h3><p>只看你关心的进度，需要决策时再接手。</p></div></div><form v-if="canExecute" class="inline-form employee-task-form" @submit.prevent="addTask">
               <input
                 v-model="taskText"
                 required
@@ -1889,127 +1878,15 @@ onBeforeUnmount(() => {
                 <option value="coding">编码</option></select
               ><button class="primary">交给员工</button>
             </form>
-            <div class="section-heading">
-              <h3>
-                待处理 <span>{{ activeTasks.length }}</span>
-              </h3>
-            </div>
-            <div v-if="!activeTasks.length" class="empty-card">
-              没有待处理任务，今天很从容。
-            </div>
-            <article
-              v-for="t in [...activeTasks, ...historyTasks]"
-              :key="t.id"
-              class="task-card"
-            >
-              <div class="card-top">
-                <span :class="['pill', t.status === 'done' ? 'green' : '']">{{
-                  labels[t.status]
-                }}</span
-                ><small>{{ date(t.createdAt) }}</small
-                ><span v-if="t.dutyId" class="hint">职责触发</span>
-              </div>
-              <h3>{{ t.text }}</h3>
-              <p v-if="t.waiting || t.approval" class="attention">
-                {{ t.waiting || t.approval }}
-              </p>
-              <p v-if="t.recovery?.attempts" class="hint">自动恢复 {{ t.recovery.attempts }} 次 · {{ t.recovery.reason }}</p>
-              <p v-if="t.checkpoint" class="hint">恢复点：{{ t.checkpoint }}</p>
-              <ol v-if="t.plan?.length" class="plan">
-                <li v-for="(step, n) in t.plan" :key="n" :class="step.status">
-                  <span>{{ labels[step.status] }}</span> {{ step.content }}
-                </li>
-              </ol>
-              <p v-if="t.progress?.length" class="hint">
-                {{ t.progress.at(-1).text }}
-              </p>
-              <details v-if="t.result">
-                <summary>处理结果</summary>
-                <pre>{{ t.result }}</pre>
-              </details>
-              <div class="card-actions">
-                <button
-                  v-if="t.status === 'running'"
-                  @click="taskAction(t, 'stop')"
-                >
-                  停止</button
-                ><button
-                  v-if="t.status === 'waiting'"
-                  class="primary"
-                  @click="taskAction(t, 'answer')"
-                >
-                  补充信息</button
-                ><button
-                  v-if="t.status === 'approval'"
-                  class="primary"
-                  @click="taskAction(t, 'approve')"
-                >
-                  审批</button
-                ><button
-                  v-if="['stopped', 'failed', 'cancelled'].includes(t.status)"
-                  @click="taskAction(t, 'resume')"
-                >
-                  继续任务</button
-                ><button
-                  @click="
-                    attempt(async () => {
-                      if (
-                        confirm('确定重新派发为新任务？此前外部操作不会回滚。')
-                      )
-                        await control({
-                          action: 'redispatch',
-                          id: t.id,
-                          confirmed: true,
-                        });
-                    })
-                  "
-                >
-                  重新派发</button
-                ><button
-                  v-if="t.workSession"
-                  @click="
-                    attempt(async () => {
-                      const timeline = await employeeApi(
-                        '/employee/transcript',
-                        'POST',
-                        { threadId: t.workSession },
-                      );
-                      toast(JSON.stringify(timeline.entries));
-                    })
-                  "
-                >
-                  时间线</button
-                ><button
-                  v-if="t.workSession"
-                  @click="openEmployee(t.workSession)"
-                >
-                  执行详情 ↗</button
-                ><button
-                  v-if="t.computerSession"
-                  @click="openEmployee(t.computerSession)"
-                >
-                  浏览器执行详情 ↗</button
-                ><button
-                  v-if="!ended(t.status) && t.status !== 'running'"
-                  @click="
-                    attempt(() => employeeAction({ action: 'done', id: t.id }))
-                  "
-                >
-                  取消</button
-                ><button
-                  v-if="ended(t.status)"
-                  class="link"
-                  @click="taskAction(t, 'remove')"
-                >
-                  删除记录
-                </button>
-              </div>
-            </article></template
+            <div class="employee-task-filters" aria-label="筛选任务"><button v-for="[id, label, count] in [['active', '进行中', activeTasks.length], ['attention', '待我处理', attentionTasks.length], ['history', '已结束', historyTasks.length]]" :key="id" :class="{ selected: employeeTaskFilter === id }" :aria-pressed="employeeTaskFilter === id" @click="employeeTaskFilter = id">{{ label }} <span>{{ count }}</span></button></div>
+            <div v-if="!visibleEmployeeTasks.length" class="employee-empty"><span aria-hidden="true">✓</span><h3>{{ employeeTaskFilter === 'attention' ? '没有需要你处理的事项' : employeeTaskFilter === 'history' ? '还没有结束的任务' : '暂时没有进行中的任务' }}</h3><p>在对话中交代工作，或在上方直接创建任务。</p><button v-if="employeeTaskFilter !== 'history'" @click="employeeTab = 'chat'">去交代工作</button></div>
+            <EmployeeTaskCard v-for="task in visibleEmployeeTasks" :key="selectedEmployee + task.id" :task="task" :readonly="!canExecute" :act="(action, text) => employeeTaskAction(task, action, text)" @inspect="openEmployee($event)" /></template
           >
-          <template v-if="employeeTab === 'duties'"
+          <template v-if="employeeTab === 'duties' && !creatingEmployee"
             ><div class="section-heading">
               <h3>职责模板</h3>
               <button
+                v-if="employee.canManage"
                 class="primary"
                 @click="
                   duty = emptyDuty();
@@ -2100,8 +1977,9 @@ onBeforeUnmount(() => {
               <h3>{{ d.text }}</h3>
               <p>{{ d.note }}</p>
               <div class="card-actions">
-                <button @click="editDuty(d)">编辑</button
+                <button v-if="employee.canManage" @click="editDuty(d)">编辑</button
                 ><button
+                  v-if="employee.canManage"
                   class="link"
                   @click="
                     attempt(async () => {
@@ -2115,8 +1993,8 @@ onBeforeUnmount(() => {
               </div>
             </article></template
           >
-          <template v-if="employeeTab === 'memories'"
-            ><form class="inline-form" @submit.prevent="addMemory">
+          <template v-if="employeeTab === 'memories' && !creatingEmployee"
+            ><form v-if="employee.canManage" class="inline-form" @submit.prevent="addMemory">
               <input
                 v-model="memoryText"
                 required
@@ -2149,6 +2027,7 @@ onBeforeUnmount(() => {
                   >{{ ["", "普通", "重要", "长期记住"][m.importance] }} · 强度
                   {{ m.strength }}</span
                 ><button
+                  v-if="employee.canManage"
                   @click="
                     memoryID = m.id;
                     memoryText = m.text;
@@ -2157,6 +2036,7 @@ onBeforeUnmount(() => {
                 >
                   编辑</button
                 ><button
+                  v-if="employee.canManage"
                   class="link"
                   @click="
                     attempt(() =>
@@ -2170,8 +2050,8 @@ onBeforeUnmount(() => {
             </article></template
           >
 
-        </div></template
-      >
+        </div>
+      </section>
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" />
       <ExperiencesView
         v-else-if="view === 'experiences' && isAdmin"
@@ -2192,8 +2072,101 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.employee-group-label { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin: 24px 8px 10px; }
+.employee-execution-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; flex: none; min-width: 0; padding: 11px 32px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.employee-execution-bar > span { color: var(--text-secondary); font-size: 11px; }
+.employee-execution-bar .execution-switch { min-height: 32px; }
+.employee-execution-bar small { color: var(--muted); font-size: 10px; }
+.employee-execution-bar select { max-width: 220px; min-height: 34px; padding: 5px 9px; font-size: 12px; }
 .employee-list { flex: 1; min-height: 44px; overflow-y: auto; padding: 0 12px; }
-.employee-list > button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 44px; margin: 3px 0; padding: 9px 12px; text-align: left; border: 0; background: transparent; }
-.employee-list > button.active { color: #0963d8; background: #e8effd; }
-.employee-list .truncate { flex: 1; }
+.employee-list > button { display: flex; align-items: center; gap: 11px; width: 100%; min-height: 64px; margin: 5px 0; padding: 10px; text-align: left; border: 1px solid transparent; background: transparent; border-radius: 12px; }
+.employee-list > button.active { color: var(--accent); background: var(--surface); border-color: var(--border); box-shadow: var(--sh-xs); }
+.employee-nav-avatar, .employee-avatar { display: grid; place-items: center; flex: none; font-weight: 650; background: var(--accent-soft); color: var(--accent); }
+.employee-nav-avatar { width: 34px; height: 36px; border-radius: 10px; }
+.employee-nav-info { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.employee-nav-info strong { font-weight: 600; font-size: 13px; }
+.employee-nav-info small { color: var(--muted); font-size: 11px; }
+.employee-list .count.attention { color: var(--amber); background: var(--amber-soft); }
+.employee-workspace { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.employee-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 23px 32px 18px; background: var(--surface); }
+.employee-identity { display: flex; align-items: center; gap: 15px; min-width: 0; }
+.employee-identity > div { min-width: 0; }
+.employee-avatar { width: 48px; height: 50px; border-radius: 15px; font-size: 21px; }
+.employee-eyebrow { font-size: 10px; letter-spacing: .08em; color: var(--muted); }
+.employee-header h2 { margin: 4px 0; font-size: 21px; letter-spacing: -.025em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.employee-header p { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 520px; }
+.employee-header-actions { display: flex; align-items: center; gap: 10px; flex: none; }
+.employee-header-actions button { font-size: 12px; min-height: 36px; }
+.employee-status { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; color: var(--green); font-size: 12px; white-space: nowrap; }
+.employee-status > span { font-size: 7px; }
+.employee-status.attention { color: var(--amber); }
+.employee-delete { color: var(--red); border-color: transparent; background: transparent; }
+.employee-delete:hover { background: var(--red-soft); border-color: transparent; }
+.employee-tabs { display: flex; align-items: center; flex: none; padding: 0 32px; gap: 24px; border-bottom: 1px solid var(--border); background: var(--surface); overflow-x: auto; }
+.employee-tabs button { display: flex; align-items: center; gap: 7px; min-height: 48px; padding: 8px 4px; border: 0; border-radius: 0; background: transparent; color: var(--text-secondary); font-size: 13px; white-space: nowrap; }
+.employee-tabs button.selected { color: var(--accent); box-shadow: inset 0 -2px var(--accent); font-weight: 650; }
+.tab-count { font-size: 10px; color: var(--muted); padding: 2px 5px; border-radius: 5px; background: var(--surface-sunken); }
+.employee-settings-label { color: var(--muted); font-size: 12px; margin-left: auto; white-space: nowrap; }
+.employee-content { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; padding: 28px 32px; background: var(--surface-sunken); scrollbar-width: thin; }
+.employee-content > * { max-width: 1040px; margin-left: auto; margin-right: auto; }
+.employee-content.is-chat, .employee-content.is-browser { padding: 0; overflow: hidden; display: flex; flex-direction: column; background: var(--surface); }
+.employee-content > .banner { flex: none; margin: 12px 24px; }
+.employee-content > .employee-chat-layout { max-width: none; margin: 0; }
+.employee-chat-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; flex: 1; min-height: 0; }
+.employee-work-summary { overflow-y: auto; padding: 26px 20px; border-left: 1px solid var(--border); background: var(--surface-sunken); scrollbar-width: thin; }
+.summary-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.summary-heading h3 { margin: 0; font-size: 13px; }
+.summary-heading button { font-size: 11px; padding: 4px; }
+.summary-empty { padding: 42px 8px; text-align: center; color: var(--text-secondary); }
+.summary-empty > span { display: block; margin-bottom: 15px; color: var(--green); font-size: 25px; }
+.summary-empty strong { font-size: 13px; }
+.summary-empty p { font-size: 12px; line-height: 1.75; color: var(--muted); }
+.attention-shortcut, .summary-task { display: grid; gap: 8px; text-align: left; width: 100%; margin-top: 14px; padding: 14px; background: var(--surface); font-size: 12px; line-height: 1.65; white-space: normal; overflow-wrap: anywhere; border-radius: 10px; }
+.summary-task strong { font-size: 12px; font-weight: 550; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.summary-task > span:last-child { font-size: 11px; color: var(--muted); }
+.summary-task-status { color: var(--accent); font-size: 10px; }
+.attention-shortcut { background: var(--amber-soft); color: var(--amber); border-color: oklch(0.89 0.06 75); }
+.attention-shortcut span { font-size: 11px; }
+.employee-browser { flex: 1; min-height: 0; width: 100%; max-width: none; display: flex; flex-direction: column; }
+.employee-section-heading { margin-bottom: 20px; }
+.employee-section-heading h3 { margin: 0 0 7px; font-size: 20px; }
+.employee-section-heading p { color: var(--muted); font-size: 13px; margin: 0; }
+.employee-task-form { background: var(--surface); padding: 12px; border: 1px solid var(--border); border-radius: 12px; }
+.employee-task-form input { min-width: 140px; }
+.employee-task-filters { display: flex; gap: 6px; margin-bottom: 18px; overflow-x: auto; }
+.employee-task-filters button { background: transparent; border: 1px solid transparent; font-size: 12px; padding: 8px 12px; white-space: nowrap; }
+.employee-task-filters button.selected { background: var(--surface); border-color: var(--border); color: var(--accent); box-shadow: var(--sh-xs); }
+.employee-task-filters span { margin-left: 7px; color: var(--muted); font-size: 11px; }
+.employee-create { max-width: 640px; margin-top: 24px; padding: 32px; }
+.employee-create h3 { margin: 0; font-size: 24px; letter-spacing: -.03em; }
+.employee-create .actions, .employee-settings-form .actions { justify-content: flex-end; }
+.employee-settings-form { max-width: 720px; padding: 28px; }
+.employee-settings-form h3 { margin: 0; font-size: 18px; }
+.employee-settings-form fieldset { min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+.employee-settings-form fieldset label { display: flex; gap: 8px; padding: 7px 0; align-items: center; font-size: 12px; }
+.employee-empty { padding: 56px 20px; text-align: center; }
+.employee-empty > span { display: block; color: var(--green); font-size: 30px; }
+.employee-empty h3 { margin: 18px 0 10px; font-size: 16px; }
+.employee-empty p { font-size: 13px; color: var(--muted); margin-bottom: 20px; }
+@media (max-width: 1180px) { .employee-chat-layout { grid-template-columns: minmax(0, 1fr); } .employee-work-summary { display: none; } .employee-header p { max-width: 320px; } }
+@media (max-width: 700px) {
+  .employee-execution-bar { padding: 10px 16px; gap: 8px; }
+  .employee-execution-bar .execution-switch { min-height: 40px; }
+  .employee-execution-bar small { flex-basis: 100%; font-size: 10px; }
+  .employee-execution-bar select { max-width: 100%; }
+  .employee-header { padding: 16px 16px 12px; flex-wrap: wrap; gap: 12px; }
+  .employee-identity { gap: 10px; }
+  .employee-avatar { width: 40px; height: 42px; border-radius: 12px; font-size: 18px; }
+  .employee-header h2 { font-size: 18px; }
+  .employee-header p { max-width: calc(100vw - 96px); }
+  .employee-eyebrow { display: none; }
+  .employee-header-actions { width: 100%; gap: 6px; }
+  .employee-header-actions button { min-height: 44px; }
+  .employee-status { margin-right: auto; padding-left: 0; font-size: 11px; }
+  .employee-tabs { padding: 0 16px; gap: 18px; }
+  .employee-content { padding: 18px 14px; }
+  .employee-create, .employee-settings-form { padding: 22px 18px; margin-top: 0; }
+  .employee-create h3 { font-size: 21px; }
+  .employee-task-filters button { min-height: 44px; padding: 8px 10px; }
+}
 </style>
