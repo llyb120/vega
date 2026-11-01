@@ -98,10 +98,6 @@ func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
 		pairingStatus(conn, connectionStatus{Code: "login_invalid"})
 		return
 	}
-	if !secureOrigin(origin) {
-		pairingStatus(conn, connectionStatus{Code: "insecure_origin"})
-		return
-	}
 	if !a.allowOrigin(origin) {
 		pairingStatus(conn, connectionStatus{Code: "permission_required"})
 		return

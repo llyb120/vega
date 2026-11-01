@@ -112,7 +112,7 @@ test("pairing reports permission, verification and backend failures without mist
   assert.notEqual(requests[0].instance, requests[1].instance);
 });
 
-test("pairing exposes local-network, HTTPS and old-client failures and stops on terminal errors", async (t) => {
+test("pairing exposes local-network, credential-save and old-client failures and stops on terminal errors", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const original = globalThis.WebSocket, sockets: any[] = [];
   class Socket {
@@ -123,7 +123,7 @@ test("pairing exposes local-network, HTTPS and old-client failures and stops on 
   }
   globalThis.WebSocket = Socket as any;
   t.after(() => { globalThis.WebSocket = original; });
-  for (const code of ["local_unavailable", "insecure_origin", "legacy_client"]) {
+  for (const code of ["local_unavailable", "credential_save", "legacy_client"]) {
     const statuses: any[] = [];
     const pairing = new LocalAgentPairing(async () => ({ ticket: "fixture" }), "alice", (status: any) => statuses.push(status));
     await pairing.connect();
@@ -133,11 +133,11 @@ test("pairing exposes local-network, HTTPS and old-client failures and stops on 
     else socket.onmessage({ data: JSON.stringify({ type: "status", code }) });
     assert.equal(statuses.at(-1).code, code);
     assert(!statuses.some((status) => status.code === "connected"));
-    if (code === "insecure_origin") {
+    if (code === "credential_save") {
       const count = sockets.length;
       t.mock.timers.tick(60000); await Promise.resolve();
       assert.equal(sockets.length, count);
-      assert.match(pairingStatusText(statuses.at(-1)), /HTTPS/);
+      assert.match(pairingStatusText(statuses.at(-1)), /写入权限/);
     }
     pairing.close();
   }

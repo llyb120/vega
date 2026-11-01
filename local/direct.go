@@ -88,7 +88,7 @@ func (a *Agent) startConnections(ctx context.Context) {
 func (a *Agent) startConnection(saved ServerCredential, token string) *directConnection {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !secureOrigin(saved.Origin) {
+	if !validOrigin(saved.Origin) {
 		return nil
 	}
 	trusted := false

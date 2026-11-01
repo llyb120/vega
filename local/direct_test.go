@@ -144,15 +144,15 @@ func TestNativeClientContinuesAfterPairingPageClosesAndReconnectsAfterRestart(t 
 		t.Fatalf("revoking site must forget and stop its direct connection: %d", response.Code)
 	}
 }
-func TestPersistentCredentialsRequireHTTPSExceptLoopback(t *testing.T) {
-	for _, origin := range []string{"http://vega.example", "https://user:pass@vega.example", "https://vega.example/path"} {
-		if secureOrigin(origin) {
-			t.Fatal("unsafe origin accepted: " + origin)
+func TestPersistentCredentialOriginsAcceptHTTPAndHTTPSWithoutWeakeningValidation(t *testing.T) {
+	for _, origin := range []string{"ftp://vega.example", "https://user:pass@vega.example", "https://vega.example/path", "http://vega.example?token=secret", "null", ""} {
+		if validOrigin(origin) {
+			t.Fatal("invalid origin accepted: " + origin)
 		}
 	}
-	for _, origin := range []string{"https://vega.example", "http://127.0.0.1:3000", "http://[::1]:3000", "http://localhost:3000"} {
-		if !secureOrigin(origin) {
-			t.Fatal("safe origin rejected: " + origin)
+	for _, origin := range []string{"http://vega.example", "http://192.168.1.10:8080", "https://vega.example", "http://127.0.0.1:3000", "http://[::1]:3000", "http://localhost:3000"} {
+		if !validOrigin(origin) {
+			t.Fatal("HTTP(S) origin refused: " + origin)
 		}
 	}
 }

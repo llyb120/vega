@@ -46,7 +46,7 @@ SQLite 图片授权会自动升级到版本 4，并修复旧分叉历史的图�
 
 ### HTTPS与反向代理
 
-公网部署必须使用HTTPS，配置`VEGA_PUBLIC_URL=https://vega.example.com`（仅origin，不带路径）。服务将使用Secure Cookie，并以该origin检查请求；不要信任任意客户端传入的Forwarded头。反代保留Host，为`/api/events`、`/api/chrome/live`、`/api/local-agent/socket`转发WebSocket Upgrade/Connection，设备连接还需保留Authorization头。直接本地HTTP开发可不设置此变量，Cookie不会错误地带Secure导致无法登录。
+网站和客户端均支持HTTP/WS与HTTPS/WSS；公网建议使用HTTPS。`VEGA_PUBLIC_URL`设置为实际访问的HTTP(S) origin（如`http://vega.example.com:8080`或`https://vega.example.com`，不带路径），服务按该origin检查请求，仅HTTPS使用Secure Cookie。**HTTP下登录信息、设备凭据与命令明文传输，存在被窃听或篡改的风险。** 不要信任任意客户端传入的Forwarded头。反代保留Host，为`/api/events`、`/api/chrome/live`、`/api/local-agent/socket`转发WebSocket Upgrade/Connection，设备连接还需保留Authorization头。直接本地HTTP开发可不设置此变量。
 
 原`VEGA_TOKEN`现在仅用于**首个管理员初始化**和只返回就绪/扩展连接状态的`GET /api/health`，不再是普通网站API的管理员后门。容器启动/健康检查已改用health入口，不需要保存网站账号密码；Token轮换不撤销SQLite中的账号登录。
 
@@ -141,7 +141,7 @@ WS连接先通过带CSRF校验的POST取得15秒有效、一次性且绑定管�
 
 **无头模式**：设置 `VEGA_BROWSER_MODE=isolated` 后，服务启动一个私有无头 Chrome（与 Docker 同一套扩展协议、独立 profile 目录 `<数据库目录>/chromium`），不占宿主桌面。Linux/Windows/macOS 都支持；Windows 上通过 `VEGA_CHROME_PATH` 指定 chrome.exe，未设置时自动探测常见安装路径。无头实例可多 tab 并行截图和输入；cookie/登录态持久在私有 profile，不与用户日常浏览器共享。Docker 模式同样使用此变量，行为一致。
 
-远程部署仍只需现有网站端口。反向代理须为`/api/events`、`/api/chrome/live`及`/api/local-agent/socket`转发WebSocket的HTTP/1.1 Upgrade/Connection并保留Host，设备连接还须保留Authorization；公网请配置正确的`VEGA_PUBLIC_URL`并使用HTTPS/WSS，**不要暴露Chrome调试端口或回环扩展端口**。断线后点击刷新重新连接，不自动补发上次操作。
+远程部署仍只需现有网站端口。反向代理须为`/api/events`、`/api/chrome/live`及`/api/local-agent/socket`转发WebSocket的HTTP/1.1 Upgrade/Connection并保留Host，设备连接还须保留Authorization；公网建议配置正确的`VEGA_PUBLIC_URL`并使用HTTPS/WSS，**不要暴露Chrome调试端口或回环扩展端口**。断线后点击刷新重新连接，不自动补发上次操作。
 
 ### MCP、技能和团队
 
@@ -170,7 +170,7 @@ WS连接先通过带CSRF校验的POST取得15秒有效、一次性且绑定管�
 
 ## 安全与状态
 
-工作台拥有服务端文件/命令/浏览器权限，**执行权限只给可信用户**，不是多租户沙箱。API使用账号Cookie认证、服务端角色/会话归属检查、CSRF/同源检查和请求/文件/流量预算，敏感配置脱敏返回。跨设备部署使用HTTPS并设置`VEGA_PUBLIC_URL`，反代保留`Host`并为两个实时WebSocket入口启用Upgrade。
+工作台拥有服务端文件/命令/浏览器权限，**执行权限只给可信用户**，不是多租户沙箱。API使用账号Cookie认证、服务端角色/会话归属检查、CSRF/同源检查和请求/文件/流量预算，敏感配置脱敏返回。跨设备部署建议使用HTTPS并设置实际访问origin的`VEGA_PUBLIC_URL`，反代保留`Host`并为两个实时WebSocket入口启用Upgrade。
 
 密码本与应用内订阅登录加密存于 SQLite。建议设置 `VEGA_VAULT_KEY` 为 32 字节 Base64 或 64 位 hex，并在数据库之外备份；不设置时随机生成并存在同一 DB，**只防误读/误传，不防拿到整个数据库的攻击者**。丢失外部密钥会使凭据不可恢复。普通 API 配置可以含明文密钥，优先环境变量引用。跨机 X25519 协议与原项目一样信任中转站不替换公钥，不具备带外身份认证。
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -195,12 +196,108 @@ func TestApprovingSiteContinuesToBackendAndReportsFailure(t *testing.T) {
 	}
 }
 
-func TestRemoteHTTPReportsHTTPSRequirementWithoutSavingOrVerifying(t *testing.T) {
-	agent, conn := pairForTest(t, "http://vega.example", filepath.Join(t.TempDir(), "config.json"))
-	if status := readPairing(t, conn); status["code"] != "insecure_origin" {
-		t.Fatalf("missing HTTPS requirement: %v", status)
+func TestRemoteHTTPPairsAndReconnectsWithSavedCredential(t *testing.T) {
+	const origin = "http://vega.example"
+	clientID, token := strings.Repeat("c", 32), strings.Repeat("s", 43)
+	accepted := make(chan struct{}, 2)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "vega.example" || r.TLS != nil {
+			http.Error(w, "unexpected origin or TLS", 400)
+			return
+		}
+		if r.URL.Path == "/api/local-agent/verify" {
+			var body map[string]string
+			if json.NewDecoder(r.Body).Decode(&body) != nil || body["clientId"] != clientID {
+				http.Error(w, "invalid pair", 400)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": clientID, "deviceToken": token})
+			return
+		}
+		if r.URL.Path != "/api/local-agent/socket" || r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("Origin") != "" || r.URL.RawQuery != "" {
+			http.Error(w, "not authorized", 403)
+			return
+		}
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var hello map[string]any
+		if conn.ReadJSON(&hello) != nil || hello["clientId"] != clientID {
+			return
+		}
+		_ = conn.WriteJSON(map[string]string{"type": "ready", "userId": "alice", "clientId": clientID})
+		accepted <- struct{}{}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer backend.Close()
+	// Route the non-loopback hostname to a local fixture without relying on DNS.
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address == "vega.example:80" {
+			address = backend.Listener.Addr().String()
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
 	}
-	if len(agent.config.Servers) != 0 {
-		t.Fatal("insecure credential stored")
+	previousHTTP, previousWS := http.DefaultTransport, websocket.DefaultDialer
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy, transport.DialContext = nil, dial
+	dialer := *websocket.DefaultDialer
+	dialer.Proxy, dialer.NetDialContext = nil, dial
+	http.DefaultTransport, websocket.DefaultDialer = transport, &dialer
+	defer func() {
+		http.DefaultTransport, websocket.DefaultDialer = previousHTTP, previousWS
+		transport.CloseIdleConnections()
+	}()
+	path := filepath.Join(t.TempDir(), "config.json")
+	agent := &Agent{configPath: path, config: Config{ClientID: clientID, TrustedOrigins: []string{origin}}, connections: make(map[*websocket.Conn]struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent.startConnections(ctx)
+	pairing := httptest.NewServer(http.HandlerFunc(agent.serveWS))
+	defer pairing.Close()
+	browser, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(pairing.URL, "http"), http.Header{"Origin": {origin}})
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer browser.Close()
+	_ = browser.WriteJSON(map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"})
+	if status := readPairing(t, browser); status["type"] != "paired" || status["connected"] != true {
+		t.Fatalf("remote HTTP pairing failed: %v", status)
+	}
+	receive(t, accepted)
+	_ = browser.Close()
+	pairing.Close()
+	agent.mu.Lock()
+	config := agent.config
+	agent.mu.Unlock()
+	if len(config.Servers) != 1 || config.Servers[0].Origin != origin {
+		t.Fatal("remote HTTP device credential not saved")
+	}
+	cancel()
+	waitStopped := func(a *Agent) {
+		t.Helper()
+		for i := 0; i < 100; i++ {
+			a.mu.Lock()
+			count := len(a.direct)
+			a.mu.Unlock()
+			if count == 0 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("native connection did not stop")
+	}
+	waitStopped(agent)
+	restarted := &Agent{configPath: path, config: config, connections: make(map[*websocket.Conn]struct{})}
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	restarted.startConnections(ctx)
+	receive(t, accepted)
+	stop()
+	waitStopped(restarted)
 }

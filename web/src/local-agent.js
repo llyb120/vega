@@ -8,7 +8,6 @@ const STATUS = {
   detecting: "正在检测本机客户端…",
   local_unavailable: "未检测到可连接的本机客户端。请启动客户端，并允许浏览器访问本地网络；若已运行，请检查托盘“连接授权”。",
   permission_required: "已检测到客户端，等待站点授权。请在弹出的“Vega 本机连接授权”页面点击“允许此站点”，然后回到此页。",
-  insecure_origin: "无法连接：公网网站必须使用 HTTPS，不能通过远程 HTTP 保存设备凭据。请先为网站配置 HTTPS。",
   ticket_failed: "无法取得网站的配对票据。请检查登录是否有效，以及 /api/local-agent/ticket 是否能访问。",
   authorizing: "站点已允许，客户端正在向网站验证登录…",
   login_network: "客户端无法访问网站的登录验证接口，请检查客户端网络、DNS 和 HTTPS 证书。",
@@ -56,7 +55,7 @@ export class LocalAgentPairing {
       clearTimeout(this.timeout);
       this.report(code, httpStatus);
       this.socket?.close();
-      const terminal = ["insecure_origin", "credential_save", "login_invalid"].includes(code) ||
+      const terminal = ["credential_save", "login_invalid"].includes(code) ||
         (code === "backend_http" && [401, 403].includes(httpStatus));
       if (!terminal) this.retry = setTimeout(() => void this.connect(), 5000);
     };
