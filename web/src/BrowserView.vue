@@ -81,7 +81,6 @@ function zoomView(event, factor) {
 function requestControl() {
   if (liveState.value !== "view" || !imageReady.value || socket?.readyState !== WebSocket.OPEN) return;
   resetInput();
-  resetView();
   operating.value = true;
   liveState.value = "waiting";
   socket.send(JSON.stringify({ type: "mode", mode: "control" }));
@@ -481,6 +480,12 @@ function pointerCancel(event) {
 }
 function touchStart(event) {
   lastTouchAt = Date.now();
+  const previous = touchGesture;
+  if (previous?.dragging) touchCancel();
+  if (operating.value && !remote.value) {
+    touchGesture = null;
+    return;
+  }
   const points = [...event.touches].slice(0, 2);
   if (!points.length) return;
   const x = points.reduce((sum, p) => sum + p.clientX, 0) / points.length,
@@ -490,9 +495,10 @@ function touchStart(event) {
     rect: imageRect(event),
     distance: points.length === 2 ? Math.hypot(points[0].clientX - points[1].clientX, points[0].clientY - points[1].clientY) : 0,
     view: !operating.value,
-    multiple: points.length > 1 || !!touchGesture?.multiple,
-    moved: !!touchGesture?.moved,
-    at: touchGesture?.at || Date.now(),
+    multiple: points.length > 1 || !!previous?.multiple,
+    moved: !!previous?.moved,
+    blocked: !!previous?.blocked,
+    at: previous?.at || Date.now(),
     frameId: shownFrame?.frameId,
     point: imagePoint({ currentTarget: event.currentTarget, clientX: x, clientY: y }),
   };
@@ -505,7 +511,27 @@ function touchMove(event) {
     y = points.reduce((sum, p) => sum + p.clientY, 0) / points.length,
     g = touchGesture;
   if (Math.hypot(x - g.x, y - g.y) >= DRAG_PX || points.length > 1) g.moved = true;
-  if (!g.view || !g.moved) return;
+  if (!g.view) {
+    if (points.length > 1) {
+      touchStart(event);
+      return;
+    }
+    if (!remote.value || g.multiple || !g.moved || !g.point || g.blocked) return;
+    if (!g.dragging && Date.now() - g.at < 500) {
+      g.blocked = true;
+      return;
+    }
+    const point = imagePoint({ currentTarget: event.currentTarget, clientX: x, clientY: y }, true);
+    if (!point) return;
+    if (!g.dragging) {
+      g.dragging = true;
+      void control({ action: "pointer", phase: "down", ...g.point }, g.frameId);
+    }
+    g.last = point;
+    void control({ action: "pointer", phase: "move", ...point }, g.frameId);
+    return;
+  }
+  if (!g.moved) return;
   const distance = points.length === 2 ? Math.hypot(points[0].clientX - points[1].clientX, points[0].clientY - points[1].clientY) : 0,
     next = Math.max(0.1, Math.min(4, g.zoom * (g.distance && distance ? distance / g.distance : 1))),
     ratio = next / g.zoom;
@@ -517,6 +543,13 @@ function touchEnd(event) {
   lastTouchAt = Date.now();
   const g = touchGesture;
   if (!g) return;
+  if (g.dragging) {
+    const ended = event.changedTouches?.[0],
+      point = ended && imagePoint({ currentTarget: event.currentTarget, clientX: ended.clientX, clientY: ended.clientY }, true);
+    g.last = point || g.last;
+    touchCancel();
+    return;
+  }
   if (event.touches.length) {
     touchStart(event);
     return;
@@ -527,7 +560,12 @@ function touchEnd(event) {
 }
 function touchCancel() {
   lastTouchAt = Date.now();
+  const g = touchGesture;
   touchGesture = null;
+  if (g?.dragging) {
+    suppressClick = true;
+    void control({ action: "pointer", phase: "up", ...g.last }, g.frameId);
+  }
 }
 function imageKey(event) {
   if (!remote.value) {
@@ -815,7 +853,7 @@ onBeforeUnmount(() => {
           </form>
         </details>
         <p class="hint remote-mode-hint">
-          点击、滚轮和鼠标拖动会直接同步到网页；触屏短按点击网页，翻页请用上滚/下滚，查看模式支持双指缩放和单指拖动。
+          点击、滚轮和鼠标拖动会直接同步到网页；触屏短按点击，按住约半秒再移动可像鼠标按住拖动，松手即释放；翻页请用上滚/下滚。查看模式支持双指缩放和单指拖动。
         </p>
       </div>
       <div v-if="busy" class="browser-placeholder" role="status">
@@ -833,7 +871,7 @@ onBeforeUnmount(() => {
           role="region"
           :class="{ 'remote-active': remote }"
           :tabindex="liveState === 'offline' ? -1 : 0"
-          aria-label="浏览器画面：查看时双指缩放、单指拖动，操作时短按点击网页"
+          aria-label="浏览器画面：查看时双指缩放、单指拖动，操作时短按点击、长按后拖动网页"
           @keydown="imageKey"
           @click="clickImage"
           @pointerdown="pointerDown"

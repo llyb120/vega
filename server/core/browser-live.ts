@@ -295,8 +295,9 @@ class LiveSession {
       if (this.pendingFrame && this.pendingFrame.id === message.frameId) {
         this.presented = this.pendingFrame;
         this.acknowledged.set(this.presented.id, this.presented);
+        // Keep starting frames through a touch hold, within the existing three-second input window.
         for (const [id, frame] of this.acknowledged)
-          if (this.acknowledged.size > 3 || Date.now() - frame.at > 3000)
+          if (this.acknowledged.size > 32 || Date.now() - frame.at > 3000)
             this.acknowledged.delete(id);
         this.pendingFrame = undefined;
       }

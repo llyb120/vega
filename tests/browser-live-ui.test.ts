@@ -388,11 +388,13 @@ test(
       assert.equal(modes.length, 0);
       const geometry = () => evaluate(`(()=>{const image=document.querySelector('.browser-image'),controls=document.querySelector('.remote-controls'),panel=document.querySelector('.browser-panel');return{imageTop:image.getBoundingClientRect().top-panel.getBoundingClientRect().top,imageHeight:image.getBoundingClientRect().height,controlsHeight:controls.getBoundingClientRect().height,panelHeight:panel.getBoundingClientRect().height}})()`);
       const beforeControl = await geometry();
+      const zoomedTransform = await evaluate(`document.querySelector('.browser-image img').style.transform`);
       assert(beforeControl.controlsHeight > 0, "view mode reserves the auxiliary controls without enabling remote input");
       assert.equal(await evaluate(`document.querySelector('.remote-text textarea').disabled`), true);
       await tap(".browser-address button");
       await sleep(350);
       assert.deepEqual(await geometry(), beforeControl, "starting control must not move or resize the browser image");
+      assert.equal(await evaluate(`document.querySelector('.browser-image img').style.transform`), zoomedTransform, "starting control preserves pinch zoom and panning");
       assert.equal(modes.at(-1)?.mode, "control", JSON.stringify(modes));
       assert.equal(await evaluate(`document.querySelector('.browser-address button').textContent.trim()`), "退出操作");
       await until(`document.querySelector('.remote-text textarea')?.getClientRects().length>0`);
@@ -403,6 +405,7 @@ test(
       assert.equal(await contextMenu(""), true, "legacy touch context menus without pointerType are blocked too");
       await command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
       assert.equal(inputs.length, 0, "a real touch long press must not turn into a click or a remote right click");
+      const expectedTap = await evaluate(`(()=>{const e=document.querySelector('.browser-image');e.scrollIntoView({block:'center',behavior:'instant'});const r=e.getBoundingClientRect(),image=e.querySelector('img'),picture=image.getBoundingClientRect();return{x:Math.floor((r.x+r.width/2-picture.left)*image.naturalWidth/picture.width),y:Math.floor((Math.min(innerHeight-10,Math.max(10,r.y+r.height/2))-picture.top)*image.naturalHeight/picture.height)}})()`);
       await tap(".browser-image");
       for (
         let i = 0;
@@ -422,7 +425,8 @@ test(
       assert.equal(inputs[0].action.action, "click_at");
       await until(`!document.querySelector('.remote-text textarea').placeholder.startsWith('先点击')`);
       assert.deepEqual(await geometry(), beforeControl, "selecting an editable target must not reflow the auxiliary controls");
-      assert(Math.abs(inputs[0].action.x - 450) < 3);
+      assert(Math.abs(inputs[0].action.x - expectedTap.x) < 3);
+      assert(Math.abs(inputs[0].action.y - expectedTap.y) < 3);
       assert.equal(await contextMenu("touch"), true);
       await sleep(250);
       assert.equal(
@@ -442,6 +446,28 @@ test(
         1,
         "only a mouse context menu must send a remote right click",
       );
+      const touchDragStart = inputs.length;
+      const dragPoint = await evaluate(`(()=>{const e=document.querySelector('.browser-image');e.scrollIntoView({block:'center',behavior:'instant'});const r=e.getBoundingClientRect(),image=e.querySelector('img'),picture=image.getBoundingClientRect(),x=r.x+r.width/2,y=Math.min(innerHeight-30,Math.max(30,r.y+r.height/2));return{x,y,rawX:Math.floor((x-picture.left)*image.naturalWidth/picture.width),rawY:Math.floor((y-picture.top)*image.naturalHeight/picture.height)}})()`);
+      await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ id: 1, x: dragPoint.x, y: dragPoint.y }] });
+      await sleep(650);
+      assert.equal(inputs.length, touchDragStart, "holding still must not send a mouse press");
+      for (let n = 1; n <= 8; n++) {
+        await command("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ id: 1, x: dragPoint.x - n * 6, y: dragPoint.y + n * 2 }] });
+        await sleep(20);
+      }
+      await command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      for (let i = 0; i < 100 && !inputs.slice(touchDragStart).some((m) => m.action.phase === "up"); i++) await sleep(20);
+      const touchDrag = inputs.slice(touchDragStart);
+      assert.equal(touchDrag[0]?.action.phase, "down", JSON.stringify(touchDrag));
+      assert.equal(touchDrag.at(-1)?.action.phase, "up", JSON.stringify(touchDrag));
+      assert(touchDrag.some((m) => m.action.phase === "move"));
+      assert(touchDrag.every((m) => m.action.action === "pointer" && m.frameId === touchDrag[0].frameId), "held touch maps to one pinned mouse gesture, not clicks");
+      assert(Math.abs(touchDrag[0].action.x - dragPoint.rawX) < 3);
+      assert(Math.abs(touchDrag[0].action.y - dragPoint.rawY) < 3);
+      assert(touchDrag.at(-1)!.action.x < touchDrag[0].action.x);
+      assert.equal(await evaluate(`document.querySelector('.browser-image img').style.transform`), zoomedTransform, "remote touch drag must not pan the zoomed preview");
+      await sleep(150);
+      assert.equal(inputs.length, touchDragStart + touchDrag.length, "lifting after a drag must not synthesize a click");
       await tap('textarea[aria-label="远程输入文字"]');
       assert.equal(await evaluate(`document.activeElement.getAttribute('aria-label')`), "远程输入文字", "the auxiliary field can open a phone keyboard");
       await until(
@@ -496,8 +522,9 @@ test(
       );
       await sleep(150);
       const p = await evaluate(
-        `(()=>{const e=document.querySelector('.browser-image img');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width*.75,y:r.y+r.height/2}})()`,
+        `(()=>{const e=document.querySelector('.browser-image');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width*.75,y:Math.min(innerHeight-10,Math.max(10,r.y+r.height/2))}})()`,
       );
+      const mouseDragStart = inputs.length;
       const clicksBeforeDrag = inputs.filter(
         (m) => m.action.action === "click_at",
       ).length;
@@ -529,16 +556,16 @@ test(
       });
       for (
         let i = 0;
-        i < 100 && !inputs.some((m) => m.action.phase === "up");
+        i < 100 && !inputs.slice(mouseDragStart).some((m) => m.action.phase === "up");
         i++
       )
         await sleep(10);
-      assert(inputs.some((m) => m.action.phase === "down"));
-      const dragInputs = inputs.filter(m => m.action.action === "pointer");
+      assert(inputs.slice(mouseDragStart).some((m) => m.action.phase === "down"));
+      const dragInputs = inputs.slice(mouseDragStart).filter(m => m.action.action === "pointer");
       assert(dragInputs.every(m => m.frameId === dragInputs[0].frameId), "repaints must not relabel an ongoing mouse gesture");
-      assert(inputs.some((m) => m.action.phase === "move"));
+      assert(dragInputs.some((m) => m.action.phase === "move"));
       assert(
-        inputs.some((m) => m.action.phase === "up"),
+        dragInputs.some((m) => m.action.phase === "up"),
         "stream repaint must not remove pointer capture during drag",
       );
       await sleep(400);

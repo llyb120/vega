@@ -132,6 +132,69 @@ test("touch taps operate once but long presses, multi-touch, cancellation and sy
   assert.equal(sent[0].frameId, "frame", "a repaint must not relabel an old touch as a fresh observation");
 });
 
+for (const finish of ["touchEnd", "touchCancel", "secondFinger"]) test(`touch hold then drag uses scaled mouse coordinates, a pinned frame and one release on ${finish}`, () => {
+  const { state, handlers, event, sent, advance } = preview();
+  state.operating.value = true; state.liveState.value = "control";
+  state.zoom.value = 2; state.panX.value = 40; state.panY.value = -20;
+  const touch = (x: number, y: number) => ({ clientX: x, clientY: y });
+  const touches = (points: any[]) => ({ currentTarget: event.currentTarget, touches: points });
+  handlers.touchStart(touches([touch(250, 150)]));
+  advance(600);
+  for (let i = 0; i < 200; i++) {
+    state.shownFrame = { ...state.shownFrame, frameId: "repaint-" + i };
+    handlers.touchMove(touches([touch(270 + i / 10, 170)]));
+  }
+  assert.equal(sent.length, 1, "press goes first; moves wait for confirmation");
+  assert.equal(state.outbox.length, 1, "unsent moves coalesce");
+  if (finish === "secondFinger") {
+    handlers.touchStart(touches([touch(290, 170), touch(300, 180)]));
+    handlers.touchEnd(touches([touch(290, 170)]));
+    advance(600);
+    handlers.touchMove(touches([touch(320, 190)]));
+    handlers.touchEnd(touches([]));
+  } else handlers[finish]({ ...touches([]), changedTouches: [touch(300, 190)] });
+  handlers.touchEnd(touches([]));
+  handlers.clickImage(event);
+  while (state.outbox.length) {
+    state.inflight = 0;
+    const next = state.outbox.shift();
+    handlers.control(next.action, next.frameId);
+  }
+  assert.deepEqual(sent.map((m) => m.action.phase), ["down", "move", "up"]);
+  assert(sent.every((m) => m.frameId === "frame"), "repaint must not relabel a touch gesture");
+  assert.equal(sent[0].action.x, 165);
+  assert.equal(sent[0].action.y, 180);
+  assert.equal(sent[1].action.x, 224);
+  assert.equal(sent[2].action.x, finish === "touchEnd" ? 240 : 224);
+  assert.equal(state.zoom.value, 2, "remote drag must not pan or zoom the preview");
+  assert.equal(state.panX.value, 40);
+  assert.equal(state.panY.value, -20);
+});
+
+test("quick touch swipes, waiting touches and cancelled holds never become remote drags or taps", () => {
+  const { state, handlers, event, sent, advance } = preview();
+  state.operating.value = true; state.liveState.value = "control";
+  const touch = { currentTarget: event.currentTarget, touches: [{ clientX: 250, clientY: 150 }] };
+  handlers.touchStart(touch);
+  advance(100);
+  handlers.touchMove({ ...touch, touches: [{ clientX: 270, clientY: 150 }] });
+  advance(600);
+  handlers.touchMove({ ...touch, touches: [{ clientX: 290, clientY: 150 }] });
+  handlers.touchEnd({ ...touch, touches: [] });
+  state.liveState.value = "waiting";
+  handlers.touchStart(touch);
+  state.liveState.value = "control";
+  advance(600);
+  handlers.touchMove({ ...touch, touches: [{ clientX: 290, clientY: 150 }] });
+  handlers.touchEnd({ ...touch, touches: [] });
+  handlers.touchStart(touch);
+  advance(600);
+  handlers.touchCancel();
+  handlers.touchMove({ ...touch, touches: [{ clientX: 290, clientY: 150 }] });
+  handlers.touchEnd({ ...touch, touches: [] });
+  assert.deepEqual(sent, []);
+});
+
 test("auxiliary text waits for an editable remote target and never adds Enter or replays a draft", () => {
   const { state, handlers, sent, source } = preview();
   state.text.value = "中文输入与粘贴";
@@ -154,14 +217,15 @@ test("auxiliary text waits for an editable remote target and never adds Enter or
   assert.match(source, /touch-action: none/);
 });
 
-test("only the explicit button starts control, resets the viewport and exit blocks further remote input", () => {
+test("only the explicit button starts control, preserves the viewport and exit blocks further remote input", () => {
   const { state, handlers, event, sent, source } = preview();
-  state.zoom.value = 2; state.panX.value = 40;
+  state.zoom.value = 2; state.panX.value = 40; state.panY.value = -20;
   handlers.requestControl();
   assert.equal(state.operating.value, true);
   assert.equal(state.liveState.value, "waiting");
-  assert.equal(state.zoom.value, 1);
-  assert.equal(state.panX.value, 0);
+  assert.equal(state.zoom.value, 2);
+  assert.equal(state.panX.value, 40);
+  assert.equal(state.panY.value, -20);
   assert.equal(JSON.stringify(sent), JSON.stringify([{ type: "mode", mode: "control" }]));
   handlers.clickImage(event);
   assert.equal(sent.length, 1, "waiting does not queue an accidental click");
@@ -169,10 +233,13 @@ test("only the explicit button starts control, resets the viewport and exit bloc
   handlers.clickImage(event);
   assert.equal(sent[1].type, "input");
   assert.equal(sent[1].action.action, "click_at");
-  assert.equal(sent[1].action.x, 450);
-  assert.equal(sent[1].action.y, 300);
+  assert.equal(sent[1].action.x, 165);
+  assert.equal(sent[1].action.y, 180);
   handlers.releaseControl();
   assert.equal(state.remote.value, false);
+  assert.equal(state.zoom.value, 2);
+  assert.equal(state.panX.value, 40);
+  assert.equal(state.panY.value, -20);
   assert.equal(state.outbox.length, 0);
   handlers.clickImage(event);
   assert.equal(sent.length, 3);

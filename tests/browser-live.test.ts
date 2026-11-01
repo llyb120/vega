@@ -442,6 +442,36 @@ test("live input maps displayed pixels, streams drag phases, types once and rele
   );
   assert.equal(f.hub.controllers.size, 0);
 });
+test("a held touch can start from its displayed frame after stream repaints without relaxing freshness or page checks", async () => {
+  const f = await fixture(), s = await f.open();
+  const frame = await s.wait("frame");
+  s.message({ type: "mode", mode: "control" });
+  await s.wait("mode", m => m.mode === "control");
+  await sleep(650);
+  await s.wait("frame", m => m.frameId >= frame.frameId + 4);
+  const session = f.hub.sessions.get(s.socket.id)!;
+  const starting = session.acknowledged.get(frame.frameId)!;
+  assert(starting, "a long press must not lose its starting frame after only three repaints");
+  let seq = 0;
+  const input = async (phase: string) => {
+    s.message({ type: "input", seq: ++seq, frameId: frame.frameId, action: { action: "pointer", phase, x: 200, y: 100 } });
+    return s.wait("input_result", m => m.seq === seq);
+  };
+  for (const phase of ["down", "move", "up"]) assert.equal((await input(phase)).status, "executed");
+  const presses = f.calls.filter(c => c.params?.type === "mousePressed").length;
+  f.state.stamp = "changed during hold";
+  assert.equal((await input("down")).status, "not_executed");
+  f.state.stamp = "viewport";
+  starting.at = Date.now() - 4000;
+  assert.equal((await input("down")).status, "not_executed", "the original three-second freshness limit still applies");
+  assert.equal(f.calls.filter(c => c.params?.type === "mousePressed").length, presses);
+  for (let i = 0; i < 40; i++) {
+    session.pendingFrame = { ...starting, id: 1000 + i, at: Date.now() };
+    s.message({ type: "frame_ack", frameId: 1000 + i });
+  }
+  assert.equal(session.acknowledged.size, 32, "frame metadata retention stays bounded");
+  assert(!session.acknowledged.has(frame.frameId));
+});
 test("live drag retains its accepted frame across scroll, expiry and acknowledgement eviction", async () => {
   const f = await fixture(), s = await f.open();
   const frame = await s.wait("frame");
