@@ -20,7 +20,6 @@ import {
 } from "h3";
 import { app } from "../../core/application";
 import { assert, object, type Obj } from "../../core/util";
-import { getRequestIP } from "h3";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
 import presets from "../../../shared/provider-presets.json";
@@ -73,33 +72,26 @@ export default defineEventHandler(async (event) => {
   if (path[0] === "health")
     return { connected: engine.chrome.bridge.status().connected, ready: true };
   if (["auth", "users"].includes(path[0])) return authRoute(event, path);
+  if (path[0] === "local-agent" && path[1] === "verify" && method === "POST") {
+    const body = await bodyJSON(event, 4096);
+    setHeader(event, "Cache-Control", "no-store");
+    try { return engine.localAgents.verify(body.ticket, auth); }
+    catch { throw createError({ statusCode: 401, statusMessage: "Local agent ticket invalid or expired" }); }
+  }
   const who = principal(event),
     user = who.user;
   let a: Obj = {};
   if (["POST", "PUT", "PATCH"].includes(method))
     a = await bodyJSON(event, 90 << 20);
-  // Local execution agent (vega-local): same-machine loopback only, no login.
-  // A running agent registers a port+secret, then pings ~every 2s. Sessions
-  // delegate read/bash/write/edit to it while it is online.
   if (path[0] === "local-agent") {
-    const ip = getRequestIP(event) || "";
-    check(
-      ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1",
-      403,
-      "local-agent endpoints only accept loopback",
-    );
-    const la = engine.localAgents;
-    if (path[1] === "status" && method === "GET")
-      return { online: la.online() };
-    if (method === "POST" && (path[1] === "register" || path[1] === "ping")) {
-      const agent =
-        path[1] === "register"
-          ? la.register(Number(a.port), String(a.token || ""), String(a.cwd || ""))
-          : la.ping(Number(a.port), String(a.token || ""), String(a.cwd || ""));
-      return { ok: true, port: agent.port };
-    }
-    if (method === "DELETE" && path[1]) {
-      la.remove(Number(path[1]), String(getRequestURL(event).searchParams.get("token") || ""));
+    setHeader(event, "Cache-Control", "no-store");
+    check(method === "POST", 405, "POST required");
+    if (path[1] === "ticket") return engine.localAgents.ticket(who, a.instance);
+    if (path[1] === "connect") return engine.localAgents.connect(user.id, a);
+    if (path[1] === "result") return engine.localAgents.result(user.id, a);
+    if (path[1] === "disconnect") {
+      check(typeof a.instance === "string", 400, "instance required");
+      engine.localAgents.disconnect(user.id, a.instance);
       return { ok: true };
     }
     throw createError({ statusCode: 404, statusMessage: "Not found" });
@@ -147,8 +139,11 @@ export default defineEventHandler(async (event) => {
       if (path.length === 1 && method === "POST") {
         assert(!a.model || typeof a.model === "string", "Invalid model");
         if (a.model) await engine.catalog.resolve(engine.config(), a.model);
+        const agent = engine.localAgents.active(user.id);
         return store.newSession({
-          cwd: a.cwd,
+          cwd: agent?.cwd || a.cwd,
+          localAgent: !!agent,
+          localPlatform: agent?.platform,
           ownerId: user.id,
           model: a.model,
           title: a.title,
@@ -447,7 +442,7 @@ export default defineEventHandler(async (event) => {
           a,
         );
       if (path[1] === "tool")
-        return engine.chrome.execute("user-ui", a.cwd || process.cwd(), a);
+        return engine.chrome.execute("browser-view:" + user.id, a.cwd || process.cwd(), a);
       if (a.operation === "close") {
         engine.chrome.bridge.close();
         return { ok: true };

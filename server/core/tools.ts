@@ -30,6 +30,7 @@ import {
   localWrite,
   localEdit,
   localCwdExists,
+  LocalAgentUnavailable,
 } from "./local-agent";
 import { assert, clip, id, type Obj } from "./util";
 import type { Config, Model } from "./config";
@@ -39,6 +40,7 @@ export type Outcome = {
   images?: { mime: string; data?: string; blobId?: string }[];
   error?: boolean;
   stop?: boolean;
+  pause?: string;
   secret?: string;
 };
 const schema = (
@@ -139,7 +141,7 @@ export class Tools {
         ),
         schema(
           "bash",
-          "Run a server shell command in session cwd. Windows uses PowerShell. Default timeout120s, max600s; do not drive Chrome UI through shell.",
+          "Run a shell command in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s; do not drive Chrome UI through shell.",
           { command: string, timeout: integer },
           ["command"],
         ),
@@ -295,15 +297,23 @@ export class Tools {
     }
     return defs;
   }
-  // A live vega-local on this machine takes over filesystem/shell for normal
-  // sessions. SQLite virtual paths always stay on the server; chrome is not
-  // delegated. If the local call fails (agent died mid-request), the caller
-  // falls back to the normal server path so a flaky agent never stalls a turn.
   private agent() {
-    return this.engine.localAgents.active();
+    if (!this.session.localAgent) return;
+    const agent = this.engine.localAgents.active(this.session.ownerId);
+    if (!agent) throw new LocalAgentUnavailable();
+    return agent;
   }
 
   async execute(call: Call, model: Model): Promise<Outcome> {
+    try {
+      return await this.executeInner(call, model);
+    } catch (error) {
+      if (error instanceof LocalAgentUnavailable && !this.signal.aborted)
+        return { value: { status: "needs_review", reason: error.message }, error: true, stop: true, pause: error.message };
+      throw error;
+    }
+  }
+  private async executeInner(call: Call, model: Model): Promise<Outcome> {
     this.signal.throwIfAborted();
     const a = { ...call.arguments };
     delete a._after;
@@ -335,47 +345,25 @@ export class Tools {
     }
     if (["write", "edit"].includes(call.name)) {
       const agent = this.agent();
-      if (agent) {
-        try {
-          const path = resolve(this.session.cwd, a.path);
-          return call.name === "write"
-            ? (assert(typeof a.path === "string" && a.path, "path required"),
-               assert(typeof a.content === "string", "content required"),
-               await localWrite(agent, path, a.content))
-            : (assert(Array.isArray(a.edits) && a.edits.length, "edits required"),
-               await localEdit(agent, path, a.edits));
-        } catch (e: any) {
-          if (e?.statusCode === 400 || /required|must match|Overlapping|exceeds|UTF-8|not a regular/i.test(e.message)) throw e;
-          // agent unreachable -> fall through to server execution
-        }
-      }
+      if (agent)
+        return call.name === "write"
+          ? localWrite(this.engine.localAgents, agent, this.session.cwd, a, this.signal)
+          : localEdit(this.engine.localAgents, agent, this.session.cwd, a, this.signal);
       return { value: await mutate(this.session.cwd, call.name, a) };
     }
     if (call.name === "bash") {
       const agent = this.agent();
-      if (agent) {
-        try {
-          return await localShell(agent, this.session.cwd, a);
-        } catch {
-          // fall through to server execution
-        }
-      }
-      return shell(this.session.cwd, a, this.signal, this.emit);
+      return agent
+        ? localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal)
+        : shell(this.session.cwd, a, this.signal, this.emit);
     }
     if (call.name === "change_working_directory") {
-      const path = resolve(this.session.cwd, a.path || "");
+      assert(typeof a.path === "string" && a.path, "path required");
       const agent = this.agent();
-      if (agent) {
-        try {
-          await localCwdExists(agent, path);
-        } catch (e: any) {
-          if (!/local machine/.test(e.message)) throw e; // e.g. genuinely missing dir
-          // agent unreachable -> verify on server instead
-          assert(a.path && (await stat(path)).isDirectory(), "Existing cwd directory required");
-        }
-      } else {
-        assert(a.path && (await stat(path)).isDirectory(), "Existing cwd directory required");
-      }
+      const path = agent
+        ? await localCwdExists(this.engine.localAgents, agent, this.session.cwd, a.path, this.signal)
+        : resolve(this.session.cwd, a.path);
+      if (!agent) assert((await stat(path)).isDirectory(), "Existing cwd directory required");
       this.session.cwd = path;
       this.engine.store.saveSession(this.session);
       return { value: { cwd: path } };
@@ -481,7 +469,7 @@ export class Tools {
     }
     throw Error("Runtime-only or unknown tool: " + call.name);
   }
-  async read(a: Obj): Promise<Outcome> {
+  async read(a: Obj, serverOnly = false): Promise<Outcome> {
     if (a.path === "sqlite:config")
       return {
         value: {
@@ -536,7 +524,7 @@ export class Tools {
           skill.assets.some((asset: Obj) => asset.path === path),
           "Skill resource not found",
         );
-        return this.read({ ...a, path: resolve(cache.resourceRoot!, path) });
+        return this.read({ ...a, path: resolve(cache.resourceRoot!, path) }, true);
       }
       assert(path === "SKILL.md", "Legacy skill has no archived resources");
       return { value: { path: a.path, text: skill.content } };
@@ -548,6 +536,7 @@ export class Tools {
       if (match[1] === "blob") {
         const blob = this.engine.store.blobData(match[2]);
         assert(blob, "Archived blob missing");
+        this.engine.store.grantBlob(match[2], this.session.id);
         return {
           value: { path: a.path },
           images: [{ mime: blob.mime, blobId: match[2] }],
@@ -557,16 +546,17 @@ export class Tools {
       assert(value, "Archived observation missing");
       return { value };
     }
-    const path = await readPath(this.session.cwd, a.path),
-      st = await stat(path);
+    const agent = serverOnly ? undefined : this.agent(),
+      local = agent ? await localRead(this.engine.localAgents, agent, this.session.cwd, a.path, this.signal) : undefined,
+      path = local?.path || await readPath(this.session.cwd, a.path),
+      st = local ? { size: local.data.length, isFile: () => true } : await stat(path);
     assert(st.isFile(), "Regular file required");
     const extension = extname(path).toLowerCase();
     if (
       [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"].includes(extension)
     ) {
-      // Images always processed on the server: they need the SQLite blob store.
       assert(st.size <= 25 << 20, "Image exceeds25MiB");
-      const data = await readFile(path),
+      const data = local?.data || await readFile(path),
         metadata = await sharp(data, { limitInputPixels: 64000000 }).metadata();
       const blobId = this.engine.store.blob(
         "image/" + (metadata.format === "jpeg" ? "jpeg" : metadata.format),
@@ -585,21 +575,12 @@ export class Tools {
         ],
       };
     }
-    const agent = this.agent();
-    if (agent) {
-      try {
-        return await localRead(agent, path, a);
-      } catch (e: any) {
-        if (/UTF-8|exceeds|not a regular/i.test(e.message)) throw e;
-        // agent unreachable -> fall back to server read below
-      }
-    }
     assert(
       st.size <= 32 << 20,
       "Text file exceeds32MiB; use bounded shell extraction",
     );
     const content = new TextDecoder("utf-8", { fatal: true }).decode(
-      await readFile(path),
+      local?.data || await readFile(path),
     );
     assert(!content.includes("\0"), "Not a UTF-8 text file");
     return { value: { path, ...textSlice(content, a.offset, a.limit) } };

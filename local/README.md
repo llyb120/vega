@@ -1,31 +1,20 @@
 # vega-local
 
-Local execution agent for Vega. No UI, system-tray icon only (headless on
-Linux/macOS). When it runs, cloud sessions on the same machine delegate
-`read`/`write`/`edit`/`bash`/`change_working_directory` to this computer
-instead of the server. `chrome` and `sqlite:` paths always stay on the server.
+Run the local client, then sign in to the Vega website. The **website frontend** connects to `ws://127.0.0.1:47673/agent`; there is no API Key or server URL to configure. Keep the website open while local work is running.
 
-## Run
+The first connection from a new website opens a small local permission page. Approve only your own trusted Vega origin: approval lets accounts signed in to that site read/write files and execute commands on this machine. Login is verified with a one-use, 15-second server ticket, not a reusable local secret. Windows tray → **连接授权** lists trusted sites and can revoke them.
 
-Double-click `vega-local.exe` (Windows) or run the binary. No configuration:
-it registers with the Vega server at `VEGA_LOCAL_URL` (default
-`http://127.0.0.1:8080`), so it must run on the same machine as Vega.
+Once the website shows **本机已连接**, newly created conversations use this client's working directory. Existing server conversations stay on the server; Stage, fork and Fire inherit the original execution location. `read`, `write`, `edit`, `bash` and directory changes run locally, including image reads. `sqlite:` archives, skills and Chrome remain server-side.
 
-- **On** = tray icon appears → cloud tools run locally within ~1s.
-- **Off** = icon quits → tools fall back to the server immediately (3.5s max
-  if killed hard). Brief network loss is tolerated; a real call that can't
-  reach the agent falls back to the server for that turn.
+If a response is lost, work pauses and asks the user to inspect the actual result, repair the connection and explicitly continue. No command is replayed or silently rerun on the server. Closing the connection or cancelling the session cancels pending local shell processes.
 
-Files/commands run in the session's `cwd` on this machine. The agent binds
-`127.0.0.1` only and requires a per-start secret for every request.
+The client only listens on loopback. Trusted website origins are saved in the current user's config directory at `vega-local/trusted-sites.json`; no account password, login cookie or API Key is stored locally. Use HTTPS for remote websites. Your browser may ask permission to connect to a local device.
 
 ## Build
 
 ```powershell
-cd local
-go build -o vega-local.exe .   # Windows (tray)
-GOOS=linux go build .           # headless
+go test ./...
+go build -o vega-local.exe .
 ```
 
-CI (`.github/workflows/build-local-agent.yml`) builds Windows (tray),
-Linux and macOS binaries on every push that touches `local/`.
+CI builds Windows tray and Linux/macOS headless binaries. Linux/macOS require a browser to approve a new site; when automatic opening is unavailable, the client prints the local permission-page address.

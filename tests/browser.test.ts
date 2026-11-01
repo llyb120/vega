@@ -197,6 +197,7 @@ test(
     );
     const store = new Store(":memory:"),
       bridge = new FixtureBridge();
+    store.db.prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)").run("fixture", "fixture", "test-only", "admin", 0, Date.now(), 0);
     let submitted = 0,
       live: BrowserLive | undefined;
     const server = createServer((req, res) => {

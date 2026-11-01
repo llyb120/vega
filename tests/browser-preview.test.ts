@@ -41,8 +41,14 @@ function fixture() {
   let connected = true,
     active = 0,
     maximum = 0;
+  const gates = new Map<string, Mutex>();
   const chrome = {
     gate: new Mutex(),
+    tabGate: (tag: string) => {
+      let gate = gates.get(tag);
+      if (!gate) gates.set(tag, gate = new Mutex());
+      return gate;
+    },
     bridge: {
       start: async () => {},
       status: () => ({ connected, browser: "Google Chrome" }),
@@ -98,7 +104,7 @@ test("browser page lists stable tabs without observing or capturing pages and re
   assert.equal(disconnected.tabs.length, 0);
   assert.equal(f.calls.length, 1);
 });
-test("tab screenshot captures only the chosen stable tag using the shared Chrome gate, without browser input", async () => {
+test("tab screenshots serialize per tab without blocking other tabs or sending input", async () => {
   const f = fixture(),
     result = await browserScreenshot(
       f.chrome,
@@ -124,7 +130,10 @@ test("tab screenshot captures only the chosen stable tag using the shared Chrome
     browserScreenshot(f.chrome, "viewer", "C2-fixture"),
   ]);
   assert.equal(queued[0].tabTag, "C1-fixture");
-  assert.equal(f.maximum, 1);
+  assert.equal(f.maximum, 2);
+  const same = fixture();
+  await Promise.all([browserScreenshot(same.chrome, "owner", "C1-fixture"), browserScreenshot(same.chrome, "owner", "C1-fixture")]);
+  assert.equal(same.maximum, 1);
 });
 test("unknown, protected, closed or disconnected tabs are not captured and actions cannot be supplied", async () => {
   const f = fixture();

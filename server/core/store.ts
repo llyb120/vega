@@ -29,6 +29,8 @@ export type Session = {
   scene?: string;
   stageSource?: string;
   taskId?: string;
+  localAgent?: boolean;
+  localPlatform?: string;
   readOnly?: boolean;
   ownerId?: string;
   readerIds?: string[];
@@ -61,7 +63,7 @@ export class Store {
     assert(
       (app === 0 || app === 1447380801) &&
         !(app === 0 && tables > 0) &&
-        version <= 3,
+        version <= 4,
       "Not a supported Vega database; existing data left unchanged",
     );
     this.db
@@ -77,7 +79,9 @@ export class Store {
    CREATE INDEX IF NOT EXISTS web_sessions_user ON web_sessions(userId);
    CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated DESC);
    CREATE TABLE IF NOT EXISTS blob_access(blob TEXT NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(blob,session));
-   PRAGMA application_id=1447380801; PRAGMA user_version=3; COMMIT;`);
+   CREATE TABLE IF NOT EXISTS blob_user_access(blob TEXT NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,user TEXT NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,PRIMARY KEY(blob,user));
+   ${version < 4 ? "INSERT OR IGNORE INTO blob_access(blob,session) SELECT b.id,m.session FROM messages m,json_each(m.data,'$.images') image JOIN blobs b ON b.id=json_extract(image.value,'$.blobId');" : ""}
+   PRAGMA application_id=1447380801; PRAGMA user_version=4; COMMIT;`);
     if (path !== ":memory:") chmodSync(path, 0o600);
   }
   close() {
@@ -148,6 +152,9 @@ export class Store {
         .prepare("INSERT OR IGNORE INTO blob_access VALUES(?,?)")
         .run(blob, session);
   }
+  grantBlobUser(blob: string, userId: string) {
+    this.db.prepare("INSERT OR IGNORE INTO blob_user_access VALUES(?,?)").run(blob, userId);
+  }
   blobData(key: string) {
     return this.db
       .prepare("SELECT mime,data FROM blobs WHERE id=?")
@@ -170,8 +177,9 @@ export class Store {
     };
   }
   newSession(input: Partial<Session> = {}) {
-    const cwd = resolve(input.cwd || process.cwd());
-    assert(statSync(cwd).isDirectory(), "cwd must be an existing directory");
+    const cwd = input.localAgent ? input.cwd! : resolve(input.cwd || process.cwd());
+    assert(typeof cwd === "string" && cwd.length > 0, "cwd required");
+    if (!input.localAgent) assert(statSync(cwd).isDirectory(), "cwd must be an existing directory");
     const s: Session = {
       ...input,
       id: id(),
@@ -262,6 +270,7 @@ export class Store {
         fireRole: undefined,
       });
       for (const m of this.messages(key)) this.append(copy.id, m);
+      this.db.prepare("INSERT INTO blob_access SELECT blob,? FROM blob_access WHERE session=?").run(copy.id, key);
       for (const row of this.db
         .prepare("SELECT id,data FROM folds WHERE session=?")
         .all(key) as any[])
@@ -294,6 +303,8 @@ export class Store {
       title: "Stage",
       stageSource: key,
       ownerId: source.ownerId,
+      localAgent: source.localAgent,
+      localPlatform: source.localPlatform,
       readerIds: source.readerIds,
       model: inherit ? source.model : undefined,
       readOnly: source.readOnly,

@@ -1,13 +1,10 @@
-// Vega local execution agent: no UI, tray icon only. Registers with the local
-// Vega server so cloud sessions run read/bash/write/edit on this machine.
+// Vega local execution agent. The website connects to its loopback WebSocket.
 package main
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,176 +17,206 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	"github.com/gorilla/websocket"
 )
 
 const (
-	pingInterval = 2 * time.Second
-	maxBody      = 40 << 20
-	maxOutput    = 2 << 20 // 2 MiB, matches server shell()
+	localAddress = "127.0.0.1:47673"
+	maxBody      = 48 << 20
+	maxOutput    = 2 << 20
 )
 
-// serverBase is the local Vega URL the agent talks to. Same machine only.
-func serverBase() string {
-	if v := os.Getenv("VEGA_LOCAL_URL"); v != "" {
-		return strings.TrimRight(v, "/")
-	}
-	return "http://127.0.0.1:8080"
-}
-
 type Agent struct {
-	cwd    string
-	token  string
-	port   int
-	closed atomic.Bool
-	mu     sync.Mutex
-	client *http.Client
+	mu             sync.Mutex
+	config         Config
+	configPath     string
+	configToken    string
+	pendingOrigins map[string]bool
+	connections    map[*websocket.Conn]struct{}
 }
 
 func main() {
-	a := &Agent{
-		client: &http.Client{Timeout: 5 * time.Second},
-	}
-	// Pick a loopback port first so we can report it on register.
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	a, err := newAgent()
 	must(err)
-	a.port = lis.Addr().(*net.TCPAddr).Port
-	cwd, _ := os.Getwd()
-	a.cwd = cwd
-
+	lis, err := net.Listen("tcp", localAddress)
+	must(err)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/exec", a.handleExec)
-	mux.HandleFunc("/file", a.handleFile)
-	srv := &http.Server{Handler: mux}
+	mux.HandleFunc("/agent", a.serveWS)
+	mux.HandleFunc("/config/"+a.configToken, a.configure)
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(lis) }()
-
-	go a.loop()
-	fmt.Fprintf(os.Stderr, "vega-local: listening on 127.0.0.1:%d, cwd=%s, server=%s\n", a.port, a.cwd, serverBase())
-	systrayRun(func() {
-		a.closed.Store(true)
+	configure := func() { openBrowser("http://" + localAddress + "/config/" + a.configToken) }
+	fmt.Fprintln(os.Stderr, "vega-local: running on "+localAddress)
+	systrayRun(configure, func() {
+		a.mu.Lock()
+		for conn := range a.connections {
+			_ = conn.Close()
+		}
+		a.mu.Unlock()
 		_ = srv.Close()
-		a.deregister()
 		os.Exit(0)
 	})
 }
 
-// ---- registration / heartbeat ----
+type job struct {
+	ID   string          `json:"id"`
+	Op   string          `json:"op"`
+	Args json.RawMessage `json:"args"`
+}
 
-func (a *Agent) loop() {
-	for !a.closed.Load() {
-		err := a.register()
-		a.setConnected(err == nil)
-		if err == nil {
-			// Registered: fast ping keeps us "online"; a single missed ping
-			// within ~3s marks us down on the server.
-			for !a.closed.Load() {
-				if err := a.ping(); err != nil {
-					a.setConnected(false)
-					break // server forgot us / unreachable -> re-register
-				}
-				time.Sleep(pingInterval)
+func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", 405)
+		return
+	}
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return a.allowOrigin(r.Header.Get("Origin")) }}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	conn.SetReadLimit(4096)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var auth struct {
+		Type   string `json:"type"`
+		Ticket string `json:"ticket"`
+	}
+	if conn.ReadJSON(&auth) != nil || auth.Type != "auth" {
+		return
+	}
+	proof, err := verifyLogin(r.Header.Get("Origin"), auth.Ticket)
+	if err != nil {
+		return
+	}
+	a.mu.Lock()
+	valid := len(a.connections) < 8
+	if valid {
+		a.connections[conn] = struct{}{}
+	}
+	a.mu.Unlock()
+	if !valid {
+		return
+	}
+	setState(true)
+	defer func() {
+		a.mu.Lock()
+		delete(a.connections, conn)
+		connected := len(a.connections) > 0
+		a.mu.Unlock()
+		setState(connected)
+	}()
+	_ = conn.SetReadDeadline(time.UnixMilli(proof.ExpiresAt))
+	conn.SetReadLimit(maxBody)
+	cwd, _ := os.Getwd()
+	if conn.WriteJSON(map[string]any{"type": "ready", "instance": proof.Instance, "userId": proof.UserID, "cwd": cwd, "platform": runtime.GOOS}) != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	var writes sync.Mutex
+	var tasks sync.Mutex
+	pending := map[string]context.CancelFunc{}
+	seen := map[string]bool{}
+	defer func() {
+		tasks.Lock()
+		defer tasks.Unlock()
+		for _, cancel := range pending {
+			cancel()
+		}
+	}()
+	for {
+		var request job
+		if conn.ReadJSON(&request) != nil {
+			return
+		}
+		if len(request.ID) != 36 {
+			return
+		}
+		tasks.Lock()
+		if request.Op == "cancel" {
+			if stop := pending[request.ID]; stop != nil {
+				stop()
 			}
-		} else {
-			// Can't reach Vega (not running yet / network). Retry quickly.
-			time.Sleep(pingInterval)
+			tasks.Unlock()
+			continue
 		}
-	}
-}
-
-func (a *Agent) setConnected(v bool) {
-	setState(v)
-}
-
-func (a *Agent) call(path string) error {
-	req, err := http.NewRequest(http.MethodPost, serverBase()+"/api/local-agent/"+path,
-		bytes.NewReader(a.body()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func (a *Agent) body() []byte {
-	b, _ := json.Marshal(map[string]any{
-		"port":  a.port,
-		"token": a.token,
-		"cwd":   a.cwd,
-	})
-	return b
-}
-
-func (a *Agent) register() error {
-	// A fresh secret each (re)register; server stores it alongside our port.
-	buf := make([]byte, 24)
-	_, _ = rand.Read(buf)
-	a.token = hex.EncodeToString(buf)
-	return a.call("register")
-}
-
-func (a *Agent) ping() error { return a.call("ping") }
-func (a *Agent) deregister() {
-	req, err := http.NewRequest(http.MethodDelete, serverBase()+"/api/local-agent/"+fmt.Sprint(a.port)+"?token="+a.token, nil)
-	if err == nil {
-		resp, err := a.client.Do(req)
-		if err == nil {
-			resp.Body.Close()
+		if seen[request.ID] || len(pending) >= 16 || len(seen) >= 4096 {
+			tasks.Unlock()
+			return
 		}
+		seen[request.ID] = true
+		taskCtx, stop := context.WithCancel(ctx)
+		pending[request.ID] = stop
+		tasks.Unlock()
+		go func(request job) {
+			result := execute(taskCtx, request)
+			stop()
+			tasks.Lock()
+			delete(pending, request.ID)
+			tasks.Unlock()
+			writes.Lock()
+			defer writes.Unlock()
+			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if conn.WriteJSON(map[string]any{"id": request.ID, "result": result}) != nil {
+				_ = conn.Close()
+			}
+		}(request)
 	}
 }
-
-// ---- auth for local HTTP: only requests carrying our per-session token ----
-
-func (a *Agent) authed(r *http.Request) bool {
-	return a.token != "" && r.Header.Get("X-Local-Token") == a.token
+func execute(ctx context.Context, j job) map[string]any {
+	if j.Op == "exec" {
+		var req execReq
+		if json.Unmarshal(j.Args, &req) != nil || strings.TrimSpace(req.Command) == "" || len(req.Command) > 2<<20 {
+			return failure("Invalid command")
+		}
+		return runCommand(ctx, req)
+	}
+	if j.Op == "file" {
+		var req fileReq
+		if json.Unmarshal(j.Args, &req) != nil || req.Path == "" {
+			return failure("path required")
+		}
+		return fileOperation(req)
+	}
+	return failure("Unknown operation")
 }
+func failure(message string) map[string]any { return map[string]any{"error": message} }
 
 type execReq struct {
 	Cwd     string `json:"cwd"`
 	Command string `json:"command"`
 	Timeout int    `json:"timeout"`
 }
+type limitedOutput struct {
+	mu        sync.Mutex
+	data      bytes.Buffer
+	truncated bool
+}
 
-func (a *Agent) handleExec(w http.ResponseWriter, r *http.Request) {
-	if !a.authed(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+func (b *limitedOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(p)
+	remaining := maxOutput - b.data.Len()
+	if n > remaining {
+		p = p[:remaining]
+		b.truncated = true
 	}
-	var req execReq
-	if !jsonOK(w, r, &req) || strings.TrimSpace(req.Command) == "" {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
+	_, _ = b.data.Write(p)
+	return n, nil
+}
+func runCommand(parent context.Context, req execReq) map[string]any {
+	if req.Timeout < 1 || req.Timeout > 600 {
+		return failure("Invalid timeout")
 	}
-	timeout := req.Timeout
-	if timeout <= 0 || timeout > 600 {
-		timeout = 120
+	st, err := os.Stat(req.Cwd)
+	if err != nil || !st.IsDir() {
+		return failure("cwd must be an existing directory on this machine")
 	}
-	cwd := req.Cwd
-	if cwd == "" {
-		cwd = a.cwd
-	}
-	// Resolve within this machine; refuse paths that don't exist locally.
-	if abs, err := filepath.Abs(cwd); err == nil {
-		cwd = abs
-	}
-	if _, err := os.Stat(cwd); err != nil {
-		writeJSON(w, map[string]any{
-			"output": "", "exitCode": -1,
-			"error": "cwd not found on local machine: " + cwd,
-		})
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeout)*time.Second)
+	ctx, cancel := context.WithTimeout(parent, time.Duration(req.Timeout)*time.Second)
 	defer cancel()
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -201,171 +228,184 @@ func (a *Agent) handleExec(w http.ResponseWriter, r *http.Request) {
 	} else {
 		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", req.Command)
 	}
-	cmd.Dir = cwd
-	out, err := cmd.CombinedOutput()
-	truncated := false
-	if len(out) > maxOutput {
-		out = out[:maxOutput]
-		truncated = true
-	}
+	cmd.Dir = req.Cwd
+	configureCommand(cmd)
+	cmd.WaitDelay = 2 * time.Second
+	output := &limitedOutput{}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err = cmd.Run()
 	code := 0
-	var emsg string
+	message := ""
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			code = ee.ExitCode()
+		code = -1
+		if exit, ok := err.(*exec.ExitError); ok {
+			code = exit.ExitCode()
 		} else {
-			code = -1
-			emsg = err.Error()
+			message = err.Error()
 		}
 	}
-	if ctx.Err() == context.DeadlineExceeded {
+	if ctx.Err() != nil {
 		code = -1
-		emsg = "Cancelled/timeout"
+		message = "Cancelled/timeout"
 	}
-	writeJSON(w, map[string]any{
-		"output": string(out), "truncated": truncated,
-		"exitCode": code, "error": emsg,
-	})
+	return map[string]any{"output": output.data.String(), "truncated": output.truncated, "exitCode": code, "error": message}
 }
 
 type fileReq struct {
-	Op      string     `json:"op"` // stat | read | write | edit
+	Op      string     `json:"op"`
+	Cwd     string     `json:"cwd"`
 	Path    string     `json:"path"`
-	Content string     `json:"content"` // base64
+	Content string     `json:"content"`
 	Edits   []fileEdit `json:"edits"`
 }
-
 type fileEdit struct {
 	OldText string `json:"oldText"`
 	NewText string `json:"newText"`
 }
 
-func (a *Agent) handleFile(w http.ResponseWriter, r *http.Request) {
-	if !a.authed(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+func fileOperation(req fileReq) map[string]any {
+	path := strings.TrimPrefix(strings.TrimSpace(req.Path), "@")
+	if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~\\") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return failure(err.Error())
+		}
+		path = filepath.Join(home, strings.TrimLeft(path[1:], "/\\"))
 	}
-	var req fileReq
-	if !jsonOK(w, r, &req) || req.Path == "" {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(req.Cwd, path)
 	}
-	path := req.Path
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return failure(err.Error())
 	}
 	switch req.Op {
 	case "stat":
 		st, err := os.Stat(path)
-		writeJSON(w, map[string]any{
-			"exists": err == nil,
-			"isFile": err == nil && st.Mode().IsRegular(),
-			"isDir":  err == nil && st.IsDir(),
-			"size":   sizeOf(st),
-		})
+		return map[string]any{"path": path, "isDir": err == nil && st.IsDir()}
 	case "read":
-		b, err := os.ReadFile(path)
+		f, err := os.Open(path)
 		if err != nil {
-			writeJSON(w, map[string]any{"error": err.Error()})
-			return
+			return failure(err.Error())
 		}
-		writeJSON(w, map[string]any{
-			"content": base64.StdEncoding.EncodeToString(b),
-		})
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			return failure(err.Error())
+		}
+		if !st.Mode().IsRegular() || st.Size() > 32<<20 {
+			return failure("Regular file required, max32MiB")
+		}
+		data, err := io.ReadAll(io.LimitReader(f, (32<<20)+1))
+		if err != nil {
+			return failure(err.Error())
+		}
+		if len(data) > 32<<20 {
+			return failure("File exceeds32MiB")
+		}
+		return map[string]any{"path": path, "content": base64.StdEncoding.EncodeToString(data)}
 	case "write":
 		data, err := base64.StdEncoding.DecodeString(req.Content)
-		if err != nil {
-			writeJSON(w, map[string]any{"error": "invalid base64 content"})
-			return
+		if err != nil || len(data) > 32<<20 {
+			return failure("Invalid content or exceeds32MiB")
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			writeJSON(w, map[string]any{"error": err.Error()})
-			return
+		if err = writeAtomic(path, data); err != nil {
+			return failure(err.Error())
 		}
-		if err := os.WriteFile(path, data, 0o644); err != nil {
-			writeJSON(w, map[string]any{"error": err.Error()})
-			return
-		}
-		writeJSON(w, map[string]any{"ok": true})
+		return map[string]any{"path": path, "bytes": len(data)}
 	case "edit":
-		writeJSON(w, editFile(path, req.Edits))
-	default:
-		http.Error(w, "unknown op", http.StatusBadRequest)
+		return editFile(path, req.Edits)
 	}
+	return failure("Unknown file operation")
 }
-
-func sizeOf(st os.FileInfo) int64 {
-	if st == nil {
-		return 0
+func writeAtomic(path string, data []byte) error {
+	mode := os.FileMode(0644)
+	if st, err := os.Lstat(path); err == nil {
+		if !st.Mode().IsRegular() {
+			return fmt.Errorf("Regular file required")
+		}
+		mode = st.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-	return st.Size()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".vega-edit-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err = f.Chmod(mode); err == nil {
+		_, err = f.Write(data)
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
-
-// editFile mirrors server mutate(): exact unique oldText -> newText.
-// oldText must match literally (\r\n tolerated in the request); newText is
-// inserted verbatim. Line endings are otherwise left untouched.
 func editFile(path string, edits []fileEdit) map[string]any {
+	if len(edits) == 0 {
+		return failure("edits required")
+	}
+	st, err := os.Lstat(path)
+	if err != nil {
+		return failure(err.Error())
+	}
+	if !st.Mode().IsRegular() || st.Size() > 32<<20 {
+		return failure("Regular text file required, max32MiB")
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return map[string]any{"error": err.Error()}
+		return failure(err.Error())
 	}
-	if len(b) > 32<<20 {
-		return map[string]any{"error": "Edit file exceeds32MiB"}
+	if !utf8.Valid(b) || bytes.ContainsRune(b, 0) {
+		return failure("Not a UTF-8 text file")
 	}
 	value := string(b)
 	crlf := strings.Contains(value, "\r\n")
-	// Try literal match; if it fails and file uses CRLF, retry after
-	// normalizing oldText's LFs so callers can send \n against \r\n files.
-	match := func(v, old string) int { return strings.Index(v, old) }
-	type rng struct {
+	type replacement struct {
 		start, end int
 		text       string
 	}
-	ranges := make([]rng, 0, len(edits))
+	ranges := make([]replacement, 0, len(edits))
 	for _, e := range edits {
 		if e.OldText == "" {
-			return map[string]any{"error": "Exact nonempty oldText/newText required"}
+			return failure("Exact nonempty oldText required")
 		}
-		start := match(value, e.OldText)
+		old := e.OldText
+		start := strings.Index(value, old)
 		if start < 0 && crlf {
-			old := strings.ReplaceAll(e.OldText, "\n", "\r\n")
-			start = match(value, old)
+			old = strings.ReplaceAll(strings.ReplaceAll(old, "\r\n", "\n"), "\n", "\r\n")
+			start = strings.Index(value, old)
 		}
-		if start < 0 || strings.Index(value[start+len(e.OldText):], e.OldText) >= 0 {
-			return map[string]any{"error": "oldText must match exactly one region; no file changed."}
+		if start < 0 || strings.Index(value[start+1:], old) >= 0 {
+			return failure("oldText must match exactly one region; no file changed")
 		}
-		ranges = append(ranges, rng{start, start + len(e.OldText), e.NewText})
+		ranges = append(ranges, replacement{start, start + len(old), e.NewText})
 	}
-	// sort by start, reject overlaps, then apply back-to-front.
 	sort.Slice(ranges, func(i, j int) bool { return ranges[i].start < ranges[j].start })
 	for i := 1; i < len(ranges); i++ {
 		if ranges[i].start < ranges[i-1].end {
-			return map[string]any{"error": "Overlapping edits; no file changed"}
+			return failure("Overlapping edits; no file changed")
 		}
 	}
 	for i := len(ranges) - 1; i >= 0; i-- {
 		r := ranges[i]
 		value = value[:r.start] + r.text + value[r.end:]
 	}
-	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
-		return map[string]any{"error": err.Error()}
+	if len(value) > 32<<20 {
+		return failure("Edited file exceeds32MiB")
+	}
+	if err = writeAtomic(path, []byte(value)); err != nil {
+		return failure(err.Error())
 	}
 	return map[string]any{"path": path, "bytes": len(value)}
 }
-
-func jsonOK(w http.ResponseWriter, r *http.Request, v any) bool {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
-	if err != nil || json.Unmarshal(body, v) != nil {
-		return false
-	}
-	return true
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
-}
-
 func must(err error) {
 	if err != nil {
 		panic(err)

@@ -1,8 +1,6 @@
 //go:build windows && !linux
 
-// Windows build: real system tray icon via getlantern/systray. The icon is a
-// small bundled .ico; the menu only offers Quit and the tooltip reports
-// whether the agent is currently registered with the local Vega server.
+// Windows tray: connection status, trusted-site permissions and Quit.
 package main
 
 import (
@@ -15,15 +13,23 @@ import (
 //go:embed icon.ico
 var iconData []byte
 
-func systrayRun(onQuit func()) {
+func systrayRun(configure, onQuit func()) {
 	systray.Run(func() {
 		systray.SetIcon(iconData)
 		systray.SetTitle("Vega Local")
 		systray.SetTooltip("Vega 本地执行端")
+		mConfigure := systray.AddMenuItem("连接授权", "查看或撤销已信任的 Vega 站点")
 		mQuit := systray.AddMenuItem("退出", "Stop local agent")
 		go func() {
-			<-mQuit.ClickedCh
-			onQuit()
+			for {
+				select {
+				case <-mConfigure.ClickedCh:
+					configure()
+				case <-mQuit.ClickedCh:
+					onQuit()
+					return
+				}
+			}
 		}()
 		// Show connection state in tooltip.
 		setState = func(v bool) {

@@ -35,6 +35,7 @@ export async function initialize(pageScript: string, helper: string) {
   if (token.length < 16)
     throw Error("VEGA_TOKEN must be at least16 characters");
   const auth = new Auth(store, token);
+  auth.events.on("revoke", (id) => engine.localAgents.disconnect(id));
   if (!auth.hasUsers())
     console.info(
       "[Vega] Create the first administrator using the setup token" +

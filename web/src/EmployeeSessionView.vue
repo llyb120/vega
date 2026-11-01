@@ -45,10 +45,8 @@ onBeforeUnmount(() => version++);
 </script>
 <template>
   <header class="topbar">
-    <div>
       <button class="link" @click="emit('back')">← 返回数字员工</button>
       <h2>{{ session?.title || "员工会话记录" }}</h2>
-    </div>
     <div class="actions">
       <span :class="['pill', running ? 'green' : '']">{{
         running ? "执行中" : "执行记录"

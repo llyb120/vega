@@ -2257,7 +2257,8 @@ summary {
   input:not([type="checkbox"]):not([hidden]),
   select,
   .attach {
-    min-height: 44px;
+    /* Component specificity must not shrink accessible touch targets. */
+    min-height: 44px !important;
   }
   .icon,
   .attach {

@@ -1031,12 +1031,18 @@ test(
       await until(`document.querySelector('form textarea')`);
       await layout("duty form");
       await byText("长期记忆", ".tabs");
-      await byText("密码本", ".tabs");
-      await layout("vault form");
+      assert.equal(
+        await evaluate(`document.querySelector('.tabs').textContent.includes('密码本')`),
+        false,
+        "vault management belongs in settings, not employee tabs",
+      );
       assert.equal(
         await evaluate(`document.querySelector('.tabs').textContent.includes('团队员工')`),
         false,
       );
+      await nav("设置");
+      await until(`[...document.querySelectorAll('.settings h3')].some(e=>e.textContent==='密码本')`);
+      await layout("vault settings");
       await nav("浏览器");
       await until(
         `document.querySelector('.browser-image img')?.naturalWidth===1568`,

@@ -437,7 +437,10 @@ export class Chrome {
       (!["none", "inspect"].includes(a.feedback) && a.visual !== "none");
     const shot = capture ? await this.capture(o, a, prior) : {};
     this.observations.set(key, o);
-    for (const image of o.images) this.store.grantBlob(image.blobId, owner);
+    for (const image of o.images) {
+      if (owner.startsWith("browser-view:")) this.store.grantBlobUser(image.blobId, owner.slice("browser-view:".length));
+      else this.store.grantBlob(image.blobId, owner);
+    }
     this.store.save("browser-observation", o.id, { ...o, frames: undefined });
     const origin = new URL(o.pages[0].url).origin;
     return {
@@ -1000,7 +1003,14 @@ export class Chrome {
       this.cancelled.get(owner)?.abort();
       return { stopped: true };
     }
-    const target = args.tabTag || args.snapshotId;
+    let target = args.tabTag;
+    if (!target && args.snapshotId)
+      target = [...this.observations].find(([key, observation]) => key.startsWith(owner + ":") && observation.id === args.snapshotId)?.[1].tabTag;
+    if (!target && !["tabs", "open", "new_tab", "downloads", "status", "connect"].includes(args.operation) && !args.operation?.startsWith("experience_")) {
+      const matches = [...this.observations].filter(([key]) => key.startsWith(owner + ":"));
+      assert(matches.length === 1, "Explicit tabTag required; no active tab guessing");
+      target = matches[0][1].tabTag;
+    }
     return await (target ? this.tabGate(target) : this.gate).run(async () => {
       const control = new AbortController();
       this.cancelled.set(owner, control);
@@ -1009,7 +1019,7 @@ export class Chrome {
         ...(parent ? [parent] : []),
       ]);
       try {
-        return await this.inner(owner, cwd, args, signal);
+        return await this.inner(owner, cwd, { ...args, ...(target ? { tabTag: target } : {}) }, signal);
       } finally {
         if (this.cancelled.get(owner) === control) this.cancelled.delete(owner);
       }

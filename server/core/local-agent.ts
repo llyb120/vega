@@ -1,143 +1,138 @@
-import { assert, bounded } from "./util";
-import { textSlice } from "./file-read";
-import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
+import { assert, type Obj } from "./util";
+import type { Auth, Principal } from "./auth";
 
-// A running vega-local process on the same machine as this Vega server.
-// Registered via loopback /api/local-agent/register, kept alive by ~2s pings.
-type Agent = {
-  port: number;
-  token: string;
+export class LocalAgentUnavailable extends Error {
+  constructor() {
+    super("本地执行端连接中断，操作结果不确定。请先检查本机实际结果并修复连接，再回复「继续」；本轮已暂停，不会自动重试或改在服务端执行。");
+  }
+}
+type Pending = { resolve: (result: Obj) => void; reject: (error: Error) => void };
+export type Agent = {
+  userId: string;
+  instance: string;
   cwd: string;
-  lastSeen: number;
+  platform: string;
+  pending: Map<string, Pending>;
+  heartbeat?: ReturnType<typeof setTimeout>;
 };
 
-// Consider the agent online if it pinged within this window. Missed pings
-// (sleep, brief network hiccup) are tolerated; a graceful quit deregisters.
-const ONLINE_MS = 3500;
-
+// The logged-in frontend bridges requests to its own loopback WebSocket, never to another user's agent.
 export class LocalAgents {
   private agents = new Map<string, Agent>();
-
-  register(port: number, token: string, cwd: string): Agent {
-    assert(
-      Number.isInteger(port) && port > 0 && port < 65536,
-      "Invalid local agent port",
-    );
-    assert(typeof token === "string" && token.length >= 16, "Invalid token");
-    const agent: Agent = { port, token, cwd: cwd || "", lastSeen: Date.now() };
-    this.agents.set(String(port), agent);
-    return agent;
+  private tickets = new Map<string, { hash: string; instance: string; until: number }>();
+  constructor(private emit: (value: Obj) => void = () => {}) {}
+  ticket(principal: Principal, instance: unknown) {
+    assert(typeof instance === "string" && /^[a-f0-9-]{32,36}$/.test(instance), "Invalid agent instance");
+    for (const [id, ticket] of this.tickets) if (ticket.until < Date.now()) this.tickets.delete(id);
+    assert(this.tickets.size < 256, "Too many local agent connection tickets");
+    const ticket = randomUUID() + randomUUID();
+    this.tickets.set(ticket, { hash: principal.hash, instance, until: Date.now() + 15000 });
+    return { ticket };
   }
-
-  ping(port: number, token: string, cwd?: string) {
-    const a = this.agents.get(String(port));
-    assert(a && a.token === token, "Unknown local agent");
-    a.lastSeen = Date.now();
-    if (typeof cwd === "string") a.cwd = cwd;
-    return a;
+  verify(ticket: unknown, auth: Auth) {
+    assert(typeof ticket === "string", "Invalid agent ticket");
+    const entry = this.tickets.get(ticket);
+    this.tickets.delete(ticket);
+    const principal = entry && entry.until >= Date.now() && auth.resolveHash(entry.hash);
+    assert(principal, "Local agent ticket expired or login revoked");
+    return { userId: principal.user.id, instance: entry!.instance, expiresAt: principal.expiresAt };
   }
-
-  remove(port: number, token: string) {
-    const a = this.agents.get(String(port));
-    if (a && a.token === token) this.agents.delete(String(port));
+  active(userId?: string) {
+    return userId ? this.agents.get(userId) : undefined;
   }
-
-  // Most recently-seen agent on this machine, or undefined when none is live.
-  active(): Agent | undefined {
-    const now = Date.now();
-    let best: Agent | undefined;
-    for (const a of this.agents.values()) {
-      if (now - a.lastSeen > ONLINE_MS) continue;
-      if (!best || a.lastSeen > best.lastSeen) best = a;
+  connect(userId: string, a: Obj) {
+    assert(typeof a.instance === "string" && /^[a-f0-9-]{32,36}$/.test(a.instance), "Invalid agent instance");
+    assert(typeof a.cwd === "string" && a.cwd.length > 0 && a.cwd.length <= 4096 && !a.cwd.includes("\0"), "Invalid agent cwd");
+    assert(["windows", "linux", "darwin"].includes(a.platform), "Invalid agent platform");
+    let agent = this.active(userId);
+    if (agent && agent.instance !== a.instance) throw Error("Another browser is already bridging the local agent");
+    if (!agent) {
+      this.disconnect(userId);
+      agent = { userId, instance: a.instance, cwd: a.cwd, platform: a.platform, pending: new Map() };
+      this.agents.set(userId, agent);
     }
-    return best;
+    clearTimeout(agent.heartbeat);
+    agent.heartbeat = setTimeout(() => this.disconnect(userId, a.instance), 15000);
+    agent.heartbeat.unref();
+    return { ok: true };
   }
-
-  online() {
-    return this.active() !== undefined;
+  result(userId: string, a: Obj) {
+    const agent = this.active(userId);
+    assert(agent && agent.instance === a.instance, "Agent disconnected");
+    assert(typeof a.id === "string" && a.result && typeof a.result === "object" && !Array.isArray(a.result), "Invalid agent result");
+    // Late results are acknowledged but never recreate or replay an operation.
+    agent.pending.get(a.id)?.resolve(a.result);
+    return { ok: true };
+  }
+  private send(agent: Agent, job: Obj) {
+    this.emit({ type: "local_agent_request", targetUser: agent.userId, data: { instance: agent.instance, ...job } });
+  }
+  request(agent: Agent, op: "exec" | "file", args: Obj, signal: AbortSignal) {
+    signal.throwIfAborted();
+    assert(agent.pending.size < 16, "Too many local operations");
+    if (this.active(agent.userId) !== agent) throw new LocalAgentUnavailable();
+    const id = randomUUID();
+    return new Promise<Obj>((resolve, reject) => {
+      const finish = (error?: Error, value?: Obj) => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        agent.pending.delete(id);
+        if (error) reject(error);
+        else resolve(value!);
+      };
+      const cancel = (error: Error) => {
+        try { this.send(agent, { id, op: "cancel" }); } catch {}
+        finish(error);
+      };
+      const abort = () => cancel(signal.reason);
+      const timer = setTimeout(() => cancel(new LocalAgentUnavailable()), op === "exec" ? (args.timeout + 15) * 1000 : 30000);
+      agent.pending.set(id, { resolve: (r) => finish(undefined, r), reject: (e) => finish(e) });
+      signal.addEventListener("abort", abort, { once: true });
+      try { this.send(agent, { id, op, args }); }
+      catch { finish(new LocalAgentUnavailable()); }
+    });
+  }
+  disconnect(userId: string, instance?: string) {
+    const agent = this.active(userId);
+    if (!agent || (instance && agent.instance !== instance)) return;
+    this.agents.delete(userId);
+    clearTimeout(agent.heartbeat);
+    for (const pending of [...agent.pending.values()]) pending.reject(new LocalAgentUnavailable());
+  }
+  close() {
+    this.tickets.clear();
+    for (const userId of this.agents.keys()) this.disconnect(userId);
   }
 }
 
-async function call(agent: Agent, path: string, body: unknown) {
-  const response = await fetch(`http://127.0.0.1:${agent.port}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Local-Token": agent.token,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(660000),
-  });
-  const text = await bounded(response);
-  if (!response.ok) throw Error(`Local agent HTTP ${response.status}`);
-  return JSON.parse(text.toString());
-}
-
-// ---- tool behavior parity ----
-
-// Mirror server shell(): same Outcome shape so the model sees no difference.
-export async function localShell(agent: Agent, cwd: string, a: any) {
+export async function localShell(hub: LocalAgents, agent: Agent, cwd: string, a: Obj, signal: AbortSignal) {
+  assert(typeof a.command === "string" && a.command.trim(), "command required");
   const timeout = a.timeout ?? 120;
-  const r = await call(agent, "/exec", {
-    cwd,
-    command: a.command,
-    timeout: Number.isInteger(timeout) && timeout >= 1 && timeout <= 600 ? timeout : 120,
-  });
-  return {
-    value: {
-      output: String(r.output ?? ""),
-      truncated: r.truncated === true,
-      exitCode: Number(r.exitCode ?? -1),
-      ...(r.error ? { error: String(r.error) } : {}),
-    },
-    error: (Number(r.exitCode) !== 0) || Boolean(r.error),
-  };
+  assert(Number.isInteger(timeout) && timeout >= 1 && timeout <= 600, "Invalid timeout");
+  const r = await hub.request(agent, "exec", { cwd, command: a.command, timeout }, signal);
+  return { value: r, error: Number(r.exitCode) !== 0 || !!r.error };
 }
-
-// Mirror the file branch of Tools.read for plain filesystem paths: stat +
-// text read + numbered slice. Images are kept on the server (sharp/blob)
-// because they need the BLOB store; only text is delegated.
-export async function localRead(agent: Agent, path: string, a: any) {
-  const st = await call(agent, "/file", { op: "stat", path });
-  assert(st.isFile, `Not a regular file on local machine: ${path}`);
-  assert(st.size <= 32 << 20, "Text file exceeds32MiB; use bounded shell extraction");
-  const r = await call(agent, "/file", { op: "read", path });
+export async function localRead(hub: LocalAgents, agent: Agent, cwd: string, path: string, signal: AbortSignal) {
+  const r = await hub.request(agent, "file", { op: "read", cwd, path }, signal);
   assert(!r.error, r.error);
-  const content = new TextDecoder("utf-8", { fatal: true }).decode(
-    Buffer.from(r.content, "base64"),
-  );
-  assert(!content.includes("\0"), "Not a UTF-8 text file");
-  return {
-    value: { path, ...textSlice(content, a.offset, a.limit) },
-  };
+  assert(typeof r.path === "string" && typeof r.content === "string" && r.content.length <= Math.ceil((32 << 20) / 3) * 4, "Invalid local file result");
+  return { path: r.path as string, data: Buffer.from(r.content, "base64") };
 }
-
-export async function localWrite(agent: Agent, path: string, content: string) {
-  const r = await call(agent, "/file", {
-    op: "write",
-    path,
-    content: Buffer.from(content, "utf8").toString("base64"),
-  });
+export async function localWrite(hub: LocalAgents, agent: Agent, cwd: string, a: Obj, signal: AbortSignal) {
+  assert(typeof a.path === "string" && a.path && typeof a.content === "string", "path/content required");
+  const r = await hub.request(agent, "file", { op: "write", cwd, path: a.path, content: Buffer.from(a.content).toString("base64") }, signal);
   assert(!r.error, r.error);
-  return { value: { path, bytes: Buffer.byteLength(content) } };
+  return { value: r };
 }
-
-// Edit is delegated verbatim: the local agent applies the same exact-match
-// replacement and returns the change list the model expects.
-export async function localEdit(agent: Agent, path: string, edits: any[]) {
-  const r = await call(agent, "/file", { op: "edit", path, edits });
+export async function localEdit(hub: LocalAgents, agent: Agent, cwd: string, a: Obj, signal: AbortSignal) {
+  assert(typeof a.path === "string" && a.path && Array.isArray(a.edits) && a.edits.length, "path/edits required");
+  const r = await hub.request(agent, "file", { op: "edit", cwd, path: a.path, edits: a.edits }, signal);
   assert(!r.error, r.error);
-  return {
-    value: {
-      path,
-      bytes: r.bytes,
-      ...(r.changes?.length ? { changes: r.changes } : {}),
-    },
-  };
+  return { value: r };
 }
-
-// change_working_directory: just verify the directory exists locally.
-export async function localCwdExists(agent: Agent, path: string) {
-  const st = await call(agent, "/file", { op: "stat", path });
-  assert(st.isDir, `Not a directory on local machine: ${path}`);
+export async function localCwdExists(hub: LocalAgents, agent: Agent, cwd: string, path: string, signal: AbortSignal) {
+  const r = await hub.request(agent, "file", { op: "stat", cwd, path }, signal);
+  assert(r.isDir && typeof r.path === "string", "Existing local cwd directory required");
+  return r.path as string;
 }

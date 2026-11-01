@@ -99,7 +99,7 @@ export async function browserScreenshot(
     typeof tabTag === "string" && tabTag.length > 0 && tabTag.length <= 200,
     "Choose a tab from the current browser list",
   );
-  return chrome.gate.run(async () => {
+  return chrome.tabGate(tabTag).run(async () => {
     const tab = await browserTarget(chrome, tabTag);
     const observed = await chrome.feedback(
       owner,
@@ -160,7 +160,7 @@ export async function browserControl(chrome: Chrome, owner: string, args: Obj) {
       assert(remoteKeys.includes(action.key), "不支持此按键");
     if (action.action === "type") assert(action.text.length > 0, "请输入文字");
   }
-  return chrome.gate.run(async () => {
+  return chrome.tabGate(String(args.tabTag)).run(async () => {
     const tab = await browserTarget(chrome, args.tabTag),
       key = owner + ":" + tab.tag,
       o = chrome.observations.get(key);

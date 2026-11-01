@@ -1,5 +1,6 @@
 <script setup vapor>
 import SettingsView from "./SettingsView.vue";
+import { LocalAgentBridge } from "./local-agent";
 import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import TurnProcess from "./TurnProcess.vue";
@@ -24,7 +25,9 @@ const narrow = ref(false),
   navigation = ref(null),
   menuButton = ref(null),
   imageInput = ref(null),
-  uploading = ref(false);
+  uploading = ref(false),
+  localConnected = ref(false);
+let localBridge;
 const mobileTitles = {
   chat: "对话",
   employee: "数字员工",
@@ -377,6 +380,10 @@ function rejectSocketRequests(reason) {
   wsRequests.clear();
 }
 function socketMessage(value) {
+  if (value.type === "local_agent_request") {
+    localBridge?.forward(value.data);
+    return;
+  }
   if (value.type === "response") {
     const request = wsRequests.get(value.id);
     if (!request) return;
@@ -455,6 +462,10 @@ function openEventSocket(url, generation) {
         const reconnect = eventsWasConnected;
         eventsReady = true;
         eventsWasConnected = true;
+        if (!localBridge) {
+          localBridge = new LocalAgentBridge(httpApi, user.value.id, (online) => (localConnected.value = online));
+          void localBridge.connect();
+        }
         if (error.value.includes("实时")) error.value = "";
         if (reconnect)
           void attempt(async () => {
@@ -477,6 +488,8 @@ function openEventSocket(url, generation) {
   ws.onclose = (event) => {
     if (generation !== eventGeneration) return;
     eventsReady = false;
+    localBridge?.close();
+    localBridge = null;
     clearInterval(eventsHeartbeat);
     rejectSocketRequests("实时连接已中断");
     if (closed || !authenticated.value) return;
@@ -568,6 +581,8 @@ function resetLogin() {
     sessionStorage.removeItem("vega:session:" + user.value?.id);
   } catch {}
   closeNavigation();
+  localBridge?.close();
+  localBridge = null;
   stopPresence();
   clearTimeout(employeeRefreshTimer);
   closed = true;
@@ -663,9 +678,24 @@ async function removeSession(s) {
   if (!confirm("删除该会话及其 Stage 和消息？此操作不可撤销。")) return;
   await attempt(async () => {
     await api(`/sessions/${s.id}`, "DELETE");
-    if (current.value?.id === s.id) {
+    let selected = current.value;
+    const seen = new Set();
+    while (selected && !seen.has(selected.id) && selected.id !== s.id) {
+      seen.add(selected.id);
+      selected = sessions.value.find((item) => item.id === selected.stageSource);
+    }
+    if (selected?.id === s.id) {
       current.value = null;
+      sessionRequest++;
       messages.value = [];
+      folds.value = [];
+      contextBudget.value = null;
+      fireState.value = null;
+      live.value = "";
+      thinking.value = "";
+      activeTools.value = [];
+      draft.value = "";
+      attachments.value = [];
     }
     await bootstrap();
   });
@@ -1025,7 +1055,11 @@ async function saveEmployeeSettings() {
 
 onBeforeUnmount(() => {
   closed = true;
-  eventsController?.abort();
+  eventGeneration++;
+  clearTimeout(eventReconnect);
+  clearInterval(eventsHeartbeat);
+  eventsSocket?.close();
+  localBridge?.close();
 });
 </script>
 
@@ -1096,6 +1130,7 @@ onBeforeUnmount(() => {
         </svg>
       </button>
       <strong>{{ view === 'chat' ? conversationTitle : mobileTitles[view] }}</strong>
+      <span v-if="localConnected" class="pill green" title="新建会话将在本机执行">本机已连接</span>
       <span
         v-if="narrow && view === 'chat' && isRunning"
         class="status-dot"
@@ -1312,6 +1347,7 @@ onBeforeUnmount(() => {
             </select>
           </div>
           <div class="actions">
+            <span v-if="localConnected" class="pill green" title="新建会话将在本机执行">本机已连接</span>
             <span v-if="isRunning" class="pill green"><span class="status-dot"></span>执行中</span>
             <button v-if="canExecute" class="topbar-new" @click="newSession">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>

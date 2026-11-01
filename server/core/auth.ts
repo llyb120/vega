@@ -385,6 +385,7 @@ export class Auth {
     return session;
   }
   canBlob(user: User, id: string) {
+    if (this.store.db.prepare("SELECT 1 FROM blob_user_access WHERE blob=? AND user=?").get(id, user.id)) return true;
     const rows = this.store.db
       .prepare("SELECT session FROM blob_access WHERE blob=?")
       .all(id) as any[];

@@ -157,6 +157,8 @@ export class Fire {
         next = this.store.newSession({
           cwd: root.cwd,
           ownerId: root.ownerId,
+          localAgent: root.localAgent,
+          localPlatform: root.localPlatform,
           readerIds: root.readerIds,
           model: root.model,
           title: `[Fire] ${s.role === "judge" ? "判断" : "阶段"} ${s.attempt}`,

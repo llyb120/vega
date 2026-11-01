@@ -65,6 +65,7 @@ export function redactMessage(message: Message, redact: Redactor): Message {
 }
 export type AgentEvent = {
   type: string;
+  targetUser?: string;
   session?: string;
   taskId?: string;
   data?: any;
@@ -81,7 +82,7 @@ export class Engine {
   vault: Vault;
   relay: Relay;
   fire: Fire;
-  localAgents = new LocalAgents();
+  localAgents = new LocalAgents((value) => this.emit(value as AgentEvent));
   closing = false;
   mcpSessions = new Map<string, { key: string; client: MCP }>();
   mcpFor(session: Session, config: Config) {
@@ -204,6 +205,7 @@ export class Engine {
   }
   async close() {
     this.closing = true;
+    this.localAgents.close();
     await this.fire.close();
     this.employee.close();
     this.relay.close();
@@ -730,6 +732,12 @@ export class Engine {
           this.outcome(key, reply.calls[i], outcome, emit, redact);
           stop ||= !!outcome.stop;
         }
+        const pauses = [...new Set(outcomes.map((outcome) => outcome.pause).filter(Boolean))];
+        if (pauses.length) {
+          const message = this.store.append(key, { role: "assistant", text: pauses.join("\n") });
+          emit("message_end", message);
+          this.fire.pause(key);
+        }
         if (stop) return;
       }
     } catch (e: any) {
@@ -840,9 +848,12 @@ export class Engine {
             for (let j = 0; j < i; j++)
               if (await conflicts(tools.session.cwd, calls[j], c))
                 await done[j];
+            if (tools.session.localAgent && i > 0) await done[i - 1];
             tools.signal.throwIfAborted();
             await acquire();
             try {
+              tools.signal.throwIfAborted();
+              assert(!output.some((result) => result?.stop), "Skipped: batch suspended for user confirmation");
               this.emit({
                 type: "tool_start",
                 session: tools.session.id,
