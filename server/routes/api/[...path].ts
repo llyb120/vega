@@ -75,7 +75,9 @@ export default defineEventHandler(async (event) => {
   if (path[0] === "local-agent" && path[1] === "verify" && method === "POST") {
     const body = await bodyJSON(event, 4096);
     setHeader(event, "Cache-Control", "no-store");
-    try { return engine.localAgents.verify(body.ticket, auth); }
+    try {
+      return body.clientId ? app().clientSockets.pair(body) : engine.localAgents.verify(body.ticket, auth);
+    }
     catch { throw createError({ statusCode: 401, statusMessage: "Local agent ticket invalid or expired" }); }
   }
   const who = principal(event),
@@ -87,11 +89,9 @@ export default defineEventHandler(async (event) => {
     setHeader(event, "Cache-Control", "no-store");
     check(method === "POST", 405, "POST required");
     if (path[1] === "ticket") return engine.localAgents.ticket(who, a.instance);
-    if (path[1] === "connect") return engine.localAgents.connect(user.id, a);
-    if (path[1] === "result") return engine.localAgents.result(user.id, a);
-    if (path[1] === "disconnect") {
-      check(typeof a.instance === "string", 400, "instance required");
-      engine.localAgents.disconnect(user.id, a.instance);
+    if (path[1] === "revoke") {
+      check(typeof a.clientId === "string" && /^[a-f0-9]{32}$/.test(a.clientId), 400, "clientId required");
+      app().clientSockets.revoke(user.id, a.clientId);
       return { ok: true };
     }
     throw createError({ statusCode: 404, statusMessage: "Not found" });

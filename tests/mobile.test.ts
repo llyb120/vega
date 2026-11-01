@@ -921,16 +921,26 @@ test(
       };
       const office = { clientId: "d".repeat(32), instance: "a".repeat(32), name: "Office PC", cwd: "C:\\office", platform: "windows" };
       const home = { clientId: "e".repeat(32), instance: "b".repeat(32), name: "Home PC", cwd: "/home/project", platform: "linux" };
-      const remoteTicket = await remoteApi("/events", {});
-      const remoteSocket = new WebSocket(base.replace("http:", "ws:") + "/api/events?ticket=" + remoteTicket.ticket, { headers: { cookie: remoteCookie, origin: base } });
-      try {
-        await new Promise<void>((yes, no) => { remoteSocket.once("open", yes); remoteSocket.once("error", no); });
-        remoteSocket.on("message", (raw) => {
-          const event = JSON.parse(raw.toString());
-          if (event.type === "local_agent_request") void remoteApi("/local-agent/result", { ...event.data, result: { isDir: true, path: event.data.args.path } }).catch((e) => errors.push(e.message));
+      const nativePeers: WebSocket[] = [];
+      const connectNative = async (details: any) => {
+        const { ticket } = await remoteApi("/local-agent/ticket", { instance: details.instance });
+        const { deviceToken } = await remoteApi("/local-agent/verify", { ticket, clientId: details.clientId });
+        const native = new WebSocket(base.replace("http:", "ws:") + "/api/local-agent/socket", { headers: { authorization: "Bearer " + deviceToken } });
+        nativePeers.push(native);
+        await new Promise<void>((yes, no) => {
+          native.once("error", no);
+          native.once("open", () => native.send(JSON.stringify({ type: "hello", ...details })));
+          native.on("message", (raw) => {
+            const value = JSON.parse(raw.toString());
+            if (value.type === "ready") yes();
+            else if (value.op) native.send(JSON.stringify({ type: "result", id: value.id, result: { isDir: true, path: value.args.path } }));
+          });
         });
-        await remoteApi("/local-agent/connect", office);
-        await remoteApi("/local-agent/connect", home);
+        return native;
+      };
+      try {
+        const officeSocket = await connectNative(office);
+        const homeSocket = await connectNative(home);
         await until(`document.querySelector('.execution-switch')?.disabled===false`);
         assert.equal(await evaluate(`document.querySelector('.execution-switch').getAttribute('aria-checked')`), "false", "remote clients coming online must not migrate a server conversation");
         await tap(".execution-switch");
@@ -939,16 +949,16 @@ test(
         await until(`document.querySelector('.chat-topbar p')?.textContent.includes('/home/project')||document.querySelector('.notice')?.textContent.includes('/home/project')`);
         assert.equal(await evaluate(`document.querySelector('.execution-client').value`), home.clientId);
         await layout("mobile remote client selection");
-        await remoteApi("/local-agent/disconnect", { instance: home.instance });
+        homeSocket.terminate();
         await until(`document.querySelector('.execution-warning')?.textContent.includes('已离线')`);
         assert.equal(await evaluate(`document.querySelector('.execution-client').value`), home.clientId);
         assert.equal(await evaluate(`document.querySelector('.composer .primary').disabled`), true, "offline selected client must not use another online computer");
         await tap(".execution-switch");
         await until(`document.querySelector('.execution-switch').getAttribute('aria-checked')==='false'`);
-        await remoteApi("/local-agent/disconnect", { instance: office.instance });
+        officeSocket.terminate();
         await until(`document.querySelector('.execution-switch').disabled`);
         assert.equal(await evaluate("window.__localClientAttempts"), 0);
-      } finally { remoteSocket.terminate(); }
+      } finally { for (const native of nativePeers) native.terminate(); }
       await tap('[aria-label="打开导航与会话"]');
       assert.equal(
         await evaluate(`document.querySelector('.workspace').inert`),

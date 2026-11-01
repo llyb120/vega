@@ -73,6 +73,7 @@ export function gate(event: H3Event, path: string) {
   if (path === "/api/providers/callback/devin" && event.method === "GET")
     return;
   if (path === "/api/local-agent/verify" && event.method === "POST") return;
+  if (path === "/api/local-agent/socket" && event.method === "GET") return;
   sameOrigin(event);
   if (path === "/api/health") {
     check(
@@ -102,7 +103,7 @@ export function gate(event: H3Event, path: string) {
       "Invalid CSRF token; reload and sign in again",
     );
   if (path.startsWith("/api/auth/")) return;
-  if (/^\/api\/local-agent\/(ticket|connect|result|disconnect)$/.test(path) && event.method === "POST") return;
+  if (/^\/api\/local-agent\/(ticket|revoke)$/.test(path) && event.method === "POST") return;
   const role = session.user.role;
   if (role === "admin") return;
   if (

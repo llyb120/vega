@@ -24,7 +24,7 @@ Node >=24.10，使用内置 `node:sqlite`，无需另装数据库。默认数据
 
 ## 本机执行端
 
-在各台电脑启动新版 `vega-local` 并用同一账号登录网站，电脑网页会通过 WebSocket 桥接该电脑的客户端；不需要配置 Key 或服务地址，首次确认信任站点即可。输入框旁显示账号下实际在线的客户端，可按设备名选择执行电脑，手机也能选择远端电脑，手机网页不会尝试连接本机。电脑客户端和桥接网页须保持在线。新会话有在线客户端时默认客户端、否则服务端，已有会话不随上线/掉线自动切换；所选设备掉线会暂停，不会换到另一台或服务端。客户端以用户配置目录内的稳定 ID 识别，升级后旧的未绑定会话须手动选择一次。详见 [local/README.md](local/README.md)。
+各台电脑启动新版 `vega-local` 后，只需在该电脑网页登录一次并确认站点授权。前端仅传递一次性登录票据，客户端直接向后端换取设备凭据、持久保存并通过 `/api/local-agent/socket` 建立独立连接；之后**关掉网页、浏览器后台休眠、客户端或服务端重启都不依赖网页**，联网后客户端自行重连。输入框旁按实际在线设备选择电脑，手机可选远端电脑且不会尝试本机连接。任务结果不确定时暂停、等待确认，不自动重放或换机。需同时升级服务端、网页和客户端，升级后在电脑端重新握手一次。详见 [local/README.md](local/README.md)。
 
 SQLite 图片授权会自动升级到版本 4，并修复旧分叉历史的图片授权。升级前请备份数据库；升级后的库不能直接交给旧版服务使用。
 
@@ -40,13 +40,13 @@ SQLite 图片授权会自动升级到版本 4，并修复旧分叉历史的图�
 
 会话、Stage/fork/Fire衍生会话按创建账号归属，实时WebSocket事件和截图BLOB也校验会话访问权限；分享只授予查看，不授予执行。衍生会话继承创建时的查看授权，之后单独管理。旧版本无归属的会话/截图只有管理员可见，不会因升级自动公开给新账号。SQLite新增账号/登录表，升级前仍建议备份数据库。
 
-注销只撤销本次网页登录。密码修改/管理员重置、角色变更或停用只撤销该账号的网站登录与实时查看连接，**不会取消或暂停任何已经提交的内部任务**；最后一个启用的管理员不能被停用或降级。内部agent、数字员工、定时任务和恢复流程不依赖是否有人在线，保持原工具集/执行机制；只有网站上明确调用停止/取消等业务操作才改变执行状态。登录有失败尝试和并发KDF限流，用户名或密码错误统一返回失败；网站修改API要求CSRF token并检查Origin，不依赖前端隐藏按钮。
+注销只撤销本次网页登录，不关闭已经独立授权的客户端。密码修改/管理员重置、角色变更或停用撤销该账号的网站登录、实时查看及设备凭据；服务端内部任务仍保持原执行机制，但设备断连会暂停依赖该设备且结果不确定的操作，不自动重试；最后一个启用的管理员不能被停用或降级。内部agent、数字员工、定时任务和恢复流程不依赖是否有人在线，保持原工具集/执行机制；只有网站上明确调用停止/取消等业务操作才改变执行状态。登录有失败尝试和并发KDF限流，用户名或密码错误统一返回失败；网站修改API要求CSRF token并检查Origin，不依赖前端隐藏按钮。
 
 **能够通过网站提交内部任务的账号必须可信**：网站RBAC只保护登录、页面/API和数据查看，不是内部agent的工具授权系统，更不是操作系统级多租户沙箱。内部bash/文件/MCP和员工工具保持原能力，可能访问同一容器或服务器。隔离不可信任务应单独运行容器/实例和数据卷，不能靠网页角色实现。只读用户没有提交任务或执行工具的网站入口。
 
 ### HTTPS与反向代理
 
-公网部署必须使用HTTPS，配置`VEGA_PUBLIC_URL=https://vega.example.com`（仅origin，不带路径）。服务将使用Secure Cookie，并以该origin检查请求；不要信任任意客户端传入的Forwarded头。反代保留Host，为`/api/events`与`/api/chrome/live`转发WebSocket Upgrade/Connection。直接本地HTTP开发可不设置此变量，Cookie不会错误地带Secure导致无法登录。
+公网部署必须使用HTTPS，配置`VEGA_PUBLIC_URL=https://vega.example.com`（仅origin，不带路径）。服务将使用Secure Cookie，并以该origin检查请求；不要信任任意客户端传入的Forwarded头。反代保留Host，为`/api/events`、`/api/chrome/live`、`/api/local-agent/socket`转发WebSocket Upgrade/Connection，设备连接还需保留Authorization头。直接本地HTTP开发可不设置此变量，Cookie不会错误地带Secure导致无法登录。
 
 原`VEGA_TOKEN`现在仅用于**首个管理员初始化**和只返回就绪/扩展连接状态的`GET /api/health`，不再是普通网站API的管理员后门。容器启动/健康检查已改用health入口，不需要保存网站账号密码；Token轮换不撤销SQLite中的账号登录。
 
@@ -139,7 +139,7 @@ WS连接先通过带CSRF校验的POST取得15秒有效、一次性且绑定管�
 
 **无头模式**：设置 `VEGA_BROWSER_MODE=isolated` 后，服务启动一个私有无头 Chrome（与 Docker 同一套扩展协议、独立 profile 目录 `<数据库目录>/chromium`），不占宿主桌面。Linux/Windows/macOS 都支持；Windows 上通过 `VEGA_CHROME_PATH` 指定 chrome.exe，未设置时自动探测常见安装路径。无头实例可多 tab 并行截图和输入；cookie/登录态持久在私有 profile，不与用户日常浏览器共享。Docker 模式同样使用此变量，行为一致。
 
-远程部署仍只需现有网站端口。反向代理须为`/api/events`和`/api/chrome/live`转发WebSocket的HTTP/1.1 Upgrade/Connection并保留Host；公网请配置正确的`VEGA_PUBLIC_URL`并使用HTTPS/WSS，**不要暴露Chrome调试端口或回环扩展端口**。断线后点击刷新重新连接，不自动补发上次操作。
+远程部署仍只需现有网站端口。反向代理须为`/api/events`、`/api/chrome/live`及`/api/local-agent/socket`转发WebSocket的HTTP/1.1 Upgrade/Connection并保留Host，设备连接还须保留Authorization；公网请配置正确的`VEGA_PUBLIC_URL`并使用HTTPS/WSS，**不要暴露Chrome调试端口或回环扩展端口**。断线后点击刷新重新连接，不自动补发上次操作。
 
 ### MCP、技能和团队
 

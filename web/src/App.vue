@@ -1,6 +1,6 @@
 <script setup vapor>
 import SettingsView from "./SettingsView.vue";
-import { LocalAgentBridge, canBridgeLocal } from "./local-agent";
+import { LocalAgentPairing, canBridgeLocal } from "./local-agent";
 import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import TurnProcess from "./TurnProcess.vue";
@@ -402,10 +402,6 @@ function rejectSocketRequests(reason) {
   wsRequests.clear();
 }
 function socketMessage(value) {
-  if (value.type === "local_agent_request") {
-    localBridge?.forward(value.data);
-    return;
-  }
   if (value.type === "response") {
     const request = wsRequests.get(value.id);
     if (!request) return;
@@ -485,7 +481,7 @@ function openEventSocket(url, generation) {
         eventsReady = true;
         eventsWasConnected = true;
         if (!localBridge && canBridgeLocal()) {
-          localBridge = new LocalAgentBridge(httpApi, user.value.id);
+          localBridge = new LocalAgentPairing(httpApi, user.value.id);
           void localBridge.connect();
         }
         if (error.value.includes("实时")) error.value = "";

@@ -1,18 +1,26 @@
 # vega-local
 
-Run the updated client on each computer and sign in to the Vega website with the same account. Each **desktop website frontend** bridges its own `ws://127.0.0.1:47673/agent`; there is no API Key or server URL to configure. Keep both the client and its desktop website open. A phone or tablet never connects to its own loopback client; it selects an online computer through the server.
+Run the updated client and sign in to Vega **once on that computer**. The desktop webpage passes a one-use, 15-second ticket to `ws://127.0.0.1:47673/agent`. After you approve the local site permission, the native client exchanges that ticket directly with the backend for a revocable device credential. The credential never enters the webpage.
 
-The first connection from a new website opens a small local permission page. Approve only your own trusted Vega origin: approval lets accounts signed in to that site read/write files and execute commands on this machine. Login is verified with a one-use, 15-second server ticket, not a reusable local secret. Windows tray → **连接授权** lists trusted sites and can revoke them.
+After pairing, the client connects directly to `/api/local-agent/socket` with its device credential. **You may close the webpage, let the browser sleep, or use Vega from a phone.** As long as the computer, client and network remain available, it stays usable. Client and server restarts reconnect automatically without a new website login; network reconnects never replay jobs. HTTPS/WSS is required except for local loopback development.
 
-The website lists online clients by computer name, platform and a short device ID, limited to the current account. A client is considered offline after its bridge disconnects or misses heartbeats for 15 seconds. Each successful website login grants a fresh **7-day** cookie; logout, revocation and password changes still invalidate it.
+The website lists online clients by computer name, platform and short device ID, scoped to the current account. A client becomes offline when its native socket closes or its heartbeats expire. Phones/tablets do not connect to a loopback client; they select an authorized online computer through the server.
 
-New conversations default to a client when any are online, otherwise the server. Beside the **服务端 / 客户端** switch, the device selector chooses the exact computer, including from a phone. Connections and disconnections never move an existing conversation automatically. Finish or stop the current turn (including Fire) before changing devices or modes. An offline selected client blocks new commands even if another client is online.
+New conversations default to a client when any are online, otherwise the server. The **服务端 / 客户端** switch and device selector choose the exact computer. Existing conversations never move automatically when devices connect/disconnect. Finish or stop the current turn (including Fire) before changing devices or modes. An offline selected client blocks new commands even if another client is online.
 
-A manual switch validates the destination, remembers the server and **each device's** working directory separately and restores it when switching back. Missing remembered directories fall back to that side's root directory, never the other machine's path. Files are **not** copied or synchronized. Stage, fork and Fire inherit the original execution location. `read`, `write`, `edit`, `bash` and directory changes run on the selected side, including image reads. `sqlite:` archives, skills and Chrome remain server-side.
+A manual switch validates the destination, remembers the server and **each device's** working directory separately and restores it when switching back. Missing remembered directories fall back to that side's root, never another computer's path. Files are **not** synchronized. Stage, fork and Fire inherit the selected device. `read`, `write`, `edit`, `bash` and directory changes run there; `sqlite:` archives, skills and Chrome remain server-side.
 
-If a response is lost, work pauses and asks the user to inspect the actual result, repair the connection and explicitly continue. No command is replayed or silently rerun on the server. Closing the connection or cancelling the session cancels pending local shell processes.
+If a response is lost, work pauses so you can inspect the actual result, repair the connection and explicitly continue. No command is replayed or silently rerun on another device or the server. Disconnecting or cancelling a session cancels pending native shell processes. Closing the webpage does **not** disconnect the native client or cancel its work.
 
-The client only listens on loopback. Its stable non-secret device ID and trusted website origins are saved in the current user's config directory at `vega-local/trusted-sites.json`; no account password, login cookie or API Key is stored locally. Upgrades preserve trusted sites and add a device ID. Historical sessions without a device binding must explicitly select a client once; old binaries are identified only for their current bridge connection and should be upgraded. Use HTTPS for remote websites. Your browser may ask permission to connect to a local device.
+## Device credentials and revocation
+
+The per-user config directory contains `vega-local/trusted-sites.json`: the stable device ID, trusted origins and paired credentials. Windows protects tokens with current-user DPAPI; Unix stores them in a mode-0600 file under the user's config directory. The server stores only token hashes, bound to one account/device; these tokens cannot log into the website or call general APIs. No website password or login cookie is stored by the client.
+
+Windows tray → **连接授权** can revoke a trusted site: it removes its local credentials and stops its native connections. Account password/role changes and disabling access revoke the backend's device credentials too. A logged-in user can revoke one of their own devices with `POST /api/local-agent/revoke` and `{clientId}` (normal cookie/CSRF protection). Revoked clients require a fresh website handshake; repeated authorization while a healthy token exists reuses it without interrupting work. Website logout and the 7-day website cookie expiry do not revoke an independently authorized device.
+
+Upgrade the server, webpage and native binary together. Old webpage job relays are no longer used. Existing stable device IDs and trusted origins are preserved; open the desktop website once after upgrading to obtain a device credential. Historical sessions without a device binding still require choosing a device once.
+
+Reverse proxies must forward WebSocket Upgrade/Connection and the Authorization header for `/api/local-agent/socket`, in addition to `/api/events` and `/api/chrome/live`. No extra public port is needed; never expose the client's loopback port.
 
 ## Build
 
@@ -23,6 +31,6 @@ go test ./...
 go build -ldflags="-H=windowsgui" -o vega-local.exe .
 ```
 
-Use the rebuilt `.exe`, not an older download or `go run .`. Windows also detaches the client from any console at startup without closing the parent terminal, and shell commands are launched with `CREATE_NO_WINDOW`. A plain console-mode `go build` can still flash a window before startup; the GUI build above avoids that entirely.
+Use the rebuilt `.exe`, not an older download or `go run .`. Windows detaches the client from any console at startup without closing the parent terminal, and shell commands use `CREATE_NO_WINDOW`. A plain console-mode build may still flash before startup; the GUI build avoids that entirely.
 
-CI builds Windows tray and Linux/macOS headless binaries. Linux/macOS use `go build -o vega-local .` and require a browser to approve a new site; when automatic opening is unavailable, the client prints the local permission-page address.
+CI builds Windows tray and Linux/macOS headless binaries. Linux/macOS use `go build -o vega-local .` and require a browser only for first-time authorization; when automatic opening is unavailable, the client prints the local permission-page address.

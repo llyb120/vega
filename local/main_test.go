@@ -70,10 +70,13 @@ func TestWebSocketRequiresTrustedOriginAndOneTimeWebsiteLogin(t *testing.T) {
 			return
 		}
 		used = true
-		_ = json.NewEncoder(w).Encode(map[string]any{"userId": "alice", "instance": strings.Repeat("b", 32), "expiresAt": time.Now().Add(time.Hour).UnixMilli()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": strings.Repeat("c", 32), "deviceToken": strings.Repeat("d", 43)})
 	}))
 	defer website.Close()
-	agent := &Agent{config: Config{TrustedOrigins: []string{website.URL}}, connections: make(map[*websocket.Conn]struct{}), pendingOrigins: map[string]bool{"https://untrusted.test": true}}
+	agent := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{website.URL}}, connections: make(map[*websocket.Conn]struct{}), pendingOrigins: map[string]bool{"https://untrusted.test": true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent.startConnections(ctx)
 	server := httptest.NewServer(http.HandlerFunc(agent.serveWS))
 	defer server.Close()
 	connect := func(origin string) (*websocket.Conn, error) {
@@ -91,14 +94,17 @@ func TestWebSocketRequiresTrustedOriginAndOneTimeWebsiteLogin(t *testing.T) {
 	defer conn.Close()
 	_ = conn.WriteJSON(map[string]string{"type": "auth", "ticket": ticket})
 	var ready map[string]any
-	if err = conn.ReadJSON(&ready); err != nil || ready["userId"] != "alice" {
-		t.Fatalf("login failed: %v %v", ready, err)
+	if err = conn.ReadJSON(&ready); err != nil || ready["userId"] != "alice" || ready["type"] != "paired" {
+		t.Fatalf("pairing failed: %v %v", ready, err)
 	}
-	id := "01234567-0123-0123-0123-012345678901"
-	_ = conn.WriteJSON(map[string]any{"id": id, "op": "file", "args": map[string]string{"op": "read", "cwd": t.TempDir(), "path": "missing"}})
-	var result map[string]any
-	if err = conn.ReadJSON(&result); err != nil || result["id"] != id {
-		t.Fatalf("result not routed: %v %v", result, err)
+	if ready["deviceToken"] != nil {
+		t.Fatal("device credential leaked to the webpage")
+	}
+	agent.mu.Lock()
+	count := len(agent.config.Servers)
+	agent.mu.Unlock()
+	if count != 1 {
+		t.Fatal("paired credential not saved")
 	}
 	duplicate, err := connect(website.URL)
 	if err != nil {

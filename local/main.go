@@ -1,4 +1,4 @@
-// Vega local execution agent. The website connects to its loopback WebSocket.
+// Vega local execution agent. The website is used only for initial authorization.
 package main
 
 import (
@@ -36,6 +36,8 @@ type Agent struct {
 	configToken    string
 	pendingOrigins map[string]bool
 	connections    map[*websocket.Conn]struct{}
+	direct         map[string]*directConnection
+	context        context.Context
 }
 
 func main() {
@@ -49,9 +51,12 @@ func main() {
 	mux.HandleFunc("/config/"+a.configToken, a.configure)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(lis) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.startConnections(ctx)
 	configure := func() { openBrowser("http://" + localAddress + "/config/" + a.configToken) }
 	fmt.Fprintln(os.Stderr, "vega-local: running on "+localAddress)
 	systrayRun(configure, func() {
+		cancel()
 		a.mu.Lock()
 		for conn := range a.connections {
 			_ = conn.Close()
@@ -63,6 +68,7 @@ func main() {
 }
 
 type job struct {
+	Type string          `json:"type"`
 	ID   string          `json:"id"`
 	Op   string          `json:"op"`
 	Args json.RawMessage `json:"args"`
@@ -80,95 +86,36 @@ func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	conn.SetReadLimit(4096)
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var auth struct {
 		Type   string `json:"type"`
 		Ticket string `json:"ticket"`
+		UserID string `json:"userId"`
 	}
 	if conn.ReadJSON(&auth) != nil || auth.Type != "auth" {
 		return
 	}
-	proof, err := verifyLogin(r.Header.Get("Origin"), auth.Ticket)
+	origin := r.Header.Get("Origin")
+	a.mu.Lock()
+	var existing string
+	for _, saved := range a.config.Servers {
+		if saved.Origin == origin && saved.UserID == auth.UserID {
+			existing, _ = unprotectToken(saved.Token)
+		}
+	}
+	clientID := a.config.ClientID
+	a.mu.Unlock()
+	proof, err := verifyLogin(origin, auth.Ticket, clientID, existing)
 	if err != nil {
 		return
 	}
-	a.mu.Lock()
-	valid := len(a.connections) < 8
-	if valid {
-		a.connections[conn] = struct{}{}
-		setState(true)
-	}
-	a.mu.Unlock()
-	if !valid {
+	saved, err := a.saveCredential(origin, proof)
+	if err != nil {
 		return
 	}
-	defer func() {
-		a.mu.Lock()
-		delete(a.connections, conn)
-		setState(len(a.connections) > 0)
-		a.mu.Unlock()
-	}()
-	_ = conn.SetReadDeadline(time.UnixMilli(proof.ExpiresAt))
-	conn.SetReadLimit(maxBody)
-	cwd, _ := os.Getwd()
-	name, _ := os.Hostname()
-	if name == "" {
-		name = "Vega " + runtime.GOOS
-	}
-	if conn.WriteJSON(map[string]any{"type": "ready", "instance": proof.Instance, "userId": proof.UserID, "clientId": a.config.ClientID, "name": name, "cwd": cwd, "platform": runtime.GOOS}) != nil {
-		return
-	}
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-	var writes sync.Mutex
-	var tasks sync.Mutex
-	pending := map[string]context.CancelFunc{}
-	seen := map[string]bool{}
-	defer func() {
-		tasks.Lock()
-		defer tasks.Unlock()
-		for _, cancel := range pending {
-			cancel()
-		}
-	}()
-	for {
-		var request job
-		if conn.ReadJSON(&request) != nil {
-			return
-		}
-		if len(request.ID) != 36 {
-			return
-		}
-		tasks.Lock()
-		if request.Op == "cancel" {
-			if stop := pending[request.ID]; stop != nil {
-				stop()
-			}
-			tasks.Unlock()
-			continue
-		}
-		if seen[request.ID] || len(pending) >= 16 || len(seen) >= 4096 {
-			tasks.Unlock()
-			return
-		}
-		seen[request.ID] = true
-		taskCtx, stop := context.WithCancel(ctx)
-		pending[request.ID] = stop
-		tasks.Unlock()
-		go func(request job) {
-			result := execute(taskCtx, request)
-			stop()
-			tasks.Lock()
-			delete(pending, request.ID)
-			tasks.Unlock()
-			writes.Lock()
-			defer writes.Unlock()
-			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if conn.WriteJSON(map[string]any{"id": request.ID, "result": result}) != nil {
-				_ = conn.Close()
-			}
-		}(request)
-	}
+	a.startConnection(saved, proof.DeviceToken)
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.WriteJSON(map[string]any{"type": "paired", "instance": proof.Instance, "userId": proof.UserID, "clientId": clientID})
 }
 func execute(ctx context.Context, j job) map[string]any {
 	if j.Op == "exec" {

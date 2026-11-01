@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,8 +21,9 @@ import (
 )
 
 type Config struct {
-	ClientID       string   `json:"clientId"`
-	TrustedOrigins []string `json:"trustedOrigins"`
+	ClientID       string             `json:"clientId"`
+	TrustedOrigins []string           `json:"trustedOrigins"`
+	Servers        []ServerCredential `json:"servers,omitempty"`
 }
 
 func newAgent() (*Agent, error) {
@@ -64,12 +66,47 @@ func newAgent() (*Agent, error) {
 	}
 	return a, nil
 }
+func (a *Agent) saveConfig(config Config) error {
+	data, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	if err = os.MkdirAll(filepath.Dir(a.configPath), 0700); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(a.configPath), ".trusted-sites-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if err = file.Chmod(0600); err == nil {
+		_, err = file.Write(data)
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), a.configPath)
+}
 func validOrigin(origin string) bool {
 	u, err := url.Parse(origin)
 	if err != nil || u.User != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
 		return false
 	}
 	return u.Scheme == "https" || u.Scheme == "http"
+}
+func secureOrigin(origin string) bool {
+	if !validOrigin(origin) {
+		return false
+	}
+	u, _ := url.Parse(origin)
+	ip := net.ParseIP(u.Hostname())
+	return u.Scheme == "https" || u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback())
 }
 func (a *Agent) allowOrigin(origin string) bool {
 	if !validOrigin(origin) {
@@ -116,7 +153,8 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		}
 		origin, remove := r.FormValue("origin"), r.FormValue("remove")
 		a.mu.Lock()
-		next := Config{ClientID: a.config.ClientID, TrustedOrigins: append([]string{}, a.config.TrustedOrigins...)}
+		next := a.config
+		next.TrustedOrigins = append([]string{}, a.config.TrustedOrigins...)
 		if origin != "" && a.pendingOrigins[origin] {
 			next.TrustedOrigins = append(next.TrustedOrigins, origin)
 		} else if remove != "" {
@@ -126,16 +164,18 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 					next.TrustedOrigins = append(next.TrustedOrigins, item)
 				}
 			}
+			next.Servers = nil
+			for _, saved := range a.config.Servers {
+				if saved.Origin != remove {
+					next.Servers = append(next.Servers, saved)
+				}
+			}
 		} else {
 			a.mu.Unlock()
 			http.Error(w, "Unknown site", 400)
 			return
 		}
-		data, _ := json.Marshal(next)
-		err := os.MkdirAll(filepath.Dir(a.configPath), 0700)
-		if err == nil {
-			err = os.WriteFile(a.configPath, data, 0600)
-		}
+		err := a.saveConfig(next)
 		if err != nil {
 			a.mu.Unlock()
 			http.Error(w, "Unable to save site permission", 500)
@@ -144,8 +184,10 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		a.config = next
 		delete(a.pendingOrigins, origin)
 		if remove != "" {
-			for conn := range a.connections {
-				_ = conn.Close()
+			for _, connection := range a.direct {
+				if connection.origin == remove {
+					connection.cancel()
+				}
 			}
 		}
 		a.mu.Unlock()
@@ -168,17 +210,18 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 }
 
 type loginProof struct {
-	UserID    string `json:"userId"`
-	Instance  string `json:"instance"`
-	ExpiresAt int64  `json:"expiresAt"`
+	UserID      string `json:"userId"`
+	Instance    string `json:"instance"`
+	ClientID    string `json:"clientId"`
+	DeviceToken string `json:"deviceToken"`
 }
 
-func verifyLogin(origin, ticket string) (loginProof, error) {
+func verifyLogin(origin, ticket, clientID, deviceToken string) (loginProof, error) {
 	var proof loginProof
-	if !validOrigin(origin) || len(ticket) != 72 {
-		return proof, fmt.Errorf("Invalid login ticket")
+	if !secureOrigin(origin) || len(ticket) != 72 {
+		return proof, fmt.Errorf("Invalid or insecure pairing origin/ticket")
 	}
-	data, _ := json.Marshal(map[string]string{"ticket": ticket})
+	data, _ := json.Marshal(map[string]string{"ticket": ticket, "clientId": clientID, "deviceToken": deviceToken})
 	req, err := http.NewRequest(http.MethodPost, origin+"/api/local-agent/verify", bytes.NewReader(data))
 	if err != nil {
 		return proof, err
@@ -194,7 +237,7 @@ func verifyLogin(origin, ticket string) (loginProof, error) {
 		return proof, fmt.Errorf("Login expired")
 	}
 	err = json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&proof)
-	if err == nil && (proof.UserID == "" || len(proof.Instance) < 32 || proof.ExpiresAt <= time.Now().UnixMilli()) {
+	if err == nil && (proof.UserID == "" || len(proof.Instance) < 32 || proof.ClientID != clientID || len(proof.DeviceToken) != 43) {
 		err = fmt.Errorf("Invalid login proof")
 	}
 	return proof, err

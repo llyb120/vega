@@ -1,0 +1,262 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"runtime"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+type ServerCredential struct {
+	Origin string `json:"origin"`
+	UserID string `json:"userId"`
+	Token  string `json:"token"`
+}
+type directConnection struct {
+	origin string
+	token  string
+	cancel context.CancelFunc
+}
+
+func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredential, error) {
+	protected, err := protectToken(proof.DeviceToken)
+	if err != nil {
+		return ServerCredential{}, err
+	}
+	saved := ServerCredential{Origin: origin, UserID: proof.UserID, Token: protected}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	trusted := false
+	for _, item := range a.config.TrustedOrigins {
+		trusted = trusted || item == origin
+	}
+	if !trusted {
+		return saved, fmt.Errorf("Site permission revoked during pairing")
+	}
+	next := a.config
+	next.Servers = nil
+	for _, item := range a.config.Servers {
+		if item.Origin != origin || item.UserID != proof.UserID {
+			next.Servers = append(next.Servers, item)
+		}
+	}
+	if len(next.Servers) >= 8 {
+		return saved, fmt.Errorf("Too many paired accounts")
+	}
+	next.Servers = append(next.Servers, saved)
+	if err = a.saveConfig(next); err != nil {
+		return saved, err
+	}
+	a.config = next
+	return saved, nil
+}
+func (a *Agent) startConnections(ctx context.Context) {
+	a.mu.Lock()
+	a.context = ctx
+	servers := append([]ServerCredential{}, a.config.Servers...)
+	a.mu.Unlock()
+	for _, saved := range servers {
+		if token, err := unprotectToken(saved.Token); err == nil {
+			a.startConnection(saved, token)
+		}
+	}
+}
+func (a *Agent) startConnection(saved ServerCredential, token string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !secureOrigin(saved.Origin) {
+		return
+	}
+	trusted := false
+	for _, origin := range a.config.TrustedOrigins {
+		trusted = trusted || origin == saved.Origin
+	}
+	if !trusted {
+		return
+	}
+	if a.direct == nil {
+		a.direct = make(map[string]*directConnection)
+	}
+	key := saved.Origin + "\x00" + saved.UserID
+	if old := a.direct[key]; old != nil {
+		if old.token == token {
+			return
+		}
+		old.cancel()
+	}
+	parent := a.context
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	connection := &directConnection{origin: saved.Origin, token: token, cancel: cancel}
+	a.direct[key] = connection
+	go func() {
+		defer cancel()
+		defer func() {
+			a.mu.Lock()
+			if a.direct[key] == connection {
+				delete(a.direct, key)
+			}
+			a.mu.Unlock()
+		}()
+		delay := time.Second
+		for ctx.Err() == nil {
+			if !a.connectBackend(ctx, saved, token) {
+				return // Revoked credentials need a new explicit website handshake.
+			}
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if delay < 30*time.Second {
+				delay *= 2
+				if delay > 30*time.Second {
+					delay = 30 * time.Second
+				}
+			}
+		}
+	}()
+}
+func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, token string) bool {
+	u, _ := url.Parse(saved.Origin + "/api/local-agent/socket")
+	if u.Scheme == "https" {
+		u.Scheme = "wss"
+	} else {
+		u.Scheme = "ws"
+	}
+	dialer := *websocket.DefaultDialer
+	dialer.HandshakeTimeout = 8 * time.Second
+	conn, response, err := dialer.DialContext(ctx, u.String(), http.Header{"Authorization": {"Bearer " + token}})
+	if err != nil {
+		if response != nil {
+			_ = response.Body.Close()
+			if response.StatusCode == 401 || response.StatusCode == 403 {
+				return false
+			}
+		}
+		return true
+	}
+	defer conn.Close()
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
+	id := make([]byte, 16)
+	if _, err = rand.Read(id); err != nil {
+		return true
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return true
+	}
+	name, _ := os.Hostname()
+	if name == "" {
+		name = "Vega " + runtime.GOOS
+	}
+	a.mu.Lock()
+	clientID := a.config.ClientID
+	a.mu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": hex.EncodeToString(id), "clientId": clientID, "name": name, "cwd": cwd, "platform": runtime.GOOS}) != nil {
+		return true
+	}
+	conn.SetReadLimit(maxBody)
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var ready struct{ Type, UserID, ClientID string }
+	if conn.ReadJSON(&ready) != nil || ready.Type != "ready" || ready.UserID != saved.UserID || ready.ClientID != clientID {
+		return true
+	}
+	a.mu.Lock()
+	a.connections[conn] = struct{}{}
+	setState(true)
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		delete(a.connections, conn)
+		setState(len(a.connections) > 0)
+		a.mu.Unlock()
+	}()
+	runJobs(ctx, conn)
+	return true
+}
+func runJobs(parent context.Context, conn *websocket.Conn) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	var writes, tasks sync.Mutex
+	write := func(value any) {
+		writes.Lock()
+		defer writes.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if conn.WriteJSON(value) != nil {
+			_ = conn.Close()
+		}
+	}
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				write(map[string]string{"type": "ping"})
+			}
+		}
+	}()
+	pending := map[string]context.CancelFunc{}
+	seen := map[string]bool{}
+	defer func() {
+		tasks.Lock()
+		defer tasks.Unlock()
+		for _, cancel := range pending {
+			cancel()
+		}
+	}()
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+		var request job
+		if conn.ReadJSON(&request) != nil {
+			return
+		}
+		if request.Type == "pong" {
+			continue
+		}
+		if len(request.ID) != 36 {
+			return
+		}
+		tasks.Lock()
+		if request.Op == "cancel" {
+			if stop := pending[request.ID]; stop != nil {
+				stop()
+			}
+			tasks.Unlock()
+			continue
+		}
+		if seen[request.ID] || len(pending) >= 16 || len(seen) >= 4096 {
+			tasks.Unlock()
+			return
+		}
+		seen[request.ID] = true
+		taskCtx, stop := context.WithCancel(ctx)
+		pending[request.ID] = stop
+		tasks.Unlock()
+		go func(request job) {
+			result := execute(taskCtx, request)
+			stop()
+			tasks.Lock()
+			delete(pending, request.ID)
+			tasks.Unlock()
+			write(map[string]any{"type": "result", "id": request.ID, "result": result})
+		}(request)
+	}
+}

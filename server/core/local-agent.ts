@@ -18,9 +18,21 @@ export type Agent = {
   pending: Map<string, Pending>;
   onlineUntil: number;
   heartbeat?: ReturnType<typeof setTimeout>;
+  transport?: { send: (job: Obj) => void; close: () => void };
 };
 
-// Each desktop browser bridges one client; other logged-in devices can select it by stable client ID.
+export function validateClient(a: Obj) {
+  assert(typeof a.instance === "string" && /^[a-f0-9-]{32,36}$/.test(a.instance), "Invalid agent instance");
+  // Registrations without a durable ID remain scoped to their connection instance.
+  const clientId = a.clientId ?? a.instance;
+  assert(typeof clientId === "string" && /^[a-f0-9-]{32,36}$/.test(clientId), "Invalid client ID");
+  assert(a.name === undefined || (typeof a.name === "string" && a.name.trim().length > 0 && a.name.length <= 128 && !/[\x00-\x1f]/.test(a.name)), "Invalid client name");
+  assert(typeof a.cwd === "string" && a.cwd.length > 0 && a.cwd.length <= 4096 && !a.cwd.includes("\0"), "Invalid agent cwd");
+  assert(["windows", "linux", "darwin"].includes(a.platform), "Invalid agent platform");
+  return clientId;
+}
+
+// Jobs for native clients use their own authenticated socket, never a website connection.
 export class LocalAgents {
   private agents = new Map<string, Agent>();
   private tickets = new Map<string, { hash: string; instance: string; until: number }>();
@@ -64,20 +76,14 @@ export class LocalAgents {
     }
     return agent;
   }
-  connect(userId: string, a: Obj) {
-    assert(typeof a.instance === "string" && /^[a-f0-9-]{32,36}$/.test(a.instance), "Invalid agent instance");
-    // Older clients are scoped to their bridge instance until upgraded; never guess their identity on reconnect.
-    const clientId = a.clientId ?? a.instance;
-    assert(typeof clientId === "string" && /^[a-f0-9-]{32,36}$/.test(clientId), "Invalid client ID");
-    assert(a.name === undefined || (typeof a.name === "string" && a.name.trim().length > 0 && a.name.length <= 128 && !/[\x00-\x1f]/.test(a.name)), "Invalid client name");
-    assert(typeof a.cwd === "string" && a.cwd.length > 0 && a.cwd.length <= 4096 && !a.cwd.includes("\0"), "Invalid agent cwd");
-    assert(["windows", "linux", "darwin"].includes(a.platform), "Invalid agent platform");
+  connect(userId: string, a: Obj, transport?: Agent["transport"]) {
+    const clientId = validateClient(a);
     let agent = this.active(userId, clientId);
     assert(!agent || agent.instance === a.instance, "此客户端已由另一个浏览器连接");
     if (!agent) {
       assert(this.list(userId).length < 8, "Too many connected clients");
       assert(![...this.agents.values()].some((item) => item.userId === userId && item.instance === a.instance), "Agent instance already registered");
-      agent = { userId, clientId, name: a.name?.trim() || "客户端 " + clientId.slice(0, 8), instance: a.instance, cwd: a.cwd, platform: a.platform, pending: new Map(), onlineUntil: Date.now() + 15000 };
+      agent = { userId, clientId, name: a.name?.trim() || "客户端 " + clientId.slice(0, 8), instance: a.instance, cwd: a.cwd, platform: a.platform, pending: new Map(), onlineUntil: Date.now() + 15000, transport };
       this.agents.set(userId + ":" + clientId, agent);
       this.emit({ type: "clients_changed", targetUser: userId });
     }
@@ -96,7 +102,8 @@ export class LocalAgents {
     return { ok: true };
   }
   private send(agent: Agent, job: Obj) {
-    this.emit({ type: "local_agent_request", targetUser: agent.userId, data: { instance: agent.instance, ...job } });
+    if (agent.transport) agent.transport.send(job);
+    else this.emit({ type: "local_agent_request", targetUser: agent.userId, data: { instance: agent.instance, ...job } });
   }
   request(agent: Agent, op: "exec" | "file", args: Obj, signal: AbortSignal) {
     signal.throwIfAborted();
@@ -130,6 +137,7 @@ export class LocalAgents {
       this.agents.delete(key);
       clearTimeout(agent.heartbeat);
       for (const pending of [...agent.pending.values()]) pending.reject(new LocalAgentUnavailable());
+      try { agent.transport?.close(); } catch {}
       changed = true;
     }
     if (changed) this.emit({ type: "clients_changed", targetUser: userId });

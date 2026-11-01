@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { LocalAgentBridge, canBridgeLocal } from "../web/src/local-agent.js";
+import { LocalAgentPairing, canBridgeLocal } from "../web/src/local-agent.js";
 
 test("desktop and mobile indicators describe all online clients rather than the current device", () => {
   const source = readFileSync("web/src/App.vue", "utf8");
@@ -79,7 +79,7 @@ test("a manual switch updates the selected session only after success and keeps 
   assert.equal(calls, 2, "running work must not be moved across machines");
 });
 
-test("frontend connects outward using the current login ticket and never replays jobs after disconnect", async (t) => {
+test("the frontend pairs once and never relays jobs, holds device tokens or disconnects a native client", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const original = globalThis.WebSocket;
   const sent: any[] = [], calls: any[] = [], sockets: any[] = [], statuses: boolean[] = [];
@@ -91,33 +91,25 @@ test("frontend connects outward using the current login ticket and never replays
   }
   globalThis.WebSocket = Socket as any;
   t.after(() => { globalThis.WebSocket = original; });
-  const bridge = new LocalAgentBridge(async (path: any, method: any, data: any) => {
+  const pairing = new LocalAgentPairing(async (path: any, method: any, data: any) => {
     calls.push({ path, method, data });
-    return path.endsWith("ticket") ? { ticket: "one-time-login-proof" } : { ok: true };
-  }, "alice", (online) => statuses.push(online));
-  t.after(() => bridge.close());
-  await bridge.connect();
+    return { ticket: "one-time-login-proof" };
+  }, "alice", (paired) => statuses.push(paired));
+  t.after(() => pairing.close());
+  await pairing.connect();
   const socket = sockets[0];
   assert.equal(socket.url, "ws://127.0.0.1:47673/agent");
   socket.onopen();
-  assert.deepEqual(sent[0], { type: "auth", ticket: "one-time-login-proof" });
-  const instance = (bridge as any).instance;
-  await socket.onmessage({ data: JSON.stringify({ type: "ready", userId: "alice", instance, clientId: "d".repeat(32), name: "Office PC", cwd: "C:\\work", platform: "windows" }) });
-  assert.equal(calls.find((item) => item.path === "/local-agent/connect").data.clientId, "d".repeat(32));
+  assert.deepEqual(sent[0], { type: "auth", ticket: "one-time-login-proof", userId: "alice" });
+  const instance = (pairing as any).instance;
+  socket.onmessage({ data: JSON.stringify({ type: "paired", userId: "alice", instance, clientId: "d".repeat(32) }) });
   assert.deepEqual(statuses, [true]);
-  bridge.forward({ instance: "other", id: "not-ours", op: "exec" });
-  bridge.forward({ instance, id: "once", op: "exec", args: { command: "fixture" } });
-  bridge.forward({ instance, id: "once", op: "exec", args: { command: "fixture" } });
-  assert.equal(sent.filter((item) => item.id === "once").length, 1);
-  await socket.onmessage({ data: JSON.stringify({ id: "once", result: { exitCode: 0 } }) });
-  assert.equal(calls.filter((item) => item.path.endsWith("result")).length, 1);
-  bridge.forward({ instance, id: "uncertain", op: "exec", args: {} });
   socket.onclose();
-  assert.deepEqual(statuses, [true, false]);
-  assert.equal(calls.filter((item) => item.path.endsWith("disconnect")).length, 1);
-  t.mock.timers.tick(5000);
+  t.mock.timers.tick(30000);
   await Promise.resolve(); await Promise.resolve();
-  assert.equal(sent.filter((item) => item.id === "uncertain").length, 1);
-  bridge.forward({ instance, id: "uncertain", op: "exec" });
-  assert.equal(sent.filter((item) => item.id === "uncertain").length, 1);
+  pairing.close();
+  assert.equal(sockets.length, 1, "the page releases its handshake socket after pairing");
+  assert.deepEqual(calls.map((item) => item.path), ["/local-agent/ticket"]);
+  assert.equal(sent.length, 1);
+  assert.equal((pairing as any).forward, undefined, "job forwarding is not a browser responsibility");
 });

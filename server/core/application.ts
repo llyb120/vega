@@ -9,6 +9,7 @@ import { Engine } from "./engine";
 import { HeadlessBrowser } from "./headless";
 import { BrowserLive } from "./browser-live";
 import { EventsSocket } from "./events-socket";
+import { ClientSockets } from "./client-socket";
 export type Application = {
   store: Store;
   engine: Engine;
@@ -16,6 +17,7 @@ export type Application = {
   auth: Auth;
   browserLive: BrowserLive;
   eventsSocket: EventsSocket;
+  clientSockets: ClientSockets;
   headless: HeadlessBrowser;
 };
 let application: Application | undefined;
@@ -48,6 +50,7 @@ export async function initialize(pageScript: string, helper: string) {
     auth,
     browserLive: new BrowserLive(chrome, auth),
     eventsSocket: new EventsSocket(engine, auth),
+    clientSockets: new ClientSockets(store, auth, engine.localAgents),
     headless: new HeadlessBrowser(),
   };
   const dbPath = process.env.VEGA_DB || "vega.db";
