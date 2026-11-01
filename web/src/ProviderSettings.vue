@@ -421,7 +421,7 @@ onBeforeUnmount(() => {
       <h3>服务商</h3>
       <button @click="edit('', {})" :disabled="busy">＋ 添加服务商</button>
     </div>
-    <div class="provider-layout">
+    <div class="provider-layout" :class="{ empty: !providers.length }">
       <aside class="provider-list">
         <button
           v-for="[key, p] in providers"
@@ -664,6 +664,11 @@ onBeforeUnmount(() => {
   grid-template-columns: 190px minmax(0, 1fr);
   gap: 24px;
 }
+/* No providers yet: an empty 190px rail would only waste horizontal space. */
+.provider-layout.empty {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .provider-list {
   display: flex;
   flex-direction: column;

@@ -1205,19 +1205,15 @@ onBeforeUnmount(() => {
           <path d="M4 7h16M4 12h16M4 17h16" />
         </svg>
       </button>
-      <strong>{{ view === 'chat' ? conversationTitle : mobileTitles[view] }}</strong>
-      <span
-        class="pill"
-        :class="{ green: localConnected }"
-        role="status"
-        :title="clientStatus + ' · 新会话可选择任意在线客户端，已有会话不会自动切换'"
-      >{{ clientStatus }}</span>
-      <span
-        v-if="narrow && view === 'chat' && isRunning"
-        class="status-dot"
-        role="status"
-        aria-label="执行中"
-      ></span>
+      <div class="mobile-title">
+        <strong>{{ view === 'chat' ? conversationTitle : mobileTitles[view] }}</strong>
+        <span
+          v-if="narrow && view === 'chat' && isRunning"
+          class="status-dot"
+          role="status"
+          aria-label="执行中"
+        ></span>
+      </div>
       <select
         v-if="narrow && view === 'chat' && stagePath.length > 1"
         class="stage-switch"
@@ -1266,6 +1262,12 @@ onBeforeUnmount(() => {
       <div class="brand">
         <span class="brand-mark small">V</span><strong>Vega</strong>
         <span class="brand-edition">工作台</span>
+        <span
+          class="pill client-chip"
+          :class="{ green: localConnected }"
+          role="status"
+          :title="clientStatus + ' · 新会话可选择任意在线客户端，已有会话不会自动切换'"
+        >{{ clientStatus }}</span>
         <button
           class="icon close-navigation"
           aria-label="关闭导航"
@@ -1403,8 +1405,7 @@ onBeforeUnmount(() => {
       </div>
       <template v-if="view === 'chat'">
         <header v-if="!narrow" class="topbar chat-topbar">
-          <div>
-            <span class="topbar-eyebrow">工作台 / 对话</span>
+          <div class="chat-heading">
             <h2>
               {{ conversationTitle }}
               <span v-if="current?.stageSource" class="pill">Stage</span>
@@ -1630,7 +1631,6 @@ onBeforeUnmount(() => {
                   {{ client.name }} · {{ client.platform }} · {{ client.id.slice(0, 6) }} · 在线
                 </option>
               </select>
-              <div v-if="!isRunning" class="context-controls"></div>
               <span class="hint">Enter 发送 · Shift + Enter 换行</span>
               <button
                 v-if="isRunning"
