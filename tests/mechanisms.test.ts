@@ -17,6 +17,7 @@ import { Chrome } from "../server/core/chrome";
 import { Engine } from "../server/core/engine";
 import { Relay } from "../server/core/relay";
 import { compileScript, parse } from "@vue/compiler-sfc";
+import { envelope, fieldBytes, fieldNumber } from "../server/core/devin";
 const cleanup: (() => any)[] = [];
 afterEach(async () => {
   for (const f of cleanup.splice(0).reverse()) await f();
@@ -92,6 +93,32 @@ function setup(url: string) {
   });
   return engine;
 }
+test("native thinking-only employee chat recovers once without scene downgrades or silent success", async () => {
+  let requests = 0;
+  const url = await http(async (req: any, res: any) => {
+    for await (const _chunk of req) { /* drain the binary fixture request */ }
+    requests++;
+    const result = requests === 1 ? fieldBytes(9, "I need to respond") : fieldBytes(3, "收到，我会按你的要求处理。");
+    res.setHeader("Content-Type", "application/connect+proto");
+    res.end(Buffer.concat([envelope(Buffer.concat([result, fieldNumber(5, 1)])), envelope(Buffer.from("{}"), 2)]));
+  });
+  const e = setup(url), config = e.config();
+  config.provider.p.api = "devin";
+  e.store.put("config", config);
+  e.catalog.resolve = async () => resolveModel(config);
+  const employee = e.employee.for(e.employee.create({ name: "Native assistant" }, "owner").id), session = employee.chat("owner");
+  const events: any[] = [];
+  e.events.on("event", (event) => events.push(event));
+  await e.run(session.id, { role: "user", text: "请确认收到" });
+  assert.equal(requests, 2);
+  assert.equal(events.filter((event) => event.type === "retry").length, 1);
+  assert(events.some((event) => event.type === "thinking_delta"));
+  assert(!events.some((event) => event.type === "scene" || event.type === "error"));
+  assert.equal(e.store.messages(session.id).at(-1)?.text, "收到，我会按你的要求处理。");
+  assert.equal(events.at(-1).data.error, false);
+  assert.equal(employee.state().tasks.length, 0, "a normal question must not be forced into a task");
+});
+
 test("MCP Streamable HTTP describe-before-call, definition revalidation, readOnly allowlist", async () => {
   let calls = 0,
     changed = false;

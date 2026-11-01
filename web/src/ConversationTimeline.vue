@@ -33,7 +33,7 @@ const turns = computed(() => conversationTurns(props.messages, { running: props.
         </article>
       </template>
     </TurnProcess>
-    <article v-for="entry in turn.conclusion" :key="entry.key" :class="['message', entry.message.role, { continuation: entry.continuation }]">
+    <article v-for="entry in turn.conclusion" :key="entry.key" :class="['message', entry.message.role, { continuation: entry.continuation, error: !!entry.message.error }]" :role="entry.message.error ? 'alert' : undefined">
       <MessageText v-if="entry.message.text" :text="entry.message.displayText || entry.message.text" />
       <img v-for="(image, n) in entry.message.images || []" :key="n" :src="image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`" alt="助手附图" />
     </article>

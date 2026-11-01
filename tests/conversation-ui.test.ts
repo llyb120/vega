@@ -26,6 +26,7 @@ test("employee chat, task records and the retained chat all reuse the original N
   assert(timeline.includes("<UserMessage") && timeline.includes("<TurnProcess") && timeline.includes("<ToolSteps"));
   assert(timeline.includes("turn.conclusion") && timeline.includes("started-at"));
   assert(timeline.includes("entry.message.displayText || entry.message.text"));
+  assert(timeline.includes("error: !!entry.message.error") && timeline.includes("entry.message.error ? 'alert'"), "persisted runtime failures must be visible as failures after reload");
   const debug = readFileSync("web/src/EmployeeSessionView.vue", "utf8");
   assert(debug.includes('raw = ref(false)') && debug.includes("原始消息") && debug.includes("JSON.stringify(message.calls"));
   assert(readFileSync("web/src/ToolSteps.vue", "utf8").includes("image.blobId ? `/api/blobs/${image.blobId}`"));

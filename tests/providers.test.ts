@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { Store } from "../server/core/store";
-import { Providers, bodyFor, type Tool } from "../server/core/provider";
+import { Providers, ProviderError, bodyFor, type Tool } from "../server/core/provider";
 import { resolveModel } from "../server/core/config";
 import { Subscriptions } from "../server/core/subscriptions";
 import { Catalog } from "../server/core/catalog";
@@ -72,6 +72,25 @@ function model(api: string, url: string) {
     },
   });
 }
+test("thinking-only and blank replies are incomplete across native, streaming and JSON providers", async () => {
+  const sse = (frames: any[]) => frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n";
+  const cases: [string, string | Buffer, string][] = [
+    ["devin", Buffer.concat([envelope(Buffer.concat([fieldBytes(9, "I should create a task"), fieldNumber(5, 1)])), envelope(Buffer.from("{}"), 2)]), "application/connect+proto"],
+    ["devin", Buffer.concat([envelope(Buffer.concat([fieldBytes(9, "Output budget spent thinking"), fieldNumber(5, 3)])), envelope(Buffer.from("{}"), 2)]), "application/connect+proto"],
+    ["openai-completions", sse([{ choices: [{ delta: { reasoning_content: "I should create a task", content: " \n\t" }, finish_reason: "stop" }] }]), "text/event-stream"],
+    ["anthropic-messages", sse([{ type: "content_block_start", content_block: { type: "thinking", thinking: "I should create a task" } }, { type: "message_delta", delta: { stop_reason: "end_turn" } }, { type: "message_stop" }]), "text/event-stream"],
+    ["openai-responses", sse([{ type: "response.completed", response: { status: "completed", output: [{ type: "reasoning", summary: [{ type: "summary_text", text: "I should create a task" }] }] } }]), "text/event-stream"],
+    ["openai-completions", JSON.stringify({ choices: [{ message: { reasoning_content: "I should create a task", content: " \n" }, finish_reason: "stop" }] }), "application/json"],
+    ["anthropic-messages", JSON.stringify({ stop_reason: "end_turn", content: [{ type: "thinking", thinking: "I should create a task" }] }), "application/json"],
+    ["openai-responses", JSON.stringify({ status: "completed", output: [{ type: "reasoning", summary: [{ type: "summary_text", text: "I should create a task" }] }] }), "application/json"],
+  ];
+  for (const [api, payload, type] of cases) {
+    const m = model(api, await http(payload, type));
+    m.apiKey = "fixture";
+    await assert.rejects(new Providers().chat(m, "sys", [{ role: "user", text: "please handle this" }], [tool], new AbortController().signal), (error: any) => error instanceof ProviderError && error.kind === "empty", `${api} ${type} cannot silently complete with thinking only`);
+  }
+});
+
 test("all three standard protocols stream tools, thinking and usage", async () => {
   const cases = [
     [

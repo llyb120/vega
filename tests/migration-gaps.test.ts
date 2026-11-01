@@ -93,6 +93,74 @@ test("output-length recovery lowers effort only once and never replays already c
     await rm(dir, { recursive: true, force: true });
   }
 });
+test("empty employee chat generations recover with the same request and never replay a delegated task", async () => {
+  const { e, store, config } = engine();
+  const employee = e.employee.for(e.employee.create({ name: "Assistant" }, "owner").id);
+  const session = employee.chat("owner");
+  let requests = 0, dispatches = 0;
+  const retries: any[] = [];
+  e.events.on("event", (event) => {
+    if (event.type === "tool_start" && event.data.name === "employee") dispatches++;
+    if (event.type === "retry") retries.push(event.data);
+  });
+  e.providers.chat = async (model, system, messages) => {
+    requests++;
+    assert(messages.some((message) => message.role === "user" && message.text?.includes("handle this screenshot") && message.images?.length), JSON.stringify(messages.map((message) => ({ role: message.role, text: message.text?.slice(0, 250), images: message.images }))));
+    if (requests === 1 || requests === 3) throw new ProviderError("thinking only", 0, "empty");
+    assert.equal(model.options.reasoningEffort, "low");
+    assert(system.includes("未返回正文或工具调用"));
+    if (requests === 2) return { role: "assistant", calls: [{ id: "delegate-once", name: "employee", arguments: { action: "add", kind: "todo", text: "authorized work" } }] };
+    assert(messages.some((message) => message.role === "tool" && message.callId === "delegate-once"));
+    return { role: "assistant", text: "已创建任务，后续在任务页跟进。" };
+  };
+  try {
+    await e.run(session.id, { role: "user", text: "handle this screenshot", images: [{ mime: "image/png", data: "fixture" }] });
+    assert.equal(requests, 4);
+    assert.equal(retries.length, 2, "one recovery for each distinct empty generation, not a repeated tool batch");
+    assert.equal(dispatches, 1);
+    assert.equal(employee.state().tasks.length, 1);
+    assert.equal(store.messages(session.id).at(-1)?.text, "已创建任务，后续在任务页跟进。");
+    assert.equal(config.provider.p.models.m.options.reasoningEffort, "high");
+  } finally { await e.close(); store.close(); }
+});
+
+test("repeated thinking-only failures stop after one recovery and remain visible in employee chat history", async () => {
+  const { e, store } = engine();
+  const employee = e.employee.for(e.employee.create({ name: "Assistant" }, "owner").id);
+  const session = employee.chat("owner");
+  let requests = 0;
+  const events: any[] = [];
+  e.events.on("event", (event) => events.push(event));
+  e.providers.chat = async () => { requests++; throw new ProviderError("thinking only", 0, "empty"); };
+  try {
+    await assert.rejects(e.run(session.id, { role: "user", text: "please handle this" }), /thinking only/);
+    assert.equal(requests, 2);
+    assert.equal(employee.state().tasks.length, 0, "thinking is never evidence that a task was created");
+    const failure = store.messages(session.id).at(-1)!;
+    assert.equal(failure.role, "assistant");
+    assert.equal(failure.error, true);
+    assert.match(failure.text!, /本轮未完成/);
+    assert(events.some((event) => event.type === "message_end" && event.data.error));
+    assert.equal(events.at(-1).type, "done");
+    assert.equal(events.at(-1).data.error, true);
+    assert.equal(e.active.size, 0);
+  } finally { await e.close(); store.close(); }
+});
+
+test("cancelling a thinking-only generation never triggers recovery or creates a failure reply", async () => {
+  const { e, store } = engine();
+  const employee = e.employee.for(e.employee.create({ name: "Assistant" }, "owner").id);
+  const session = employee.chat("owner"), controller = new AbortController();
+  let requests = 0;
+  e.providers.chat = async () => { requests++; controller.abort(); throw new ProviderError("thinking only", 0, "empty"); };
+  try {
+    await assert.rejects(e.run(session.id, { role: "user", text: "please handle this" }, undefined, controller.signal));
+    assert.equal(requests, 1);
+    assert(!store.messages(session.id).some((message) => message.error));
+    assert.equal(employee.state().tasks.length, 0);
+  } finally { await e.close(); store.close(); }
+});
+
 test("setup virtual config is explicit-authorized, section-scoped and secret-preserving", async () => {
   const { e, store, config } = engine(),
     session = store.newSession(),

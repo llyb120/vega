@@ -618,7 +618,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
 
         let reply: Message | undefined;
         let outputRecovery: Model | undefined,
-          outputRecovered = false;
+          outputRecovered = false,
+          emptyRecovered = false;
         for (let attempt = 0; attempt <= 5; attempt++) {
           emit("message_start", {
             model: model.selection,
@@ -628,10 +629,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           try {
             reply = await this.providers.chat(
               outputRecovery || model,
-              system,
+              emptyRecovered ? system + "\n[运行提示：上一段生成未返回正文或工具调用，不能算完成。根据原始授权继续：回复用户，或调用尚未执行且必要的工具；已执行的操作以历史工具结果为准，不得重放。]" : system,
               view,
               tools.definitions(model),
-              outputRecovery
+              outputRecovery || emptyRecovered
                 ? AbortSignal.any([control.signal, AbortSignal.timeout(120000)])
                 : control.signal,
               emit,
@@ -640,6 +641,13 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             break;
           } catch (e: any) {
             control.signal.throwIfAborted();
+            if (e.kind === "empty" && !emptyRecovered) {
+              emptyRecovered = true;
+              outputRecovery ||= recoveryModel(model);
+              this.providers.reset(key);
+              emit("retry", { reason: "模型未返回正文或工具调用，正在恢复一次；不会重放历史工具操作", attempt: attempt + 1 });
+              continue;
+            }
             if (
               !trimRecovered &&
               (e.status === 413 ||
@@ -706,6 +714,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             session.model = next;
             outputRecovery = undefined;
             outputRecovered = false;
+            emptyRecovered = false;
             overflowRecovered = false;
             model = await this.catalog.resolve(config, next);
             await this.compact(tools, model, system);
@@ -878,6 +887,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     } catch (e: any) {
       error = e instanceof Error ? e : new Error(String(e));
       error.message = String(redact.value(error.message));
+      if (session?.employeeId && !session.taskId && !control.signal.aborted) {
+        const failure = this.store.append(key, { role: "assistant", text: `本轮未完成：${error.message}\n已执行的操作仍保留，可补充消息继续。`, error: true });
+        emit("message_end", failure);
+      }
       emit("error", error.message);
       throw error;
     } finally {

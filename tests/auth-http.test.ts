@@ -29,6 +29,7 @@ test(
         Buffer.from("secret-image-fixture"),
       );
     seeded.close();
+    let thinkingRequests = 0;
     const mock = createServer(async (req, res) => {
       if (req.method === "GET" && req.url === "/models") {
         res.setHeader("Content-Type", "application/json");
@@ -69,6 +70,8 @@ test(
       const content = payload.messages?.[userAt]?.content;
       const memory = typeof content === "string" ? content.match(/team-memory-fixture-(?:admin|member)/)?.[0] : undefined;
       const memoryCall = memory && !payload.messages.slice(userAt + 1).some((message: any) => message.role === "tool");
+      const thinkingOnly = typeof content === "string" && content.includes("thinking-only-chat-fixture");
+      if (thinkingOnly) thinkingRequests++;
       res.setHeader("Content-Type", "text/event-stream");
       res.end(
         "data: " +
@@ -76,7 +79,7 @@ test(
             choices: [
               {
                 index: 0,
-                delta: memoryCall ? { tool_calls: [{ index: 0, id: "memory-fixture", type: "function", function: { name: "employee", arguments: JSON.stringify({ action: "remember", text: memory }) } }] } : { content: "private session response" },
+                delta: thinkingOnly ? { reasoning_content: "I need to respond, but no answer was generated" } : memoryCall ? { tool_calls: [{ index: 0, id: "memory-fixture", type: "function", function: { name: "employee", arguments: JSON.stringify({ action: "remember", text: memory }) } }] } : { content: "private session response" },
                 finish_reason: memoryCall ? "tool_calls" : "stop",
               },
             ],
@@ -444,6 +447,20 @@ test(
       const teamState = await ok(`/employees/${team.id}`, 'GET', undefined, admin);
       assert(teamState.memories.some((memory: any) => memory.text === 'team-memory-fixture-admin'));
       assert(!teamState.memories.some((memory: any) => memory.text === 'team-memory-fixture-member'), 'a forged actorId cannot inherit the administrator who owns the team employee');
+      await ok(`/employees/${team.id}/messages`, 'POST', { text: 'thinking-only-chat-fixture' }, admin);
+      let failedChat: any;
+      for (let index = 0; index < 100; index++) {
+        failedChat = await ok(`/employees/${team.id}/chat`, 'GET', undefined, admin);
+        if (!failedChat.running && failedChat.messages.at(-1)?.error) break;
+        await sleep(20);
+      }
+      assert.equal(thinkingRequests, 2, 'an empty generation is recovered once, not treated as success or retried forever');
+      assert.equal(failedChat.running, false);
+      assert.equal(failedChat.messages.at(-1).error, true);
+      assert.match(failedChat.messages.at(-1).text, /本轮未完成/);
+      const readAfterFailure = await ok(`/sessions/${teamChat.session.id}`, 'GET', undefined, b);
+      assert.equal(readAfterFailure.messages.at(-1).text, failedChat.messages.at(-1).text, 'the failure survives a new reader rather than depending on a transient event');
+      assert.equal((await ok(`/employees/${team.id}`, 'GET', undefined, admin)).tasks.length, 0);
       assert.equal((await req(`/employees/${workerA.id}/control`, "POST", { action: "settings", vaultIds: [] }, a)).r.status, 403);
       for (const [worker, login] of [[workerA, a], [workerB, b]] as const) {
         await ok(`/employees/${worker.id}`, "POST", { action: "add", kind: "todo", text: "isolated work", key: "same-key", nextCheckInMinutes: 60 }, login);

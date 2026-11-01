@@ -40,10 +40,15 @@ export class ProviderError extends Error {
   constructor(
     message: string,
     public status = 0,
-    public kind?: "length",
+    public kind?: "length" | "empty",
   ) {
     super(message);
   }
+}
+function usableReply(reply: Message) {
+  if (!reply.text?.trim() && !reply.calls?.length)
+    throw new ProviderError("模型只返回了思考内容或空白，没有回复正文或工具调用", 0, "empty");
+  return reply;
 }
 const hash = (v: any) =>
   createHash("sha256").update(JSON.stringify(v)).digest("hex");
@@ -502,13 +507,13 @@ export class Providers {
       this.resolveImage,
     );
     if (model.api === "devin")
-      return await devinStream(
+      return usableReply(await devinStream(
         model,
         body,
         model.options.__devinVersion || "3000.11.205",
         signal,
         emit,
-      );
+      ));
     const headers: Obj = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
@@ -923,10 +928,7 @@ export class Providers {
       seenCalls.add(call.id);
     }
     signal.throwIfAborted();
-    assert(
-      result.text || result.calls?.length,
-      "Provider returned no usable text or tools",
-    );
+    usableReply(result);
     if (responseID && session && model.api === "openai-responses") {
       const state = this.checkpoints.get(cacheKey);
       if (state?.owner === owner) {
