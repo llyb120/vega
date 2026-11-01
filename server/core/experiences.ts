@@ -25,7 +25,7 @@ export class Experiences {
       modelSaved: boolean;
     }
   >();
-  constructor(public store: Store) {}
+  constructor(public store: Store, public kind = "experience") {}
   scope(raw: string) {
     const u = new URL(raw);
     assert(
@@ -39,7 +39,7 @@ export class Experiences {
     return u.origin;
   }
   all() {
-    return this.store.objects<any>("experience");
+    return this.store.objects<any>(this.kind);
   }
   summary(e: Obj) {
     return {
@@ -248,7 +248,7 @@ export class Experiences {
               a.successes.length - b.successes.length ||
               a.updatedAt - b.updatedAt,
           )[0];
-          this.store.remove("experience", worst.id);
+          this.store.remove(this.kind, worst.id);
         }
         entry = {
           id: id(),
@@ -298,7 +298,7 @@ export class Experiences {
     entry.evidence = r.evidence || "";
     entry.snapshotId = args.snapshotId;
     entry.updatedAt = Date.now();
-    this.store.save("experience", entry.id, entry);
+    this.store.save(this.kind, entry.id, entry);
     const trail = this.trails.get(owner + ":" + scope);
     if (trail && !args.auto) trail.modelSaved = true;
     return { experience: this.summary(entry), saved: true };
@@ -388,10 +388,10 @@ export class Experiences {
       entry.updatedAt = Date.now();
       if (!existing && autos.length >= 10)
         this.store.remove(
-          "experience",
+          this.kind,
           autos.sort((a, b) => a.updatedAt - b.updatedAt)[0].id,
         );
-      this.store.save("experience", entry.id, entry);
+      this.store.save(this.kind, entry.id, entry);
     }
     for (const key of this.shown)
       if (key.startsWith(owner + ":")) this.shown.delete(key);

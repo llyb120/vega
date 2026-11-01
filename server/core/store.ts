@@ -29,6 +29,7 @@ export type Session = {
   scene?: string;
   stageSource?: string;
   taskId?: string;
+  employeeId?: string;
   localAgent?: boolean;
   localPlatform?: string;
   clientId?: string;
@@ -261,8 +262,8 @@ export class Store {
   fork(key: string) {
     const source = this.session(key);
     assert(
-      !source.taskId,
-      "Employee task history must continue through task controls",
+      !source.taskId && !source.employeeId,
+      "Employee history must continue through its workspace",
     );
     return this.transaction(() => {
       const copy = this.newSession({
@@ -298,8 +299,8 @@ export class Store {
   stage(key: string, inherit = false) {
     const source = this.session(key);
     assert(
-      !source.taskId,
-      "Employee task history must continue through task controls",
+      !source.taskId && !source.employeeId,
+      "Employee history must continue through its workspace",
     );
     return this.newSession({
       cwd: source.cwd,

@@ -18,7 +18,7 @@ import {
   setHeader,
   send,
 } from "h3";
-import { app } from "../../core/application";
+import { app, employeeLive } from "../../core/application";
 import { assert, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
@@ -104,7 +104,7 @@ export default defineEventHandler(async (event) => {
         user,
         sessions: store
           .sessions()
-          .filter((s) => !s.taskId && auth.canRead(user, s)),
+          .filter((s) => !s.taskId && !s.employeeId && auth.canRead(user, s)),
         running: Object.fromEntries(
           [...engine.active.keys()]
             .filter((key) => {
@@ -136,6 +136,60 @@ export default defineEventHandler(async (event) => {
       setHeader(event, "Content-Type", blob.mime);
       return send(event, Buffer.from(blob.data));
     }
+    if (path[0] === "employees") {
+      check(user.role !== "viewer", 403, "Execution permission required");
+      if (path.length === 1) {
+        if (method === "GET") return engine.employee.all().filter((employee) => employee.accessible(user)).map((employee) => {
+          const s = employee.state();
+          return { id: s.id, name: s.name, instruction: s.instruction, enabled: s.enabled, activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length };
+        });
+        if (method === "POST") return engine.employee.create(a, user.id);
+      }
+      const employee = engine.employee.for(path[1]);
+      check(employee.accessible(user), 404, "Employee not found");
+      const state = employee.state();
+      if (path[2] === "chat" && method === "GET") {
+        const session = employee.chat(user.id);
+        return { session, messages: store.messages(session.id), running: engine.active.has(session.id) };
+      }
+      if (path[2] === "messages" && method === "POST") {
+        const session = employee.chat(user.id);
+        const message = await inputMessage(a, store, session.id);
+        if (engine.active.has(session.id)) engine.steer(session.id, message);
+        else await engine.launch(session.id, message);
+        return { id: session.id };
+      }
+      if (path[2] === "cancel" && method === "POST") {
+        if (state.chatSession) engine.cancel(state.chatSession);
+        return { ok: true };
+      }
+      if (path[2] === "chrome") {
+        if (method === "POST" && a.operation === "close") {
+          check(!employee.busy.size, 409, "Stop browser tasks first");
+          await engine.browsers.stop(employee.employeeId);
+          return { ok: true };
+        }
+        const browser = await engine.browsers.get(employee.employeeId);
+        if (path[3] === "tabs" && method === "GET") return browserTabs(browser);
+        if (path[3] === "live" && method === "POST") return employeeLive(employee.employeeId).ticket(who, a.tabTag);
+        if (path[3] === "screenshot" && method === "POST") return browserScreenshot(browser, "employee-view:" + user.id, a.tabTag);
+        if (path[3] === "control" && method === "POST") return browserControl(browser, "employee-view:" + user.id, a);
+        if (path[3] === "tool" && method === "POST") return browser.execute("employee-view:" + user.id, state.cwd, a);
+        if (path.length === 3) return browser.bridge.status();
+        check(false, 404, "Browser route not found");
+      }
+      if (path[2] === "control" && method === "POST") {
+        if (a.vaultIds !== undefined) check(user.role === "admin", 403, "Only administrators grant credentials");
+        return employee.control(a);
+      }
+      if (path[2] === "transcript" && method === "POST") return employee.transcript(a.threadId);
+      if (path.length === 2 && method === "GET") return { ...state, busy: [...employee.busy.keys()] };
+      if (path.length === 2 && method === "POST") {
+        const result = await employee.execute("", a);
+        return result.secret ? JSON.parse(result.secret) : result.value;
+      }
+      check(false, 404, "Employee route not found");
+    }
     if (path[0] === "sessions") {
       if (path.length === 1 && method === "POST") {
         assert(!a.model || typeof a.model === "string", "Invalid model");
@@ -160,6 +214,7 @@ export default defineEventHandler(async (event) => {
       }
       const key = path[1],
         session = auth.session(user, key, method !== "GET");
+      if (session.employeeId && method !== "GET") check(false, 400, "Use the employee workspace to manage its conversations");
       if (path[2] === "access")
         check(false, 404, "Private sessions cannot be shared");
 
@@ -187,7 +242,7 @@ export default defineEventHandler(async (event) => {
             (s) =>
               !engine.active.has(s.id) &&
               engine.fire.forSession(s.id)?.status !== "running" &&
-              !s.taskId,
+              !s.taskId && !s.employeeId,
           ),
           "Cannot delete running or employee-owned session",
         );

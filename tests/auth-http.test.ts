@@ -402,6 +402,26 @@ test(
       const a = await sign("runner-one", "valid-runner-one-password"),
         b = await sign("runner-two", "valid-runner-two-password"),
         v = await sign("viewer-one", "valid-viewer-one-password");
+      const workerA = await ok("/employees", "POST", { name: "Alice worker", cwd: dir }, a);
+      const workerB = await ok("/employees", "POST", { name: "Bob worker", cwd: dir }, b);
+      assert.notEqual(workerA.id, workerB.id);
+      assert.equal((await req("/employees/" + workerA.id, "GET", undefined, b)).r.status, 404);
+      assert.equal((await req("/employees", "GET", undefined, v)).r.status, 403);
+      assert.deepEqual((await ok("/employees", "GET", undefined, a)).map((employee: any) => employee.id), [workerA.id]);
+      assert.equal((await req(`/employees/${workerA.id}/control`, "POST", { action: "settings", vaultIds: [] }, a)).r.status, 403);
+      for (const [worker, login] of [[workerA, a], [workerB, b]] as const) {
+        await ok(`/employees/${worker.id}/control`, "POST", { action: "settings", enabled: false }, login);
+        await ok(`/employees/${worker.id}`, "POST", { action: "add", kind: "todo", text: "isolated work", key: "same-key" }, login);
+      }
+      const stateA = await ok(`/employees/${workerA.id}`, "GET", undefined, a);
+      const stateB = await ok(`/employees/${workerB.id}`, "GET", undefined, b);
+      assert.notEqual(stateA.tasks[0].id, stateB.tasks[0].id);
+      assert.equal((await req(`/employees/${workerB.id}`, "POST", { action: "done", id: stateA.tasks[0].id }, a)).r.status, 404);
+      const chat = await ok(`/employees/${workerA.id}/chat`, "GET", undefined, a);
+      assert.equal(chat.session.employeeId, workerA.id);
+      assert.equal((await req(`/sessions/${chat.session.id}/messages`, "POST", { text: "must use employee" }, a)).r.status, 400);
+      assert(!(await ok("/bootstrap", "GET", undefined, a)).sessions.some((session: any) => session.id === chat.session.id));
+      assert.equal((await req(`/sessions/${chat.session.id}`, "GET", undefined, b)).r.status, 404);
       assert(
         !JSON.stringify(await ok("/users", "GET", undefined, admin)).includes(
           "scrypt1:",

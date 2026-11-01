@@ -16,6 +16,7 @@ export type Application = {
   token: string;
   auth: Auth;
   browserLive: BrowserLive;
+  employeeLives: Map<string, BrowserLive>;
   eventsSocket: EventsSocket;
   clientSockets: ClientSockets;
   headless: HeadlessBrowser;
@@ -49,6 +50,7 @@ export async function initialize(pageScript: string, helper: string) {
     token,
     auth,
     browserLive: new BrowserLive(chrome, auth),
+    employeeLives: new Map(),
     eventsSocket: new EventsSocket(engine, auth),
     clientSockets: new ClientSockets(store, auth, engine.localAgents),
     headless: new HeadlessBrowser(),
@@ -59,6 +61,19 @@ export async function initialize(pageScript: string, helper: string) {
   engine.employee.start();
   engine.relay.restart();
   return application;
+}
+export function employeeLive(employeeId?: string) {
+  const application = app();
+  if (!employeeId) return application.browserLive;
+  const employee = application.engine.employee.for(employeeId);
+  let live = application.employeeLives.get(employeeId);
+  if (!live) {
+    const chrome = application.engine.browsers.peek(employeeId);
+    if (!chrome) throw Error("员工浏览器尚未启动");
+    live = new BrowserLive(chrome, application.auth, (principal) => employee.accessible(principal.user));
+    application.employeeLives.set(employeeId, live);
+  }
+  return live;
 }
 export function authenticated(value: string, token: string) {
   const a = Buffer.from(value),

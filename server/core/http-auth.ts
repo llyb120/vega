@@ -106,6 +106,7 @@ export function gate(event: H3Event, path: string) {
   if (/^\/api\/local-agent\/(ticket|revoke)$/.test(path) && event.method === "POST") return;
   const role = session.user.role;
   if (role === "admin") return;
+  if (role === "operator" && /^\/api\/employees(?:\/|$)/.test(path)) return;
   if (
     (path === "/api/bootstrap" && event.method === "GET") ||
     (path === "/api/events" && ["GET", "POST"].includes(event.method))
@@ -137,6 +138,10 @@ export function eventAllowed(user: User, value: any) {
     } catch {
       return false;
     }
+  }
+  if (value.data?.employeeId) {
+    try { return app().engine.employee.for(value.data.employeeId).accessible(user); }
+    catch { return false; }
   }
   if (value.type === "fire") {
     try {

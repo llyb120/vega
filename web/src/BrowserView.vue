@@ -1,6 +1,6 @@
 <script setup vapor>
 import { computed, ref, onMounted, onBeforeUnmount } from "vue";
-const props = defineProps({ api: Function });
+const props = defineProps({ api: Function, employeeId: String });
 const status = ref(null),
   tabs = ref([]),
   selected = ref(""),
@@ -169,6 +169,7 @@ async function capture(tab) {
     const url = new URL("/api/chrome/live", window.location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("ticket", ticket);
+    if (props.employeeId) url.searchParams.set("employeeId", props.employeeId);
     const ws = new WebSocket(url);
     socket = ws;
     const fail = (reason) => {
@@ -253,6 +254,17 @@ async function capture(tab) {
       error.value = e.message;
     }
   }
+}
+async function stopBrowser() {
+  if (busy.value) return;
+  busy.value = true;
+  disconnect();
+  try {
+    await props.api("/chrome", "POST", { operation: "close" });
+    tabs.value = []; status.value = null; screenshot.value = null;
+    info.value = "实例已停止，登录态保留；刷新标签页可重新启动。";
+  } catch (e) { error.value = e.message; }
+  finally { busy.value = false; }
 }
 async function refresh() {
   if (busy.value) return;
@@ -745,6 +757,7 @@ onBeforeUnmount(() => {
         status?.connected ? (status.browser || "浏览器") + " 已连接" : "未连接"
       }}</span
       ><button :disabled="busy" @click="refresh">刷新标签页</button>
+      <button v-if="employeeId" :disabled="busy" @click="stopBrowser">停止实例</button>
     </div>
   </header>
   <section class="browser-view" :aria-busy="busy">

@@ -9,6 +9,7 @@ import ToolSteps from "./ToolSteps.vue";
 import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
+import EmployeeChat from "./EmployeeChat.vue";
 import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
 import {
@@ -133,6 +134,7 @@ const isAdmin = computed(() => user.value?.role === "admin"),
 const canWriteCurrent = computed(
   () =>
     canExecute.value &&
+    !!current.value?.employeeId &&
     !sessionLoading.value &&
     !current.value?.taskId &&
     (!current.value ||
@@ -187,7 +189,15 @@ const employee = ref({
     memories: [],
     runs: [],
   }),
-  employeeTab = ref("tasks"),
+  employeeTab = ref("chat"),
+  employees = ref([]),
+  selectedEmployee = ref(""),
+  employeeEvent = ref(null),
+  employeeComposers = ref({}),
+  creatingEmployee = ref(false),
+  newEmployeeName = ref(""),
+  newEmployeeInstruction = ref(""),
+  vaultEntries = ref([]),
   employeeSession = ref(""),
   employeeSessionVersion = ref(0),
   employeeError = ref(""),
@@ -343,6 +353,7 @@ const historyTasks = computed(() =>
 const labels = {
   queued: "排队中",
   running: "执行中",
+  recovering: "自动恢复中",
   deferred: "等外部结果",
   waiting: "需要信息",
   approval: "需要确认",
@@ -586,7 +597,8 @@ async function enter(result) {
   if (isAdmin.value) startPresence();
   await Promise.all([
     loadModels(),
-    sessions.value.length
+    canExecute.value ? refreshEmployee() : null,
+    !canExecute.value && sessions.value.length
       ? selectSession(
           sessions.value.find(
             (s) =>
@@ -598,6 +610,7 @@ async function enter(result) {
         )
       : null,
   ]);
+  if (canExecute.value) view.value = "employee";
   try {
     const pending = JSON.parse(
       sessionStorage.getItem("vega:provider-login:" + user.value.id) || "null",
@@ -664,7 +677,22 @@ function resetLogin() {
   config.value = {};
   catalogModels.value = [];
   activeTaskCount.value = null;
+  employeeTab.value = "chat";
+  creatingEmployee.value = false;
+  newEmployeeName.value = "";
+  newEmployeeInstruction.value = "";
+  vaultEntries.value = [];
+  employee.value = { duties: [], tasks: [], memories: [], runs: [] };
+  taskText.value = "";
+  memoryText.value = "";
+  memoryID.value = "";
+  dutyOpen.value = false;
+  duty.value = emptyDuty();
   employeeSession.value = "";
+  employees.value = [];
+  selectedEmployee.value = "";
+  employeeEvent.value = null;
+  employeeComposers.value = {};
   employeeError.value = "";
   drafts.clear();
   restoreDraft();
@@ -917,6 +945,10 @@ async function refreshCurrent() {
   running.value[current.value.id] = data.running;
 }
 async function handleEvent(event) {
+  if (event.session && event.session === employee.value.chatSession) {
+    employeeEvent.value = event;
+    return;
+  }
   if (event.type === "clients_changed") {
     await bootstrap();
     return;
@@ -980,13 +1012,14 @@ async function handleEvent(event) {
   const selected = event.session === current.value?.id;
   if (event.type === "started") running.value[event.session] = true;
   if (event.type === "employee_changed") {
+    if (!event.data?.employeeId || event.data.employeeId === selectedEmployee.value) employeeSessionVersion.value++;
     if (typeof event.data?.activeTasks === "number")
       activeTaskCount.value = event.data.activeTasks;
     queueEmployeeRefresh();
     return;
   }
   if (event.type === "employee_error") {
-    employeeError.value = event.data;
+    employeeError.value = typeof event.data === 'string' ? event.data : event.data?.message;
     return;
   }
   if (!selected) {
@@ -1044,14 +1077,55 @@ async function handleEvent(event) {
   }
 }
 async function loadEmployee() {
-  if (!isAdmin.value) return;
+  if (!canExecute.value) return;
   const owner = user.value.id;
-  const data = await api("/employee");
+  const list = await api("/employees");
   if (user.value?.id !== owner) return;
-  employee.value = data;
-  activeTaskCount.value = (data.tasks || []).filter(
-    (t) => !ended(t.status),
-  ).length;
+  employees.value = list;
+  activeTaskCount.value = list.reduce((count, employee) => count + employee.activeTasks, 0);
+  if (!list.some((entry) => entry.id === selectedEmployee.value)) selectedEmployee.value = list[0]?.id || "";
+  const id = selectedEmployee.value;
+  if (!id) return;
+  employeeComposers.value[id] ||= { text: "", images: [] };
+  const data = await api(`/employees/${id}`);
+  if (user.value?.id !== owner || selectedEmployee.value !== id) return;
+  if (employeeTab.value !== "settings" || employee.value.id !== id) employee.value = data;
+}
+function employeeApi(path, method = "GET", data) {
+  if (!selectedEmployee.value) throw Error("请先创建员工");
+  return api(path.replace(/^\/employee(?=\/|$)/, `/employees/${selectedEmployee.value}`), method, data);
+}
+function employeeBrowserApi(path, method = "GET", data) {
+  return api(path.replace(/^\/chrome/, `/employees/${selectedEmployee.value}/chrome`), method, data);
+}
+async function chooseEmployee(id) {
+  selectedEmployee.value = id;
+  employeeSession.value = "";
+  employeeEvent.value = null;
+  employeeTab.value = "chat";
+  dutyOpen.value = false;
+  memoryID.value = "";
+  taskText.value = "";
+  employeeError.value = "";
+  creatingEmployee.value = false;
+  view.value = "employee";
+  closeNavigation();
+  await refreshEmployee();
+}
+async function createEmployee() {
+  await attempt(async () => {
+    const created = await api("/employees", "POST", { name: newEmployeeName.value, instruction: newEmployeeInstruction.value, cwd: project.value });
+    newEmployeeName.value = "";
+    newEmployeeInstruction.value = "";
+    await chooseEmployee(created.id);
+  });
+}
+async function employeeTabChanged(id) {
+  employeeTab.value = id;
+  if (id === "settings" && isAdmin.value) {
+    try { vaultEntries.value = (await api("/vault")).entries; }
+    catch (error) { employeeError.value = error.message; }
+  }
 }
 function openEmployee(session = "") {
   employeeSession.value = session;
@@ -1075,12 +1149,12 @@ function queueEmployeeRefresh() {
   }, 150);
 }
 async function employeeAction(data) {
-  const result = await api("/employee", "POST", data);
+  const result = await employeeApi("/employee", "POST", data);
   await loadEmployee();
   return result;
 }
 async function control(data) {
-  await api("/employee/control", "POST", data);
+  await employeeApi("/employee/control", "POST", data);
   await loadEmployee();
 }
 async function addTask() {
@@ -1090,7 +1164,7 @@ async function addTask() {
       kind: "todo",
       text: taskText.value,
       profile: taskProfile.value,
-      cwd: project.value,
+      cwd: employee.value.cwd,
     });
     taskText.value = "";
   });
@@ -1170,6 +1244,10 @@ async function saveEmployeeSettings() {
   await attempt(async () => {
     await control({
       action: "settings",
+      name: employee.value.name,
+      instruction: employee.value.instruction,
+      cwd: employee.value.cwd,
+      ...(isAdmin.value ? { vaultIds: employee.value.vaultIds || [] } : {}),
       enabled: employee.value.enabled,
       workStart: employee.value.workStart,
       workEnd: employee.value.workEnd,
@@ -1286,8 +1364,8 @@ onBeforeUnmount(() => {
       <button
         v-if="canExecute && view === 'chat'"
         class="icon mobile-control"
-        aria-label="新建会话"
-        @click="newSession"
+        aria-label="交给员工"
+        @click="openEmployee()"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 5v14M5 12h14" />
@@ -1325,21 +1403,27 @@ onBeforeUnmount(() => {
           </svg>
         </button>
       </div>
-      <button v-if="canExecute" class="new-session" @click="newSession">
+      <button v-if="canExecute" class="new-session" @click="creatingEmployee = true; openEmployee()">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 5v14M5 12h14" />
         </svg>
-        <span>新建会话</span>
+        <span>创建员工</span>
       </button>
+      <div v-if="canExecute" class="sidebar-heading"><span>我的员工</span><span>{{ employees.length }}</span></div>
+      <div v-if="canExecute" class="employee-list">
+        <button v-for="entry in employees" :key="entry.id" class="session-row" :class="{ active: view === 'employee' && selectedEmployee === entry.id }" @click="chooseEmployee(entry.id)">
+          <span :class="['dot', { working: entry.enabled && entry.activeTasks }]" aria-hidden="true"></span><span class="truncate">{{ entry.name }}</span><span class="count">{{ entry.activeTasks }}</span>
+        </button>
+      </div>
       <nav aria-label="主导航" @click="closeNavigation">
         <button :class="{ selected: view === 'chat' }" @click="view = 'chat'">
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M20 15a3 3 0 0 1-3 3H9l-5 3v-6a3 3 0 0 1-1-2V7a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3Z" />
           </svg>
-          <span>对话</span>
+          <span>历史对话</span>
         </button>
         <button
-          v-if="isAdmin"
+          v-if="canExecute"
           :class="{ selected: view === 'employee' }"
           @click="openEmployee()"
         >
@@ -1355,7 +1439,7 @@ onBeforeUnmount(() => {
         <button
           v-if="isAdmin"
           :class="{ selected: view === 'browser' }"
-          @click="view = 'browser'"
+          @click="employeeTab = 'browser'; openEmployee()"
         >
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
             <rect x="3" y="4" width="18" height="16" rx="2" />
@@ -1398,10 +1482,10 @@ onBeforeUnmount(() => {
           <span>设置</span>
         </button>
       </nav>
-      <div class="sidebar-heading">
+      <div v-if="view === 'chat'" class="sidebar-heading">
         <span>最近会话</span><span>{{ rootSessions.length }}</span>
       </div>
-      <div class="session-list">
+      <div v-if="view === 'chat'" class="session-list">
         <div
           v-for="s in rootSessions"
           :key="s.id"
@@ -1488,9 +1572,9 @@ onBeforeUnmount(() => {
               :title="clientStatus + ' · 新会话可选择任意在线客户端，已有会话不会自动切换'"
             >{{ clientStatus }}</span>
             <span v-if="isRunning" class="pill green"><span class="status-dot"></span>执行中</span>
-            <button v-if="canExecute" class="topbar-new" @click="newSession">
+            <button v-if="canExecute" class="topbar-new" @click="openEmployee()">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-              新建会话
+              交给员工
             </button>
           </div>
         </header>
@@ -1607,7 +1691,7 @@ onBeforeUnmount(() => {
           />
         </div>
         <p v-if="!canWriteCurrent" class="context-note">
-          当前账号仅可查看此会话，不能发送消息、停止任务或执行工具。
+          历史会话仅供查阅；继续工作请交给员工，执行会话由员工管理。
         </p>
         <div v-if="canWriteCurrent" class="composer-wrap">
           <form class="composer" @submit.prevent="send">
@@ -1730,17 +1814,17 @@ onBeforeUnmount(() => {
         @changed="attempt(bootstrap)"
       />
       <EmployeeSessionView
-        v-else-if="view === 'employee' && isAdmin && employeeSession"
+        v-else-if="view === 'employee' && canExecute && employeeSession"
         :api="api"
         :session-id="employeeSession"
         :revision="employeeSessionVersion"
         @back="openEmployee()"
       />
-      <template v-else-if="view === 'employee' && isAdmin"
+      <template v-else-if="view === 'employee' && canExecute"
         ><header class="topbar">
           <div>
-            <h2>数字员工</h2>
-            <p>职责触发工作，任务独立推进。</p>
+            <h2>{{ employee.name || '我的员工' }}</h2>
+            <p>交代目标，员工安排任务、持续推进并自动恢复。</p>
           </div>
           <span :class="['pill', employee.enabled ? 'green' : '']">{{
             employee.enabled ? "已启用" : "已停用"
@@ -1757,36 +1841,44 @@ onBeforeUnmount(() => {
               ×
             </button>
           </p>
-          <div class="employee-settings">
-            <label
-              ><input v-model="employee.enabled" type="checkbox" />
-              启用员工</label
-            ><label
-              >工作时间 <input v-model="employee.workStart" type="time" /> —
-              <input v-model="employee.workEnd" type="time" /></label
-            ><button @click="saveEmployeeSettings">保存</button
-            ><small>北京时间</small>
+          <form v-if="creatingEmployee || !employees.length" class="card form-grid" @submit.prevent="createEmployee">
+            <h3>创建数字员工</h3>
+            <label>员工名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发员工" /></label>
+            <label>主要负责什么<textarea v-model="newEmployeeInstruction" maxlength="8000" placeholder="职责方向、工作原则和偏好"></textarea></label>
+            <div class="actions"><button class="primary">创建</button><button v-if="employees.length" type="button" @click="creatingEmployee = false">取消</button></div>
+          </form>
+          <div v-if="employeeTab === 'settings' && employees.length" class="card form-grid">
+            <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
+            <label>工作原则<textarea v-model="employee.instruction" maxlength="8000"></textarea></label>
+            <label>工作目录<input v-model="employee.cwd" required /></label>
+            <label><input v-model="employee.enabled" type="checkbox" /> 启用员工</label>
+            <label>工作时间（北京时间，起止相同表示全天）<span><input v-model="employee.workStart" type="time" /> — <input v-model="employee.workEnd" type="time" /></span></label>
+            <fieldset v-if="isAdmin && vaultEntries.length"><legend>允许使用的密码本条目</legend><label v-for="entry in vaultEntries" :key="entry.id"><input v-model="employee.vaultIds" type="checkbox" :value="entry.id" /> {{ entry.name }} · {{ entry.condition }}</label></fieldset>
+            <button @click="saveEmployeeSettings">保存员工设置</button>
           </div>
           <div v-if="!employee.enabled" class="context-note">
             员工当前停用，新任务只保存、不执行。启用并进入工作时间后开始处理。
           </div>
-          <div class="tabs" role="tablist">
+          <div v-if="employees.length && !creatingEmployee" class="tabs" role="tablist">
             <button
               v-for="[id, label] in [
-                ['tasks', '任务'],
+                ['chat', '对话'],
+                ['tasks', '工作'],
+                ['browser', '浏览器'],
                 ['duties', '职责'],
                 ['memories', '长期记忆'],
+                ['settings', '设置'],
               ]"
               :key="id"
               :class="{ selected: employeeTab === id }"
-              @click="
-                employeeTab = id;
-              "
+              @click="employeeTabChanged(id)"
             >
               {{ label }}
             </button>
           </div>
-          <template v-if="employeeTab === 'tasks'"
+          <EmployeeChat v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee && !creatingEmployee" :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" />
+          <BrowserView v-if="employeeTab === 'browser' && selectedEmployee && !creatingEmployee" :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" />
+          <template v-if="employeeTab === 'tasks' && !creatingEmployee"
             ><form class="inline-form" @submit.prevent="addTask">
               <input
                 v-model="taskText"
@@ -1821,6 +1913,7 @@ onBeforeUnmount(() => {
               <p v-if="t.waiting || t.approval" class="attention">
                 {{ t.waiting || t.approval }}
               </p>
+              <p v-if="t.recovery?.attempts" class="hint">自动恢复 {{ t.recovery.attempts }} 次 · {{ t.recovery.reason }}</p>
               <p v-if="t.checkpoint" class="hint">恢复点：{{ t.checkpoint }}</p>
               <ol v-if="t.plan?.length" class="plan">
                 <li v-for="(step, n) in t.plan" :key="n" :class="step.status">
@@ -1856,7 +1949,7 @@ onBeforeUnmount(() => {
                   v-if="['stopped', 'failed', 'cancelled'].includes(t.status)"
                   @click="taskAction(t, 'resume')"
                 >
-                  原会话续做</button
+                  继续任务</button
                 ><button
                   @click="
                     attempt(async () => {
@@ -1876,7 +1969,7 @@ onBeforeUnmount(() => {
                   v-if="t.workSession"
                   @click="
                     attempt(async () => {
-                      const timeline = await api(
+                      const timeline = await employeeApi(
                         '/employee/transcript',
                         'POST',
                         { threadId: t.workSession },
@@ -1890,12 +1983,12 @@ onBeforeUnmount(() => {
                   v-if="t.workSession"
                   @click="openEmployee(t.workSession)"
                 >
-                  主会话 ↗</button
+                  执行详情 ↗</button
                 ><button
                   v-if="t.computerSession"
                   @click="openEmployee(t.computerSession)"
                 >
-                  Chrome 会话 ↗</button
+                  浏览器执行详情 ↗</button
                 ><button
                   v-if="!ended(t.status) && t.status !== 'running'"
                   @click="
@@ -2097,3 +2190,10 @@ onBeforeUnmount(() => {
     </section>
   </div>
 </template>
+
+<style scoped>
+.employee-list { flex: 1; min-height: 44px; overflow-y: auto; padding: 0 12px; }
+.employee-list > button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 44px; margin: 3px 0; padding: 9px 12px; text-align: left; border: 0; background: transparent; }
+.employee-list > button.active { color: #0963d8; background: #e8effd; }
+.employee-list .truncate { flex: 1; }
+</style>

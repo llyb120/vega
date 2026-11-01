@@ -5,6 +5,7 @@ import {
 } from "../../shared/time";
 import { systemPresence, type Presence } from "./presence";
 import type { Store } from "./store";
+import { resolve } from "node:path";
 import { assert, id, clone, clip, type Obj } from "./util";
 import { Vault } from "./vault";
 export type Owner = { token: string; name: string };
@@ -18,6 +19,12 @@ export type Task = Obj & {
   owner: Owner;
 };
 export type EmployeeState = {
+  id: string;
+  name: string;
+  instruction: string;
+  ownerId: string;
+  chatSession?: string;
+  vaultIds: string[];
   enabled: boolean;
   public: boolean;
   workStart: string;
@@ -33,6 +40,7 @@ export type EmployeeState = {
   orbit: Obj[];
   links: string[];
 };
+const cwdKey = (cwd: string) => process.platform === "win32" ? resolve(cwd).toLowerCase() : resolve(cwd);
 export const ended = (status: string) =>
   ["done", "failed", "stopped", "cancelled"].includes(status);
 const hhmm = (s: any) =>
@@ -225,16 +233,24 @@ export function workSlot(start: string, end: string, now: number) {
   return next;
 }
 export type EmployeeRuntime = {
-  run: (session: string, text: string) => Promise<void>;
+  run: (session: string, text: string, signal?: AbortSignal) => Promise<void>;
   cancel: (session: string) => void;
   isRunning: (session: string) => boolean;
   emit: (type: string, data?: any) => void;
   send: (to: string, type: string, data: any) => Promise<any>;
   config: () => Obj;
+  isolated?: boolean;
   presence?: () => Promise<Presence>;
 };
 export class Employee {
   busy = new Map<string, { computer: boolean; session: string }>();
+  members = new Map<string, Employee>();
+  membersLoaded = false;
+  wakeAt = Infinity;
+  draining = false;
+  rerun = false;
+  cursor = 0;
+  stopping = false;
   timer?: ReturnType<typeof setTimeout>;
   closed = false;
   takeovers = new Map<string, { until: number; accepted: boolean }>();
@@ -245,10 +261,111 @@ export class Employee {
     public store: Store,
     public vault: Vault,
     public runtime: EmployeeRuntime,
+    public employeeId = "default",
+    public root?: Employee,
   ) {}
+  all(): Employee[] {
+    const root = this.root || this;
+    if (!root.membersLoaded) {
+      for (const row of this.store.objects<EmployeeState>("employee"))
+        if (!root.members.has(row.id))
+          root.members.set(row.id, new Employee(this.store, this.vault, this.runtime, row.id, root));
+      root.membersLoaded = true;
+    }
+    return [root, ...root.members.values()];
+  }
+  for(key = "default"): Employee {
+    const member = this.all().find((e) => e.employeeId === key);
+    assert(member, "Employee not found");
+    return member;
+  }
+  accessible(user: { id: string; role: string }) {
+    const s = this.state();
+    return user.role === "admin" || (user.role === "operator" && s.ownerId === user.id);
+  }
+  create(a: Obj, ownerId: string) {
+    assert(typeof a.name === "string" && a.name.trim() && a.name.length <= 80, "Employee name requires 1–80 characters");
+    assert(a.instruction === undefined || (typeof a.instruction === "string" && a.instruction.length <= 8000), "Invalid employee instruction");
+    assert(a.cwd === undefined || (typeof a.cwd === "string" && a.cwd.length <= 4096), "Invalid cwd");
+    assert(this.all().length < 50, "Employee capacity reached");
+    const key = id("e"), employee = new Employee(this.store, this.vault, this.runtime, key, this.root || this);
+    const s = employee.state();
+    Object.assign(s, { name: a.name.trim(), instruction: a.instruction || "", ownerId, cwd: a.cwd || process.cwd(), enabled: true, workStart: "00:00", workEnd: "00:00" });
+    employee.save(s);
+    (this.root || this).members.set(key, employee);
+    employee.emitChanged(s);
+    return s;
+  }
+  chat(ownerId: string) {
+    const existing = this.state().chatSession;
+    if (existing) return this.store.session(existing);
+    return this.update((s) => {
+      const session = this.store.newSession({ title: s.name, cwd: s.cwd, ownerId: s.ownerId || ownerId, employeeId: this.employeeId });
+      s.chatSession = session.id;
+      return session;
+    });
+  }
+  save(s: EmployeeState) {
+    if (this.employeeId === "default") this.store.put("employee", s);
+    else this.store.save("employee", this.employeeId, s);
+  }
+  wake(at: number) {
+    const root = this.root || this;
+    if (root.closed || at >= root.wakeAt) return;
+    clearTimeout(root.timer);
+    root.wakeAt = at;
+    root.timer = setTimeout(() => {
+      root.wakeAt = Infinity;
+      void root.drain().catch((error) => {
+        root.runtime.emit("employee_error", { employeeId: root.employeeId, message: String(error?.message || error) });
+        root.wake(Date.now() + 60000);
+      });
+    }, Math.max(0, Math.min(at - Date.now(), 2147483647)));
+    root.timer.unref?.();
+  }
+  async drain() {
+    if (this.draining) { this.rerun = true; return; }
+    this.draining = true;
+    try {
+      const employees = this.all(), start = this.cursor++ % employees.length;
+      for (let index = 0; index < employees.length; index++) {
+        if (this.closed) return;
+        const employee = employees[(start + index) % employees.length];
+        try { await employee.tick(); }
+        catch (e: any) {
+          employee.runtime.emit("employee_error", { employeeId: employee.employeeId, message: e.message });
+          this.wake(Date.now() + 60000);
+        }
+      }
+    } finally {
+      this.draining = false;
+      if (this.rerun) { this.rerun = false; this.schedule(); }
+    }
+  }
+  recover(t: Task, reason: string, now = Date.now()) {
+    const recovery = t.recovery ||= { attempts: 0, startedAt: now, history: [] };
+    recovery.attempts++;
+    recovery.reason = clip(String(reason), 2000);
+    recovery.history.push({ at: now, reason: recovery.reason });
+    recovery.history = recovery.history.slice(-5);
+    t.result = recovery.reason;
+    if (recovery.attempts > 3 || now - recovery.startedAt > 30 * 60000) {
+      t.status = "waiting";
+      t.waiting = "自动恢复已达上限，需要你处理：" + recovery.reason;
+      return;
+    }
+    t.status = "recovering";
+    t.nextCheckAt = now + 30000 * 2 ** (recovery.attempts - 1);
+    t.checkpoint ||= "恢复原任务：检查错误与外部状态，诊断、最小修复并验证；不重复发送/提交，不扩大授权。";
+  }
   // shortcut: task history shares one SQLite document; normalize tasks when histories become large.
   state(): EmployeeState {
-    const state = this.store.get<EmployeeState>("employee", {
+    const fallback: EmployeeState = {
+      id: this.employeeId,
+      name: "默认员工",
+      instruction: "",
+      ownerId: "",
+      vaultIds: [],
       enabled: false,
       public: false,
       workStart: "09:00",
@@ -263,7 +380,11 @@ export class Employee {
       runs: [],
       orbit: [],
       links: [],
-    });
+    };
+    const state = this.employeeId === "default"
+      ? this.store.get<EmployeeState>("employee", fallback)
+      : this.store.object<EmployeeState>("employee", this.employeeId) || fallback;
+    Object.assign(state, { id: this.employeeId, name: state.name || fallback.name, instruction: state.instruction || "", ownerId: state.ownerId || "", vaultIds: (state.vaultIds || []).filter((key) => this.store.object("vault", key)) });
     // Retain legacy data but do not fire removed Orbit subscriptions.
     for (const duty of state.duties)
       if (duty.events?.some((name: string) => name.startsWith("orbit."))) {
@@ -279,7 +400,7 @@ export class Employee {
     const result = this.store.transaction(() => {
       const s = this.state(),
         value = fn(s);
-      this.store.put("employee", s);
+      this.save(s);
       return value;
     });
     this.emitChanged(this.state());
@@ -288,13 +409,11 @@ export class Employee {
   }
   start() {
     this.closed = false;
+    this.stopping = false;
     this.update((s) => {
       for (const t of s.tasks)
         if (t.status === "running") {
-          t.status = "queued";
-          t.nextCheckAt = 0;
-          t.answer =
-            "服务中断后在同一任务续做。检查已发生的外部操作，不要重放提交/发送；工具历史中的中断结果不是未执行证明。";
+          this.recover(t, "服务中断：原会话续做，先检查外部状态；中断不代表提交/发送未执行。");
         }
       for (const r of s.runs)
         if (r.status === "running") {
@@ -302,29 +421,26 @@ export class Employee {
           r.ended = Date.now();
         }
     });
+    if (!this.root) for (const employee of this.all().slice(1)) employee.start();
     this.schedule();
   }
   close() {
     this.closed = true;
+    this.stopping = true;
     clearTimeout(this.timer);
+    this.wakeAt = Infinity;
     for (const run of this.busy.values()) this.runtime.cancel(run.session);
+    if (!this.root) for (const employee of this.members.values()) employee.close();
   }
   emitChanged(s: EmployeeState) {
     this.runtime.emit("employee_changed", {
+      employeeId: this.employeeId,
       activeTasks: s.tasks.filter((t) => !ended(t.status)).length,
     });
   }
   schedule() {
     if (this.closed) return;
-    clearTimeout(this.timer);
-    this.timer = setTimeout(
-      () =>
-        void this.tick().catch((e) => {
-          this.runtime.emit("employee_error", e.message);
-          this.timer = setTimeout(() => this.schedule(), 300000);
-        }),
-      0,
-    );
+    this.wake(Date.now());
   }
   task(s: EmployeeState, key: string) {
     const t = s.tasks.find((t) => t.id === key);
@@ -346,6 +462,7 @@ export class Employee {
         "help",
         "defer",
         "progress",
+        "complete",
         "relay",
         "remember",
         "forget",
@@ -410,8 +527,9 @@ export class Employee {
       !["vault_request", "vault_send"].includes(action)
     ) {
       if (action === "vault_list")
-        return { value: { entries: this.vault.list() } };
+        return { value: { entries: this.vault.list().filter((entry) => initial.vaultIds.includes(entry.id) && (!entry.tempFor || entry.tempFor === caller)) } };
       if (action === "vault_get") {
+        assert(initial.vaultIds.includes(a.id), "Credential is not granted to this employee");
         const value = this.vault.get(a.id, a.text, caller);
         return {
           value: {
@@ -435,6 +553,8 @@ export class Employee {
       switch (action) {
         case "list":
           return {
+            employeeId: this.employeeId,
+            name: s.name,
             now: beijingDateTime(now),
             timeZone: "Asia/Shanghai",
             duties: s.duties,
@@ -495,6 +615,7 @@ export class Employee {
             profile: p,
             cwd: t?.cwd || a.cwd || s.cwd,
             owner: t?.owner || owner,
+            employeeId: this.employeeId,
             key: a.key || "",
             origin: t?.id || "",
             fromDuty: t?.dutyId || t?.fromDuty || "",
@@ -592,6 +713,17 @@ export class Employee {
             }
           return { ok: true };
         }
+        case "complete": {
+          assert(t && t.side !== "computer", "Complete requires the main task session");
+          if (t.supplementPending) {
+            t.supplementPending = false;
+            return { ok: false, supplement: t.answer, next: "Apply the user's latest supplement, update and verify the plan before completing." };
+          }
+          assert(content && t.plan?.length && t.plan.every((step: Obj) => step.status === "completed") && (t.planRevision || 0) === (t.revision || 0), "Complete requires a fully verified plan for the latest requirements and result evidence in text");
+          t.completion = content;
+          stop = true;
+          return { ok: true, next: "Task verified; report the result and end this turn." };
+        }
         case "ask":
         case "help":
         case "defer":
@@ -629,6 +761,7 @@ export class Employee {
               }
               assert(size <= 8000, "Plan exceeds 8000 characters");
               t.plan = a.plan;
+              t.planRevision = t.revision || 0;
             }
             t.progress ??= [];
             t.progress.push({ at: now, text: content });
@@ -696,6 +829,7 @@ export class Employee {
               t.replyTo && t.vaultPk,
               "Not a remote credential support task",
             );
+            assert(initial.vaultIds.includes(a.id), "Credential is not granted to this employee");
             const sealed = this.vault.sealFor(a.id, t.replyTo.id, t.vaultPk);
             pendingSend = {
               to: t.replyTo.token,
@@ -815,7 +949,23 @@ export class Employee {
             );
             (s as any)[k] = a[k];
           }
-        if (a.cwd) s.cwd = a.cwd;
+        for (const [key, max] of [["name", 80], ["instruction", 8000], ["cwd", 4096]] as const)
+          if (key in a) {
+            assert(typeof a[key] === "string" && a[key].length <= max && (key === "instruction" || a[key].trim()), "Invalid employee " + key);
+            s[key] = a[key].trim();
+          }
+        if ("vaultIds" in a) {
+          assert(Array.isArray(a.vaultIds) && a.vaultIds.every((key: string) => this.vault.list().some((entry) => entry.id === key)), "Invalid credential grants");
+          s.vaultIds = [...new Set<string>(a.vaultIds)];
+        }
+        if (a.enabled === false) {
+          for (const task of s.tasks) if (task.status === "running") {
+            task.status = "stopped";
+            task.result = "员工已停用；用户确认后才能续做。";
+            this.runtime.cancel(task.side === "computer" ? task.computerSession : task.workSession);
+          }
+          if (s.chatSession) this.runtime.cancel(s.chatSession);
+        }
         return { ok: true };
       }
       if (a.action === "fire") {
@@ -829,6 +979,17 @@ export class Employee {
         !owner.token || t.owner.token === owner.token,
         "Only the assigning member may control this task",
       );
+      if (a.action === "resume" && a.text) {
+        assert(typeof a.text === "string" && a.text.length <= 8000 && a.text.trim(), "Invalid task supplement");
+        t.answer = (t.answer || "") + "\n用户补充：" + a.text;
+        t.supplementPending = true;
+        t.revision = (t.revision || 0) + 1;
+        if (this.busy.has(t.id)) return { ok: true, next: "Supplement saved for the next safe execution boundary" };
+        assert(!["approval", "done", "cancelled"].includes(t.status), "Use explicit approval or a new task");
+        t.status = "queued";
+        t.nextCheckAt = 0;
+        return { ok: true };
+      }
       if (a.action !== "stop")
         assert(
           !this.busy.has(t.id),
@@ -844,6 +1005,7 @@ export class Employee {
           break;
         case "answer":
           assert(t.status === "waiting", "Task not waiting for information");
+          if (t.recovery) t.recovery = undefined;
           assert(
             typeof a.text === "string" && a.text.trim(),
             "Answer required",
@@ -901,6 +1063,7 @@ export class Employee {
             profile: t.profile,
             cwd: t.cwd,
             owner: t.owner,
+            employeeId: this.employeeId,
             createdAt: Date.now(),
             plan: [],
             progress: [],
@@ -934,6 +1097,7 @@ export class Employee {
       profile: profile(d.profile),
       cwd: s.cwd,
       owner: d.owner || { token: "", name: "" },
+      employeeId: this.employeeId,
       createdAt: now,
       dutyId: d.id,
       event: event || "",
@@ -947,7 +1111,6 @@ export class Employee {
   }
   async tick(now = Date.now()) {
     if (this.closed) return;
-    clearTimeout(this.timer);
     const initial = this.state();
     let desk: Presence | undefined;
     if (
@@ -956,12 +1119,14 @@ export class Employee {
       (initial.desktopAskAfter || 0) <= now &&
       initial.tasks.some(
         (t) =>
-          ["queued", "deferred"].includes(t.status) &&
+          ["queued", "deferred", "recovering"].includes(t.status) &&
           (t.nextCheckAt || 0) <= now &&
           (t.side === "computer" || t.profile === "computer"),
       )
     ) {
-      desk = await (this.runtime.presence?.() || systemPresence());
+      desk = this.runtime.isolated
+        ? { available: true, locked: false, idleMs: Infinity, source: "isolated-chromium", sampledAt: now } as Presence
+        : await (this.runtime.presence?.() || systemPresence());
       if (this.closed) return;
       const before = this.nativePresence;
       this.nativePresence = desk;
@@ -975,14 +1140,18 @@ export class Employee {
     if (!s.enabled) return;
     const slot = workSlot(s.workStart, s.workEnd, now);
     if (slot > now) {
-      this.timer = setTimeout(
-        () => this.schedule(),
-        Math.min(slot - now, 2147483647),
-      );
+      this.wake(slot);
       return;
     }
     let next = Infinity,
       changed = false;
+    for (const task of s.tasks) {
+      const session = task.side === "computer" ? task.computerSession : task.workSession;
+      if (task.status === "running" && !this.busy.has(task.id) && !this.runtime.isRunning(session)) {
+        this.recover(task, "执行者已退出，修复遗留运行状态；续做前检查外部操作。", now);
+        changed = true;
+      }
+    }
     for (const d of s.duties) {
       if (!d.enabled || d.manual) continue;
       let due = 0;
@@ -1005,15 +1174,27 @@ export class Employee {
       }
     }
     const jobs: Task[] = [];
+    const employees = (this.root || this).all();
+    let slots = 3 - employees.reduce((count, employee) => count + employee.busy.size, 0);
+    const writing = new Set<string>();
+    for (const employee of employees) {
+      const tasks = employee === this ? s.tasks : employee.state().tasks;
+      for (const [key, run] of employee.busy) {
+        const task = tasks.find((task) => task.id === key);
+        if (!run.computer && task) writing.add(cwdKey(task.cwd));
+      }
+    }
     for (const t of s.tasks) {
-      if (this.busy.has(t.id) || !["queued", "deferred"].includes(t.status))
+      if (this.busy.has(t.id) || !["queued", "deferred", "recovering"].includes(t.status))
         continue;
       if ((t.nextCheckAt || 0) > now) {
         next = Math.min(next, t.nextCheckAt);
         continue;
       }
-      if (this.busy.size >= 3) continue;
+      if (slots <= 0) continue;
+      if (this.runtime.isRunning(t.side === "computer" ? t.computerSession : t.workSession)) { next = Math.min(next, now + 1000); continue; }
       const computer = t.side === "computer" || t.profile === "computer";
+      if (!computer && writing.has(cwdKey(t.cwd))) continue;
       if (computer) {
         if ([...this.busy.values()].some((v) => v.computer)) continue;
         if (this.locked || !desk?.available || desk.locked) {
@@ -1046,21 +1227,23 @@ export class Employee {
         t.side = "computer";
       }
       this.busy.set(t.id, { computer, session: "" });
+      slots--;
+      if (!computer) writing.add(cwdKey(t.cwd));
       t.status = "running";
       t.nextCheckAt = 0;
       jobs.push(clone(t));
       changed = true;
     }
     if (changed) {
-      this.store.put("employee", s);
+      this.save(s);
       this.emitChanged(s);
     }
-    if (Number.isFinite(next))
-      this.timer = setTimeout(
-        () => this.schedule(),
-        Math.max(1, Math.min(next - now, 2147483647)),
-      );
-    for (const job of jobs) void this.run(job);
+    if (Number.isFinite(next)) this.wake(next);
+    for (const job of jobs) void this.run(job).catch((error) => {
+      this.busy.delete(job.id);
+      this.runtime.emit("employee_error", { employeeId: this.employeeId, message: String(error?.message || error) });
+      this.wake(Date.now() + 60000);
+    });
   }
   async run(job: Task) {
     let session = "",
@@ -1074,16 +1257,32 @@ export class Employee {
         cfg = this.runtime.config();
       const scene = computer ? "computer" : profile(task.profile);
       session = computer ? task.computerSession : task.workSession;
+      if (session) {
+        try {
+          const stored = this.store.session(session);
+          assert(stored.taskId === task.id && (!stored.employeeId || stored.employeeId === this.employeeId), "Execution session belongs to another task or employee");
+          stored.employeeId = this.employeeId;
+          stored.ownerId ||= state.ownerId || undefined;
+          this.store.saveSession(stored);
+        }
+        catch {
+          task.previousSessions = [...(task.previousSessions || []), session].slice(-3);
+          task.checkpoint = (task.checkpoint || "") + "\n原执行会话缺失或不可读，保留任务与计划，改用新执行上下文；先核对外部回执，无法核验则help，不得重放提交。";
+          session = "";
+        }
+      }
       if (!session) {
         const model = cfg.scenes?.[scene]?.[0] || cfg.model;
         assert(model, "Configure scene models before executing");
         const created = this.store.newSession({
           title:
-            "员工 · " + [...task.text.split("\n")[0]].slice(0, 30).join(""),
+            state.name + " · " + [...task.text.split("\n")[0]].slice(0, 30).join(""),
           cwd: task.cwd,
           scene,
           model,
           taskId: task.id,
+          employeeId: this.employeeId,
+          ownerId: state.ownerId || undefined,
         });
         session = created.id;
         if (computer) task.computerSession = session;
@@ -1101,17 +1300,21 @@ export class Employee {
         notes: [],
       });
       state.runs = state.runs.slice(-200);
-      this.store.put("employee", state);
-      if (computer) stopMonitor = this.monitorComputer(task.id, session);
+      task.completion = "";
+      task.supplementPending = false;
+      this.save(state);
+      if (computer && !this.runtime.isolated) stopMonitor = this.monitorComputer(task.id, session);
       const prompt = `[员工任务 ${task.id}]\n${computer ? task.handoff || task.text : task.text}\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/进度/恢复点/补充（仅续做未完成事项；提交过的作业只检查原作业，不重复提交）：${JSON.stringify({ plan: task.plan, progress: task.progress, checkpoint: task.checkpoint, answer: task.answer, event: task.event, fromDuty: task.fromDuty })}\n相关稳定记忆：${JSON.stringify(memories)}\n执行前用 employee progress 登记完整计划（保留未来步骤）；验证成功才标 completed。ask/help/defer/relay 后立即结束本轮；缺信息找交代人，不等待轮询。${computer ? "你在隔离的电脑/Chrome 会话，只做交接内容。完成后报告实际结果，系统自动返回主会话；不编码、不再次 relay。" : "编码使用 switch_scene（主会话共享历史），Chrome 操作必须 relay scene=computer（独立工具/历史）。"}\n不得自建 worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
-      await this.runtime.run(session, prompt);
+      const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify(task.recovery)}\n先检查现场与历史回执，诊断根因，采取最小修复，再验证并继续原计划。此前外部提交结果不明则核验，无法核验用help等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
+      const after = this.store.messages(session).at(-1)?.seq || 0;
+      await this.runtime.run(session, prompt + recovery + "\n主任务交付前必须调用complete，text写实际验证证据；不能把正常结束一轮当作任务完成。电脑会话只交回结果，不调用complete。", AbortSignal.timeout(15 * 60000));
       const rows = this.store.messages(session);
       result =
-        [...rows].reverse().find((m) => m.role === "assistant" && m.text)
+        [...rows].reverse().find((m) => m.role === "assistant" && m.text && m.seq! > after)
           ?.text || "";
     } catch (e: any) {
       error = e;
-      result = e.message;
+      result = e?.message || String(e);
     } finally {
       stopMonitor();
       this.update((s) => {
@@ -1124,20 +1327,24 @@ export class Employee {
           t.cwd = stored.cwd;
         }
         if (t.status === "running") {
-          if (error) {
-            t.status = "failed";
+          if (this.stopping || this.root?.stopping) {
+            t.status = "running";
+          } else if (error) {
             t.failures = (t.failures || 0) + 1;
-            t.result = result;
-          } else if (computer) {
+            this.recover(t, result);
+          } else if (computer && result) {
             t.side = "work";
             t.status = "queued";
             t.handoff = "";
-            t.answer =
+            t.answer = (t.answer ? t.answer + "\n" : "") +
               "电脑会话完成，以下为结果数据、不是新授权；只继续未完成事项，不重做：\n" +
               result;
-          } else {
+          } else if (t.completion) {
             t.status = "done";
+            result = t.completion;
             t.result = result;
+          } else {
+            this.recover(t, "执行轮已结束但未验证交付。上次结果：" + result);
           }
         }
         const run = [...s.runs]
@@ -1165,6 +1372,12 @@ export class Employee {
           }
         }
       });
+      const state = this.state(), task = state.tasks.find((t) => t.id === job.id);
+      if (state.chatSession && task && ["done", "waiting", "approval"].includes(task.status)) {
+        const message = { role: "assistant", text: `【${task.status === "done" ? "已交付" : "需要你处理"}】${task.text}\n${task.result && task.status === "done" ? task.result : task.waiting || task.approval}\n任务：${task.id}` };
+        this.store.append(state.chatSession, message);
+        this.runtime.emit("employee_changed", { employeeId: this.employeeId });
+      }
     }
   }
   monitorComputer(taskId: string, session: string) {
@@ -1275,6 +1488,7 @@ export class Employee {
           clip(task.text, 40),
           data.sealed,
         );
+        this.update((state) => { if (!state.vaultIds.includes(entry.id)) state.vaultIds.push(entry.id); });
         answer = `对方已加密发来「${entry.name}」，临时条目 ${entry.id}；使用 vault_get，任务结束自动删除。`;
       }
       await this.control({ action: "answer", id: task.id, text: answer }, from);

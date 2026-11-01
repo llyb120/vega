@@ -130,7 +130,7 @@ export class Relay {
         this.connected = true;
         this.onStatus({ connected: true });
         backoff = 1000;
-        for (const task of this.employee.state().tasks)
+        for (const employee of this.employee.all()) for (const task of employee.state().tasks)
           if (task.status === "waiting" && task.owner.token)
             void this.send(task.owner.token, "starlink.help", {
               id: task.id,
@@ -276,13 +276,18 @@ export class Relay {
       }
       return;
     }
-    if (event.type?.startsWith("starlink."))
-      await this.employee.remote(from, event.type, data);
+    if (event.type?.startsWith("starlink.")) {
+      const employee = event.type === "starlink.reply"
+        ? this.employee.all().find((employee) => employee.state().tasks.some((task) => task.id === data.id)) || this.employee
+        : this.employee;
+      await employee.remote(from, event.type, data);
+    }
   }
   async serve(owner: Owner, command: string, args: Obj) {
-    assert(this.employee.state().public, "Employee is not public");
+    const employee = this.employee.for(args.employeeId || "default");
+    assert(employee.state().public, "Employee is not public");
     if (command === "info") {
-      const s = this.employee.state();
+      const s = employee.state();
       return {
         status: s.enabled ? "enabled" : "disabled",
         tasks: s.tasks.filter(
@@ -291,18 +296,16 @@ export class Relay {
       };
     }
     if (command === "employee_get") {
-      const s = this.employee.state();
+      const s = employee.state();
       return {
-        ...s,
-        memories: [],
-        orbit: [],
-        links: [],
-        tasks: s.tasks.map(({ checkpoint, ...t }) => t),
+        id: s.id, name: s.name, enabled: s.enabled, public: s.public,
+        duties: [], memories: [], runs: [], orbit: [], links: [],
+        tasks: s.tasks.filter((task) => task.owner.token === owner.token).map(({ checkpoint, ...task }) => task),
       };
     }
     if (command === "employee_say")
       return (
-        await this.employee.execute(
+        await employee.execute(
           "",
           { action: "add", kind: "todo", text: args.text },
           owner,
@@ -316,13 +319,16 @@ export class Relay {
         delete: "remove",
         supply: "answer",
       };
-      return this.employee.control(
+      return employee.control(
         { ...args, action: aliases[args.action] || args.action },
         owner,
       );
     }
-    if (command === "transcript")
-      return this.employee.transcript(args.threadId);
+    if (command === "transcript") {
+      const task = employee.state().tasks.find((task) => task.workSession === args.threadId || task.computerSession === args.threadId);
+      assert(task?.owner.token === owner.token, "Only the assigning member may view this task");
+      return employee.transcript(args.threadId);
+    }
     throw Error("Unsupported employee team command");
   }
 }

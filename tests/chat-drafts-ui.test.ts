@@ -35,6 +35,8 @@ function mount(handler: (path: string, method: string, data: any) => any = () =>
     localBridge: null, stopPresence() {}, employeeRefreshTimer: undefined, closed: false, eventGeneration: 0,
     eventReconnect: undefined, eventsHeartbeat: undefined, eventsSocket: null, eventsReady: false, eventsWasConnected: false,
     clearTimeout, clearInterval, rejectSocketRequests() {}, authenticated: ref(true), password: ref(""), setupToken: ref(""),
+    employees: ref([]), selectedEmployee: ref(""), employeeEvent: ref(null), employeeComposers: ref({}),
+    employeeTab: ref("chat"), creatingEmployee: ref(false), newEmployeeName: ref(""), newEmployeeInstruction: ref(""), vaultEntries: ref([]), employee: ref({}), taskText: ref(""), memoryText: ref(""), memoryID: ref(""), dutyOpen: ref(false), duty: ref({}), emptyDuty: () => ({}),
     onlineClients: ref([]), localPairing: ref(null), clientListReady: ref(true), config: ref({}), catalogModels: ref([]), activeTaskCount: ref(null), employeeSession: ref(""), employeeError: ref(""),
   };
   context.attempt = async (fn: any) => { try { return await fn(); } catch (e: any) { context.error.value = e.message; } };

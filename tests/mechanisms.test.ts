@@ -265,7 +265,10 @@ test("employee external-job defer and Chrome relay reuse exactly two isolated se
           }),
         ],
       });
-    } else completion(res, { content: "job123 complete" });
+    } else if (calls === 4) completion(res, { tool_calls: [call("verified", "employee", {
+      action: "progress", text: "checked job123", plan: [{ content: "check job123", status: "completed" }],
+    })] });
+    else completion(res, { tool_calls: [call("complete", "employee", { action: "complete", text: "job123 complete; verified original job status" })] });
   });
   const e = setup(url),
     cfg = e.config();
@@ -305,7 +308,7 @@ test("employee external-job defer and Chrome relay reuse exactly two isolated se
       task.workSession !== task.computerSession,
   );
   assert.equal(e.store.sessions().length, 2);
-  assert.equal(calls, 4);
+  assert.equal(calls, 5);
   assert.equal(e.employee.busy.size, 0);
 });
 test("StarLink validates peer identity and preserves authenticated owner for tasks and support", async () => {

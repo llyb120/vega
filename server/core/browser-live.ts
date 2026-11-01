@@ -32,6 +32,7 @@ export class BrowserLive {
   constructor(
     public chrome: Chrome,
     public auth: Auth,
+    public canUse: (principal: Principal) => boolean = (principal) => principal.user.role === "admin",
   ) {
     auth.events.on("logout", this.logout);
     auth.events.on("revoke", this.revoke);
@@ -46,8 +47,8 @@ export class BrowserLive {
   };
   async ticket(principal: Principal, tabTag: unknown) {
     assert(
-      this.auth.resolveHash(principal.hash)?.user.role === "admin",
-      "仅管理员可查看和操作浏览器",
+      !!this.auth.resolveHash(principal.hash) && this.canUse(this.auth.resolveHash(principal.hash)!),
+      "无权查看和操作此浏览器",
     );
     const tab = await this.chrome
       .tabGate(String(tabTag))
@@ -84,7 +85,7 @@ export class BrowserLive {
       id = url.searchParams.get("ticket") || "",
       ticket = this.tickets.get(id);
     assert(
-      principal?.user.role === "admin" &&
+      principal && this.canUse(principal) &&
         ticket &&
         ticket.hash === principal.hash &&
         ticket.until >= Date.now(),
@@ -156,7 +157,8 @@ class LiveSession {
   valid() {
     return (
       this.active &&
-      this.hub.auth.resolveHash(this.principal.hash)?.user.role === "admin"
+      !!this.hub.auth.resolveHash(this.principal.hash) &&
+      this.hub.canUse(this.hub.auth.resolveHash(this.principal.hash)!)
     );
   }
   async run() {

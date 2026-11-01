@@ -39,8 +39,9 @@ export class Chrome {
     public store: Store,
     public bridge: ChromeBridge,
     public pageScript: string,
+    experienceKind = "experience",
   ) {
-    this.experiences = new Experiences(store);
+    this.experiences = new Experiences(store, experienceKind);
   }
   cdp(
     tag: string,

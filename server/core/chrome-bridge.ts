@@ -21,9 +21,10 @@ export class ChromeBridge {
   >();
   queued = new EventEmitter();
   version = "0.1.14";
+  constructor(public privateInstance = false) {}
   async start() {
     if (this.server) return;
-    const ports = process.env.NOVA_CHROME_PORT
+    const ports = this.privateInstance ? [0] : process.env.NOVA_CHROME_PORT
       ? [Number(process.env.NOVA_CHROME_PORT)]
       : Array.from({ length: 10 }, (_, n) => 47653 + n);
     for (const port of ports) {
@@ -42,7 +43,7 @@ export class ChromeBridge {
           server.listen(port, "127.0.0.1", yes);
         });
         this.server = server;
-        this.port = port;
+        this.port = (server.address() as import("node:net").AddressInfo).port;
         return;
       } catch (e: any) {
         server.close();
@@ -160,6 +161,7 @@ export class ChromeBridge {
     }
     assert(req.method === "POST", "POST required");
     if (req.url === "/pair") {
+      assert(!this.privateInstance || req.headers.authorization === "Bearer " + this.token, "Private browser pairing denied");
       send({ token: this.token });
       return;
     }
@@ -255,5 +257,8 @@ export class ChromeBridge {
     this.server?.closeAllConnections();
     this.server?.close();
     this.server = undefined;
+    this.clients.clear();
+    this.queues.clear();
+    this.primaryID = "";
   }
 }
