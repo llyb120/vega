@@ -1,11 +1,7 @@
 <script setup vapor>
 import SettingsView from "./SettingsView.vue";
 import { LocalAgentPairing, canBridgeLocal, pairingStatusText } from "./local-agent";
-import MessageText from "./MessageText.vue";
-import UserMessage from "./UserMessage.vue";
-import TurnProcess from "./TurnProcess.vue";
-import { groupTurns, timelineOf } from "./conversation";
-import ToolSteps from "./ToolSteps.vue";
+import ConversationTimeline from "./ConversationTimeline.vue";
 import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
@@ -197,6 +193,8 @@ const employee = ref({
   employeeSaving = ref(false),
   employeeDeleting = ref(false),
   employeeExecutionBusy = ref(false),
+  employeeExecutionOpen = ref(false),
+  employeeMenu = ref(null),
   debugRevision = ref(0),
   employees = ref([]),
   selectedEmployee = ref(""),
@@ -264,37 +262,6 @@ const executionHint = computed(() => {
   if (!executionLocal.value && !localConnected.value) return "当前在服务端执行；连接客户端后可切换";
   return `当前在${executionLocal.value ? "客户端" : "服务端"}执行，点击切换；两端文件不会自动同步`;
 });
-const turns = computed(() =>
-  groupTurns(messages.value).map((turn, i, all) => {
-    const running = i === all.length - 1 && !!isRunning.value;
-    const process = timelineOf(
-      running
-        ? turn.body
-        : turn.body.slice(0, turn.body.length - turn.conclusion.length),
-    );
-    if (running && thinking.value) {
-      const item = { role: "thought", seq: "live-thought", text: thinking.value };
-      const last = process.at(-1);
-      if (last?.kind === "process") last.items.push(item);
-      else process.push({ kind: "process", key: "process-live-thought", items: [item] });
-    }
-    if (running && live.value) {
-      process.push({
-        kind: "message",
-        key: "assistant-live",
-        message: { role: "assistant", text: live.value, streaming: true },
-        continuation: false,
-      });
-    }
-    return {
-      ...turn,
-      running,
-      process,
-      lastProcessIndex: process.findLastIndex((entry) => entry.kind === "process"),
-      conclusion: timelineOf(running ? [] : turn.conclusion),
-    };
-  }),
-);
 const rootSessions = computed(() =>
   sessions.value.filter((s) => !s.stageSource),
 );
@@ -1109,6 +1076,7 @@ async function chooseEmployee(id) {
   employeeSession.value = "";
   employeeEvent.value = null;
   employeeTab.value = "chat";
+  employeeExecutionOpen.value = false;
   employeeTaskFilter.value = "active";
   dutyOpen.value = false;
   memoryID.value = "";
@@ -1366,8 +1334,9 @@ onBeforeUnmount(() => {
           <path d="M4 7h16M4 12h16M4 17h16" />
         </svg>
       </button>
-      <strong>{{ view === 'chat' ? conversationTitle : mobileTitles[view] }}</strong>
+      <strong>{{ view === 'employee' ? creatingEmployee ? '创建员工' : employee.name || '数字员工' : view === 'chat' ? conversationTitle : mobileTitles[view] }}</strong>
       <span
+        v-if="view !== 'employee'"
         class="pill"
         :class="{ green: localConnected }"
         role="status"
@@ -1395,6 +1364,10 @@ onBeforeUnmount(() => {
           Stage {{ i + 1 }}
         </option>
       </select>
+      <details v-if="view === 'employee' && employee.canManage && !creatingEmployee && !employeeSession" ref="employeeMenu" class="employee-mobile-menu">
+        <summary aria-label="员工更多操作">···</summary>
+        <div class="employee-mobile-actions"><small>{{ employeeStatus }}</small><button @click="employeeTabChanged('settings'); employeeMenu.open = false">员工设置</button><button :aria-expanded="employeeExecutionOpen" @click="employeeExecutionOpen = !employeeExecutionOpen; employeeMenu.open = false">新任务执行位置 · {{ employee.execution?.localAgent ? employee.execution.clientName || '客户端' : '服务端' }}</button><button class="employee-delete" :disabled="employeeDeleting" @click="employeeMenu.open = false; deleteEmployee()">删除员工</button></div>
+      </details>
       <button
         v-if="canExecute && view === 'chat'"
         class="icon mobile-control"
@@ -1405,7 +1378,7 @@ onBeforeUnmount(() => {
           <path d="M12 5v14M5 12h14" />
         </svg>
       </button>
-      <span v-else class="mobile-header-spacer" aria-hidden="true"></span>
+      <span v-else-if="view !== 'employee' || !employee.canManage || creatingEmployee || employeeSession" class="mobile-header-spacer" aria-hidden="true"></span>
     </header>
     <button
       v-if="navigationOpen"
@@ -1609,90 +1582,7 @@ onBeforeUnmount(() => {
             {{ fireState.status }}
             <p v-if="fireState.reason">{{ fireState.reason }}</p>
           </div>
-          <template v-for="turn in turns" :key="`${current?.id}-${turn.user?.seq ?? 'live'}`">
-            <section class="conversation-turn">
-              <article v-if="turn.user" class="message user">
-                <UserMessage
-                  v-if="turn.user.text"
-                  :text="turn.user.displayText || turn.user.text"
-                />
-                <img
-                  v-for="(image, n) in turn.user.images || []"
-                  :key="n"
-                  :src="
-                    image.blobId
-                      ? `/api/blobs/${image.blobId}`
-                      : `data:${image.mime};base64,${image.data}`
-                  "
-                  alt="用户附图"
-                />
-              </article>
-              <div v-if="turn.body.length" class="message-meta">
-                <span>Vega</span><span>{{ turn.body.findLast((m) => m.model)?.model || "" }}</span>
-              </div>
-              <TurnProcess
-                v-if="turn.process.length"
-                :messages="turn.body"
-                :started-at="turn.user?.at"
-                :running="turn.running"
-              >
-                <template v-for="(entry, i) in turn.process" :key="entry.key">
-                  <ToolSteps
-                    v-if="entry.kind === 'process'"
-                    :items="entry.items"
-                    :active="turn.running && i === turn.lastProcessIndex ? activeTools : []"
-                    :live="turn.running && (i === turn.process.length - 1 || (activeTools.length && i === turn.lastProcessIndex))"
-                  />
-                  <article
-                    v-else
-                    :class="['message', entry.message.role, { continuation: entry.continuation }]"
-                  >
-                    <MessageText
-                      v-if="entry.message.text"
-                      :text="entry.message.displayText || entry.message.text"
-                      :streaming="entry.message.streaming"
-                    />
-                    <div
-                      v-if="entry.message.calls?.length && turn.process[i + 1]?.kind !== 'process'"
-                      class="calls"
-                    >
-                      <span v-for="c in entry.message.calls" :key="c.id">↳ {{ c.name }}</span>
-                    </div>
-                  </article>
-                </template>
-              </TurnProcess>
-              <template v-for="entry in turn.conclusion" :key="entry.key">
-                <article
-                  v-if="entry.kind === 'message'"
-                  :class="['message', entry.message.role, { continuation: entry.continuation }]"
-                >
-                  <MessageText :text="entry.message.displayText || entry.message.text" />
-                </article>
-              </template>
-            </section>
-          </template>
-          <article
-            v-if="(live || thinking) && (!turns.length || !turns.at(-1).running)"
-            class="message assistant continuation"
-          >
-            <div class="message-meta">
-              <span>Vega</span><span>{{ model }}</span
-              ><span class="status-dot"></span>
-            </div>
-            <details v-if="thinking" class="reasoning">
-              <summary>思考中</summary>
-              <pre>{{ thinking }}</pre>
-            </details>
-            <MessageText v-if="live" :text="live" streaming />
-          </article>
-          <ToolSteps
-            v-if="
-              activeTools.length &&
-              (!turns.length || !turns.at(-1).running || turns.at(-1).lastProcessIndex < 0)
-            "
-            :active="activeTools"
-            live
-          />
+          <ConversationTimeline :key="current?.id ?? 'none'" :messages="messages" :running="!!isRunning" :live="live" :thinking="thinking" :active-tools="activeTools" :model="model" />
         </div>
         <p v-if="!canWriteCurrent" class="context-note">
           历史会话仅供查阅；继续工作请交给员工，执行会话由员工管理。
@@ -1834,7 +1724,7 @@ onBeforeUnmount(() => {
           <button v-for="[id, label] in employeeTabs" :key="id" :aria-current="employeeTab === id ? 'page' : undefined" :class="{ selected: employeeTab === id }" @click="employeeTabChanged(id)">{{ label }}<span v-if="id === 'tasks' && activeTasks.length" class="tab-count">{{ activeTasks.length }}</span></button>
           <span v-if="employeeTab === 'settings'" class="employee-settings-label">员工设置</span>
         </nav>
-        <div v-if="employees.length && !creatingEmployee" class="employee-execution-bar"><span>新任务执行于</span><button v-if="employee.canManage" type="button" class="execution-switch" role="switch" aria-label="客户端执行（仅影响新任务）" :aria-checked="!!employee.execution?.localAgent" :disabled="employeeExecutionBusy || (!employee.execution?.localAgent && !employee.executionClients?.length)" @click="changeEmployeeExecution(!employee.execution?.localAgent)"><span :class="{ selected: !employee.execution?.localAgent }">服务端</span><span class="execution-track" aria-hidden="true"></span><span :class="{ selected: employee.execution?.localAgent }">客户端</span></button><span v-else class="execution-readonly">{{ employee.execution?.localAgent ? employee.execution.clientName || '客户端' : '服务端' }}</span><select v-if="employee.canManage && employee.execution?.localAgent" aria-label="员工执行客户端" :value="employee.execution.clientId" :disabled="employeeExecutionBusy" @change="changeEmployeeExecution(true, $event.target.value)"><option v-if="!employee.executionClients?.some((client) => client.id === employee.execution.clientId)" :value="employee.execution.clientId" disabled>{{ employee.execution.clientName }} · 离线</option><option v-for="client in employee.executionClients || []" :key="client.id" :value="client.id">{{ client.name }} · {{ client.platform }}</option></select><small>{{ employeeExecutionBusy ? '正在验证执行环境…' : employee.canManage && !employee.executionClients?.length && !employee.execution?.localAgent ? '无在线客户端，连接后可切换；只影响新任务' : '只影响之后的新任务，已有任务不变' }}</small></div>
+        <div v-if="employees.length && !creatingEmployee" class="employee-execution-bar" :class="{ 'mobile-open': employeeExecutionOpen }"><span>新任务执行于</span><button v-if="employee.canManage" type="button" class="execution-switch" role="switch" aria-label="客户端执行（仅影响新任务）" :aria-checked="!!employee.execution?.localAgent" :disabled="employeeExecutionBusy || (!employee.execution?.localAgent && !employee.executionClients?.length)" @click="changeEmployeeExecution(!employee.execution?.localAgent)"><span :class="{ selected: !employee.execution?.localAgent }">服务端</span><span class="execution-track" aria-hidden="true"></span><span :class="{ selected: employee.execution?.localAgent }">客户端</span></button><span v-else class="execution-readonly">{{ employee.execution?.localAgent ? employee.execution.clientName || '客户端' : '服务端' }}</span><select v-if="employee.canManage && employee.execution?.localAgent" aria-label="员工执行客户端" :value="employee.execution.clientId" :disabled="employeeExecutionBusy" @change="changeEmployeeExecution(true, $event.target.value)"><option v-if="!employee.executionClients?.some((client) => client.id === employee.execution.clientId)" :value="employee.execution.clientId" disabled>{{ employee.execution.clientName }} · 离线</option><option v-for="client in employee.executionClients || []" :key="client.id" :value="client.id">{{ client.name }} · {{ client.platform }}</option></select><small>{{ employeeExecutionBusy ? '正在验证执行环境…' : employee.canManage && !employee.executionClients?.length && !employee.execution?.localAgent ? '无在线客户端，连接后可切换；只影响新任务' : '只影响之后的新任务，已有任务不变' }}</small></div>
         <div class="employee-content" :class="{ 'is-chat': employeeTab === 'chat' && !creatingEmployee && employees.length, 'is-browser': employeeTab === 'browser' && !creatingEmployee }">
           <p v-if="employeeError" class="banner error" role="alert">
             {{ employeeError
@@ -2168,5 +2058,22 @@ onBeforeUnmount(() => {
   .employee-create, .employee-settings-form { padding: 22px 18px; margin-top: 0; }
   .employee-create h3 { font-size: 21px; }
   .employee-task-filters button { min-height: 44px; padding: 8px 10px; }
+}
+@media (max-width: 760px) {
+  .employee-header { display: none; }
+  .employee-tabs { padding: 0 14px; gap: 22px; }
+  .employee-tabs button { min-height: 44px; }
+  .employee-execution-bar { display: none; padding: 10px 14px; }
+  .employee-execution-bar.mobile-open { display: flex; }
+  .employee-execution-bar .execution-switch { min-height: 44px; }
+  .employee-execution-bar select { font-size: 16px; }
+  .employee-mobile-menu { position: relative; flex: none; margin-left: auto; }
+  .employee-mobile-menu summary { display: grid; place-items: center; width: 44px; min-height: 44px; list-style: none; font-size: 24px; cursor: pointer; border-radius: 8px; }
+  .employee-mobile-menu summary::-webkit-details-marker { display: none; }
+  .employee-mobile-menu[open] summary { background: var(--surface-sunken); }
+  .employee-mobile-actions { position: absolute; right: 0; top: calc(100% + 6px); width: min(280px, calc(100vw - 28px)); max-height: 70dvh; overflow-y: auto; z-index: 30; padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--sh-lg); }
+  .employee-mobile-actions small { display: block; color: var(--muted); padding: 10px 12px; }
+  .employee-mobile-actions button { width: 100%; text-align: left; white-space: normal; min-height: 44px; border-color: transparent; background: transparent; font-size: 13px; line-height: 1.5; padding: 10px 12px; }
+  .employee-mobile-actions button:hover { background: var(--surface-sunken); }
 }
 </style>

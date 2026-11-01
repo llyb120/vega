@@ -12,6 +12,7 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Auth } from "../server/core/auth";
+import { Tools } from "../server/core/tools";
 
 function fixture() {
   const store = new Store(":memory:");
@@ -60,6 +61,33 @@ test("team employees are visible to everyone; personal employees and management 
     assert(!auth.canRead(bob, privateSession));
     assert(!auth.canWrite(viewer, teamSession));
     assert.equal(engine.employee.state().scope, "team", "the legacy default employee migrates to the team group");
+  } finally { await engine.close(); store.close(); }
+});
+
+test("team chat management uses the current sender, not the employee owner or a previous administrator", async () => {
+  const { store, engine } = fixture();
+  try {
+    const insert = store.db.prepare("INSERT INTO web_users(id,username,password,role,disabled,createdAt,lastLogin) VALUES(?,?,?,?,0,0,0)");
+    insert.run("admin", "admin", "fixture", "admin");
+    insert.run("member", "member", "fixture", "operator");
+    const employee = engine.employee.for(engine.employee.create({ name: "Team" }, "admin", "team").id);
+    const session = employee.chat("admin");
+    const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {});
+    const action = (name: string) => tools.definitions({} as any).find((tool) => tool.name === "employee")!.parameters.properties.action.enum.includes(name);
+    tools.actorId = "admin";
+    assert(action("remember") && action("add"));
+    await tools.execute({ id: "remember", name: "employee", arguments: { action: "remember", text: "Use this workflow" } }, {} as any);
+    await tools.execute({ id: "duty", name: "employee", arguments: { action: "add", kind: "duty", text: "Weekly review", manual: true } }, {} as any);
+    assert.equal(employee.state().duties.length, 1);
+    tools.actorId = "member";
+    assert(!action("remember") && !action("vault_get"));
+    await assert.rejects(tools.execute({ id: "denied", name: "employee", arguments: { action: "remember", text: "untrusted change" } }, {} as any), /无团队员工管理权限/);
+    await tools.execute({ id: "work", name: "employee", arguments: { action: "add", kind: "todo", text: "authorized work" } }, {} as any);
+    tools.actorId = "admin";
+    store.db.prepare("UPDATE web_users SET role='operator' WHERE id='admin'").run();
+    assert(!action("remember"), "revoked management cannot survive in a cached conversation");
+    tools.actorId = undefined;
+    assert(!action("remember"), "owner identity is never a fallback for a shared conversation");
   } finally { await engine.close(); store.close(); }
 });
 

@@ -1,24 +1,24 @@
 <script setup vapor>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
-import MessageText from "./MessageText.vue";
-import UserMessage from "./UserMessage.vue";
-import ToolSteps from "./ToolSteps.vue";
-import { groupTurns } from "./conversation";
+import ConversationTimeline from "./ConversationTimeline.vue";
 const props = defineProps({ api: Function, employeeId: String, name: String, revision: Number, event: Object, composer: Object, readonly: Boolean });
-const messages = ref([]), running = ref(false), busy = ref(false), error = ref(""), live = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
+const messages = ref([]), running = ref(false), busy = ref(false), error = ref(""), live = ref(""), thinking = ref(""), activeTools = ref([]), model = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
 const files = computed({ get: () => props.composer.images, set: (images) => props.composer.images = images });
-const turns = computed(() => groupTurns(messages.value));
-let disposed = false, request = 0;
+let disposed = false, request = 0, streamVersion = 0;
 async function scroll() { await nextTick(); if (transcript.value) transcript.value.scrollTop = transcript.value.scrollHeight; }
 async function refresh() {
-  const current = ++request;
+  const current = ++request, stream = streamVersion;
   try {
     const result = await props.api(`/employees/${props.employeeId}/chat`);
     if (disposed || current !== request) return;
     messages.value = result.messages;
-    running.value = result.running;
-    live.value = "";
+    if (stream === streamVersion) {
+      running.value = result.running;
+      live.value = "";
+      thinking.value = "";
+      if (!result.running) activeTools.value = [];
+    }
     await scroll();
   } catch (e) { if (!disposed) error.value = e.message; }
 }
@@ -58,14 +58,54 @@ async function stop() {
 function keydown(event) {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !matchMedia("(pointer: coarse)").matches) { event.preventDefault(); void send(); }
 }
+function handleEvent(event) {
+  if (!event) return;
+  streamVersion++;
+  switch (event.type) {
+    case "started":
+      running.value = true;
+      error.value = "";
+      activeTools.value = [];
+      break;
+    case "message_start":
+      live.value = "";
+      thinking.value = "";
+      model.value = event.data.model;
+      break;
+    case "text_delta":
+      live.value += event.data;
+      running.value = true;
+      void scroll();
+      break;
+    case "thinking_delta":
+      thinking.value += event.data;
+      running.value = true;
+      break;
+    case "tool_start":
+      activeTools.value.push(event.data);
+      break;
+    case "tool_end":
+      activeTools.value = activeTools.value.filter((tool) => tool.id !== event.data.call.id);
+      void refresh();
+      break;
+    case "error":
+      error.value = typeof event.data === "string" ? event.data : event.data?.message;
+      break;
+    case "done":
+      running.value = false;
+      activeTools.value = [];
+      void refresh();
+      break;
+    case "message_end":
+    case "compacted":
+    case "user":
+    case "steer":
+      void refresh();
+      break;
+  }
+}
 watch(() => props.revision, refresh);
-watch(() => props.event, (event) => {
-  if (event?.type === "text_delta") { live.value += event.data; running.value = true; void scroll(); }
-  else if (event?.type === "message_start") live.value = "";
-  else if (event?.type === "started") running.value = true;
-  else if (event?.type === "error") error.value = typeof event.data === "string" ? event.data : event.data?.message;
-  else if (["message_end", "done", "user", "steer"].includes(event?.type)) void refresh();
-});
+watch(() => props.event, handleEvent);
 onMounted(refresh);
 onBeforeUnmount(() => { disposed = true; request++; });
 </script>
@@ -74,17 +114,7 @@ onBeforeUnmount(() => { disposed = true; request++; });
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <div ref="transcript" class="employee-transcript" aria-live="polite">
       <div v-if="!messages.length" class="employee-welcome"><span class="welcome-avatar" aria-hidden="true">{{ name?.slice(0, 1) }}</span><span class="welcome-label">你的数字搭档已就位</span><h3>今天，想交给我什么？</h3><p>直接告诉我目标。我会安排任务、跟进结果，<br />需要你决定时再回来。</p><div v-if="!readonly" class="welcome-prompts"><button @click="draft = '帮我处理一项工作：'; input?.focus()"><span aria-hidden="true">↗</span> 交代新工作</button><button @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><span aria-hidden="true">☷</span> 看看工作进度</button></div></div>
-      <section v-for="turn in turns" :key="turn.user?.seq || 'reply'" class="conversation-turn">
-        <article v-if="turn.user" class="message user">
-          <UserMessage :text="turn.user.displayText || turn.user.text || ''" />
-          <img v-for="image in turn.user.images || []" :key="image.blobId" :src="`/api/blobs/${image.blobId}`" alt="用户附图" />
-        </article>
-        <ToolSteps v-if="turn.body.some((message) => message.role === 'tool' || message.calls?.length)" :items="turn.body.filter((message) => message.role === 'tool' || message.calls?.length)" />
-        <article v-for="message in turn.body.filter((message) => message.role === 'assistant' && message.text)" :key="message.seq" class="message assistant">
-          <small class="hint">{{ name }}</small><MessageText :text="message.displayText || message.text" />
-        </article>
-      </section>
-      <article v-if="live" class="message assistant"><MessageText :text="live" streaming /></article>
+      <ConversationTimeline :key="employeeId" :messages="messages" :running="running" :live="live" :thinking="thinking" :active-tools="activeTools" :name="name" :model="model" />
       <p v-if="running" class="hint" role="status">正在处理你的消息… 后台任务可在“工作”中查看。</p>
     </div>
     <p v-if="readonly" class="readonly-note">当前账号仅可查看团队员工的对话和任务。</p>
@@ -116,7 +146,14 @@ onBeforeUnmount(() => { disposed = true; request++; });
 .attach-button { background: transparent; border-color: transparent; color: var(--text-secondary); padding-left: 0; }
 .composer-hint { color: var(--muted); font-size: 10px; flex: 1; text-align: right; }
 .composer-tools .primary { margin-left: auto; min-width: 72px; }
-.message img { max-width: 100%; max-height: 360px; object-fit: contain; }
 @media (max-width: 700px) { .employee-chat { padding: 0 14px 14px; } .employee-transcript { padding: 18px 0; } .employee-welcome { padding: 20px 0; } .welcome-avatar { width: 46px; height: 48px; margin-bottom: 12px; font-size: 21px; } .employee-welcome h3 { font-size: 23px; } .welcome-prompts { margin-top: 18px; } .composer-hint { display: none; } .composer-tools button { min-height: 44px; } .employee-composer textarea { font-size: 16px; } }
+@media (max-width: 760px) {
+  .employee-chat { padding: 0 12px max(8px, env(safe-area-inset-bottom, 0px)); }
+  .employee-composer { padding: 8px 12px 6px; border-radius: 12px; box-shadow: none; }
+  .employee-composer textarea { height: 44px; min-height: 44px; max-height: 18dvh; resize: none; padding: 2px 0; font-size: 16px; line-height: 1.5; }
+  .composer-tools { margin-top: 4px; gap: 8px; }
+  .composer-tools button { min-height: 44px; }
+  .composer-hint { display: none; }
+}
 @media (max-height: 600px) { .employee-welcome { min-height: 160px; padding: 10px 0; } .welcome-avatar, .welcome-label, .welcome-prompts { display: none; } }
 </style>

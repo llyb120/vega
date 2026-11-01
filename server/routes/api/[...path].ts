@@ -184,7 +184,7 @@ export default defineEventHandler(async (event) => {
       }
       if (path[2] === "messages" && method === "POST") {
         const session = employee.chat(user.id);
-        const message = await inputMessage(a, store, session.id);
+        const message = { ...await inputMessage(a, store, session.id), actorId: user.id };
         check(!employee.deleting, 409, "员工正在删除，请稍候");
         if (engine.active.has(session.id)) engine.steer(session.id, message);
         else await engine.launch(session.id, message);

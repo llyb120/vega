@@ -551,6 +551,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         }
       }
       tools = new Tools(this, session, config, control.signal, emit);
+      tools.actorId = input?.actorId;
       this.active.get(key)!.context = tools.context;
       const setup = builtinCommand(input?.text || "")?.command;
       tools.setupAccess = setup === "setup" ? "provider" : undefined;
@@ -574,6 +575,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       while (true) {
         control.signal.throwIfAborted();
         for (const m of state.steer.splice(0)) {
+          tools.actorId = m.actorId;
           this.store.append(key, redactMessage(m, redact));
           emit("steer", m);
         }

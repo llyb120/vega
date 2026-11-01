@@ -12,7 +12,7 @@ export function groupTurns(messages) {
   return turns.map((turn) => {
     let conclusion = -1;
     for (let i = turn.body.length - 1; i >= 0; i--) {
-      if (turn.body[i].role !== "assistant" || !turn.body[i].text?.trim()) break;
+      if (turn.body[i].role !== "assistant" || turn.body[i].calls?.length || !(turn.body[i].text?.trim() || turn.body[i].images?.length)) break;
       conclusion = i;
     }
     return {
@@ -42,7 +42,7 @@ export function timelineOf(messages) {
     else {
       if (m.thinking?.trim())
         addProcess({ ...m, role: "thought", text: m.thinking, thinking: undefined });
-      if (m.role !== "assistant" || m.text?.trim()) {
+      if (m.role !== "assistant" || m.text?.trim() || m.images?.length || m.calls?.length) {
         groups.push({
           kind: "message",
           key: `${m.role}-${m.seq ?? groups.length}`,
@@ -54,6 +54,32 @@ export function timelineOf(messages) {
     previousRole = m.role;
   }
   return groups;
+}
+
+export function conversationTurns(messages, { running = false, thinking = "", live = "" } = {}) {
+  const turns = groupTurns(messages);
+  if (running && !turns.length) turns.push({ user: null, body: [], process: [], conclusion: [] });
+  return turns.map((turn, index) => {
+    const active = running && index === turns.length - 1;
+    const process = timelineOf(active ? turn.body : turn.process);
+    const conclusion = active ? [] : timelineOf(turn.conclusion);
+    const appendThoughts = (items) => {
+      const last = process.at(-1);
+      if (last?.kind === "process") last.items.push(...items);
+      else process.push({ kind: "process", key: "process-final-thoughts", items });
+    };
+    // Final answers can carry reasoning too; keep that reasoning in the fold, not in the result.
+    for (const entry of conclusion) if (entry.kind === "process") appendThoughts(entry.items);
+    if (active && thinking) appendThoughts([{ role: "thought", seq: "live-thought", text: thinking }]);
+    if (active && live) process.push({ kind: "message", key: "assistant-live", message: { role: "assistant", text: live, streaming: true }, continuation: false });
+    return {
+      ...turn,
+      running: active,
+      process,
+      lastProcessIndex: process.findLastIndex((entry) => entry.kind === "process"),
+      conclusion: conclusion.filter((entry) => entry.kind === "message"),
+    };
+  });
 }
 
 export function toolKind(name = "") {

@@ -64,6 +64,11 @@ test(
           .includes("keep-running-after-web-access-revoked")
       )
         await sleep(1000);
+      const payload = JSON.parse(Buffer.concat(chunks).toString());
+      const userAt = payload.messages?.findLastIndex((message: any) => message.role === "user") ?? -1;
+      const content = payload.messages?.[userAt]?.content;
+      const memory = typeof content === "string" ? content.match(/team-memory-fixture-(?:admin|member)/)?.[0] : undefined;
+      const memoryCall = memory && !payload.messages.slice(userAt + 1).some((message: any) => message.role === "tool");
       res.setHeader("Content-Type", "text/event-stream");
       res.end(
         "data: " +
@@ -71,8 +76,8 @@ test(
             choices: [
               {
                 index: 0,
-                delta: { content: "private session response" },
-                finish_reason: "stop",
+                delta: memoryCall ? { tool_calls: [{ index: 0, id: "memory-fixture", type: "function", function: { name: "employee", arguments: JSON.stringify({ action: "remember", text: memory }) } }] } : { content: "private session response" },
+                finish_reason: memoryCall ? "tool_calls" : "stop",
               },
             ],
           }) +
@@ -93,6 +98,7 @@ test(
           VEGA_TOKEN: token,
           VEGA_DB: db,
           VEGA_SKILL_CACHE: join(dir, "skills"),
+          VEGA_CHROMIUM_EXTERNAL: "1",
         },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
@@ -109,6 +115,7 @@ test(
       extra: Record<string, string> = {},
     ) => {
       const r = await fetch(base + "/api" + path, {
+        signal: AbortSignal.timeout(10000),
         method,
         headers: {
           ...(data ? { "Content-Type": "application/json" } : {}),
@@ -188,6 +195,7 @@ test(
         try {
           const r = await fetch(base + "/api/health", {
             headers: { Authorization: "Bearer " + token },
+            signal: AbortSignal.timeout(1000),
           });
           await r.text();
           if (r.ok) {
@@ -423,6 +431,19 @@ test(
       assert.equal((await req(`/sessions/${teamChat.session.id}`, "GET", undefined, b)).r.status, 200);
       assert.equal((await req(`/employees/${team.id}/messages`, "POST", { text: "must not execute" }, v)).r.status, 403);
       assert.equal((await req(`/employees/${team.id}/control`, "POST", { action: "settings", name: "unauthorized" }, a)).r.status, 403);
+      for (const [login, marker] of [[admin, 'team-memory-fixture-admin'], [a, 'team-memory-fixture-member']] as const) {
+        await ok(`/employees/${team.id}/messages`, 'POST', { text: marker, actorId: admin.id }, login);
+        let finished = false;
+        for (let index = 0; index < 100; index++) {
+          const state = await ok(`/employees/${team.id}/chat`, 'GET', undefined, admin);
+          if (!state.running && state.messages.some((message: any) => message.text === marker)) { finished = true; break; }
+          await sleep(20);
+        }
+        assert(finished, 'team fixture turn must finish');
+      }
+      const teamState = await ok(`/employees/${team.id}`, 'GET', undefined, admin);
+      assert(teamState.memories.some((memory: any) => memory.text === 'team-memory-fixture-admin'));
+      assert(!teamState.memories.some((memory: any) => memory.text === 'team-memory-fixture-member'), 'a forged actorId cannot inherit the administrator who owns the team employee');
       assert.equal((await req(`/employees/${workerA.id}/control`, "POST", { action: "settings", vaultIds: [] }, a)).r.status, 403);
       for (const [worker, login] of [[workerA, a], [workerB, b]] as const) {
         await ok(`/employees/${worker.id}`, "POST", { action: "add", kind: "todo", text: "isolated work", key: "same-key", nextCheckInMinutes: 60 }, login);

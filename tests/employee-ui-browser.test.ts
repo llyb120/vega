@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import WebSocket from "ws";
 import { sleep } from "../server/core/util";
 
-test("employee production UI fits narrow/desktop viewports and administrator debug sessions stay read-only", { skip: !process.env.VEGA_EMPLOYEE_UI_URL, timeout: 45000 }, async () => {
+test("employee production UI preserves Nova turns, gives mobile space to the transcript and keeps administrator records read-only", { skip: !process.env.VEGA_EMPLOYEE_UI_URL, timeout: 45000 }, async () => {
   const base = process.env.VEGA_EMPLOYEE_UI_URL!;
   assert.equal(new URL(base).hostname, "127.0.0.1", "Only an isolated local fixture may be used");
   const login = await fetch(base + "/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json", Origin: base }, body: JSON.stringify({ username: "preview-admin", password: "preview-only-password-123" }) });
@@ -53,6 +53,13 @@ test("employee production UI fits narrow/desktop viewports and administrator deb
     await command("Network.setCookie", { name: "vega_session", value: cookie, url: base, httpOnly: true });
     await command("Page.navigate", { url: base });
     await until("!!document.querySelector('.employee-workspace .employee-composer')");
+    await until("document.querySelectorAll('.conversation-turn').length>0");
+    const structure = await evaluate("(()=>{const t=document.querySelector('.conversation-turn'),p=t.querySelector('.turn-process'),f=t.querySelector('.turn-fold');return {folded:getComputedStyle(p).display==='none',foldLabel:f.textContent,final:t.querySelector(':scope > .message.assistant .markdown-body')?.textContent,processContainsFinal:p.textContent.includes('Nova fixture final result')}})()");
+    assert(structure.folded && structure.foldLabel.includes('tokens'), JSON.stringify(structure));
+    assert(structure.final.includes('Nova fixture final result') && !structure.processContainsFinal, JSON.stringify(structure));
+    await evaluate("document.querySelector('.turn-fold').click();document.querySelector('.tool-steps-summary').click()");
+    assert.equal(await evaluate("getComputedStyle(document.querySelector('.turn-process')).display!=='none' && !!document.querySelector('.tool-steps-body .tool-thought')"), true);
+    await evaluate("document.querySelector('.turn-fold').click()");
     for (const width of [320, 390, 768, 1440]) {
       await command("Emulation.setDeviceMetricsOverride", { width, height: 844, deviceScaleFactor: 1, mobile: width < 768 });
       await command("Emulation.setTouchEmulationEnabled", { enabled: width < 768 });
@@ -62,12 +69,30 @@ test("employee production UI fits narrow/desktop viewports and administrator deb
       assert.deepEqual(layout.overflow, [], JSON.stringify({ width, layout }));
       assert(layout.composerVisible, JSON.stringify({ width, layout }));
       assert(!layout.history && layout.debug);
+      if (width <= 760) {
+        const mobile = await evaluate("(()=>{const q=s=>document.querySelector(s);return {transcript:q('.employee-transcript').clientHeight/innerHeight,header:getComputedStyle(q('.employee-header')).display,execution:getComputedStyle(q('.employee-execution-bar')).display,composer:q('.employee-composer').getBoundingClientRect().height}})()");
+        assert(mobile.transcript >= .60 && mobile.header === 'none' && mobile.execution === 'none' && mobile.composer <= 130, JSON.stringify({ width, mobile }));
+      }
     }
+    await command('Emulation.setDeviceMetricsOverride', { width: 390, height: 480, deviceScaleFactor: 1, mobile: true });
+    await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+    const keyboard = await evaluate("(()=>{const c=document.querySelector('.employee-composer').getBoundingClientRect(),t=document.querySelector('.employee-transcript').getBoundingClientRect();return {bottom:c.bottom,height:t.height}})()");
+    assert(keyboard.bottom <= 481 && keyboard.height >= 200, JSON.stringify(keyboard));
+    await command('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await evaluate("document.querySelector('.employee-mobile-menu summary').click();[...document.querySelectorAll('.employee-mobile-actions button')].find(button=>button.textContent==='员工设置').click()");
+    await until("!!document.querySelector('.employee-settings-form')");
+    await evaluate("[...document.querySelectorAll('.employee-tabs button')].find(button=>button.textContent==='对话').click();document.querySelector('.employee-mobile-menu summary').click();[...document.querySelectorAll('.employee-mobile-actions button')].find(button=>button.textContent.includes('新任务执行位置')).click()");
+    assert.equal(await evaluate("getComputedStyle(document.querySelector('.employee-execution-bar')).display==='flex'"), true);
+    await evaluate("document.querySelector('.employee-mobile-menu summary').click();[...document.querySelectorAll('.employee-mobile-actions button')].find(button=>button.textContent.includes('新任务执行位置')).click()");
+    await command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 844, deviceScaleFactor: 1, mobile: false });
     await evaluate("[...document.querySelectorAll('nav button')].find(e=>e.textContent.includes('调试会话')).click()");
     await until("document.querySelectorAll('.debug-session').length>0");
     await evaluate("document.querySelector('.debug-session').click()");
     await until("!!document.querySelector('.debug-metadata')");
     assert.equal(await evaluate("document.querySelectorAll('.workspace textarea,.workspace .composer').length"), 0);
+    assert.equal(await evaluate("!!document.querySelector('.employee-session .conversation-turn') && !document.querySelector('.employee-session .tool-block')"), true);
+    await evaluate("[...document.querySelectorAll('.topbar button')].find(button=>button.textContent==='原始消息').click()");
+    assert.equal(await evaluate("!!document.querySelector('.employee-session .tool-block')"), true);
     await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await evaluate("[...document.querySelectorAll('.employee-list button')][0].click()");
     await until("!!document.querySelector('.employee-composer') && document.querySelector('.sidebar').getBoundingClientRect().right<=1");

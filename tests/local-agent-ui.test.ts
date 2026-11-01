@@ -9,7 +9,8 @@ test("desktop and mobile indicators describe all online clients rather than the 
   const indicators = [...source.matchAll(/<span\b([^>]*:title="([^"]*clientStatus[^"\n]*)"[^>]*)>([^<]*)<\/span>/g)];
   assert.equal(indicators.length, 2);
   for (const [, attributes, title, text] of indicators) {
-    assert.doesNotMatch(attributes, /v-if=/);
+    if (attributes.includes('v-if="view')) assert.match(attributes, /v-if="view !== 'employee'"/, "mobile employee chat omits the redundant connection indicator");
+    else assert.doesNotMatch(attributes, /v-if=/);
     assert.match(attributes, /role="status"/);
     const expression = text.match(/\{\{([\s\S]*?)\}\}/)![1];
     for (const clientStatus of ["无在线客户端", "客户端在线 · 2 台"]) {

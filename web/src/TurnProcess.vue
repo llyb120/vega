@@ -45,7 +45,7 @@ const tokenTitle = computed(() => {
     <span class="turn-fold-chevron" aria-hidden="true">{{ expanded ? "▾" : "▸" }}</span>
   </button>
   <div
-    v-if="messages.length"
+    v-if="messages.length || running"
     v-show="running || expanded"
     :class="['turn-process', { folded: !running }]"
   >

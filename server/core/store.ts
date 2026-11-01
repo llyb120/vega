@@ -8,6 +8,7 @@ export type Message = {
   role: string;
   text?: string;
   displayText?: string;
+  actorId?: string;
   thinking?: string;
   signature?: string;
   opaque?: any[];

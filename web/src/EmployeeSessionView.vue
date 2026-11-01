@@ -1,5 +1,6 @@
 <script setup vapor>
 import { onBeforeUnmount, ref, watch } from "vue";
+import ConversationTimeline from "./ConversationTimeline.vue";
 const props = defineProps({
   api: Function,
   sessionId: String,
@@ -7,6 +8,7 @@ const props = defineProps({
   debug: Boolean,
 });
 const emit = defineEmits(["back"]);
+const raw = ref(false);
 const session = ref(null),
   messages = ref([]),
   running = ref(false),
@@ -49,6 +51,7 @@ onBeforeUnmount(() => version++);
       <button class="link" @click="emit('back')">← {{ debug ? '返回调试会话' : '返回数字员工' }}</button>
       <h2>{{ session?.title || "员工会话记录" }}</h2>
     <div class="actions">
+      <button v-if="debug" :aria-pressed="raw" @click="raw = !raw">{{ raw ? '整理视图' : '原始消息' }}</button>
       <span :class="['pill', running ? 'green' : '']">{{
         running ? "执行中" : "执行记录"
       }}</span
@@ -66,7 +69,8 @@ onBeforeUnmount(() => version++);
     <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>员工 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>模型 / 场景</dt><dd>{{ session.model || '默认' }} / {{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="busy && !messages.length" role="status">正在加载记录…</p>
-    <article
+    <ConversationTimeline v-if="!raw" :key="sessionId" :messages="messages" :running="running" />
+    <template v-else><article
       v-for="(message, i) in messages"
       :key="sessionId + '-' + (message.seq || i)"
       :class="['message', message.role]"
@@ -113,7 +117,7 @@ onBeforeUnmount(() => version++);
           "
           alt="任务附图"
       /></template>
-    </article>
+    </article></template>
     <p v-if="!busy && !messages.length && !error" class="empty-card">
       还没有执行记录
     </p>

@@ -5,6 +5,7 @@ import {
   formatDuration,
   formatTokens,
   groupTurns,
+  conversationTurns,
   processLiveLines,
   processSummary,
   timelineOf,
@@ -28,6 +29,48 @@ test("conversation keeps conclusions visible and folds only completed process", 
   assert.equal(timeline[0].kind, "process");
   assert.deepEqual(timeline[0].items.map((m: any) => m.role), ["thought", "tool"]);
   assert.equal(timelineOf(turn.conclusion)[0].continuation, false);
+});
+
+test("Nova conversation structure keeps commentary and reasoning in the completed fold and the final result outside it", () => {
+  const messages = [
+    { role: "user", seq: 1, text: "Inspect and deliver", at: 1000 },
+    { role: "assistant", seq: 2, text: "Checking the project", thinking: "First inspect", calls: [{ id: "read", name: "read" }], at: 2000 },
+    { role: "tool", seq: 3, name: "read", text: "file", images: [{ mime: "image/png", blobId: "snapshot" }], at: 3000 },
+    { role: "assistant", seq: 4, thinking: "Verified the result", text: "## Final\n**Ready**", usage: { input: 100, output: 20 }, at: 4000 },
+  ];
+  const [turn] = conversationTurns(messages) as any[];
+  assert.equal(turn.running, false);
+  assert.deepEqual(turn.process.map((entry: any) => entry.kind), ["process", "message", "process"]);
+  assert.equal(turn.process[1].message.text, "Checking the project");
+  assert.equal(turn.process[2].items[0].images[0].blobId, "snapshot");
+  assert.equal(turn.process[2].items.at(-1).text, "Verified the result");
+  assert.equal(turn.conclusion.length, 1);
+  assert.equal(turn.conclusion[0].message.text, "## Final\n**Ready**");
+  assert(!turn.process.some((entry: any) => entry.message?.seq === 4));
+  assert.equal(turnStats(turn.body, turn.user.at).outputTokens, 20);
+  assert.equal(messages[3].thinking, "Verified the result", "rendering must not mutate canonical history");
+});
+
+test("running Nova turns preserve reasoning/live text and only the active turn remains unfolded", () => {
+  const messages = [{ role: "user", seq: 1, text: "first" }, { role: "assistant", seq: 2, text: "done" }, { role: "user", seq: 3, text: "second" }];
+  const turns = conversationTurns(messages, { running: true, thinking: "Working", live: "Partial" }) as any[];
+  assert.equal(turns[0].running, false);
+  assert.equal(turns[0].conclusion[0].message.text, "done");
+  assert.equal(turns[1].running, true);
+  assert.deepEqual(turns[1].conclusion, []);
+  assert.equal(turns[1].process[0].items[0].role, "thought");
+  assert.equal(turns[1].process[1].message.streaming, true);
+  const [empty] = conversationTurns([], { running: true, thinking: "Before history arrives", live: "Streaming" });
+  assert.equal(empty.process.length, 2);
+  assert.equal(conversationTurns([], {}).length, 0);
+});
+
+test("image-only results stay outside the fold and unfinished tool calls are never final conclusions", () => {
+  const [image] = conversationTurns([{ role: "assistant", seq: 1, images: [{ mime: "image/png", blobId: "result" }] }]);
+  assert.equal(image.conclusion[0].message.images[0].blobId, "result");
+  const [unfinished] = conversationTurns([{ role: "assistant", seq: 1, text: "about to submit", calls: [{ id: "submit", name: "chrome" }] }]);
+  assert.deepEqual(unfinished.conclusion, []);
+  assert.equal(unfinished.process[0].message.calls[0].name, "chrome");
 });
 
 test("process folds use Nova summaries, live previews and measured turn usage", () => {
