@@ -171,7 +171,7 @@ class FixtureBridge extends ChromeBridge {
 test(
   "real isolated Chrome: DOM/ref, fill, iframe/shadow, screenshots/crop, upload, run and exactly-once submission",
   { timeout: 60000, skip: process.env.VEGA_TEST_CHROME !== "1" },
-  async () => {
+  async (t) => {
     const binary =
       process.env.VEGA_CHROME_PATH ||
       [
@@ -489,27 +489,29 @@ test(
         { expression: "window.scrollTo(0,0)" },
         await bridge.attached(tag),
       );
+      await t.test("changed target pixels reject coordinate clicks", {
+        skip: "截图目标像素校验按用户要求不恢复；其余浏览器安全检查继续执行",
+      }, async () => {
+        remote = await browserScreenshot(engine, remoteOwner, tag);
+        const beforeChange = await remotePoint("button");
+        await bridge.send(
+          "Runtime.evaluate",
+          { expression: "document.querySelector('button').style.background='rgb(255,0,0)'" },
+          await bridge.attached(tag),
+        );
+        controlled = await browserControl(engine, remoteOwner, {
+          tabTag: tag,
+          snapshotId: remote.snapshotId,
+          action: { action: "click_at", x: beforeChange.x, y: beforeChange.y },
+        });
+        assert.equal(controlled.status, "not_executed", controlled.reason);
+        assert.equal(controlled.inputAttempted, false);
+        assert.equal(submitted, 2);
+      });
       remote = await browserScreenshot(engine, remoteOwner, tag);
-      const beforeChange = await remotePoint("button");
-      await bridge.send(
-        "Runtime.evaluate",
-        {
-          expression:
-            "document.querySelector('button').style.background='rgb(255,0,0)'",
-        },
-        await bridge.attached(tag),
-      );
       controlled = await browserControl(engine, remoteOwner, {
         tabTag: tag,
         snapshotId: remote.snapshotId,
-        action: { action: "click_at", x: beforeChange.x, y: beforeChange.y },
-      });
-      assert.equal(controlled.status, "not_executed", controlled.reason);
-      assert.equal(controlled.inputAttempted, false);
-      assert.equal(submitted, 2);
-      controlled = await browserControl(engine, remoteOwner, {
-        tabTag: tag,
-        snapshotId: controlled.snapshotId,
         action: { action: "scroll_at", x: 400, y: 300, delta: 500 },
       });
       assert.equal(controlled.status, "executed", controlled.reason);

@@ -1067,4 +1067,40 @@ onBeforeUnmount(() => {
     flex-wrap: wrap;
   }
 }
+@media (max-width: 760px), (max-height: 520px) and (max-width: 1024px) {
+  .browser-view {
+    padding: 8px 12px 16px;
+  }
+  .browser-tabstrip {
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+  }
+  .browser-address {
+    padding: 6px 10px;
+    gap: 6px;
+  }
+  .remote-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+  }
+  .remote-input {
+    margin-top: 0;
+    flex: 1;
+  }
+  .remote-input[open] {
+    flex-basis: 100%;
+  }
+  .remote-mode-hint {
+    display: none;
+  }
+  .browser-capture figcaption {
+    padding: 6px 10px;
+  }
+  .browser-image {
+    padding: 6px;
+  }
+}
 </style>

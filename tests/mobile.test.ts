@@ -1082,7 +1082,8 @@ test(
           await evaluate(
             `document.querySelector('.browser-image img').getBoundingClientRect().top<innerHeight-40`,
           ),
-          "screenshot must be visible before scrolling",
+          "screenshot must be visible before scrolling at " + width + "x" + height + " " +
+            await evaluate(`JSON.stringify([...document.querySelectorAll('.topbar,.browser-tabstrip,.browser-address,.remote-controls,.browser-capture figcaption,.browser-image')].map(e=>({class:e.className,top:e.getBoundingClientRect().top,height:e.getBoundingClientRect().height})))`),
         );
         assert(
           await evaluate(
@@ -1344,7 +1345,7 @@ test(
       for (let i = 0; i < 40 && requests.length < 2; i++) await sleep(50);
       assert.equal(requests.length, 2);
       assert.equal(
-        await evaluate(`document.querySelectorAll('.mobile-stage,.chat-topbar button').length`),
+        await evaluate(`document.querySelectorAll('.mobile-stage,.chat-topbar button:not(.topbar-new)').length`),
         0,
         "Stage is created by command, not a separate add button",
       );
@@ -1355,7 +1356,7 @@ test(
       await evaluate(
         `document.querySelector('[aria-label="消息"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))`,
       );
-      await until(`document.querySelector('.stage-switch')?.value!==document.querySelector('.stage-switch option').value`);
+      await until(`document.querySelector('.stage-switch')?.value!==document.querySelector('.stage-switch option')?.value`);
       assert.equal(
         await evaluate(`document.querySelectorAll('.session-row').length`),
         sessionCount,
@@ -1368,7 +1369,8 @@ test(
       await layout("desktop remains usable");
       await resize(320, 568);
       await tap('[aria-label="打开导航与会话"]');
-      await tap(".sidebar footer button");
+      await until(`document.querySelector('.sidebar').classList.contains('mobile-open')&&Math.abs(document.querySelector('.sidebar').getBoundingClientRect().left)<1`);
+      await tap('.sidebar [aria-label="退出登录"]');
       await until(`document.querySelector('.login-card')`);
       await fill("#username", "phone-admin");
       await fill("#password", "Phone-regression-password-2026");
