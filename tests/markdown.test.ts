@@ -35,7 +35,7 @@ test("Nova conversation structure keeps commentary and reasoning in the complete
   const messages = [
     { role: "user", seq: 1, text: "Inspect and deliver", at: 1000 },
     { role: "assistant", seq: 2, text: "Checking the project", thinking: "First inspect", calls: [{ id: "read", name: "read" }], at: 2000 },
-    { role: "tool", seq: 3, name: "read", text: "file", images: [{ mime: "image/png", blobId: "snapshot" }], at: 3000 },
+    { role: "tool", seq: 3, callId: "read", name: "read", text: "file", images: [{ mime: "image/png", blobId: "snapshot" }], at: 3000 },
     { role: "assistant", seq: 4, thinking: "Verified the result", text: "## Final\n**Ready**", usage: { input: 100, output: 20 }, at: 4000 },
   ];
   const [turn] = conversationTurns(messages) as any[];
@@ -71,6 +71,49 @@ test("image-only results stay outside the fold and unfinished tool calls are nev
   const [unfinished] = conversationTurns([{ role: "assistant", seq: 1, text: "about to submit", calls: [{ id: "submit", name: "chrome" }] }]);
   assert.deepEqual(unfinished.conclusion, []);
   assert.equal(unfinished.process[0].message.calls[0].name, "chrome");
+});
+
+test("consecutive calls without assistant text form one Nova process group, including thoughts and parallel results", () => {
+  const messages = [
+    { role: "assistant", seq: 1, text: "Inspect the files" },
+    { role: "assistant", seq: 2, calls: [{ id: "a", name: "read" }] },
+    { role: "tool", seq: 3, callId: "a", name: "read", text: "one" },
+    { role: "assistant", seq: 4, text: " \n", thinking: "Check the remaining files", calls: [{ id: "b", name: "read" }, { id: "c", name: "read" }] },
+    { role: "tool", seq: 5, callId: "c", name: "read", text: "three", error: true },
+    { role: "tool", seq: 6, callId: "b", name: "read", text: "two" },
+    { role: "assistant", seq: 7, calls: [{ id: "d", name: "read" }] },
+    { role: "tool", seq: 8, callId: "d", name: "read", text: "four" },
+    { role: "assistant", seq: 9, text: "Now verify the fix" },
+    { role: "assistant", seq: 10, calls: [{ id: "check", name: "bash" }] },
+    { role: "tool", seq: 11, callId: "check", name: "bash", text: "passed" },
+  ];
+  const timeline = timelineOf(messages) as any[];
+  assert.deepEqual(timeline.map((entry) => entry.kind), ["message", "process", "message", "process"]);
+  assert.deepEqual(timeline[1].items.filter((item: any) => item.role === "tool").map((item: any) => item.callId), ["a", "c", "b", "d"]);
+  assert.equal(processSummary(timeline[1].items), "读取文件 ×4（1 项失败）");
+  assert(timeline[1].items.some((item: any) => item.role === "thought"));
+  assert.equal(processSummary(timeline[3].items), "执行命令 ×1");
+  assert.equal(timeline[2].message.text, "Now verify the fix", "real commentary still separates process groups");
+  assert.equal(messages.length, 11, "rendering never changes canonical messages or tool order");
+});
+
+test("unconfirmed tool calls remain in their process group rather than blank assistant bubbles or false completed results", () => {
+  const messages = [
+    { role: "assistant", seq: 1, calls: [{ id: "a", name: "read" }, { id: "b", name: "write" }] },
+    { role: "tool", seq: 2, callId: "a", name: "read", text: "ok" },
+  ];
+  const timeline = timelineOf(messages) as any[];
+  assert.equal(timeline.length, 1);
+  assert.equal(timeline[0].kind, "process");
+  assert.equal(timeline[0].items.filter((item: any) => item.pending).length, 1);
+  const pending = timeline[0].items.find((item: any) => item.pending);
+  assert.equal(pending.id, "b");
+  assert.deepEqual(processLiveLines([pending]), ["结果未确认 · write"]);
+  assert.match(processSummary(timeline[0].items), /1 项结果待确认/);
+  const completed = timelineOf([...messages, { role: "tool", seq: 3, callId: "b", name: "write", text: "written" }]) as any[];
+  assert.equal(completed.length, 1);
+  assert(!completed[0].items.some((item: any) => item.pending));
+  assert.equal(processSummary(completed[0].items), "读取文件 ×1、修改文件 ×1");
 });
 
 test("process folds use Nova summaries, live previews and measured turn usage", () => {

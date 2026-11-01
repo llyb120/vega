@@ -2186,9 +2186,8 @@ summary {
     border-radius: var(--r-md);
   }
   .tool-steps-summary {
-    padding: 13px;
-    flex-wrap: wrap;
-    min-height: 46px;
+    padding: 0 8px;
+    min-height: 44px;
   }
   .markdown {
     font-size: 15px;

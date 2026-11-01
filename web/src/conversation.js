@@ -26,6 +26,7 @@ export function groupTurns(messages) {
 /** Match Nova: adjacent thoughts/tools form one process segment; text breaks it. */
 export function timelineOf(messages) {
   const groups = [];
+  const completedCalls = new Set(messages.filter((message) => message.role === "tool").map((message) => message.callId));
   let previousRole = "";
   const addProcess = (item) => {
     const last = groups.at(-1);
@@ -42,7 +43,7 @@ export function timelineOf(messages) {
     else {
       if (m.thinking?.trim())
         addProcess({ ...m, role: "thought", text: m.thinking, thinking: undefined });
-      if (m.role !== "assistant" || m.text?.trim() || m.images?.length || m.calls?.length) {
+      if (m.role !== "assistant" || m.text?.trim() || m.images?.length) {
         groups.push({
           kind: "message",
           key: `${m.role}-${m.seq ?? groups.length}`,
@@ -50,6 +51,8 @@ export function timelineOf(messages) {
           continuation: m.role === "assistant" && previousRole === "assistant",
         });
       }
+      for (const call of m.calls || [])
+        if (!completedCalls.has(call.id)) addProcess({ role: "tool", id: call.id, name: call.name, pending: true });
     }
     previousRole = m.role;
   }
@@ -115,7 +118,8 @@ export function processSummary(items) {
   }
   const actions = [...counts].map(([label, n]) => `${label} ×${n}`);
   const failed = tools.filter((item) => item.error).length;
-  return (actions.join("、") || "分析思路") + (failed ? `（${failed} 项失败）` : "");
+  const pending = tools.filter((item) => item.pending && !item.active).length;
+  return (actions.join("、") || "分析思路") + (failed ? `（${failed} 项失败）` : "") + (pending ? `（${pending} 项结果待确认）` : "");
 }
 
 export function processLiveLines(items, wrap = (text) => text.split("\n")) {
@@ -123,7 +127,7 @@ export function processLiveLines(items, wrap = (text) => text.split("\n")) {
   for (let i = items.length - 1; i >= 0 && lines.length < 2; i--) {
     const item = items[i];
     const status = item.role === "tool"
-      ? item.error ? "失败" : item.active ? "进行中" : "已完成"
+      ? item.error ? "失败" : item.active ? "进行中" : item.pending ? "结果未确认" : "已完成"
       : "";
     const text = item.role === "thought"
       ? item.text?.trimEnd() || "思考中…"

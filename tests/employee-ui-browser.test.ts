@@ -57,9 +57,15 @@ test("employee production UI preserves Nova turns, gives mobile space to the tra
     const structure = await evaluate("(()=>{const t=document.querySelector('.conversation-turn'),p=t.querySelector('.turn-process'),f=t.querySelector('.turn-fold');return {folded:getComputedStyle(p).display==='none',foldLabel:f.textContent,final:t.querySelector(':scope > .message.assistant .markdown-body')?.textContent,processContainsFinal:p.textContent.includes('Nova fixture final result')}})()");
     assert(structure.folded && structure.foldLabel.includes('tokens'), JSON.stringify(structure));
     assert(structure.final.includes('Nova fixture final result') && !structure.processContainsFinal, JSON.stringify(structure));
-    await evaluate("document.querySelector('.turn-fold').click();document.querySelector('.tool-steps-summary').click()");
-    assert.equal(await evaluate("getComputedStyle(document.querySelector('.turn-process')).display!=='none' && !!document.querySelector('.tool-steps-body .tool-thought')"), true);
     await evaluate("document.querySelector('.turn-fold').click()");
+    const groups = await evaluate("(()=>{const p=document.querySelector('.turn-process');return {groups:p.querySelectorAll('.tool-steps').length,empty:[...p.querySelectorAll(':scope > .message')].filter(e=>!e.textContent.trim()&&!e.querySelector('img')).length,first:p.querySelector('.tool-steps-summary').textContent}})()");
+    assert.equal(groups.groups, 2, JSON.stringify(groups));
+    assert.equal(groups.empty, 0, JSON.stringify(groups));
+    assert(groups.first.includes('读取文件 ×4'), JSON.stringify(groups));
+    await evaluate("document.querySelector('.tool-steps-summary').click()");
+    assert.equal(await evaluate("getComputedStyle(document.querySelector('.turn-process')).display!=='none' && !!document.querySelector('.tool-steps-body .tool-thought')"), true);
+    assert.equal(await evaluate("document.querySelectorAll('.tool-steps-body .tool-step').length"), 5);
+    await evaluate("document.querySelector('.tool-steps-summary').click()");
     for (const width of [320, 390, 768, 1440]) {
       await command("Emulation.setDeviceMetricsOverride", { width, height: 844, deviceScaleFactor: 1, mobile: width < 768 });
       await command("Emulation.setTouchEmulationEnabled", { enabled: width < 768 });
@@ -69,11 +75,15 @@ test("employee production UI preserves Nova turns, gives mobile space to the tra
       assert.deepEqual(layout.overflow, [], JSON.stringify({ width, layout }));
       assert(layout.composerVisible, JSON.stringify({ width, layout }));
       assert(!layout.history && layout.debug);
+      const processLayout = await evaluate("(()=>{const p=document.querySelector('.turn-process'),groups=[...p.querySelectorAll('.tool-steps')],buttons=groups.map(e=>e.querySelector('.tool-steps-summary'));return {heights:groups.map(e=>e.getBoundingClientRect().height),targets:buttons.map(e=>e.getBoundingClientRect().height)}})()");
+      assert(processLayout.heights.every((height:number)=>height<=56), JSON.stringify({width,processLayout}));
       if (width <= 760) {
+        assert(processLayout.targets.every((height:number)=>height>=44), JSON.stringify({width,processLayout}));
         const mobile = await evaluate("(()=>{const q=s=>document.querySelector(s);return {transcript:q('.employee-transcript').clientHeight/innerHeight,header:getComputedStyle(q('.employee-header')).display,execution:getComputedStyle(q('.employee-execution-bar')).display,composer:q('.employee-composer').getBoundingClientRect().height}})()");
         assert(mobile.transcript >= .60 && mobile.header === 'none' && mobile.execution === 'none' && mobile.composer <= 130, JSON.stringify({ width, mobile }));
       }
     }
+    await evaluate("document.querySelector('.turn-fold').click()");
     await command('Emulation.setDeviceMetricsOverride', { width: 390, height: 480, deviceScaleFactor: 1, mobile: true });
     await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
     const keyboard = await evaluate("(()=>{const c=document.querySelector('.employee-composer').getBoundingClientRect(),t=document.querySelector('.employee-transcript').getBoundingClientRect();return {bottom:c.bottom,height:t.height}})()");

@@ -8,8 +8,8 @@ const props = defineProps({
 });
 const expanded = ref(false);
 const allItems = computed(() => [
-  ...props.items,
-  ...props.active.map((item) => ({ ...item, role: "tool", active: true })),
+  ...props.items.map((item) => item.pending && props.active.some((tool) => tool.id === item.id) ? { ...item, active: true } : item),
+  ...props.active.filter((tool) => !props.items.some((item) => (item.callId || item.id) === tool.id)).map((item) => ({ ...item, role: "tool", active: true })),
 ]);
 const summary = computed(() => processSummary(allItems.value));
 const lines = computed(() => processLiveLines(allItems.value));
@@ -43,10 +43,11 @@ const icon = (item) => icons[toolKind(item.name)];
           <summary>思考过程</summary>
           <pre>{{ m.text }}</pre>
         </details>
-        <div v-else-if="m.active" class="tool-step active">
+        <div v-else-if="m.active || m.pending" class="tool-step" :class="{ active: m.active }">
           <span class="step-icon" aria-hidden="true">{{ icon(m) }}</span>
           <span class="step-name">{{ m.name }}</span>
-          <span class="spinner" role="status" aria-label="进行中"></span>
+          <span v-if="m.active" class="spinner" role="status" aria-label="进行中"></span>
+          <span v-else class="hint">结果未确认</span>
         </div>
         <details v-else class="tool-step" :class="{ failed: m.error }">
           <summary>

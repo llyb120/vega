@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { ref } from "vue";
+import { computed, ref } from "vue";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
 const between = (start: string, end: string) => chat.slice(chat.indexOf(start), chat.indexOf(end));
@@ -30,6 +30,16 @@ test("employee chat, task records and the retained chat all reuse the original N
   const debug = readFileSync("web/src/EmployeeSessionView.vue", "utf8");
   assert(debug.includes('raw = ref(false)') && debug.includes("原始消息") && debug.includes("JSON.stringify(message.calls"));
   assert(readFileSync("web/src/ToolSteps.vue", "utf8").includes("image.blobId ? `/api/blobs/${image.blobId}`"));
+});
+
+test("in-flight and persisted tool calls share a single entry instead of double-counted summary rows", () => {
+  const source = readFileSync("web/src/ToolSteps.vue", "utf8");
+  const props = { items: [{ role: "tool", id: "pending", name: "write", pending: true }, { role: "tool", callId: "finished", name: "read", text: "ok" }], active: [{ id: "pending", name: "write" }, { id: "finished", name: "read" }, { id: "new", name: "bash" }] };
+  const items = vm.runInNewContext(source.slice(source.indexOf("const allItems ="), source.indexOf("const summary =")) + "\nallItems.value", { computed, props });
+  assert.equal(items.length, 3);
+  assert.equal(items.filter((item: any) => item.active).length, 2);
+  assert.equal(items.find((item: any) => item.id === "pending").active, true);
+  assert.equal(items.find((item: any) => item.callId === "finished").active, undefined);
 });
 
 test("employee streaming keeps thoughts, model identity and in-flight tools rather than flattening only final text", async () => {
