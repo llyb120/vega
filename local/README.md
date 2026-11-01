@@ -21,4 +21,6 @@ go test ./...
 go build -ldflags="-H=windowsgui" -o vega-local.exe .
 ```
 
+Use the rebuilt `.exe`, not an older download or `go run .`. Windows also detaches the client from any console at startup without closing the parent terminal, and shell commands are launched with `CREATE_NO_WINDOW`. A plain console-mode `go build` can still flash a window before startup; the GUI build above avoids that entirely.
+
 CI builds Windows tray and Linux/macOS headless binaries. Linux/macOS use `go build -o vega-local .` and require a browser to approve a new site; when automatic opening is unavailable, the client prints the local permission-page address.

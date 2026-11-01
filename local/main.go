@@ -39,6 +39,7 @@ type Agent struct {
 }
 
 func main() {
+	detachConsole()
 	a, err := newAgent()
 	must(err)
 	lis, err := net.Listen("tcp", localAddress)
