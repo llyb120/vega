@@ -890,6 +890,8 @@ test(
       await nav("对话");
       await fill('textarea[aria-label="消息"]', "");
       await layout("initial chat");
+      assert.equal(await evaluate(`document.querySelector('.execution-switch').getAttribute('aria-checked')`), "false", "offline new sessions default to the server");
+      assert.equal(await evaluate(`document.querySelector('.execution-switch').disabled`), true, "an offline client cannot be selected");
       await tap('[aria-label="打开导航与会话"]');
       assert.equal(
         await evaluate(`document.querySelector('.workspace').inert`),
@@ -965,7 +967,7 @@ test(
       await layout("advanced provider parameters");
       await byText("保存服务商");
       await until(
-        `document.querySelector('[role=status]')?.textContent.includes('服务商已保存')`,
+        `[...document.querySelectorAll('[role=status]')].some(e=>e.textContent.includes('服务商已保存'))`,
       );
       await tap(".scene-item:last-child > button");
       await fill(
@@ -983,7 +985,7 @@ test(
       );
       await byText("保存场景");
       await until(
-        `document.querySelector('[role=status]')?.textContent.includes('场景模型已保存')`,
+        `[...document.querySelectorAll('[role=status]')].some(e=>e.textContent.includes('场景模型已保存'))`,
       );
       await upload('input[type=file][accept=".zip"]', skill);
       await byText("上传技能");
@@ -1119,8 +1121,12 @@ test(
       );
       await tap(".browser-url summary");
       await until(
-        `[...document.querySelectorAll('.browser-address .pill')].some(e=>e.textContent.trim()==="实时画面")&&document.querySelector('.browser-image img')?.naturalWidth===1568`,
+        `[...document.querySelectorAll('.browser-address .pill')].some(e=>e.textContent.trim()==="查看中")&&document.querySelector('.browser-image img')?.naturalWidth===1568`,
       );
+      await tap(".browser-image img");
+      assert.equal(remoteInputs.length, 0, "viewing the preview must not operate the website");
+      await byText("开始操作", ".browser-address");
+      await until(`document.querySelector('.browser-address button')?.textContent.trim()==='退出操作'`);
       await tap(".browser-image img");
       await until(
         `document.querySelector('.remote-controls')&&document.querySelector('.browser-image img')?.naturalWidth===1568`,

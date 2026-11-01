@@ -362,8 +362,24 @@ test(
       assert.equal(inputs.length, 0, "long press must not claim control");
       assert.equal(modes.length, 0);
       await tap(".browser-image img");
+      await sleep(100);
+      assert.equal(modes.length, 0, "a view click must not request control");
+      assert.equal(inputs.length, 0, "a view click must not reach the webpage");
+      await evaluate(`(()=>{const e=document.querySelector('.browser-image img'),r=e.getBoundingClientRect();e.dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,clientX:r.x+r.width/2,clientY:r.y+r.height/2,deltaY:-240}));})()`);
+      assert(await evaluate(`document.querySelector('.browser-image img').style.transform.includes('scale(1.')`), "wheel zooms the local preview");
+      const viewPoint = await evaluate(`(()=>{const r=document.querySelector('.browser-image img').getBoundingClientRect();return{x:(Math.max(0,r.left)+Math.min(innerWidth,r.right))/2,y:(Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2}})()`);
+      await command("Input.dispatchMouseEvent", { type: "mousePressed", x: viewPoint.x, y: viewPoint.y, button: "left", buttons: 1, clickCount: 1 });
+      await command("Input.dispatchMouseEvent", { type: "mouseMoved", x: viewPoint.x + 24, y: viewPoint.y + 16, button: "left", buttons: 1 });
+      await command("Input.dispatchMouseEvent", { type: "mouseReleased", x: viewPoint.x + 24, y: viewPoint.y + 16, button: "left", buttons: 0, clickCount: 1 });
+      await sleep(100);
+      assert.equal(modes.length, 0, "preview panning must not claim control");
+      assert.equal(inputs.length, 0, "preview zoom and panning must not reach the webpage");
+      await tap(".browser-address button:nth-of-type(2)");
+      assert(await evaluate(`document.querySelector('.browser-image img').style.transform.includes('scale(1)')`));
+      await tap(".browser-address button");
       await sleep(350);
       assert.equal(modes.at(-1)?.mode, "control", JSON.stringify(modes));
+      assert.equal(await evaluate(`document.querySelector('.browser-address button').textContent.trim()`), "退出操作");
       await until(
         `getComputedStyle(document.querySelector('.remote-controls')).visibility==='visible'`,
       );
@@ -381,6 +397,7 @@ test(
         imageTop,
         "showing remote controls must not move the screenshot",
       );
+      await tap(".browser-image img");
       for (
         let i = 0;
         i < 100 && !inputs.some((m) => m.action.action === "click_at");
@@ -389,7 +406,7 @@ test(
         await sleep(10);
       assert(
         inputs.some((m) => m.action.action === "click_at"),
-        "first tap must send click_at; modes=" +
+        "tap after explicitly starting control must send click_at; modes=" +
           JSON.stringify(modes) +
           " state=" +
           (await evaluate(
@@ -569,6 +586,16 @@ test(
       await until(
         `document.querySelector('[aria-label="远程按键 回车"]')?.disabled===false`,
       );
+      await tap(".browser-address button");
+      await until(`document.querySelector('.browser-address button').textContent.trim()==='开始操作'`);
+      const afterExit = inputs.length;
+      await tap(".browser-image img");
+      await sleep(100);
+      assert.equal(inputs.length, afterExit, "exit returns to view-only mode immediately");
+      assert.equal(modes.at(-1)?.mode, "view");
+      await tap(".browser-address button");
+      await until(`document.querySelector('.browser-address button').textContent.trim()==='退出操作'`);
+      await until(`document.querySelector('[aria-label="远程按键 回车"]')?.disabled===false`);
       broken = true;
       const sent = inputs.length;
       await tap('[aria-label="远程按键 回车"]');

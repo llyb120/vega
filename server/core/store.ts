@@ -31,6 +31,7 @@ export type Session = {
   taskId?: string;
   localAgent?: boolean;
   localPlatform?: string;
+  executionCwds?: { server?: string; local?: string };
   readOnly?: boolean;
   ownerId?: string;
   readerIds?: string[];
@@ -305,6 +306,7 @@ export class Store {
       ownerId: source.ownerId,
       localAgent: source.localAgent,
       localPlatform: source.localPlatform,
+      executionCwds: source.executionCwds,
       readerIds: source.readerIds,
       model: inherit ? source.model : undefined,
       readOnly: source.readOnly,

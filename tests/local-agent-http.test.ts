@@ -22,8 +22,8 @@ test("deployed login → frontend WebSocket → local client executes once, paus
   catch { t.skip("Local agent port is in use; do not interfere with a user's client"); return; }
   await new Promise<void>((yes) => reserved.close(() => yes()));
   const dir = await mkdtemp(join(tmpdir(), "vega-local-e2e-"));
-  const clientDir = join(dir, "client"), configDir = join(dir, "config");
-  await mkdir(clientDir); await mkdir(join(configDir, "vega-local"), { recursive: true });
+  const clientDir = join(dir, "client"), serverDir = join(dir, "server"), configDir = join(dir, "config");
+  await mkdir(clientDir); await mkdir(serverDir); await mkdir(join(configDir, "vega-local"), { recursive: true });
   const reserve = createServer();
   await new Promise<void>((yes) => reserve.listen(0, "127.0.0.1", yes));
   const port = (reserve.address() as any).port;
@@ -95,8 +95,32 @@ test("deployed login → frontend WebSocket → local client executes once, paus
       }
     });
     await until(() => events.some((e) => e.type === "ready"));
+    const serverSession = await api("/sessions", "POST", { cwd: serverDir });
+    assert.equal(serverSession.localAgent, false);
+    assert.equal(serverSession.cwd, serverDir);
+    await assert.rejects(api("/sessions", "POST", { localAgent: true }), /客户端未连接/);
     await bridge.connect(); await until(() => online);
+    assert.equal((await api("/sessions/" + serverSession.id)).session.localAgent, false, "connecting must not migrate existing sessions");
+    const explicitServer = await api("/sessions", "POST", { cwd: serverDir, localAgent: false });
+    assert.equal(explicitServer.localAgent, false);
+    assert.equal(explicitServer.cwd, serverDir);
+    await assert.rejects(api("/sessions", "POST", { localAgent: "client" }), /Invalid execution mode/);
+    const switched = await api("/sessions/" + serverSession.id + "/execution", "POST", { localAgent: true });
+    assert.equal(switched.localAgent, true); assert.equal(switched.cwd, clientDir);
+    const restored = await api("/sessions/" + serverSession.id + "/execution", "POST", { localAgent: false });
+    assert.equal(restored.localAgent, false); assert.equal(restored.cwd, serverDir);
     await api("/config", "PUT", { model: "test/m", provider: { test: { api: "openai-completions", baseURL: "http://127.0.0.1:" + (mock.address() as any).port, models: { m: { limit: { context: 128000, output: 1000 } } } } } });
+    await api("/sessions/" + serverSession.id + "/messages", "POST", { text: "write server execution fixture after connecting" });
+    await until(() => events.some((e) => e.type === "done" && e.session === serverSession.id));
+    assert.match(await readFile(join(serverDir, "from-client.txt"), "utf8"), /local-success/);
+    assert.equal(existsSync(join(clientDir, "from-client.txt")), false, "the old server session must not write on the newly connected client");
+    events.length = 0;
+    await api("/sessions/" + serverSession.id + "/execution", "POST", { localAgent: true });
+    await api("/sessions/" + serverSession.id + "/messages", "POST", { text: "write client execution fixture after a manual switch" });
+    await until(() => events.some((e) => e.type === "done" && e.session === serverSession.id));
+    assert.match(await readFile(join(clientDir, "from-client.txt"), "utf8"), /local-success/);
+    await api("/sessions/" + serverSession.id + "/execution", "POST", { localAgent: false });
+    events.length = 0;
     const session = await api("/sessions", "POST", {});
     assert.equal(session.localAgent, true); assert.equal(session.cwd, clientDir);
     await api("/sessions/" + session.id + "/messages", "POST", { text: "write fixture" });

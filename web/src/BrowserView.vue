@@ -12,19 +12,24 @@ const status = ref(null),
   address = ref(""),
   imageReady = ref(false),
   liveState = ref("offline"),
-  inputBusy = ref(false);
-const remote = computed(() => liveState.value === "control");
+  inputBusy = ref(false),
+  operating = ref(false),
+  zoom = ref(1),
+  panX = ref(0),
+  panY = ref(0);
+const remote = computed(() => operating.value && liveState.value === "control");
 const stateLabel = computed(
   () =>
     ({
       offline: "已断开",
+      view: "查看中",
       connecting: "连接中",
       waiting: "等待控制权…",
       control: inputBusy.value ? "同步中…" : "操作中",
     })[liveState.value] || "实时画面",
 );
 const inputDisabled = computed(
-  () => busy.value || inputBusy.value || !imageReady.value,
+  () => !remote.value || busy.value || inputBusy.value || !imageReady.value,
 );
 const DRAG_PX = 6;
 let socket = null,
@@ -44,6 +49,7 @@ function resetInput() {
   suppressClick = false;
 }
 function disconnect() {
+  operating.value = false;
   resetInput();
   clearInterval(heartbeat);
   clearTimeout(connectTimer);
@@ -54,14 +60,36 @@ function disconnect() {
   inputBusy.value = false;
   liveState.value = "offline";
 }
+function resetView() {
+  zoom.value = 1;
+  panX.value = 0;
+  panY.value = 0;
+}
+function zoomView(event, factor) {
+  const next = Math.max(0.1, Math.min(4, zoom.value * factor)),
+    ratio = next / zoom.value,
+    rect = event.currentTarget.getBoundingClientRect(),
+    x = event.clientX ?? rect.left + rect.width / 2,
+    y = event.clientY ?? rect.top + rect.height / 2;
+  panX.value += (x - rect.left) * (1 - ratio);
+  panY.value += (y - rect.top) * (1 - ratio);
+  zoom.value = next;
+}
 function requestControl() {
-  if (socket?.readyState === WebSocket.OPEN)
-    socket.send(JSON.stringify({ type: "mode", mode: "control" }));
+  if (liveState.value !== "view" || !imageReady.value || socket?.readyState !== WebSocket.OPEN) return;
+  resetInput();
+  resetView();
+  operating.value = true;
+  liveState.value = "waiting";
+  socket.send(JSON.stringify({ type: "mode", mode: "control" }));
 }
 function releaseControl() {
+  operating.value = false;
   resetInput();
-  if (socket?.readyState === WebSocket.OPEN)
+  if (socket?.readyState === WebSocket.OPEN) {
+    liveState.value = "view";
     socket.send(JSON.stringify({ type: "mode", mode: "view" }));
+  }
 }
 function loadedImage() {
   if (previousImageURL) {
@@ -120,6 +148,7 @@ async function capture(tab) {
   if (busy.value || !viewable(tab)) return;
   const request = ++version;
   disconnect();
+  resetView();
   if (selected.value !== tab.tag) text.value = "";
   imageReady.value = false;
   selected.value = tab.tag;
@@ -189,14 +218,15 @@ async function capture(tab) {
         } else if (value.type === "ready") {
           liveState.value = "view";
         } else if (value.type === "mode") {
-          liveState.value = value.mode;
-          if (value.mode === "control" && !inflight && imageReady.value) {
-            const next = outbox.shift();
-            if (next) void control(next.action, next.frameId);
+          if (value.mode === "control" && !operating.value) {
+            releaseControl();
+            return;
           }
-          // waiting keeps a gesture already held so a press-and-drag can claim control.
-          if (value.mode !== "control" && value.mode !== "waiting")
+          liveState.value = value.mode;
+          if (value.mode !== "control" && value.mode !== "waiting") {
+            operating.value = false;
             resetInput();
+          }
           info.value = value.reason || "";
         } else if (value.type === "input_result") {
           if (value.seq !== inflight) return;
@@ -351,6 +381,7 @@ function imagePoint(event, clamp = false) {
   };
 }
 function clickImage(event) {
+  if (!remote.value) return;
   if (suppressClick) {
     suppressClick = false;
     return;
@@ -363,14 +394,6 @@ function clickImage(event) {
     button: "left",
     click_count: event.detail === 2 ? 2 : 1,
   };
-  if (!remote.value) {
-    // A click on the live view both claims control and goes through as input.
-    if (liveState.value === "view") {
-      requestControl();
-      outbox.push({ action, frameId: shownFrame?.frameId });
-    }
-    return;
-  }
   void control(action);
 }
 function contextImage(event) {
@@ -385,11 +408,11 @@ function pointerDown(event) {
   if (event.button !== 0 || event.pointerType === "touch") return;
   const point = imagePoint(event);
   if (!point) return;
-  if (!remote.value) {
-    if (liveState.value !== "view") return;
-    requestControl();
-  }
+  if (liveState.value === "waiting") return;
   gesture = {
+    view: !remote.value,
+    panX: panX.value,
+    panY: panY.value,
     id: event.pointerId,
     x: event.clientX,
     y: event.clientY,
@@ -400,6 +423,14 @@ function pointerDown(event) {
 }
 function pointerMove(event) {
   if (!gesture || gesture.id !== event.pointerId) return;
+  if (gesture.view) {
+    if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) < DRAG_PX && !gesture.dragging) return;
+    gesture.dragging = true;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    panX.value = gesture.panX + event.clientX - gesture.x;
+    panY.value = gesture.panY + event.clientY - gesture.y;
+    return;
+  }
   const point = imagePoint(event, true);
   if (!point) return;
   if (!gesture.dragging) {
@@ -414,10 +445,11 @@ function pointerMove(event) {
 }
 function pointerUp(event) {
   if (!gesture || gesture.id !== event.pointerId) return;
-  const { dragging, last } = gesture;
+  const { dragging, last, view } = gesture;
   gesture = null;
   if (!dragging) return;
   suppressClick = true;
+  if (view) return;
   void control({
     action: "pointer",
     phase: "up",
@@ -426,15 +458,21 @@ function pointerUp(event) {
 }
 function pointerCancel(event) {
   if (!gesture || gesture.id !== event.pointerId) return;
-  const { dragging, last } = gesture;
+  const { dragging, last, view } = gesture;
   gesture = null;
-  if (dragging) void control({ action: "pointer", phase: "up", ...last });
+  if (dragging && !view) void control({ action: "pointer", phase: "up", ...last });
 }
 function imageKey(event) {
   if (!remote.value) {
-    if (liveState.value === "view" && ["Enter", " "].includes(event.key)) {
+    if (event.ctrlKey || event.metaKey || event.altKey || operating.value) return;
+    if (["+", "=", "-", "0", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
       event.preventDefault();
-      requestControl();
+      if (event.key === "0") resetView();
+      else if (["+", "=", "-"].includes(event.key)) zoomView(event, event.key === "-" ? 1 / 1.2 : 1.2);
+      else if (event.key === "ArrowLeft") panX.value += 40;
+      else if (event.key === "ArrowRight") panX.value -= 40;
+      else if (event.key === "ArrowUp") panY.value += 40;
+      else panY.value -= 40;
     }
     return;
   }
@@ -499,34 +537,20 @@ function scrollRemote(delta, delta_x = 0) {
 }
 function wheelImage(event) {
   event.preventDefault();
-  const point = imagePoint(event);
-  if (!point) return;
-  const delta = Math.round(
-    Math.max(
-      -1200,
-      Math.min(
-        1200,
-        event.deltaY *
-          (event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? 600 : 1),
-      ),
-    ),
-  );
-  const delta_x = Math.round(Math.max(-1200, Math.min(1200, event.deltaX)));
-  if (!delta && !delta_x) return;
-  const action = { action: "scroll_at", ...point, delta, delta_x };
+  const amount = event.deltaY * (event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? 600 : 1),
+    delta = Math.round(Math.max(-1200, Math.min(1200, amount))),
+    delta_x = Math.round(Math.max(-1200, Math.min(1200, event.deltaX)));
   if (!remote.value) {
-    if (liveState.value === "view") {
-      requestControl();
-      outbox.push({ action, frameId: shownFrame?.frameId });
-    }
+    if (!operating.value) zoomView(event, Math.exp(-Math.max(-1200, Math.min(1200, amount)) / 600));
     return;
   }
-  if (busy.value || inputBusy.value) return;
-  void control(action);
+  const point = imagePoint(event);
+  if (!point || (!delta && !delta_x) || busy.value || inputBusy.value) return;
+  void control({ action: "scroll_at", ...point, delta, delta_x });
 }
 function sendText() {
   const value = text.value;
-  if (!value || inflight || !imageReady.value) return;
+  if (!remote.value || !value || inflight || !imageReady.value) return;
   text.value = "";
   void control({ action: "type", text: value });
 }
@@ -619,12 +643,14 @@ onBeforeUnmount(() => {
         </div>
         <div class="actions">
           <button
-            v-if="liveState === 'control' || liveState === 'waiting'"
-            class="primary"
-            :disabled="busy"
-            @click="releaseControl"
+            :class="{ primary: operating }"
+            :disabled="busy || (!operating && (liveState !== 'view' || !imageReady))"
+            @click="operating ? releaseControl() : requestControl()"
           >
-            退出操作
+            {{ operating ? '退出操作' : '开始操作' }}
+          </button>
+          <button v-if="screenshot" :disabled="operating" @click="resetView" title="恢复原始缩放和位置（快捷键 0）">
+            还原视图 · {{ Math.round(zoom * 100) }}%
           </button>
           <span :class="['pill', liveState === 'offline' ? '' : 'green']">{{
             stateLabel
@@ -728,8 +754,9 @@ onBeforeUnmount(() => {
       <figure v-else-if="!!screenshot" class="browser-capture">
         <figcaption>
           实时画面 · {{ new Date(screenshot.capturedAt).toLocaleTimeString() }}{{
-            liveState === "view" ? " · 点击画面即可开始操作" : ""
+            remote ? ' · 操作模式' : ' · 查看模式'
           }}
+          <span :style="{ visibility: operating ? 'hidden' : 'visible' }"> · 滚轮缩放，按住鼠标拖动</span>
         </figcaption>
         <div class="browser-image">
           <img
@@ -739,6 +766,8 @@ onBeforeUnmount(() => {
             :alt="'标签页当前截图：' + screenshot.title"
             draggable="false"
             :class="{ 'remote-active': remote }"
+            :style="{ transform: `translate(${panX}px, ${panY}px) scale(${zoom})` }"
+            title="查看模式可滚轮缩放、鼠标拖动；键盘 +/- 缩放，方向键平移，0 还原"
             @load="loadedImage"
             :tabindex="liveState === 'offline' ? -1 : 0"
             @keydown="imageKey"
@@ -998,6 +1027,7 @@ onBeforeUnmount(() => {
 .browser-image {
   padding: 18px;
   background: #f0f1f5;
+  overflow: hidden;
 }
 .browser-image img {
   display: block;
@@ -1011,6 +1041,14 @@ onBeforeUnmount(() => {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
+  transform-origin: 0 0;
+  cursor: grab;
+}
+.browser-image img:active {
+  cursor: grabbing;
+}
+.browser-image img.remote-active {
+  cursor: crosshair;
 }
 @media (max-width: 760px) {
   .browser-view {

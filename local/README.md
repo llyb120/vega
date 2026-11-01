@@ -4,7 +4,9 @@ Run the local client, then sign in to the Vega website. The **website frontend**
 
 The first connection from a new website opens a small local permission page. Approve only your own trusted Vega origin: approval lets accounts signed in to that site read/write files and execute commands on this machine. Login is verified with a one-use, 15-second server ticket, not a reusable local secret. Windows tray → **连接授权** lists trusted sites and can revoke them.
 
-Once the website shows **本机已连接**, newly created conversations use this client's working directory. Existing server conversations stay on the server; Stage, fork and Fire inherit the original execution location. `read`, `write`, `edit`, `bash` and directory changes run locally, including image reads. `sqlite:` archives, skills and Chrome remain server-side.
+Once the website shows **本机已连接**, newly created conversations default to this client; without a client they default to the server. The **服务端 / 客户端** switch beside the message box can override the default or change an idle conversation. Connections and disconnections never move an existing conversation automatically. Finish or stop the current turn (including Fire) before switching.
+
+A manual switch validates the destination, remembers each side's working directory and restores it when switching back. Missing remembered directories fall back to that side's root directory, never the other machine's path. Files are **not** copied or synchronized. Stage, fork and Fire inherit the original execution location. `read`, `write`, `edit`, `bash` and directory changes run on the selected side, including image reads. `sqlite:` archives, skills and Chrome remain server-side.
 
 If a response is lost, work pauses and asks the user to inspect the actual result, repair the connection and explicitly continue. No command is replayed or silently rerun on the server. Closing the connection or cancelling the session cancels pending local shell processes.
 

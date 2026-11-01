@@ -132,7 +132,9 @@ const sessions = ref([]),
   running = ref({}),
   draft = ref(""),
   attachments = ref([]),
-  sending = ref(false);
+  sending = ref(false),
+  draftExecution = ref(null),
+  switchingExecution = ref(false);
 const contextBudget = ref(null),
   fireState = ref(null);
 const live = ref(""),
@@ -191,6 +193,18 @@ function emptyDuty() {
 const isRunning = computed(
   () => current.value && running.value[current.value.id],
 );
+const executionLocal = computed(
+  () => current.value ? !!current.value.localAgent : (draftExecution.value ?? localConnected.value),
+);
+const executionBusy = computed(
+  () => switchingExecution.value || sending.value || isRunning.value || fireState.value?.status === "running",
+);
+const executionHint = computed(() => {
+  if (switchingExecution.value) return "正在校验执行环境，请稍候";
+  if (executionBusy.value) return "当前轮执行结束后可切换执行位置";
+  if (!executionLocal.value && !localConnected.value) return "当前在服务端执行；连接客户端后可切换";
+  return `当前在${executionLocal.value ? "客户端" : "服务端"}执行，点击切换；两端文件不会自动同步`;
+});
 const turns = computed(() =>
   groupTurns(messages.value).map((turn, i, all) => {
     const running = i === all.length - 1 && !!isRunning.value;
@@ -600,6 +614,7 @@ function resetLogin() {
   password.value = "";
   setupToken.value = "";
   current.value = null;
+  draftExecution.value = null;
   sessionRequest++;
   sessionLoading.value = false;
   sessions.value = [];
@@ -670,9 +685,36 @@ async function newSession() {
   await attempt(async () => {
     const s = await api("/sessions", "POST", {
       cwd: project.value,
+      localAgent: localConnected.value,
     });
+    draftExecution.value = null;
     await Promise.all([bootstrap(), selectSession(s)]);
   });
+}
+async function toggleExecution() {
+  if (!canWriteCurrent.value || executionBusy.value) return;
+  const localAgent = !executionLocal.value;
+  if (localAgent && !localConnected.value) {
+    error.value = "客户端未连接，请先连接客户端";
+    return;
+  }
+  if (!current.value) {
+    draftExecution.value = localAgent;
+    return;
+  }
+  const id = current.value.id, request = ++sessionRequest;
+  switchingExecution.value = true;
+  try {
+    await attempt(async () => {
+      const session = await api(`/sessions/${id}/execution`, "POST", { localAgent });
+      if (current.value?.id !== id || request !== sessionRequest) return;
+      current.value = session;
+      sessions.value = sessions.value.map((s) => s.id === id ? session : s);
+      notice.value = `已切换到${localAgent ? "客户端" : "服务端"}，工作目录：${session.cwd}。两端文件不会自动同步。`;
+    });
+  } finally {
+    switchingExecution.value = false;
+  }
 }
 async function removeSession(s) {
   if (!confirm("删除该会话及其 Stage 和消息？此操作不可撤销。")) return;
@@ -701,7 +743,11 @@ async function removeSession(s) {
   });
 }
 async function send() {
-  if (!canWriteCurrent.value) return;
+  if (!canWriteCurrent.value || switchingExecution.value) return;
+  if (executionLocal.value && !localConnected.value) {
+    error.value = "客户端已断开，请重连后继续，或手动切换到服务端；不会自动重试操作";
+    return;
+  }
   if (sending.value || (!draft.value.trim() && !attachments.value.length))
     return;
   if (uploading.value) return;
@@ -711,7 +757,9 @@ async function send() {
     if (!current.value) {
       const s = await api("/sessions", "POST", {
         cwd: project.value,
+        localAgent: executionLocal.value,
       });
+      draftExecution.value = null;
       await Promise.all([bootstrap(), selectSession(s)]);
     }
     const id = current.value.id;
@@ -801,6 +849,11 @@ async function refreshCurrent() {
   running.value[current.value.id] = data.running;
 }
 async function handleEvent(event) {
+  if (event.type === "execution_changed") {
+    await bootstrap();
+    if (event.session === current.value?.id) await refreshCurrent();
+    return;
+  }
   if (event.type === "config_changed") {
     await Promise.all([bootstrap(), loadModels()]);
     return;
@@ -1524,6 +1577,21 @@ onBeforeUnmount(() => {
                 hidden
                 @change="upload"
               />
+              <button
+                type="button"
+                class="execution-switch"
+                role="switch"
+                aria-label="客户端执行（关闭时在服务端执行）"
+                :aria-checked="executionLocal"
+                :class="{ local: executionLocal }"
+                :title="executionHint"
+                :disabled="executionBusy || (!executionLocal && !localConnected)"
+                @click="toggleExecution"
+              >
+                <span :class="{ selected: !executionLocal }">服务端</span>
+                <span class="execution-track" aria-hidden="true"></span>
+                <span :class="{ selected: executionLocal }">客户端</span>
+              </button>
               <div v-if="!isRunning" class="context-controls"></div>
               <span class="hint">Enter 发送 · Shift + Enter 换行</span>
               <button
@@ -1540,7 +1608,7 @@ onBeforeUnmount(() => {
               ><button
                 class="primary"
                 :disabled="
-                  sending || uploading || (!draft.trim() && !attachments.length)
+                  sending || switchingExecution || uploading || (executionLocal && !localConnected) || (!draft.trim() && !attachments.length)
                 "
               >
                 {{
@@ -1556,6 +1624,9 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </form>
+          <p v-if="executionLocal && !localConnected" class="execution-warning" role="status">
+            客户端已离线，请重连或手动切换到服务端；不会自动切换或重试操作。
+          </p>
         </div>
       </template>
       <Accounts

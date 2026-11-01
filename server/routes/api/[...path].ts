@@ -139,11 +139,14 @@ export default defineEventHandler(async (event) => {
       if (path.length === 1 && method === "POST") {
         assert(!a.model || typeof a.model === "string", "Invalid model");
         if (a.model) await engine.catalog.resolve(engine.config(), a.model);
-        const agent = engine.localAgents.active(user.id);
+        const agent = engine.localAgents.active(user.id),
+          localAgent = a.localAgent === undefined ? !!agent : a.localAgent;
+        assert(typeof localAgent === "boolean", "Invalid execution mode");
+        assert(!localAgent || agent, "客户端未连接，请先连接客户端");
         return store.newSession({
-          cwd: agent?.cwd || a.cwd,
-          localAgent: !!agent,
-          localPlatform: agent?.platform,
+          cwd: localAgent ? agent!.cwd : a.cwd,
+          localAgent,
+          localPlatform: localAgent ? agent!.platform : undefined,
           ownerId: user.id,
           model: a.model,
           title: a.title,
@@ -187,6 +190,8 @@ export default defineEventHandler(async (event) => {
         for (const s of family) await engine.releaseSession(s.id);
         return { ok: true };
       }
+      if (path[2] === "execution" && method === "POST")
+        return await engine.switchExecution(key, a.localAgent);
       if (path[2] === "stage" && method === "POST")
         return store.stage(key, a.inheritModel === true);
       if (path[2] === "cancel" && method === "POST") {
