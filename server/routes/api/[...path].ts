@@ -1,4 +1,5 @@
 import { updateEmployeeAvatar } from "../../core/employee-avatar";
+import { chatHistory } from "../../core/chat-page";
 import { prepareDutyInput } from "../../core/duty-condition";
 import { uploadSkill } from "../../core/skill-upload";
 import {
@@ -198,7 +199,7 @@ export default defineEventHandler(async (event) => {
       }
       if (path[2] === "chat" && method === "GET") {
         const session = employee.chat(user.id);
-        return { session, messages: store.messages(session.id), running: engine.active.has(session.id) };
+        return { session, ...chatHistory(store, session.id, getRequestURL(event).searchParams), running: engine.active.has(session.id) };
       }
       if (path[2] === "messages" && method === "POST") {
         const session = employee.chat(user.id);

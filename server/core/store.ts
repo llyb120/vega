@@ -254,6 +254,21 @@ export class Store {
       .all(key)
       .map((r: any) => ({ ...JSON.parse(r.data), seq: r.seq }));
   }
+  /** Chat history window: the newest `limit` messages before `before`, or every message after `after`. */
+  messagePage(key: string, { before, after, limit }: { before?: number; after?: number; limit?: number }): { messages: Message[]; hasMore: boolean } {
+    const parse = (r: any) => ({ ...JSON.parse(r.data), seq: r.seq });
+    if (after !== undefined) {
+      const rows = this.db.prepare("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq").all(key, after);
+      const first = (rows[0] as any)?.seq ?? after + 1;
+      return { messages: rows.map(parse), hasMore: !!this.db.prepare("SELECT 1 FROM messages WHERE session=? AND seq<? LIMIT 1").get(key, first) };
+    }
+    const rows = this.db
+      .prepare("SELECT seq,data FROM messages WHERE session=? AND seq<? ORDER BY seq DESC LIMIT ?")
+      .all(key, before ?? Number.MAX_SAFE_INTEGER, limit ?? -1)
+      .reverse();
+    const first = (rows[0] as any)?.seq;
+    return { messages: rows.map(parse), hasMore: first !== undefined && !!this.db.prepare("SELECT 1 FROM messages WHERE session=? AND seq<? LIMIT 1").get(key, first) };
+  }
   append(key: string, m: Message) {
     return this.transaction(() => {
       const seq = Number(
