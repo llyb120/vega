@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -29,13 +30,14 @@ type connectionStatus struct {
 	HTTPStatus int    `json:"httpStatus,omitempty"`
 }
 type directConnection struct {
-	origin   string
-	token    string
-	instance string
-	jobs     *jobRunner
-	cancel   context.CancelFunc
-	status   connectionStatus
-	changed  chan struct{}
+	origin     string
+	token      string
+	instance   string
+	jobs       *jobRunner
+	autoUpdate bool
+	cancel     context.CancelFunc
+	status     connectionStatus
+	changed    chan struct{}
 }
 
 func (a *Agent) connectionStatus(connection *directConnection, status connectionStatus) {
@@ -81,6 +83,8 @@ func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredentia
 func (a *Agent) startConnections(ctx context.Context) {
 	a.mu.Lock()
 	a.context = ctx
+	_ = json.Unmarshal([]byte(os.Getenv("VEGA_LOCAL_RESUME")), &a.resumeInstances)
+	_ = os.Unsetenv("VEGA_LOCAL_RESUME")
 	servers := append([]ServerCredential{}, a.config.Servers...)
 	a.mu.Unlock()
 	for _, saved := range servers {
@@ -92,7 +96,7 @@ func (a *Agent) startConnections(ctx context.Context) {
 func (a *Agent) startConnection(saved ServerCredential, token string) *directConnection {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !validOrigin(saved.Origin) {
+	if a.updating || !validOrigin(saved.Origin) {
 		return nil
 	}
 	trusted := false
@@ -116,8 +120,19 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	if parent == nil {
 		parent = context.Background()
 	}
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return nil
+	}
+	instance := hex.EncodeToString(id)
+	if resumed := a.resumeInstances[key]; len(resumed) == 32 {
+		if _, err := hex.DecodeString(resumed); err == nil {
+			instance = resumed
+		}
+	}
+	delete(a.resumeInstances, key)
 	ctx, cancel := context.WithCancel(parent)
-	connection := &directConnection{origin: saved.Origin, token: token, jobs: newJobRunner(ctx, true), cancel: cancel, status: connectionStatus{Code: "backend_connecting"}, changed: make(chan struct{})}
+	connection := &directConnection{origin: saved.Origin, token: token, instance: instance, jobs: newJobRunner(ctx, true), cancel: cancel, status: connectionStatus{Code: "backend_connecting"}, changed: make(chan struct{})}
 	a.direct[key] = connection
 	go func() {
 		defer func() { cancel(); connection.jobs.close() }()
@@ -128,12 +143,6 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 			}
 			a.mu.Unlock()
 		}()
-		id := make([]byte, 16)
-		if _, err := rand.Read(id); err != nil {
-			a.connectionStatus(connection, connectionStatus{Code: "backend_internal"})
-			return
-		}
-		connection.instance = hex.EncodeToString(id)
 		delay := time.Second
 		for ctx.Err() == nil {
 			retry, connected := a.connectBackend(ctx, saved, connection)
@@ -161,6 +170,12 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	return connection
 }
 func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, connection *directConnection) (bool, bool) {
+	a.mu.Lock()
+	updating := a.updating
+	a.mu.Unlock()
+	if updating {
+		return true, false
+	}
 	u, _ := url.Parse(saved.Origin + "/api/local-agent/socket")
 	if u.Scheme == "https" {
 		u.Scheme = "wss"
@@ -200,16 +215,16 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	clientID := a.config.ClientID
 	a.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "name": name, "cwd": cwd, "platform": runtime.GOOS, "resume": true}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true, false
 	}
 	conn.SetReadLimit(maxBody)
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var ready struct {
-		Type, UserID, ClientID string
-		Resume                 bool
-		Pending, Leases        []string
+		Type, UserID, ClientID                string
+		Resume, AutoUpdate, SessionIdle, Busy bool
+		Pending, Leases                       []string
 	}
 	if conn.ReadJSON(&ready) != nil || ready.Type != "ready" || ready.UserID != saved.UserID || ready.ClientID != clientID {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_protocol"})
@@ -217,14 +232,19 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	}
 	a.mu.Lock()
 	a.connections[conn] = struct{}{}
+	connection.autoUpdate = ready.AutoUpdate && ready.Resume && ready.SessionIdle
 	setState(true)
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()
 		delete(a.connections, conn)
+		connection.autoUpdate = false
 		setState(len(a.connections) > 0)
 		a.mu.Unlock()
 	}()
+	connection.jobs.mu.Lock()
+	connection.jobs.sessionBusy = ready.Busy
+	connection.jobs.mu.Unlock()
 	a.connectionStatus(connection, connectionStatus{Code: "connected"})
 	if ready.Resume {
 		connection.jobs.run(conn, ready.Pending, ready.Leases)
@@ -240,16 +260,20 @@ type localJob struct {
 	result map[string]any
 }
 type jobRunner struct {
-	ctx       context.Context
-	mu        sync.Mutex
-	conn      *websocket.Conn
-	tasks     map[string]*localJob
-	resumable bool
-	recovery  *time.Timer
+	running      int
+	ctx          context.Context
+	mu           sync.Mutex
+	conn         *websocket.Conn
+	tasks        map[string]*localJob
+	resumable    bool
+	sessionBusy  bool
+	lastActivity time.Time
+	updateReady  chan bool
+	recovery     *time.Timer
 }
 
 func newJobRunner(ctx context.Context, resumable bool) *jobRunner {
-	return &jobRunner{ctx: ctx, tasks: make(map[string]*localJob), resumable: resumable}
+	return &jobRunner{ctx: ctx, tasks: make(map[string]*localJob), resumable: resumable, lastActivity: time.Now()}
 }
 func runJobs(parent context.Context, conn *websocket.Conn) {
 	ctx, cancel := context.WithCancel(parent)
@@ -275,6 +299,13 @@ func (runner *jobRunner) suspend(conn *websocket.Conn) {
 		return
 	}
 	runner.conn = nil
+	if runner.updateReady != nil {
+		select {
+		case runner.updateReady <- false:
+		default:
+		}
+		runner.updateReady = nil
+	}
 	if runner.resumable {
 		var timer *time.Timer
 		timer = time.AfterFunc(reconnectGrace, func() {
@@ -350,12 +381,31 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 			return
 		}
 		if request.Type == "pong" {
+			runner.mu.Lock()
+			runner.sessionBusy = request.Busy
+			runner.mu.Unlock()
+			continue
+		}
+		if request.Type == "update_ready" || request.Type == "update_busy" {
+			runner.mu.Lock()
+			if runner.updateReady != nil {
+				select {
+				case runner.updateReady <- request.Type == "update_ready":
+				default:
+				}
+				if request.Type == "update_busy" {
+					runner.sessionBusy = true
+					runner.updateReady = nil
+				}
+			}
+			runner.mu.Unlock()
 			continue
 		}
 		if len(request.ID) != 36 {
 			return
 		}
 		runner.mu.Lock()
+		runner.lastActivity = time.Now()
 		if request.Type == "ack" {
 			if task := runner.tasks[request.ID]; task != nil && task.result != nil {
 				delete(runner.tasks, request.ID)
@@ -378,6 +428,7 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 		taskCtx, stop := context.WithCancel(runner.ctx)
 		task := &localJob{cancel: stop}
 		runner.tasks[request.ID] = task
+		runner.running++
 		runner.mu.Unlock()
 		go func(request job) {
 			var result map[string]any
@@ -389,6 +440,8 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 			stop()
 			runner.mu.Lock()
 			defer runner.mu.Unlock()
+			runner.running--
+			runner.lastActivity = time.Now()
 			if runner.tasks[request.ID] != task {
 				return
 			}

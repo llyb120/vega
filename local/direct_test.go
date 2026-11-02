@@ -62,7 +62,7 @@ func TestNativeClientContinuesAfterPairingPageClosesAndReconnectsAfterRestart(t 
 		}
 		defer conn.Close()
 		var hello map[string]any
-		if conn.ReadJSON(&hello) != nil || hello["type"] != "hello" || hello["clientId"] != clientID {
+		if conn.ReadJSON(&hello) != nil || hello["type"] != "hello" || hello["clientId"] != clientID || hello["version"] != clientVersion || hello["autoUpdate"] != true {
 			return
 		}
 		peer := &backendPeer{conn: conn}

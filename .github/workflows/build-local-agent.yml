@@ -3,9 +3,9 @@ name: Build vega-local
 on:
   push:
     branches: [master, main]
-    paths: ["local/**", ".github/workflows/build-local-agent.yml"]
+    paths: ["local/**", "scripts/client-manifest.mjs", ".github/workflows/build-local-agent.yml"]
   pull_request:
-    paths: ["local/**", ".github/workflows/build-local-agent.yml"]
+    paths: ["local/**", "scripts/client-manifest.mjs", ".github/workflows/build-local-agent.yml"]
   workflow_dispatch:
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
           cache-dependency-path: local/go.sum
 
       - name: Vet & build
@@ -57,10 +57,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Generate update manifest
+        run: node scripts/client-manifest.mjs dist
 
       # Rolling latest: assets are replaced on every push to master. The tag itself
       # stays on the first commit of the release (shortcut: fixed tag, switch to

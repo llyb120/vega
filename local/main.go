@@ -30,18 +30,30 @@ const (
 )
 
 type Agent struct {
-	mu             sync.Mutex
-	config         Config
-	configPath     string
-	configToken    string
-	pendingOrigins map[string]bool
-	connections    map[*websocket.Conn]struct{}
-	direct         map[string]*directConnection
-	context        context.Context
+	mu              sync.Mutex
+	config          Config
+	configPath      string
+	configToken     string
+	pendingOrigins  map[string]bool
+	connections     map[*websocket.Conn]struct{}
+	direct          map[string]*directConnection
+	resumeInstances map[string]string
+	updating        bool
+	context         context.Context
 }
 
 func main() {
 	detachConsole()
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version":
+			fmt.Println(clientVersion)
+			return
+		case "--apply-update":
+			must(applyUpdate(os.Args[2:]))
+			return
+		}
+	}
 	a, err := newAgent()
 	must(err)
 	lis, err := net.Listen("tcp", localAddress)
@@ -56,10 +68,11 @@ func main() {
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(lis) }()
 	ctx, cancel := context.WithCancel(context.Background())
+	must(notifyUpdateReady())
 	a.startConnections(ctx)
 	configure := func() { openBrowser("http://" + localAddress + "/config/" + a.configToken) }
 	fmt.Fprintln(os.Stderr, "vega-local: running on "+localAddress)
-	systrayRun(configure, func() {
+	quit := func() {
 		cancel()
 		a.mu.Lock()
 		for conn := range a.connections {
@@ -71,10 +84,13 @@ func main() {
 			_ = browserServer.Close()
 		}
 		os.Exit(0)
-	})
+	}
+	go a.autoUpdate(ctx, quit)
+	systrayRun(configure, quit)
 }
 
 type job struct {
+	Busy bool            `json:"busy"`
 	Type string          `json:"type"`
 	ID   string          `json:"id"`
 	Op   string          `json:"op"`

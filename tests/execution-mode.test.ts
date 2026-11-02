@@ -22,6 +22,36 @@ function fixture(t: TestContext) {
   return { engine, store };
 }
 
+test("client update idleness covers entire local turns, employee sessions and Fire chains", (t) => {
+  const { engine, store } = fixture(t);
+  const ordinary = store.newSession({ cwd: client.cwd, localAgent: true, clientId: client.clientId, ownerId: "alice" });
+  const employee = store.newSession({ cwd: client.cwd, localAgent: true, clientId: client.clientId, ownerId: "bob", employeeId: "worker", taskId: "task", scene: "computer" });
+  const server = store.newSession({ cwd: process.cwd(), localAgent: false, clientId: client.clientId, ownerId: "alice" });
+  const other = store.newSession({ cwd: client.cwd, localAgent: true, clientId: "e".repeat(32), ownerId: "alice" });
+  const state = () => ({ control: new AbortController(), steer: [] });
+  try {
+    engine.active.set(server.id, state());
+    engine.active.set(other.id, state());
+    assert.equal(engine.clientInUse(client.clientId), false, "idle local sessions and unrelated running sessions do not block");
+    for (const session of [ordinary, employee]) {
+      engine.active.set(session.id, state());
+      assert.equal(engine.clientInUse(client.clientId), true, "thinking without a pending tool is still busy, across all owners");
+      engine.active.get(session.id)!.control.abort();
+      assert.equal(engine.clientInUse(client.clientId), true, "cancellation remains busy until the turn finishes cleanup");
+      engine.active.delete(session.id);
+      assert.equal(engine.clientInUse(client.clientId), false);
+    }
+    engine.fire.running.set(ordinary.id, Promise.resolve());
+    assert.equal(engine.clientInUse(client.clientId), true, "Fire stays busy between phases even without an active model call");
+    engine.fire.running.delete(ordinary.id);
+    engine.fire.running.set(server.id, Promise.resolve());
+    assert.equal(engine.clientInUse(client.clientId), false, "server-side Fire must not block this client");
+  } finally {
+    engine.active.clear();
+    engine.fire.running.clear();
+  }
+});
+
 test("connecting a client never moves existing server sessions or their Stage/fork tools", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "vega-execution-server-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

@@ -8,13 +8,13 @@ import { assert, type Obj } from "./util";
 export const CLIENT_BODY_LIMIT = 48 << 20;
 type Socket = Pick<Peer, "id" | "request" | "send" | "close">;
 type Grant = { hash: string; userId: string; clientId: string; createdAt: number };
-type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj; transport?: Agent["transport"] };
+type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj; transport?: Agent["transport"]; updating?: boolean };
 
 export class ClientSockets {
   private connections = new Map<string, Connection>();
   private timer: ReturnType<typeof setInterval>;
   private onRevoke = (userId: string) => this.revoke(userId);
-  constructor(private store: Store, private auth: Auth, private hub: LocalAgents) {
+  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean) {
     auth.events.on("revoke", this.onRevoke);
     this.timer = setInterval(() => {
       for (const [id, connection] of this.connections) {
@@ -73,6 +73,7 @@ export class ClientSockets {
       if (!connection.details) {
         assert(value.type === "hello" && value.clientId === grant.clientId, "Client identity mismatch");
         validateClient(value);
+        assert(value.version === undefined || (typeof value.version === "string" && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(value.version)), "Invalid client version");
         const previous = this.hub.active(grant.userId, grant.clientId);
         if (previous && previous.instance !== value.instance) this.hub.disconnect(grant.userId, previous.instance);
         connection.transport = {
@@ -80,16 +81,27 @@ export class ClientSockets {
           close: () => this.close(socket.id),
         };
         this.hub.connect(grant.userId, value, connection.transport);
-        connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, resume: value.resume === true };
+        connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, resume: value.resume === true, autoUpdate: value.autoUpdate === true && value.resume === true && !!value.version };
         const agent = this.hub.active(grant.userId, grant.clientId)!;
         accepted = true;
-        socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) }));
+        socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy: this.clientInUse(grant.clientId) } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) }));
         return;
       }
-      if (value.type === "ping") {
-        this.hub.connect(grant.userId, connection.details);
+      if (value.type === "update_prepare") {
+        assert(connection.details.autoUpdate && !connection.updating, "Client update not negotiated");
+        const agent = this.hub.active(grant.userId, grant.clientId);
+        const idle = agent && agent.transport === connection.transport && !agent.reconnecting && !agent.pending.size && !agent.browserLeases.size && !this.clientInUse(grant.clientId);
+        if (idle) {
+          connection.updating = true;
+          // Reserve the same instance; new operations wait instead of racing the restart.
+          this.hub.suspend(grant.userId, agent.instance, connection.transport, true);
+        }
         accepted = true;
-        socket.send(JSON.stringify({ type: "pong" }));
+        socket.send(JSON.stringify({ type: idle ? "update_ready" : "update_busy" }));
+      } else if (value.type === "ping") {
+        if (!connection.updating) this.hub.connect(grant.userId, connection.details);
+        accepted = true;
+        socket.send(JSON.stringify({ type: "pong", ...(connection.details.autoUpdate ? { busy: this.clientInUse(grant.clientId) } : {}) }));
       } else {
         assert(value.type === "result", "Client may only send heartbeats and job results");
         this.hub.result(grant.userId, { id: value.id, result: value.result, instance: connection.details.instance });

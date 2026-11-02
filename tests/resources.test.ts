@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { writeClientManifest } from "../scripts/client-manifest.mjs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
@@ -27,17 +29,34 @@ test("Docker builds exactly the client platforms offered by Resources before bun
   assert(clients.every((client) => client.name && client.arch));
   assert.match(docker, /FROM --platform=\$BUILDPLATFORM golang:1\.26-bookworm AS clients/);
   assert.match(docker, /COPY local\/go\.mod local\/go\.sum \.\/\s+RUN go mod download/);
-  assert.match(docker, /COPY local\/\*\.go local\/icon\.ico \.\//);
+  assert.match(docker, /COPY local\/\*\.go local\/icon\.ico local\/VERSION \.\//);
   assert.match(docker, /RUN set -eu;/, "a failed cross-build must stop the image build");
   assert.match(docker, /CGO_ENABLED=0 GOOS="\$os" GOARCH="\$arch" go build -trimpath/);
   assert.match(docker, /if \[ "\$os" = windows \]; then flags="\$flags -H=windowsgui"; suffix="\.exe"; fi/);
   assert.match(docker, /-o "\/out\/vega-local-\$os-\$arch\$suffix"/);
-  assert.match(docker, /COPY --from=clients \/out \.\/web\/public\/clients\s+RUN npm run build/);
+  assert.match(docker, /COPY --from=clients \/out \.\/web\/public\/clients\s+RUN node scripts\/client-manifest\.mjs web\/public\/clients\s+RUN npm run build/);
   const ignore = readFileSync(".dockerignore", "utf8");
-  for (const input of ["local/", "local/*.go", "local/go.mod", "local/go.sum", "local/icon.ico"])
+  for (const input of ["local/", "local/*.go", "local/go.mod", "local/go.sum", "local/icon.ico", "local/VERSION"])
     assert(ignore.split(/\r?\n/).includes("!" + input));
   assert(ignore.split(/\r?\n/).includes("web/public/clients/"), "host binaries must not enter the build context");
   assert(!ignore.includes("!local/**"), "allow Go inputs, not local credentials or host executables");
+});
+
+test("the update manifest binds the native version to all five exact release files", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "vega-client-manifest-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await assert.rejects(writeClientManifest(dir), /ENOENT/);
+  for (const platform of ["windows-amd64", "linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64"])
+    writeFileSync(join(dir, `vega-local-${platform}${platform.startsWith("windows-") ? ".exe" : ""}`), platform);
+  const manifest = await writeClientManifest(dir);
+  assert.equal(manifest.version, readFileSync("local/VERSION", "utf8").trim());
+  assert.equal(Object.keys(manifest.assets).length, 5);
+  for (const [platform, asset] of Object.entries(manifest.assets) as [string, { file: string; size: number; sha256: string }][]) {
+    assert.equal(asset.size, Buffer.byteLength(platform));
+    assert.equal(asset.sha256, createHash("sha256").update(platform).digest("hex"));
+    assert.equal(readFileSync(join(dir, asset.file), "utf8"), platform);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")), manifest);
 });
 
 test("Resources offers a Chrome extension ZIP containing only the current runtime files", async (t) => {

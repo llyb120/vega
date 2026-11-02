@@ -22,6 +22,9 @@
 !local/go.mod
 !local/go.sum
 !local/icon.ico
+!local/VERSION
+!scripts/
+!scripts/client-manifest.mjs
 web/public/clients/
 **/node_modules
 **/dist

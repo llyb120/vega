@@ -6,10 +6,10 @@ import { CLIENT_HEARTBEAT_TIMEOUT, CLIENT_RECONNECT_GRACE, LocalAgents, LocalAge
 import { ClientSockets } from "../server/core/client-socket";
 
 const details = { clientId: "d".repeat(32), instance: "a".repeat(32), name: "Office PC", cwd: "C:\\work", platform: "windows" };
-async function fixture(t: any) {
+async function fixture(t: any, clientInUse: (clientId: string) => boolean = () => false) {
   const store = new Store(":memory:"), auth = new Auth(store, "client-pairing-fixture-token");
   const login = await auth.setup({ setupToken: "client-pairing-fixture-token", username: "admin", password: "Long pairing fixture password" });
-  const events: any[] = [], hub = new LocalAgents((event) => events.push(event)), sockets = new ClientSockets(store, auth, hub);
+  const events: any[] = [], hub = new LocalAgents((event) => events.push(event)), sockets = new ClientSockets(store, auth, hub, clientInUse);
   t.after(() => { sockets.closeAll(); hub.close(); store.close(); });
   const ticket = () => hub.ticket(login.principal, details.instance).ticket;
   const peer = (token: string, id = "native") => {
@@ -41,9 +41,91 @@ test("device pairing is one-use, hashed, scoped and persists without a website l
   f.sockets.message(socket, JSON.stringify({ type: "ping" }));
   assert.equal(socket.messages.at(-1).type, "pong");
   f.sockets.closeAll();
-  const restarted = new ClientSockets(f.store, f.auth, f.hub);
+  const restarted = new ClientSockets(f.store, f.auth, f.hub, () => false);
   assert.equal(restarted.authorize(socket.request).clientId, details.clientId);
   restarted.closeAll();
+});
+
+test("automatic update drains only idle clients and queues new work across a same-instance restart", async (t) => {
+  const f = await fixture(t), paired = f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
+  const hello = { type: "hello", ...details, version: "0.3.0", autoUpdate: true, resume: true };
+  const first = f.peer(paired.deviceToken, "before-update");
+  f.sockets.open(first); f.sockets.message(first, JSON.stringify(hello));
+  assert.equal(first.messages[0].autoUpdate, true);
+  const agent = f.hub.active(f.login.principal.user.id, details.clientId)!;
+  const working = f.hub.request(agent, "file", { op: "read" }, new AbortController().signal), job = first.messages.at(-1);
+  f.sockets.message(first, JSON.stringify({ type: "update_prepare" }));
+  assert.equal(first.messages.at(-1).type, "update_busy");
+  assert.equal(agent.reconnecting, false);
+  f.sockets.message(first, JSON.stringify({ type: "result", id: job.id, result: { done: true } }));
+  await working;
+  agent.browserLeases.add("active-turn");
+  f.sockets.message(first, JSON.stringify({ type: "update_prepare" }));
+  assert.equal(first.messages.at(-1).type, "update_busy", "a browser lease is busy even between browser commands");
+  agent.browserLeases.clear();
+  f.sockets.message(first, JSON.stringify({ type: "update_prepare" }));
+  assert.equal(first.messages.at(-1).type, "update_ready");
+  assert.equal(first.closed.length, 0, "the updater must receive readiness before its socket is closed");
+  assert.equal(agent.reconnecting, true);
+  f.sockets.message(first, JSON.stringify({ type: "ping" }));
+  assert.equal(agent.reconnecting, true, "heartbeats must not undo the update reservation");
+  const queued = f.hub.request(agent, "file", { op: "read" }, new AbortController().signal);
+  assert.equal(first.messages.at(-1).type, "pong", "no new job is dispatched to the exiting process");
+  const second = f.peer(paired.deviceToken, "after-update");
+  f.sockets.close(first.id);
+  f.sockets.open(second); f.sockets.message(second, JSON.stringify({ ...hello, version: "0.3.1" }));
+  await Promise.resolve();
+  assert.equal(f.hub.active(f.login.principal.user.id, details.clientId), agent);
+  assert.deepEqual(second.messages.map((m) => m.type || m.op), ["ready", "file"]);
+  const resumed = second.messages.at(-1);
+  f.sockets.message(second, JSON.stringify({ type: "result", id: resumed.id, result: { updated: true } }));
+  assert.deepEqual(await queued, { updated: true });
+});
+
+test("a running session blocks updates during model thinking even without local operations", async (t) => {
+  const running = new Set([details.clientId]);
+  const f = await fixture(t, (clientId) => running.has(clientId));
+  const paired = f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId }), socket = f.peer(paired.deviceToken);
+  f.sockets.open(socket);
+  f.sockets.message(socket, JSON.stringify({ type: "hello", ...details, version: "0.3.0", autoUpdate: true, resume: true }));
+  assert.equal(socket.messages[0].busy, true);
+  assert.equal(socket.messages[0].sessionIdle, true);
+  const agent = f.hub.active(f.login.principal.user.id, details.clientId)!;
+  assert.equal(agent.pending.size, 0);
+  assert.equal(agent.browserLeases.size, 0);
+  f.sockets.message(socket, JSON.stringify({ type: "update_prepare" }));
+  assert.equal(socket.messages.at(-1).type, "update_busy");
+  assert.equal(agent.reconnecting, false);
+  assert.equal(socket.closed.length, 0);
+  f.sockets.message(socket, JSON.stringify({ type: "ping" }));
+  assert.deepEqual(socket.messages.at(-1), { type: "pong", busy: true });
+  running.clear();
+  f.sockets.message(socket, JSON.stringify({ type: "ping" }));
+  assert.deepEqual(socket.messages.at(-1), { type: "pong", busy: false });
+  running.add(details.clientId); // A session can start after the last idle heartbeat.
+  f.sockets.message(socket, JSON.stringify({ type: "update_prepare" }));
+  assert.equal(socket.messages.at(-1).type, "update_busy");
+  assert.equal(socket.closed.length, 0);
+  running.clear();
+  f.sockets.message(socket, JSON.stringify({ type: "update_prepare" }));
+  assert.equal(socket.messages.at(-1).type, "update_ready");
+});
+
+test("an update reservation aborted before installation resumes queued work without replay", async (t) => {
+  const f = await fixture(t), paired = f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
+  const hello = { type: "hello", ...details, version: "0.3.0", autoUpdate: true, resume: true };
+  const first = f.peer(paired.deviceToken, "prepare");
+  f.sockets.open(first); f.sockets.message(first, JSON.stringify(hello));
+  f.sockets.message(first, JSON.stringify({ type: "update_prepare" }));
+  const agent = f.hub.active(f.login.principal.user.id, details.clientId)!;
+  const queued = f.hub.request(agent, "file", {}, new AbortController().signal);
+  f.sockets.close(first.id);
+  const retry = f.peer(paired.deviceToken, "unchanged-client");
+  f.sockets.open(retry); f.sockets.message(retry, JSON.stringify(hello));
+  await Promise.resolve();
+  assert.deepEqual(retry.messages.map((m) => m.type || m.op), ["ready", "file"]);
+  f.sockets.message(retry, JSON.stringify({ type: "result", id: retry.messages[1].id, result: { ok: true } }));
+  assert.deepEqual(await queued, { ok: true });
 });
 
 test("device tokens are accepted only as native WebSocket Authorization and cannot impersonate a device", async (t) => {

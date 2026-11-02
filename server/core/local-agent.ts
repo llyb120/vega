@@ -178,7 +178,7 @@ export class LocalAgents {
       resume();
     });
   }
-  suspend(userId: string, instance: string, transport?: Agent["transport"]) {
+  suspend(userId: string, instance: string, transport?: Agent["transport"], keepSocket = false) {
     const agent = [...this.agents.values()].find((item) => item.userId === userId && item.instance === instance);
     if (!agent || agent.reconnecting || (transport && agent.transport !== transport)) return;
     const previous = agent.transport;
@@ -189,7 +189,7 @@ export class LocalAgents {
     agent.heartbeat = setTimeout(() => this.disconnect(userId, instance), CLIENT_RECONNECT_GRACE);
     agent.heartbeat.unref();
     for (const pending of agent.pending.values()) pending.suspend();
-    try { previous?.close(); } catch {}
+    if (!keepSocket) try { previous?.close(); } catch {}
   }
   disconnect(userId: string, instance?: string, transport?: Agent["transport"]) {
     let changed = false;

@@ -99,6 +99,13 @@ export class Engine {
     this.mcpSessions.set(session.id, { key, client });
     return client;
   }
+  clientInUse(clientId: string) {
+    for (const key of [...this.active.keys(), ...this.fire.running.keys()]) {
+      const session = this.store.session(key);
+      if (session.localAgent && session.clientId === clientId) return true;
+    }
+    return false;
+  }
   async releaseSession(key: string) {
     const entry = this.mcpSessions.get(key);
     this.mcpSessions.delete(key);

@@ -3,7 +3,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS clients
 WORKDIR /src
 COPY local/go.mod local/go.sum ./
 RUN go mod download
-COPY local/*.go local/icon.ico ./
+COPY local/*.go local/icon.ico local/VERSION ./
 RUN set -eu; mkdir -p /out; \
     for target in windows/amd64 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
         os="${target%/*}"; arch="${target#*/}"; \
@@ -22,7 +22,10 @@ COPY server ./server
 COPY shared ./shared
 COPY web ./web
 COPY extensions/nova-chrome ./extensions/nova-chrome
+COPY scripts/client-manifest.mjs ./scripts/client-manifest.mjs
+COPY local/VERSION ./local/VERSION
 COPY --from=clients /out ./web/public/clients
+RUN node scripts/client-manifest.mjs web/public/clients
 RUN npm run build
 
 FROM node:24-bookworm-slim AS runtime
