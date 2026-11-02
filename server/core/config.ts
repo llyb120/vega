@@ -1,5 +1,6 @@
 import type { Obj } from "./util";
 import { assert, expand, httpURL, object, clone } from "./util";
+import { validateMcpServer } from "../../shared/mcp-config";
 export type Config = {
   model: string;
   provider: Record<string, Obj>;
@@ -152,13 +153,8 @@ export function validateConfig(c: Config) {
       );
     }
   }
-  for (const cfg of Object.values(c.mcp || {})) {
-    assert(
-      !!cfg.command !== !!cfg.url,
-      "MCP requires exactly one command or URL",
-    );
-    if (cfg.url) httpURL(cfg.url);
-  }
+  assert(c.mcp === undefined || (c.mcp && typeof c.mcp === "object" && !Array.isArray(c.mcp)), "MCP configuration must be an object");
+  for (const [name, cfg] of Object.entries(c.mcp || {})) validateMcpServer(cfg, name);
 }
 export function maskedConfig(config: Config) {
   const copy = clone(config);

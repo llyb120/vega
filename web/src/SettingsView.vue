@@ -2,6 +2,7 @@
 import { onMounted, ref, watch } from "vue";
 import ProviderSettings from "./ProviderSettings.vue";
 import SceneSettings from "./SceneSettings.vue";
+import { validateMcpServer } from "../../shared/mcp-config";
 const confirm = window.confirm.bind(window);
 const props = defineProps({
   api: Function,
@@ -17,13 +18,12 @@ const busy = ref(false),
   upload = ref(null),
   mcp = ref({}),
   mcpName = ref(""),
-  mcpURL = ref(""),
   vault = ref([]),
   vaultForm = ref({ name: "", condition: "", content: "" });
 watch(
   () => props.config,
   () => {
-    mcp.value = copy(props.config.mcp || {});
+    mcp.value = Object.fromEntries(Object.entries(props.config.mcp || {}).map(([name, config]) => [name, JSON.stringify(config, null, 2)]));
   },
   { immediate: true },
 );
@@ -64,7 +64,13 @@ async function importSkill() {
 async function saveMcp() {
   await run(async () => {
     const next = copy(props.config);
-    next.mcp = mcp.value;
+    next.mcp = Object.fromEntries(Object.entries(mcp.value).map(([name, text]) => {
+      let config;
+      try { config = JSON.parse(text); }
+      catch { throw Error(`MCP「${name}」的 JSON 格式无效`); }
+      validateMcpServer(config, name);
+      return [name, config];
+    }));
     emit("saved", await props.api("/config", "PUT", next));
     emit("notice", "MCP已保存");
   });
@@ -72,9 +78,15 @@ async function saveMcp() {
 function addMcp() {
   const key = mcpName.value.trim();
   if (!key) return;
-  mcp.value = { ...mcp.value, [key]: { url: mcpURL.value.trim() } };
+  if (Object.hasOwn(mcp.value, key)) return emit("error", "MCP名称已存在");
+  mcp.value = { ...mcp.value, [key]: '{\n  "url": "https://example.com/mcp"\n}' };
   mcpName.value = "";
-  mcpURL.value = "";
+}
+function newVault() {
+  vaultForm.value = { name: "", condition: "", content: "" };
+}
+function editVault(item) {
+  vaultForm.value = { id: item.id, name: item.name, condition: item.condition, content: "" };
 }
 async function loadVault() {
   const result = await props.api("/vault");
@@ -83,7 +95,7 @@ async function loadVault() {
 async function saveVault() {
   await run(async () => {
     await props.api("/vault", "POST", { ...vaultForm.value });
-    vaultForm.value = { name: "", condition: "", content: "" };
+    newVault();
     await loadVault();
     emit("notice", "凭据已加密保存");
   });
@@ -92,6 +104,7 @@ async function removeVault(item) {
   if (!confirm('永久删除此凭据？')) return;
   await run(async () => {
     await props.api("/vault/" + encodeURIComponent(item.id), "DELETE");
+    if (vaultForm.value.id === item.id) newVault();
     await loadVault();
   });
 }
@@ -151,10 +164,14 @@ onMounted(() => void run(async () => {
       </ul>
     </section>
     <section class="card">
-      <h3>密码本</h3>
+      <div class="section-heading">
+        <h3>密码本 · {{ vault.length }} 条</h3>
+        <button :disabled="busy" @click="newVault">新增凭据</button>
+      </div>
       <p class="hint">
-        凭据加密保存，供数字员工在符合条件时取用；只有管理员能修改。
+        可分别保存多条账号、密码或密钥，每条有独立的使用条件；凭据加密保存，只有管理员能修改。
       </p>
+      <p v-if="vaultForm.id" class="hint">正在编辑「{{ vaultForm.name }}」，凭据留空保留原内容。</p>
       <form class="form-grid" @submit.prevent="saveVault">
         <label
           >名称<input
@@ -172,20 +189,21 @@ onMounted(() => void run(async () => {
         <label
           >凭据<textarea
             v-model="vaultForm.content"
-            required
+            :required="!vaultForm.id"
             rows="3"
             maxlength="16000"
             autocomplete="off"
           ></textarea
         ></label>
-        <button class="primary" :disabled="busy">加密保存</button>
+        <button class="primary" :disabled="busy">{{ vaultForm.id ? '保存修改' : '新增并加密保存' }}</button>
       </form>
       <p v-if="!vault.length" class="hint">还没有凭据</p>
       <ul class="skill-items">
         <li v-for="item in vault" :key="item.id">
           <strong>{{ item.name }}</strong
           ><small>{{ item.condition }}</small
-          ><button @click="removeVault(item)">删除凭据</button>
+          ><button :disabled="busy" @click="editVault(item)">编辑</button
+          ><button :disabled="busy" @click="removeVault(item)">删除凭据</button>
         </li>
       </ul>
     </section>
@@ -194,19 +212,10 @@ onMounted(() => void run(async () => {
         <h3>MCP</h3>
         <button :disabled="busy" @click="saveMcp">保存</button>
       </div>
-      <div v-for="(server, key) in mcp" :key="key" class="mcp-row">
-        <strong>{{ key }}</strong
-        ><input
-          v-if="server.url !== undefined"
-          v-model="server.url"
-          type="url"
-          :aria-label="key + '地址'"
-        /><input
-          v-else
-          v-model="server.command"
-          :aria-label="key + '命令'"
-          placeholder="服务端命令"
-        /><button
+      <p class="hint">每个 MCP 单独配置一个 JSON 对象：远程服务使用 url / headers，本地进程使用 command / args / env；不要包含 mcpServers 外层。保留 __stored_secret__ 可保留已有密钥。</p>
+      <div v-for="(json, key) in mcp" :key="key" class="mcp-row">
+        <strong>{{ key }}</strong>
+        <textarea v-model="mcp[key]" rows="8" spellcheck="false" :aria-label="key + ' JSON配置'"></textarea><button
           @click="
             {
               const next = { ...mcp };
@@ -223,12 +232,7 @@ onMounted(() => void run(async () => {
           v-model="mcpName"
           placeholder="名称"
           aria-label="MCP名称"
-        /><input
-          v-model="mcpURL"
-          type="url"
-          placeholder="https://example.com/mcp"
-          aria-label="MCP地址"
-        /><button @click="addMcp">添加</button>
+        /><button :disabled="busy" @click="addMcp">添加 MCP</button>
       </div>
     </section>
   </div>
@@ -255,8 +259,10 @@ onMounted(() => void run(async () => {
   gap: 10px;
   margin-bottom: 10px;
 }
-.mcp-row input {
+.mcp-row textarea {
   flex: 1;
+  min-width: 0;
+  font-family: monospace;
 }
 .mcp-row strong {
   min-width: 100px;
@@ -268,6 +274,10 @@ onMounted(() => void run(async () => {
   .mcp-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .mcp-row textarea {
+    grid-column: 1/-1;
+    width: 100%;
   }
   .mcp-row strong {
     grid-column: 1/-1;
