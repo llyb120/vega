@@ -29,25 +29,26 @@ async function run(action) {
         <span class="badge"><Icon :name="task.execution?.localAgent ? 'laptop' : 'server'" :size="12" />{{ task.execution?.localAgent ? '客户端 · ' + (task.execution.clientName || '已绑定设备') : '服务端' }}</span>
         <time class="detail-time">{{ formatBeijing(task.createdAt) }}</time>
       </div>
-      <h2>{{ task.text }}</h2>
+      <h2 class="sr-only">任务详情</h2>
+      <MessageText :text="task.text" />
       <p v-if="task.status === 'queued' && task.queueReason" class="detail-note" role="status"><Icon name="clock" :size="14" />{{ task.queueReason }}</p>
     </header>
 
     <section v-if="task.status === 'approval'" class="attention-block">
       <h3><Icon name="alert" :size="16" />需要你确认</h3>
-      <p>{{ task.approval }}</p>
+      <MessageText :text="task.approval" />
       <div v-if="!readonly" class="actions"><button type="button" class="primary" :disabled="busy" @click="run('approve')"><Icon name="check" :size="16" />批准执行</button><button type="button" :disabled="busy" @click="run('reject')">驳回</button></div>
     </section>
     <form v-if="task.status === 'waiting'" class="attention-block" @submit.prevent="run('answer')">
       <h3><Icon name="alert" :size="16" />需要补充信息</h3>
-      <p>{{ task.waiting }}</p>
-      <template v-if="!readonly"><label class="sr-only" :for="'answer-' + task.id">你的回复</label><textarea :id="'answer-' + task.id" v-model="answer" rows="3" maxlength="8000" required placeholder="补充信息后，员工会继续原任务"></textarea><div class="actions end"><button class="primary" :disabled="busy || !answer.trim()">回复并继续</button></div></template>
+      <MessageText :text="task.waiting" />
+      <template v-if="!readonly"><label class="sr-only" :for="'answer-' + task.id">你的回复</label><textarea :id="'answer-' + task.id" v-model="answer" rows="3" maxlength="8000" required placeholder="补充信息后，牛马会继续原任务"></textarea><div class="actions end"><button class="primary" :disabled="busy || !answer.trim()">回复并继续</button></div></template>
     </form>
 
     <section v-if="task.progress?.length" class="detail-section">
       <h3>最新进展</h3>
-      <p class="progress-latest">{{ task.progress.at(-1).text }}</p>
-      <details v-if="task.progress.length > 1" class="progress-history"><summary>全部进展（{{ task.progress.length }}）</summary><ol><li v-for="(item, i) in task.progress" :key="i">{{ item.text }}</li></ol></details>
+      <MessageText class="progress-latest" :text="task.progress.at(-1).text" />
+      <details v-if="task.progress.length > 1" class="progress-history"><summary>全部进展（{{ task.progress.length }}）</summary><ol><li v-for="(item, i) in task.progress" :key="i"><MessageText :text="item.text" /></li></ol></details>
     </section>
 
     <section v-if="progress" class="detail-section">
@@ -67,13 +68,13 @@ async function run(action) {
       <p v-if="task.recovery?.attempts"><Icon name="refresh" :size="14" />自动恢复 {{ task.recovery.attempts }} 次 · {{ task.recovery.reason }}</p>
       <p v-if="task.checkpoint"><Icon name="clock" :size="14" />恢复点：{{ task.checkpoint }}</p>
     </section>
-    <p v-if="!task.result && !task.plan?.length && !task.checkpoint && !task.progress?.length && !['approval', 'waiting'].includes(task.status)" class="detail-note">员工开工后，进度会更新在这里。</p>
+    <p v-if="!task.result && !task.plan?.length && !task.checkpoint && !task.progress?.length && !['approval', 'waiting'].includes(task.status)" class="detail-note">牛马开工后，进度会更新在这里。</p>
 
     <footer class="detail-foot">
       <button v-if="task.workSession" type="button" @click="emit('inspect', task.workSession)"><Icon name="code" :size="15" />执行记录</button>
       <button v-if="task.computerSession" type="button" @click="emit('inspect', task.computerSession)"><Icon name="globe" :size="15" />浏览器记录</button>
       <span class="spacer"></span>
-      <span v-if="task.status === 'deferred'" class="hint">无需等待，员工会按恢复点继续检查。</span>
+      <span v-if="task.status === 'deferred'" class="hint">无需等待，牛马会按恢复点继续检查。</span>
       <template v-if="!readonly">
         <button v-if="task.status === 'running'" type="button" :disabled="busy" @click="run('stop')"><Icon name="stop" :size="14" />停止任务</button>
         <button v-else-if="!ended" type="button" :disabled="busy" @click="run('stop')"><Icon name="pause" :size="14" />暂停任务</button>
@@ -87,21 +88,20 @@ async function run(action) {
 <style scoped>
 .task-detail { display: flex; flex-direction: column; gap: 16px; min-height: 100%; padding: 20px 24px; outline: none; overflow-wrap: anywhere; }
 .detail-back { align-self: flex-start; margin: -8px 0 -6px -8px; color: var(--text-2); }
-.detail-head { display: grid; gap: 10px; }
+.detail-head { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .detail-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .detail-time { margin-left: auto; color: var(--muted); font-size: 12px; }
-.detail-head h2 { font-size: 18px; line-height: 1.45; white-space: pre-wrap; }
 .detail-note { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
-.attention-block { display: grid; gap: 10px; padding: 14px 16px; border: 1px solid var(--warn-border); border-radius: var(--r-lg); background: var(--warn-soft); }
+.attention-block { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px 16px; border: 1px solid var(--warn-border); border-radius: var(--r-lg); background: var(--warn-soft); }
 .attention-block h3 { display: flex; align-items: center; gap: 6px; color: var(--warn); font-size: 13px; }
-.attention-block p { color: var(--text); line-height: 1.6; white-space: pre-wrap; }
 .attention-block textarea { width: 100%; background: var(--surface); }
-.detail-section { display: grid; gap: 8px; }
+.detail-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .detail-section h3 { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .02em; }
 .plan-count { color: var(--text-2); font-weight: 500; }
 .progress-latest { padding: 10px 12px; border-left: 3px solid var(--accent); border-radius: 0 var(--r-md) var(--r-md) 0; background: var(--accent-softer); line-height: 1.6; }
 .progress-history summary { color: var(--muted); font-size: 12px; }
 .progress-history ol { margin: 6px 0 0; padding-left: 20px; color: var(--text-2); font-size: 12px; line-height: 1.6; }
+.progress-history .markdown { font-size: inherit; }
 .plan-bar { height: 4px; overflow: hidden; border-radius: 2px; background: var(--surface-3); }
 .plan-bar span { display: block; height: 100%; border-radius: 2px; background: var(--accent); transition: width .3s; }
 .plan { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
@@ -121,7 +121,6 @@ async function run(action) {
 .detail-foot .spacer { flex: 1; }
 @media (max-width: 767px) {
   .task-detail { padding: 14px 14px max(16px, env(safe-area-inset-bottom, 0px)); gap: 14px; }
-  .detail-head h2 { font-size: 16px; }
   .detail-foot .spacer { display: none; }
   .detail-foot .hint { flex-basis: 100%; }
 }
