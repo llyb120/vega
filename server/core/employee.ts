@@ -661,6 +661,7 @@ export class Employee {
             key: a.key || "",
             origin: t?.id || "",
             fromDuty: t?.dutyId || t?.fromDuty || "",
+            chatSource: t?.chatSource,
             nextCheckAt: requestedTime(a, now),
             plan: [],
             progress: [],
@@ -762,6 +763,8 @@ export class Employee {
             return { ok: false, supplement: t.answer, next: "Apply the user's latest supplement, update and verify the plan before completing." };
           }
           assert(content && t.plan?.length && t.plan.every((step: Obj) => step.status === "completed") && (t.planRevision || 0) === (t.revision || 0), "Complete requires a fully verified plan for the latest requirements and result evidence in text");
+          if (a.summary !== undefined) assert(typeof a.summary === "string" && a.summary.trim() && [...a.summary].length <= 400, "Delivery summary requires 1–400 characters");
+          t.summary = a.summary?.trim() || "";
           t.completion = content;
           stop = true;
           return { ok: true, next: "Task verified; report the result and end this turn." };
@@ -1339,6 +1342,7 @@ export class Employee {
       });
       state.runs = state.runs.slice(-200);
       task.completion = "";
+      task.summary = "";
       task.supplementPending = false;
       this.save(state);
       if (computer && !this.runtime.isolated) stopMonitor = this.monitorComputer(task.id, session);
@@ -1347,8 +1351,11 @@ export class Employee {
         answer: rowsBefore.findLast((message) => message.taskInput?.answer !== undefined)?.taskInput?.answer,
         handoff: rowsBefore.findLast((message) => message.taskInput?.handoff !== undefined)?.taskInput?.handoff,
         handoffRevision: rowsBefore.findLast((message) => message.taskInput?.handoffRevision !== undefined)?.taskInput?.handoffRevision,
+        quoteSeq: rowsBefore.findLast((message) => message.taskInput?.quoteSeq !== undefined)?.taskInput?.quoteSeq,
       };
-      const input = { answer: task.answer || "", handoff: computer ? task.handoff || "" : "", handoffRevision: computer ? task.handoffRevision || 0 : undefined };
+      const source = state.chatSession && task.chatSource?.session === state.chatSession ? this.store.message(state.chatSession, task.chatSource.seq) : undefined;
+      const cited = source?.quote && this.store.message(state.chatSession!, source.quote.seq);
+      const input = { answer: task.answer || "", handoff: computer ? task.handoff || "" : "", handoffRevision: computer ? task.handoffRevision || 0 : undefined, quoteSeq: cited ? source!.quote!.seq : undefined };
       // Delivery is acknowledged by the persisted input/result, never before the runtime actually appends it.
       const supplement = previous.answer !== undefined && input.answer.startsWith(previous.answer) ? input.answer.slice(previous.answer.length).trim() : input.answer;
       const snapshot = JSON.stringify({ plan: task.plan, planRevision: task.planRevision || 0, revision: task.revision || 0, progress: task.progress?.at(-1), checkpoint: task.checkpoint });
@@ -1357,7 +1364,8 @@ export class Employee {
         : `[员工任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, fromDuty: task.fromDuty })}\n相关稳定记忆：${JSON.stringify(memories)}`;
       const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason })}\n先检查现场与历史回执，诊断根因并改变无效方法，最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用help等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
-      const prompt = context + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n首次执行先用progress登记完整计划；续做保留已验证步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划，验证成功才标completed。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；缺信息找交代人，不等待轮询。${computer ? "你在隔离的电脑/Chrome会话，只做交接内容。完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写验证证据；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
+      const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
+      const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n首次执行先用progress登记完整计划；续做保留已验证步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划，验证成功才标completed。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；缺信息找交代人，不等待轮询。${computer ? "你在隔离的电脑/Chrome会话，只做交接内容。完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       await this.runtime.run(session, prompt, AbortSignal.timeout(15 * 60000), input);
       const rows = this.store.messages(session);
@@ -1426,7 +1434,10 @@ export class Employee {
       });
       const state = this.state(), task = state.tasks.find((t) => t.id === job.id);
       if (state.chatSession && task && ["done", "waiting", "approval"].includes(task.status)) {
-        const message = { role: "assistant", text: `【${task.status === "done" ? "已交付" : "需要你处理"}】${task.text}\n${task.result && task.status === "done" ? task.result : task.waiting || task.approval}\n任务：${task.id}` };
+        const full = task.status === "done" ? task.summary || task.result || "已完成，详情见任务。" : task.waiting || task.approval || "需要你处理。";
+        const excerpt = [...String(full)].slice(0, 400).join("");
+        const quote = task.chatSource?.session === state.chatSession && this.store.message(state.chatSession, task.chatSource.seq) ? this.store.quote(state.chatSession, task.chatSource.seq) : undefined;
+        const message: Message = { role: "assistant", text: `**${task.status === "done" ? "已交付" : "需要你处理"}**\n\n${excerpt}${[...String(full)].length > 400 ? "…" : ""}`, quote, delivery: true, tasks: [{ id: task.id, title: task.text.slice(0, 80), status: task.status }] };
         this.store.append(state.chatSession, message);
         this.runtime.emit("employee_changed", { employeeId: this.employeeId });
       }

@@ -1,10 +1,26 @@
 <script setup vapor>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
-import ConversationTimeline from "./ConversationTimeline.vue";
+import ChatMessage from "./ChatMessage.vue";
+import { employeeChatMessages } from "./conversation";
 const props = defineProps({ api: Function, employeeId: String, name: String, revision: Number, event: Object, composer: Object, readonly: Boolean });
-const messages = ref([]), running = ref(false), busy = ref(false), error = ref(""), live = ref(""), thinking = ref(""), activeTools = ref([]), model = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
+const emit = defineEmits(["task"]);
+const messages = ref([]), running = ref(false), busy = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
 const files = computed({ get: () => props.composer.images, set: (images) => props.composer.images = images });
+const quoted = computed({ get: () => props.composer.quote, set: (quote) => props.composer.quote = quote });
+const visible = computed(() => employeeChatMessages(messages.value, running.value));
+function quoteMessage(message) {
+  const text = (message.displayText || message.text || "[图片]").replace(/[`*_#>]/g, "").replace(/\s+/g, " ").trim();
+  quoted.value = { seq: message.seq, role: message.role, text: text.length > 160 ? text.slice(0, 160) + "…" : text };
+  void nextTick(() => input.value?.focus());
+}
+async function jumpTo(seq) {
+  await nextTick();
+  const target = [...(transcript.value?.querySelectorAll("[data-message-seq]") || [])].find((element) => Number(element.dataset.messageSeq) === seq);
+  if (!target) { error.value = "原消息暂不可见或已不存在"; return; }
+  target.scrollIntoView({ block: "center", behavior: "instant" });
+  target.focus({ preventScroll: true });
+}
 let disposed = false, request = 0, streamVersion = 0;
 async function scroll() { await nextTick(); if (transcript.value) transcript.value.scrollTop = transcript.value.scrollHeight; }
 async function refresh() {
@@ -12,14 +28,10 @@ async function refresh() {
   try {
     const result = await props.api(`/employees/${props.employeeId}/chat`);
     if (disposed || current !== request) return;
+    const atBottom = !messages.value.length || !transcript.value || transcript.value.scrollHeight - transcript.value.scrollTop - transcript.value.clientHeight < 80;
     messages.value = result.messages;
-    if (stream === streamVersion) {
-      running.value = result.running;
-      live.value = "";
-      thinking.value = "";
-      if (!result.running) activeTools.value = [];
-    }
-    await scroll();
+    if (stream === streamVersion) running.value = result.running;
+    if (atBottom) await scroll();
   } catch (e) { if (!disposed) error.value = e.message; }
 }
 async function upload(event) {
@@ -43,10 +55,10 @@ async function upload(event) {
 async function send() {
   if (busy.value || (!draft.value.trim() && !files.value.length)) return;
   busy.value = true; error.value = "";
-  const text = draft.value, images = files.value;
+  const text = draft.value, images = files.value, quote = quoted.value;
   try {
-    await props.api(`/employees/${props.employeeId}/messages`, "POST", { text, images: images.map(({ mime, data }) => ({ mime, data })) });
-    if (draft.value === text && files.value === images) { draft.value = ""; files.value = []; }
+    await props.api(`/employees/${props.employeeId}/messages`, "POST", { text, images: images.map(({ mime, data }) => ({ mime, data })), ...(quote ? { quoteSeq: quote.seq } : {}) });
+    if (draft.value === text && files.value === images && quoted.value === quote) { draft.value = ""; files.value = []; quoted.value = undefined; }
     await refresh();
   } catch (e) { error.value = e.message; }
   finally { busy.value = false; }
@@ -65,35 +77,17 @@ function handleEvent(event) {
     case "started":
       running.value = true;
       error.value = "";
-      activeTools.value = [];
       break;
     case "message_start":
-      live.value = "";
-      thinking.value = "";
-      model.value = event.data.model;
-      break;
     case "text_delta":
-      live.value += event.data;
-      running.value = true;
-      void scroll();
-      break;
     case "thinking_delta":
-      thinking.value += event.data;
       running.value = true;
-      break;
-    case "tool_start":
-      activeTools.value.push(event.data);
-      break;
-    case "tool_end":
-      activeTools.value = activeTools.value.filter((tool) => tool.id !== event.data.call.id);
-      void refresh();
       break;
     case "error":
       error.value = typeof event.data === "string" ? event.data : event.data?.message;
       break;
     case "done":
       running.value = false;
-      activeTools.value = [];
       void refresh();
       break;
     case "message_end":
@@ -114,11 +108,12 @@ onBeforeUnmount(() => { disposed = true; request++; });
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <div ref="transcript" class="employee-transcript" aria-live="polite">
       <div v-if="!messages.length" class="employee-welcome"><span class="welcome-avatar" aria-hidden="true">{{ name?.slice(0, 1) }}</span><span class="welcome-label">你的数字搭档已就位</span><h3>今天，想交给我什么？</h3><p>直接告诉我目标。我会安排任务、跟进结果，<br />需要你决定时再回来。</p><div v-if="!readonly" class="welcome-prompts"><button @click="draft = '帮我处理一项工作：'; input?.focus()"><span aria-hidden="true">↗</span> 交代新工作</button><button @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><span aria-hidden="true">☷</span> 看看工作进度</button></div></div>
-      <ConversationTimeline :key="employeeId" :messages="messages" :running="running" :live="live" :thinking="thinking" :active-tools="activeTools" :name="name" :model="model" />
-      <p v-if="running" class="hint" role="status">正在处理你的消息… 后台任务可在“工作”中查看。</p>
+      <ChatMessage v-for="message in visible" :key="message.seq" :message="message" :name="name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" />
+      <div v-if="running" class="employee-typing" role="status" aria-label="正在输入中"><span>{{ name }}</span><div>正在输入中<span class="typing-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></div></div>
     </div>
     <p v-if="readonly" class="readonly-note">当前账号仅可查看团队员工的对话和任务。</p>
     <form v-else class="employee-composer" @submit.prevent="send">
+      <div v-if="quoted" class="composer-quote"><button type="button" @click="jumpTo(quoted.seq)"><strong>引用 {{ quoted.role === 'user' ? '我' : name }}</strong><span>{{ quoted.text }}</span></button><button type="button" class="icon" aria-label="取消引用" @click="quoted = undefined">×</button></div>
       <div class="attachments"><button v-for="(file, index) in files" :key="index" type="button" @click="files.splice(index, 1)">{{ file.name }} ×</button></div>
       <textarea ref="input" v-model="draft" aria-label="给员工的消息" placeholder="告诉我目标，剩下的交给我…" rows="2" @keydown="keydown"></textarea>
       <div class="composer-tools"><input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden multiple @change="upload" /><button type="button" class="attach-button" @click="fileInput.click()"><span aria-hidden="true">＋</span> 添加图片</button><span class="composer-hint">Enter 发送 · Shift + Enter 换行</span><button v-if="running" type="button" @click="stop">停止本轮</button><button class="primary" :disabled="busy || (!draft.trim() && !files.length)">{{ busy ? '提交中…' : '发送' }} <span aria-hidden="true">↑</span></button></div>
@@ -126,6 +121,20 @@ onBeforeUnmount(() => { disposed = true; request++; });
   </section>
 </template>
 <style scoped>
+.employee-typing { margin: 4px 0 18px 37px; color: var(--muted); font-size: 12px; }
+.employee-typing > span { display: block; font-size: 10px; margin-bottom: 5px; }
+.employee-typing > div { display: inline-flex; align-items: baseline; gap: 2px; border-radius: 4px 12px 12px; padding: 10px 14px; background: var(--surface-sunken); }
+.typing-dots { display: inline-flex; }
+.typing-dots i { font-style: normal; animation: typing-dot 1.2s ease-in-out infinite; }
+.typing-dots i:nth-child(2) { animation-delay: .15s; }
+.typing-dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes typing-dot { 0%, 65%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .typing-dots i { animation: none; } }
+.composer-quote { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; border-left: 3px solid var(--accent); padding: 0 8px; background: var(--surface-sunken); border-radius: 4px; }
+.composer-quote > button:first-child { flex: 1; min-width: 0; text-align: left; border: 0; background: transparent; padding: 7px 0; display: grid; gap: 3px; }
+.composer-quote strong { font-size: 11px; color: var(--text-secondary); }
+.composer-quote span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+.composer-quote .icon { flex: none; min-width: 44px; min-height: 44px; }
 .readonly-note { color: var(--muted); text-align: center; padding: 16px; font-size: 12px; }
 .employee-chat { display: flex; flex-direction: column; min-height: 0; min-width: 0; height: 100%; padding: 0 28px 22px; }
 .employee-transcript { overflow-y: auto; flex: 1; min-height: 0; padding: 26px max(4px, calc((100% - 800px) / 2)); scrollbar-width: thin; }

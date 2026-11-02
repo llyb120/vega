@@ -190,6 +190,7 @@ const employee = ref({
   }),
   employeeTab = ref("chat"),
   employeeTaskFilter = ref("active"),
+  employeeTaskFocus = ref(""),
   employeeSaving = ref(false),
   employeeDeleting = ref(false),
   employeeExecutionBusy = ref(false),
@@ -1091,6 +1092,7 @@ async function chooseEmployee(id) {
   employeeTab.value = "chat";
   employeeExecutionOpen.value = false;
   employeeTaskFilter.value = "active";
+  employeeTaskFocus.value = "";
   dutyOpen.value = false;
   memoryID.value = "";
   taskText.value = "";
@@ -1148,6 +1150,23 @@ async function changeEmployeeExecution(localAgent, clientId) {
     toast("已切换新任务的默认执行位置；已有和正在进行的任务不变。");
   } catch (error) { employeeError.value = error.message; }
   finally { employeeExecutionBusy.value = false; }
+}
+async function openEmployeeTask(id) {
+  const owner = selectedEmployee.value;
+  let task = employee.value.tasks?.find((entry) => entry.id === id);
+  if (!task) {
+    await refreshEmployee();
+    if (selectedEmployee.value !== owner) return;
+    task = employee.value.tasks?.find((entry) => entry.id === id);
+  }
+  if (!task) { toast("这条任务记录已不存在"); return; }
+  employeeTaskFilter.value = ended(task.status) ? "history" : "active";
+  employeeTaskFocus.value = id;
+  employeeTab.value = "tasks";
+  await nextTick();
+  const card = [...document.querySelectorAll(".work-item[data-task-id]")].find((element) => element.dataset.taskId === id);
+  card?.scrollIntoView({ block: "start", behavior: "instant" });
+  card?.focus({ preventScroll: true });
 }
 async function employeeTabChanged(id) {
   employeeTab.value = id;
@@ -1766,7 +1785,7 @@ onBeforeUnmount(() => {
             <div class="actions"><button type="button" @click="employeeTab = 'chat'">返回对话</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '保存中…' : '保存修改' }}</button></div>
           </form>
           <div v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee && !creatingEmployee" class="employee-chat-layout">
-            <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" />
+            <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" @task="openEmployeeTask" />
             <aside class="employee-work-summary" aria-label="当前工作"><div class="summary-heading"><h3>当前工作</h3><button class="link" @click="employeeTab = 'tasks'">全部任务 ↗</button></div><button v-if="attentionTasks.length" class="attention-shortcut" @click="employeeTaskFilter = 'attention'; employeeTab = 'tasks'"><strong>{{ attentionTasks.length }} 项需要你处理</strong><span>补充信息或审批后继续 →</span></button><div v-if="!activeTasks.length" class="summary-empty"><span aria-hidden="true">✓</span><strong>手头很清爽</strong><p>交代一个目标，我会在这里更新进度。</p></div><button v-for="task in activeTasks.slice(0, 5)" :key="task.id" class="summary-task" @click="employeeTaskFilter = ['waiting', 'approval'].includes(task.status) ? 'attention' : 'active'; employeeTab = 'tasks'"><span :class="['summary-task-status', task.status]">{{ labels[task.status] }}</span><strong>{{ task.text }}</strong><span v-if="task.progress?.length">{{ task.progress.at(-1).text }}</span></button></aside>
           </div>
           <div v-if="employeeTab === 'browser' && selectedEmployee && !creatingEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" /></div>
@@ -1783,7 +1802,7 @@ onBeforeUnmount(() => {
             </form>
             <div class="employee-task-filters" aria-label="筛选任务"><button v-for="[id, label, count] in [['active', '进行中', activeTasks.length], ['attention', '待我处理', attentionTasks.length], ['history', '已结束', historyTasks.length]]" :key="id" :class="{ selected: employeeTaskFilter === id }" :aria-pressed="employeeTaskFilter === id" @click="employeeTaskFilter = id">{{ label }} <span>{{ count }}</span></button></div>
             <div v-if="!visibleEmployeeTasks.length" class="employee-empty"><span aria-hidden="true">✓</span><h3>{{ employeeTaskFilter === 'attention' ? '没有需要你处理的事项' : employeeTaskFilter === 'history' ? '还没有结束的任务' : '暂时没有进行中的任务' }}</h3><p>在对话中交代工作，或在上方直接创建任务。</p><button v-if="employeeTaskFilter !== 'history'" @click="employeeTab = 'chat'">去交代工作</button></div>
-            <EmployeeTaskCard v-for="task in visibleEmployeeTasks" :key="selectedEmployee + task.id" :task="task" :readonly="!canExecute" :act="(action, text) => employeeTaskAction(task, action, text)" @inspect="openEmployee($event)" /></template
+            <EmployeeTaskCard v-for="task in visibleEmployeeTasks" :key="selectedEmployee + task.id" :task="task" :highlighted="employeeTaskFocus === task.id" :readonly="!canExecute" :act="(action, text) => employeeTaskAction(task, action, text)" @inspect="openEmployee($event)" /></template
           >
           <template v-if="employeeTab === 'duties' && !creatingEmployee"
             ><div class="section-heading">

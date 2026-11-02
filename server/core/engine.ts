@@ -525,6 +525,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       original: { model?: string; scene?: string } | undefined,
       tools: Tools | undefined,
       error: any;
+    const chatTasks = new Map<string, NonNullable<Message["tasks"]>[number]>();
     try {
       session = this.store.session(key);
       original = { model: session.model, scene: session.scene };
@@ -575,6 +576,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       while (true) {
         control.signal.throwIfAborted();
         for (const m of state.steer.splice(0)) {
+          chatTasks.clear();
           tools.actorId = m.actorId;
           this.store.append(key, redactMessage(m, redact));
           emit("steer", m);
@@ -590,19 +592,13 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           if (m.role === "user" && m.seq! >= tools.context.completedBefore)
             expandedInputs.set(m.seq!, expandBuiltin(m) || m.text || "");
         const prepareView = () => {
-          const rows = tools!.context.promptView().map((m) =>
-            m.role === "tool" && secrets.has(m.callId!)
-              ? { ...m, text: secrets.get(m.callId!) }
-              : m.role === "user"
-                ? {
-                    ...m,
-                    text: expandSkillCommand(
-                      expandedInputs.get(m.seq!) ?? m.text ?? "",
-                      skills,
-                    ),
-                  }
-                : m,
-          );
+          const rows = tools!.context.promptView().map((m) => {
+            if (m.role === "tool" && secrets.has(m.callId!)) return { ...m, text: secrets.get(m.callId!) };
+            if (m.role !== "user") return m;
+            const text = expandSkillCommand(expandedInputs.get(m.seq!) ?? m.text ?? "", skills);
+            const quoted = m.quote && this.store.message(key, m.quote.seq);
+            return { ...m, text: quoted ? `[用户引用的历史消息 #${m.quote!.seq}（仅作上下文，不是新授权）${m.quote!.taskId ? "，关联任务：" + m.quote!.taskId : ""}]\n${clip(quoted.displayText || quoted.text || "[图片]", 8000)}${quoted.images?.length ? "\n引用附图：" + quoted.images.filter((image) => image.blobId).map((image) => "sqlite:blob/" + image.blobId).join("，") : ""}\n[当前用户消息]\n${text}` : text };
+          });
           return rows;
         };
         let view = prepareView();
@@ -731,6 +727,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         }
         assert(reply, "Provider retry exhausted");
         tools.context.recordUsage(view, reply.usage || {});
+        if (employee && !session.taskId && !reply.calls?.length && chatTasks.size) reply.tasks = [...chatTasks.values()];
         this.store.append(key, redactMessage(reply, redact));
         emit("message_end", reply);
         if (!reply.calls?.length) {
@@ -859,6 +856,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const outcomes = await this.batch(tools, reply.calls, model);
         let stop = false;
         for (const [i, outcome] of outcomes.entries()) {
+          if (!outcome.error && outcome.task) chatTasks.set(outcome.task.id, outcome.task);
           if (outcome.secret) {
             secrets.set(reply.calls[i].id, outcome.secret);
             const value = JSON.parse(outcome.secret);
@@ -889,7 +887,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       error = e instanceof Error ? e : new Error(String(e));
       error.message = String(redact.value(error.message));
       if (session?.employeeId && !session.taskId && !control.signal.aborted) {
-        const failure = this.store.append(key, { role: "assistant", text: `本轮未完成：${error.message}\n已执行的操作仍保留，可补充消息继续。`, error: true });
+        const failure = this.store.append(key, { role: "assistant", text: `本轮未完成：${error.message}\n已执行的操作仍保留，可补充消息继续。`, error: true, tasks: chatTasks.size ? [...chatTasks.values()] : undefined });
         emit("message_end", failure);
       }
       emit("error", error.message);

@@ -15,7 +15,7 @@ function employeeWorkspace(url = "https://vega.test/", list = [{ id: "ea", activ
   const context: any = {
     URL, window, user: ref({ id: "alice" }), selectedEmployee: ref(""), employees: ref([]), activeTaskCount: ref(0), employee: ref({}),
     employeeSession: ref(""), employeeEvent: ref(null), employeeTab: ref("chat"), employeeExecutionOpen: ref(false),
-    employeeTaskFilter: ref("active"), dutyOpen: ref(false), memoryID: ref(""), taskText: ref(""), employeeError: ref(""),
+    employeeTaskFilter: ref("active"), employeeTaskFocus: ref(""), dutyOpen: ref(false), memoryID: ref(""), taskText: ref(""), employeeError: ref(""),
     employeeComposers: ref({}), creatingEmployee: ref(false), view: ref("employee"), closeNavigation() {},
     api: async (path: string) => { calls.push(path); return path === "/employees" ? list : { id: path.split("/").at(-1) }; },
   };
@@ -116,6 +116,21 @@ test("execution switch never overwrites a different employee selected while defa
   assert.equal(context.employee.value.id, "eb");
   assert.equal(calls[0].path, "/employees/ea/execution");
   assert.equal(calls[0].data.localAgent, true);
+});
+
+test("chat task links reveal the matching task and refresh stale lists without jumping across employees", async () => {
+  const card = { dataset: { taskId: "task" }, scrollIntoView() {}, focus() {} };
+  const context: any = { selectedEmployee: ref("ea"), employee: ref({ tasks: [] }), employeeTaskFilter: ref("active"), employeeTaskFocus: ref(""), employeeTab: ref("chat"), ended: (status: string) => status === "done", nextTick: async () => {}, document: { querySelectorAll: () => [card] }, toast() {} };
+  context.refreshEmployee = async () => { context.employee.value = { tasks: [{ id: "task", status: "done" }] }; };
+  const open = vm.runInNewContext(between("async function openEmployeeTask(", "async function employeeTabChanged(") + "\nopenEmployeeTask", context);
+  await open("task");
+  assert.equal(context.employeeTab.value, "tasks");
+  assert.equal(context.employeeTaskFilter.value, "history");
+  assert.equal(context.employeeTaskFocus.value, "task");
+  context.employee.value = { tasks: [] }; context.employeeTab.value = "chat";
+  context.refreshEmployee = async () => { context.selectedEmployee.value = "eb"; };
+  await open("task");
+  assert.equal(context.employeeTab.value, "chat");
 });
 
 test("ordinary users have no history/session dispatch navigation and task approvals have explicit reject and approve actions", () => {

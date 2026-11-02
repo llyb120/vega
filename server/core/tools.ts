@@ -20,7 +20,7 @@ import { readPath, textSlice } from "./file-read";
 import { materializeSkill, skillEntry } from "./skills";
 import { isDeepStrictEqual } from "node:util";
 import { maskedConfig, mergeSecrets } from "./config";
-import type { Session, Call } from "./store";
+import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
 import { EMPLOYEE_CHAT_RULES } from "./prompt";
 import { Context } from "./context";
@@ -43,6 +43,7 @@ export type Outcome = {
   stop?: boolean;
   pause?: string;
   secret?: string;
+  task?: NonNullable<Message["tasks"]>[number];
 };
 const schema = (
   name: string,
@@ -285,7 +286,10 @@ export class Tools {
           (name: string) => !name.startsWith("orbit_"),
         );
       delete employee.parameters.properties.events;
-      if (this.session.taskId) employee.parameters.properties.action.enum.push("complete");
+      if (this.session.taskId) {
+        employee.parameters.properties.action.enum.push("complete");
+        employee.parameters.properties.summary = { type: "string", minLength: 1, maxLength: 400, description: "complete交付摘要：2–4条重点，先结论，再重要变化、限制或需用户操作事项；不贴完整报告和过程，完整证据仍写text。" };
+      }
       if (this.session.employeeId && !this.session.taskId) employee.parameters.properties.action.enum.push("resume", "answer");
       employee.description =
         "管理数字员工职责、待办、记忆和密码本。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
@@ -437,7 +441,7 @@ export class Tools {
       return { value: result, images, error: result.isError };
     }
     if (call.name === "employee") {
-      const guarded = { text: a.text, note: a.note, plan: a.plan };
+      const guarded = { text: a.text, summary: a.summary, note: a.note, plan: a.plan };
       assert(
         JSON.stringify(
           this.engine.redactors.get(this.session.id)?.value(guarded) ?? guarded,
@@ -445,18 +449,28 @@ export class Tools {
         "Credentials may not be copied to employee memory/notes/checkpoints",
       );
       const employee = this.engine.employeeFor(this.session);
+      const source = this.session.employeeId && !this.session.taskId ? this.engine.store.messages(this.session.id).findLast((message) => message.role === "user") : undefined;
+      const taskLink = (id: string, replace = false) => {
+        if (source?.seq) employee.update((state) => {
+          const task = employee.task(state, id);
+          if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
+        });
+        const task = employee.task(employee.state(), id);
+        return { id, title: task.text.slice(0, 80), status: task.status };
+      };
       if (this.session.employeeId && !this.session.taskId && employee.state().scope === "team" && !this.canManageEmployee())
         assert(["list", "resume", "answer"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "当前交代人无团队员工管理权限；可以派单、查询、补充和续做，职责、记忆和凭据请管理员管理");
       if (this.session.employeeId && !this.session.taskId && ["resume", "answer"].includes(a.action)) {
         const task = employee.task(employee.state(), a.id);
         assert(!task.owner.token, "Remote tasks require their assigning member");
-        return { value: await employee.control(a) };
+        const value = await employee.control(a);
+        return { value, task: taskLink(a.id, !value.duplicate) };
       }
       const result = await employee.execute(
         this.session.taskId || "",
         { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) },
       );
-      return { value: result.value, stop: result.stop, secret: result.secret };
+      return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? taskLink(result.value.id) : undefined };
     }
     if (call.name === "vault") {
       assert(!this.session.taskId, "Use the employee vault tools here");

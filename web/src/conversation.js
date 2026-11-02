@@ -23,6 +23,14 @@ export function groupTurns(messages) {
   });
 }
 
+export function employeeChatMessages(messages, running = false) {
+  const visible = new Set();
+  const turns = groupTurns(messages);
+  for (const [index, turn] of turns.entries())
+    if (!running || index !== turns.length - 1) for (const message of turn.conclusion) visible.add(message);
+  return messages.filter((message) => message.role === "user" || message.delivery || visible.has(message));
+}
+
 /** Match Nova: adjacent thoughts/tools form one process segment; text breaks it. */
 export function timelineOf(messages) {
   const groups = [];

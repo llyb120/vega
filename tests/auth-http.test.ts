@@ -471,6 +471,22 @@ test(
       assert.equal((await req(`/employees/${workerB.id}`, "POST", { action: "done", id: stateA.tasks[0].id }, a)).r.status, 404);
       const chat = await ok(`/employees/${workerA.id}/chat`, "GET", undefined, a);
       assert.equal(chat.session.employeeId, workerA.id);
+      assert.equal((await req(`/employees/${workerA.id}/messages`, "POST", { text: "quote unavailable", quoteSeq: 99999 }, a)).r.status, 400);
+      const teamSource = teamChat.messages?.[0]?.seq || 1;
+      assert.equal((await req(`/employees/${workerA.id}/messages`, "POST", { text: "cannot quote another employee", quoteSeq: teamSource, quote: { session: teamChat.session.id, text: "forged quote" } }, a)).r.status, 400);
+      const source = failedChat.messages.find((message: any) => message.role === "user")!;
+      assert.equal((await req(`/employees/${team.id}/messages`, "POST", { text: "viewer quote must not execute", quoteSeq: source.seq }, v)).r.status, 403);
+      await ok(`/employees/${team.id}/messages`, "POST", { text: "explain the quoted finding", quoteSeq: source.seq, quote: { text: "forged content" } }, a);
+      let quotedChat: any;
+      for (let index = 0; index < 100; index++) {
+        quotedChat = await ok(`/employees/${team.id}/chat`, "GET", undefined, a);
+        if (!quotedChat.running && quotedChat.messages.some((message: any) => message.text === "explain the quoted finding")) break;
+        await sleep(20);
+      }
+      const cited = quotedChat.messages.find((message: any) => message.text === "explain the quoted finding");
+      assert.equal(cited.quote.seq, source.seq);
+      assert.equal(cited.quote.text, source.text);
+      assert(!JSON.stringify(cited.quote).includes("forged"));
       assert.equal((await req(`/sessions/${chat.session.id}/messages`, "POST", { text: "must use employee" }, a)).r.status, 400);
       assert(!(await ok("/bootstrap", "GET", undefined, a)).sessions.some((session: any) => session.id === chat.session.id));
       assert.equal((await req(`/sessions/${chat.session.id}`, "GET", undefined, b)).r.status, 404);

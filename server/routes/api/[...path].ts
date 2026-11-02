@@ -37,6 +37,7 @@ async function inputMessage(
     (a.text || "").length <= 2 << 20 && (!a.images || a.images.length <= 16),
     "Message too large",
   );
+  const quote = a.quoteSeq === undefined ? undefined : store.quote(sessionId, a.quoteSeq);
   const images: { mime: string; blobId?: string; data?: string }[] = [];
   let total = 0;
   for (const image of a.images || []) {
@@ -60,7 +61,7 @@ async function inputMessage(
     store.grantBlob(blobId, sessionId);
     images.push({ mime: image.mime, blobId });
   }
-  return { role: "user", text: a.text || "", images };
+  return { role: "user", text: a.text || "", images, quote };
 }
 export default defineEventHandler(async (event) => {
   const { store, engine, auth } = app(),

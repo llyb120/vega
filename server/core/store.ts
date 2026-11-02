@@ -9,7 +9,10 @@ export type Message = {
   text?: string;
   displayText?: string;
   actorId?: string;
-  taskInput?: { answer?: string; handoff?: string; handoffRevision?: number };
+  taskInput?: { answer?: string; handoff?: string; handoffRevision?: number; quoteSeq?: number };
+  quote?: { seq: number; role: string; text: string; taskId?: string };
+  tasks?: { id: string; title: string; status: string }[];
+  delivery?: boolean;
   thinking?: string;
   signature?: string;
   opaque?: any[];
@@ -233,6 +236,17 @@ export class Store {
   deleteSession(key: string) {
     for (const s of this.sessionFamily(key))
       this.db.prepare("DELETE FROM sessions WHERE id=?").run(s.id);
+  }
+  message(key: string, seq: number): Message | undefined {
+    const row = this.db.prepare("SELECT data FROM messages WHERE session=? AND seq=?").get(key, seq) as { data: string } | undefined;
+    return row ? { ...JSON.parse(row.data), seq } : undefined;
+  }
+  quote(key: string, seq: number): NonNullable<Message["quote"]> {
+    assert(Number.isSafeInteger(seq) && seq > 0, "Invalid quoted message");
+    const message = this.message(key, seq);
+    assert(message && ["user", "assistant"].includes(message.role) && (message.text?.trim() || message.images?.length), "Quoted message not found in this conversation");
+    const text = (message.displayText || message.text || "[图片]").replace(/[`*_#>]/g, "").replace(/\s+/g, " ").trim();
+    return { seq, role: message.role, text: text.length > 160 ? text.slice(0, 160) + "…" : text, taskId: message.tasks?.length === 1 ? message.tasks[0].id : undefined };
   }
   messages(key: string): Message[] {
     return this.db
