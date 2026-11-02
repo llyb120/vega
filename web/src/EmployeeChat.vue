@@ -1,39 +1,116 @@
 <script setup vapor>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import ChatMessage from "./ChatMessage.vue";
+import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { employeeChatMessages } from "./conversation";
+import { createChatHistory } from "./chat-history.js";
+import { poseForSeed } from "./bot-avatar.js";
 const props = defineProps({ api: Function, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean });
 const emit = defineEmits(["task"]);
-const messages = ref([]), running = ref(false), busy = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
+const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), busy = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
 const files = computed({ get: () => props.composer.images, set: (images) => props.composer.images = images });
 const quoted = computed({ get: () => props.composer.quote, set: (quote) => props.composer.quote = quote });
-const visible = computed(() => employeeChatMessages(messages.value, running.value));
+// While a turn runs, its own assistant output stays hidden until `done`. When we saw the turn start we know exactly
+// where it begins, so earlier replies stay put instead of being hidden as "the last turn" until the new user message loads.
+const runningFrom = ref(null);
+watch(running, (value) => { if (!value) runningFrom.value = null; }, { flush: "sync" });
+const visible = computed(() => {
+  if (!running.value || runningFrom.value === null) return employeeChatMessages(messages.value, running.value);
+  const settled = messages.value.filter((message) => message.seq <= runningFrom.value);
+  return [...employeeChatMessages(settled, false), ...messages.value.filter((message) => message.seq > runningFrom.value && (message.role === "user" || message.delivery))];
+});
+const history = createChatHistory({ api: (...args) => props.api(...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore });
+
+// Each reply keeps the expression the typing avatar had at the instant it turned into that reply.
+// Stored per browser (bounded); replies never seen live get a stable pose derived from their sequence.
+const poseKey = () => `vega:chat-poses:${props.employeeId}`;
+function readPoses() { try { return JSON.parse(localStorage.getItem(poseKey()) || "{}") || {}; } catch { return {}; } }
+const poses = ref(readPoses()), typingPose = ref("center");
+function freezePose(seqs) {
+  if (!seqs.length) return;
+  const next = { ...poses.value };
+  for (const seq of seqs) next[seq] = typingPose.value;
+  const kept = Object.keys(next).map(Number).sort((a, b) => b - a).slice(0, 400);
+  poses.value = Object.fromEntries(kept.map((seq) => [seq, next[seq]]));
+  try { localStorage.setItem(poseKey(), JSON.stringify(poses.value)); } catch {}
+}
+const poseOf = (message) => poses.value[message.seq] || poseForSeed(`${props.employeeId}:${message.seq}`);
+
 function quoteMessage(message) {
   const text = (message.displayText || message.text || "[图片]").replace(/[`*_#>]/g, "").replace(/\s+/g, " ").trim();
   quoted.value = { seq: message.seq, role: message.role, text: text.length > 160 ? text.slice(0, 160) + "…" : text };
   void nextTick(() => input.value?.focus());
 }
+const findMessage = (seq) => [...(transcript.value?.querySelectorAll("[data-message-seq]") || [])].find((element) => Number(element.dataset.messageSeq) === seq);
 async function jumpTo(seq) {
   await nextTick();
-  const target = [...(transcript.value?.querySelectorAll("[data-message-seq]") || [])].find((element) => Number(element.dataset.messageSeq) === seq);
+  // Quoted messages may be older than the loaded window: page back until the source is in the DOM.
+  while (!findMessage(seq) && hasMore.value && messages.value[0]?.seq > seq && !disposed) await loadOlder();
+  const target = findMessage(seq);
   if (!target) { error.value = "原消息暂不可见或已不存在"; return; }
   target.scrollIntoView({ block: "center", behavior: "instant" });
   target.focus({ preventScroll: true });
 }
-let disposed = false, request = 0, streamVersion = 0;
+let disposed = false, turn = 0;
+const nearBottom = () => !transcript.value || transcript.value.scrollHeight - transcript.value.scrollTop - transcript.value.clientHeight < 80;
 async function scroll() { await nextTick(); if (transcript.value) transcript.value.scrollTop = transcript.value.scrollHeight; }
-async function refresh() {
-  const current = ++request, stream = streamVersion;
+/** Prepend one older page while keeping the message under the reader's eyes exactly where it was. */
+async function loadOlder() {
+  if (loadingOlder.value || !hasMore.value || disposed) return;
+  loadingOlder.value = true;
+  const el = transcript.value, height = el?.scrollHeight ?? 0, top = el?.scrollTop ?? 0;
   try {
-    const result = await props.api(`/employees/${props.employeeId}/chat`);
-    if (disposed || current !== request) return;
-    const atBottom = !messages.value.length || !transcript.value || transcript.value.scrollHeight - transcript.value.scrollTop - transcript.value.clientHeight < 80;
-    messages.value = result.messages;
-    if (stream === streamVersion) running.value = result.running;
-    if (atBottom) await scroll();
+    await history.older();
+    await nextTick();
+    if (el && !disposed) el.scrollTop = top + (el.scrollHeight - height);
   } catch (e) { if (!disposed) error.value = e.message; }
+  finally { loadingOlder.value = false; }
+}
+const OLDER_THRESHOLD = 600;
+async function fillViewport() {
+  // A page of raw messages may hold few visible bubbles (tool calls are hidden); keep paging until the view can scroll.
+  for (let guard = 0; guard < 20 && hasMore.value && !disposed; guard++) {
+    const el = transcript.value;
+    if (el && el.scrollHeight > el.clientHeight + OLDER_THRESHOLD) break;
+    await loadOlder();
+  }
+}
+let ready = false;
+function onScroll() {
+  const el = transcript.value;
+  if (!ready || !el || el.scrollTop >= OLDER_THRESHOLD || !hasMore.value || loadingOlder.value) return;
+  void loadOlder().then(onScroll);
+}
+async function load() {
+  try {
+    await history.load();
+    await scroll();
+    await fillViewport();
+    ready = true;
+  } catch (e) { if (!disposed) error.value = e.message; }
+}
+/** Fetch only messages after the newest one we hold; `apply` runs in the same tick as the merge. */
+async function refresh(apply, syncRunning = true) {
+  const atBottom = nearBottom();
+  try {
+    await history.newer(apply, syncRunning);
+    if (!disposed && atBottom) await scroll();
+  } catch (e) { if (!disposed) { error.value = e.message; apply?.([]); } }
+}
+/**
+ * The turn is over. Keep the typing row on screen until the reply is in hand, then swap them in one tick:
+ * merge the reply, clear `running` and freeze the avatar pose together so no frame shows neither.
+ */
+function finishTurn() {
+  const current = turn;
+  const before = new Set(visible.value.map((message) => message.seq));
+  return refresh(() => {
+    if (current !== turn) return; // a new turn already started; it owns the typing row now
+    freezePose(employeeChatMessages(messages.value, false).filter((message) => message.role !== "user" && !before.has(message.seq)).map((message) => message.seq));
+    running.value = false;
+  });
 }
 async function upload(event) {
   error.value = "";
@@ -80,9 +157,11 @@ function keydown(event) {
 }
 function handleEvent(event) {
   if (!event) return;
-  streamVersion++;
+  history.touch();
   switch (event.type) {
     case "started":
+      turn++;
+      if (!running.value) runningFrom.value = history.lastSeq();
       running.value = true;
       error.value = "";
       break;
@@ -95,28 +174,30 @@ function handleEvent(event) {
       error.value = typeof event.data === "string" ? event.data : event.data?.message;
       break;
     case "done":
-      running.value = false;
-      void refresh();
+      void finishTurn();
       break;
     case "message_end":
     case "compacted":
     case "user":
     case "steer":
-      void refresh();
+      void refresh(undefined, false);
       break;
   }
 }
-watch(() => props.revision, refresh);
-watch(() => props.event, handleEvent);
-onMounted(refresh);
-onBeforeUnmount(() => { disposed = true; request++; });
+watch(() => props.revision, () => refresh());
+// `message_end` and `done` arrive in the same tick through one shared ref; a pre-flush watcher would only see
+// the last of them, so every event is handled synchronously as it is assigned.
+watch(() => props.event, handleEvent, { flush: "sync" });
+onMounted(load);
+onBeforeUnmount(() => { disposed = true; });
 </script>
 <template>
   <section class="employee-chat">
     <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span><button type="button" class="icon" aria-label="关闭" @click="error = ''"><Icon name="close" :size="14" /></button></p>
-    <div ref="transcript" class="chat-scroll" aria-live="polite">
+    <div ref="transcript" class="chat-scroll" aria-live="polite" @scroll.passive="onScroll">
       <div class="chat-column">
-        <div v-if="!messages.length" class="chat-welcome">
+        <div v-if="hasMore" class="chat-older" :aria-busy="loadingOlder"><span v-if="loadingOlder" class="spinner" aria-label="正在加载更早的消息"></span><span v-else>上滑查看更早的消息</span></div>
+        <div v-if="!messages.length && !running" class="chat-welcome">
           <h3>今天，想交给{{ name }}什么？</h3>
           <p>直接告诉我目标。我会安排任务、跟进结果，需要你决定时再回来找你。</p>
           <div v-if="!readonly" class="welcome-prompts">
@@ -124,8 +205,14 @@ onBeforeUnmount(() => { disposed = true; request++; });
             <button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><Icon name="tasks" :size="15" />看看工作进度</button>
           </div>
         </div>
-        <ChatMessage v-for="message in visible" :key="message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" />
-        <div v-if="running" class="chat-typing" role="status" aria-label="正在输入中"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>{{ name }} 正在处理…</div>
+        <ChatMessage v-for="message in visible" :key="message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :pose="poseOf(message)" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" />
+        <article v-if="running" class="chat-message assistant chat-typing" role="status" aria-label="正在输入中">
+          <span class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" animate @pose="typingPose = $event" /></span>
+          <div class="chat-content">
+            <div class="chat-heading"><strong>{{ name }}</strong><span>正在输入中</span></div>
+            <div class="chat-bubble"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
+          </div>
+        </article>
       </div>
     </div>
     <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号仅可查看团队员工的对话和任务。</p>
@@ -146,16 +233,24 @@ onBeforeUnmount(() => { disposed = true; request++; });
 <style scoped>
 .employee-chat { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--surface); }
 .employee-chat > .banner { flex: none; }
-.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+.chat-scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; scrollbar-width: thin; }
 .chat-column { max-width: 820px; margin: 0 auto; padding: 16px 24px 8px; }
 .chat-welcome { display: grid; gap: 8px; padding: 32px 0 24px; }
 .chat-welcome h3 { font-size: 20px; }
 .chat-welcome p { color: var(--text-2); }
 .welcome-prompts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .welcome-prompts .icon-svg { color: var(--accent); }
-.chat-typing { display: flex; align-items: center; gap: 10px; margin: 4px 0 16px 38px; color: var(--muted); font-size: 12px; }
-.typing-dots { display: inline-flex; gap: 3px; padding: 8px 10px; border-radius: 4px 12px 12px; background: var(--surface-2); }
-.typing-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); animation: typing 1.2s ease-in-out infinite; }
+.chat-older { display: grid; place-items: center; height: 32px; color: var(--faint); font-size: 11px; }
+.chat-older .spinner { width: 14px; height: 14px; }
+/* The typing row mirrors ChatMessage's assistant row (same avatar slot, heading and bubble) so the reply replaces it in place. */
+.chat-typing { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 16px; min-width: 0; }
+.chat-typing .chat-avatar { display: grid; place-items: center; flex: none; width: 28px; height: 28px; margin-top: 2px; border-radius: 8px; background: var(--accent-soft); }
+.chat-typing .chat-content { display: grid; gap: 4px; min-width: 0; }
+.chat-typing .chat-heading { display: flex; align-items: center; gap: 8px; min-height: 20px; color: var(--muted); font-size: 11px; }
+.chat-typing .chat-heading strong { color: var(--text-2); font-size: 12px; font-weight: 600; }
+.chat-typing .chat-bubble { justify-self: start; padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: var(--surface-2); line-height: 1.65; }
+.typing-dots { display: flex; align-items: center; gap: 4px; height: 23px; }
+.typing-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: typing 1.2s ease-in-out infinite; }
 .typing-dots i:nth-child(2) { animation-delay: .15s; }
 .typing-dots i:nth-child(3) { animation-delay: .3s; }
 @media (prefers-reduced-motion: reduce) { .typing-dots i { animation: none; opacity: .7; } }
@@ -180,6 +275,7 @@ onBeforeUnmount(() => { disposed = true; request++; });
   .chat-column { padding: 12px 12px 4px; }
   .chat-welcome { padding: 16px 0; }
   .chat-welcome h3 { font-size: 18px; }
+  .chat-typing { gap: 8px; margin-bottom: 14px; }
   .chat-composer { width: calc(100% - 16px); margin: 0 8px max(8px, env(safe-area-inset-bottom, 0px)); border-radius: 12px; }
   .composer-row textarea { font-size: 16px; padding: 7px 2px; }
   .attach, .send { width: 40px; min-height: 40px; }

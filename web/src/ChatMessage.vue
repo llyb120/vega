@@ -4,12 +4,12 @@ import UserMessage from "./UserMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, quotable: Boolean });
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, pose: String, quotable: Boolean });
 const emit = defineEmits(["quote", "jump", "task"]);
 </script>
 <template>
   <article class="chat-message" :class="message.role" :data-message-seq="message.seq" tabindex="-1">
-    <span v-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" /></span>
+    <span v-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="pose" /></span>
     <div class="chat-content">
       <div class="chat-heading">
         <strong v-if="message.role !== 'user'">{{ name }}</strong>

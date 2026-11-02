@@ -2,16 +2,21 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
+import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
+import { employeeChatMessages } from "../web/src/conversation.js";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
 const between = (start: string, end: string) => chat.slice(chat.indexOf(start), chat.indexOf(end));
 function mount(api: any = async () => ({ messages: [], running: false })) {
+  const messages = ref<any[]>([]), running = ref(false), hasMore = ref(false);
+  const history = createChatHistory({ api, path: () => "/employees/fixture/chat", messages, running, hasMore });
   const context: any = {
-    ref, disposed: false, request: 0, streamVersion: 0, props: { api, employeeId: "fixture" }, scroll: async () => {},
-    messages: ref([]), running: ref(false), transcript: ref(null), error: ref(""),
+    console, ref, history, messages, running, hasMore, runningFrom: ref(null), disposed: false, turn: 0, error: ref(""), transcript: ref(null), props: { employeeId: "fixture" },
+    nearBottom: () => true, scroll: async () => {}, visible: computed(() => employeeChatMessages(messages.value, running.value)), employeeChatMessages, frozen: [] as any[],
   };
-  const methods = vm.runInNewContext(between("async function refresh()", "async function upload(") + between("function handleEvent(event)", "watch(() => props.revision") + "\n({ refresh, handleEvent })", context);
+  context.freezePose = (seqs: number[]) => context.frozen.push(...seqs);
+  const methods = vm.runInNewContext("let turn = 0;" + between("async function refresh(apply", "async function upload(") + between("function handleEvent(event)", "watch(() => props.revision") + "\n({ refresh, handleEvent, finishTurn })", context);
   return { ...context, ...methods };
 }
 
@@ -43,7 +48,7 @@ test("employee stream events keep typing visible but never append partial text o
   assert.equal(state.running.value, true);
   assert.equal(state.messages.value.length, 0);
   state.handleEvent({ type: "done" });
-  await Promise.resolve(); await Promise.resolve();
+  for (let i = 0; i < 10; i++) await Promise.resolve();
   assert.equal(state.running.value, false);
 });
 
@@ -51,10 +56,68 @@ test("a delayed history response cannot clear a newer typing state", async () =>
   let finish!: (value: any) => void;
   const state = mount(() => new Promise((resolve) => finish = resolve));
   const pending = state.refresh();
+  for (let i = 0; i < 10 && !finish; i++) await Promise.resolve();
+  assert(finish, "the history request is in flight");
   state.handleEvent({ type: "text_delta", data: "not shown until final" });
-  finish({ messages: [{ seq: 1, role: "user", text: "work" }], running: false });
+  finish({ session: { id: "s" }, messages: [{ seq: 1, role: "user", text: "work" }], running: false });
   await pending;
   assert.equal(state.running.value, true);
+});
+
+test("the typing row turns into the reply in one tick: reply merged, typing cleared and pose frozen together", async () => {
+  const replies: any[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => release = resolve);
+  const reply = { session: { id: "s" }, messages: [{ seq: 2, role: "assistant", text: "答复" }], running: false };
+  const api = async (path: string) => { replies.push(path); if (replies.length === 1) return { session: { id: "s" }, messages: [{ seq: 1, role: "user", text: "work" }], running: true, hasMore: false }; await gate; return reply; };
+  const state = mount(api);
+  await state.refresh();
+  state.handleEvent({ type: "started" });
+  const seen: Array<[boolean, number]> = [];
+
+  watch(() => [state.running.value, state.visible.value.length], ([running, count]: any) => seen.push([running, count]), { flush: "sync" });
+  // message_end and done arrive back to back; the typing row must stay until the reply is in hand.
+  state.handleEvent({ type: "message_end" });
+  state.handleEvent({ type: "done" });
+  assert.equal(state.running.value, true, "typing stays visible while the reply is fetched");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  assert.equal(state.running.value, true, "typing stays visible while the reply request is pending");
+  release();
+  for (let i = 0; i < 40 && state.running.value; i++) await Promise.resolve();
+  assert.equal(state.running.value, false);
+  assert.deepEqual(state.visible.value.map((message: any) => message.seq), [1, 2]);
+  assert.equal(state.error.value, "");
+  assert.deepEqual(state.frozen, [2], "the new reply receives the frozen typing pose");
+  assert(!seen.some(([running, count]) => !running && count < 2), "no state where typing is gone but the reply is not shown: " + JSON.stringify(seen));
+  assert(replies.slice(1).every((path) => /\?after=[12]$/.test(path)), "only messages after the newest known sequence are fetched: " + replies.join(", "));
+});
+
+test("chat history pages backwards and merges without duplicates", async () => {
+  const all = Array.from({ length: 1000 }, (_, i) => ({ seq: i + 1, role: i % 2 ? "assistant" : "user", text: "m" + (i + 1) }));
+  const paths: string[] = [];
+  const api = async (path: string) => {
+    paths.push(path);
+    const query = new URLSearchParams(path.split("?")[1]);
+    const before = Number(query.get("before") || Infinity), limit = Number(query.get("limit") || 60), after = query.get("after");
+    if (after !== null) return { session: { id: "s" }, messages: all.filter((m) => m.seq > Number(after)), hasMore: true, running: false };
+    const page = all.filter((m) => m.seq < before).slice(-limit);
+    return { session: { id: "s" }, messages: page, hasMore: page[0]?.seq > 1, running: false };
+  };
+  const messages = ref<any[]>([]), running = ref(false), hasMore = ref(false);
+  const history = createChatHistory({ api, path: () => "/chat", messages, running, hasMore, pageSize: 60 });
+  await history.load();
+  assert.equal(messages.value.length, 60);
+  assert.equal(messages.value[0].seq, 941);
+  assert.equal(hasMore.value, true);
+  await history.older();
+  assert.equal(messages.value.length, 120);
+  assert.equal(messages.value[0].seq, 881);
+  while (hasMore.value) await history.older();
+  assert.deepEqual(messages.value.map((m: any) => m.seq), all.map((m) => m.seq));
+  all.push({ seq: 1001, role: "assistant", text: "new" });
+  await history.newer();
+  assert.equal(messages.value.length, 1001);
+  assert.deepEqual(mergeMessages([{ seq: 1 }, { seq: 3 }] as any, [{ seq: 2 }, { seq: 3, text: "x" }] as any), [{ seq: 1 }, { seq: 2 }, { seq: 3, text: "x" }]);
 });
 
 test("quoted replies send only a source sequence, preserve drafts on error, and do not clear a quote changed during submission", async () => {
@@ -66,7 +129,7 @@ test("quoted replies send only a source sequence, preserve drafts on error, and 
     return new Promise((resolve) => finish = resolve);
   } };
   const context: any = { ref, computed, props, busy: ref(false), error: ref(""), refresh: async () => {} };
-  const methods = vm.runInNewContext(between("const draft = computed", "let disposed =") + between("async function send()", "async function stop()") + "\n({send})", { ...context, nextTick: async () => {}, input: ref(null) });
+  const methods = vm.runInNewContext(between("const draft = computed", "// While a turn runs") + between("async function send()", "async function stop()") + "\n({send})", { ...context, nextTick: async () => {}, input: ref(null) });
   await methods.send();
   assert.equal(props.composer.quote.seq, 7);
   assert.equal(props.composer.text, "explain this");
