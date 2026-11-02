@@ -422,3 +422,6 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
 }
+
+/* Bot avatars are silhouettes: drop the tinted square behind them wherever an avatar slot is used. */
+:is(.nav-avatar, .chat-avatar, .avatar-current, .identity-avatar):has(> .employee-picture.is-bot) { background: transparent; overflow: visible; }

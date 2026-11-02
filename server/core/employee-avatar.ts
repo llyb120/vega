@@ -5,7 +5,7 @@ import { assert, type Obj } from "./util";
 
 export async function updateEmployeeAvatar(employee: Employee, input: Obj) {
   if (input.preset !== undefined) {
-    assert(isAvatarPreset(input.preset), "请选择有效的星座头像或默认首字头像");
+    assert(isAvatarPreset(input.preset), "请选择有效的预设头像或默认头像");
     await employee.control({ action: "settings", avatar: input.preset });
   } else {
     const types: Record<string, string> = { "image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp", "image/gif": "gif" };

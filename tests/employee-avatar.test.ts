@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import sharp from "sharp";
-import { ZODIAC_AVATARS, isAvatarPreset, employeeAvatarURL } from "../shared/employee-avatars";
+import { ZODIAC_AVATARS, BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS, isAvatarPreset, employeeAvatarURL, parseBotAvatar, defaultBotAvatar, botAvatarPreset } from "../shared/employee-avatars";
+import { BOT_SHAPE_GEOMETRY, BOT_POSES, FREEZABLE_POSES, poseForSeed, nextPose } from "../web/src/bot-avatar.js";
 import { updateEmployeeAvatar } from "../server/core/employee-avatar";
 import { Employee, type EmployeeRuntime } from "../server/core/employee";
 import { Store } from "../server/core/store";
@@ -35,6 +36,29 @@ test("all 12 zodiac presets are real square WebP assets and avatar URLs never ac
   }
 });
 
+test("bot avatars encode shape and color in the preset string and every shape has original geometry", () => {
+  assert(BOT_AVATAR_SHAPES.length >= 15 && BOT_AVATAR_COLORS.length >= 12);
+  assert.equal(new Set(BOT_AVATAR_SHAPES.map(shape => shape.id)).size, BOT_AVATAR_SHAPES.length);
+  for (const shape of BOT_AVATAR_SHAPES) {
+    const geometry = (BOT_SHAPE_GEOMETRY as any)[shape.id];
+    assert(geometry, shape.id);
+    assert.match(geometry.d, /^M[\d.\- ]+[CQLA]/, shape.id);
+    assert(!/NaN|Infinity/.test(geometry.d), shape.id);
+    for (const color of BOT_AVATAR_COLORS) {
+      const value = botAvatarPreset(shape.id, color.id);
+      assert(isAvatarPreset(value), value);
+      assert.deepEqual(parseBotAvatar(value), { shape: shape.id, color: color.id, hex: color.hex });
+      assert.equal(employeeAvatarURL("employee", value), "", "bot avatars render inline, never as a URL");
+    }
+  }
+  for (const value of ["bot:", "bot:round", "bot:round:", "bot:unknown:red", "bot:round:unknown", "bot:round:red:extra", "bot:round:#ff0000", "bot:../x:red", "BOT:round:red"]) assert.equal(isAvatarPreset(value), false, value);
+  assert.deepEqual(defaultBotAvatar("employee-a"), defaultBotAvatar("employee-a"), "the default bot is stable per employee");
+  assert(new Set(["a", "b", "c", "d", "e", "f", "g", "h"].map(seed => JSON.stringify(defaultBotAvatar(seed)))).size > 4, "default bots vary across employees");
+  assert(FREEZABLE_POSES.length >= 15 && !FREEZABLE_POSES.includes("blink") && "blink" in BOT_POSES);
+  assert.equal(poseForSeed("e:42"), poseForSeed("e:42"));
+  for (let i = 0; i < 50; i++) { const pose = nextPose("left"); assert(pose !== "left" && FREEZABLE_POSES.includes(pose)); }
+});
+
 test("preset selection, clearing and reopening preserve the employee's own avatar without accepting an arbitrary blob reference", async () => {
   const { store, root, employee } = fixture();
   try {
@@ -44,6 +68,10 @@ test("preset selection, clearing and reopening preserve the employee's own avata
     assert.equal(reopened.for(employee.employeeId).state().avatar, "zodiac:pisces");
     await assert.rejects(employee.control({ action: "settings", avatar: "blob-" + "1".repeat(32) }), /avatar/);
     assert.equal(employee.state().avatar, "zodiac:pisces");
+    await updateEmployeeAvatar(employee, { preset: "bot:cloud:teal" });
+    assert.equal(employee.state().avatar, "bot:cloud:teal");
+    await assert.rejects(updateEmployeeAvatar(employee, { preset: "bot:cloud:#00ffaa" }));
+    assert.equal(employee.state().avatar, "bot:cloud:teal");
     await updateEmployeeAvatar(employee, { preset: "" });
     assert.equal(employee.state().avatar, "");
     assert.throws(() => root.create({ name: "Bad", avatar: "https://tracker.example/pixel" }, "owner"), /avatar/);
