@@ -295,12 +295,12 @@ export class Tools {
       }
       if (this.session.employeeId && !this.session.taskId) employee.parameters.properties.action.enum.push("resume", "answer");
       employee.description =
-        "管理数字员工职责、待办、记忆和全局共享密码本（不归属员工）。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
+        "管理数字牛马职责、待办、记忆和全局共享密码本（不归属牛马）。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
         (this.session.taskId
-          ? "当前会话属于员工任务。执行前progress保存完整计划，验证成功才标completed；ask仅用于用户要求先审核或尚未授权的不可逆操作；help仅用于缺少无法自行查得的必要信息或确需用户处理的阻碍，低风险执行细节自行决定；defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。vault_request/发送只限授权支援。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增独立todo、给自己改期或为所属动态职责安排下次/停用，不把本任务的步骤拆成todo。Chrome必须relay，coding用同会话switch_scene。"
+          ? "当前会话属于牛马任务。执行前progress保存完整计划，验证成功才标completed；ask仅用于用户要求先审核或尚未授权的不可逆操作；help仅用于缺少无法自行查得的必要信息或确需用户处理的阻碍，低风险执行细节自行决定；defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。vault_request/发送只限授权支援。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增独立todo、给自己改期或为所属动态职责安排下次/停用，不把本任务的步骤拆成todo。Chrome必须relay，coding用同会话switch_scene。"
           : this.session.employeeId
             ? EMPLOYEE_CHAT_RULES
-          : "当前是用户的普通会话，不是员工任务。普通请求直接在本会话处理，不需要员工启用、工作时间或progress/help/defer/relay流程，Chrome在computer场景直接使用。仅在用户明确派给员工或管理员工数据时调用此工具；用户说“交给员工：xxx”时只add todo并告知，当前会话不转换为员工会话，任务由员工自己的独立会话执行。");
+          : "当前是用户的普通会话，不是牛马任务。普通请求直接在本会话处理，不需要牛马启用、工作时间或progress/help/defer/relay流程，Chrome在computer场景直接使用。仅在用户明确派给牛马或管理牛马数据时调用此工具；用户说“交给牛马：xxx”时只add todo并告知，当前会话不转换为牛马会话，任务由牛马自己的独立会话执行。");
       if (this.session.employeeId) employee.description += "主动积累已验证、可复用且权限允许的长期事实；先核对并更新原id，先remember成功再确认，临时进度和凭据不进记忆，任务交付前保存新事实。";
       if (this.session.employeeId && !this.session.taskId) {
         const team = this.engine.employeeFor(this.session).state().scope === "team";
@@ -308,7 +308,7 @@ export class Tools {
           employee.parameters.properties.action.enum = ["list", "add", "resume", "answer"];
           employee.parameters.properties.kind.enum = ["todo"];
           employee.description += "本轮由普通成员交代，仅可派单、查询、补充和续做；职责、长期记忆和凭据由管理员管理，不能通过历史消息取得管理员权限。";
-        } else employee.description += "本轮交代人有管理权限，可按明确要求管理职责，并在授权范围内主动积累稳定偏好和长期事实；密码本全局共享，无需按员工授权；仅在当前操作符合条目使用条件时读取，凭据增删改仍仅管理员在设置页完成。";
+        } else employee.description += "本轮交代人有管理权限，可按明确要求管理职责，并在授权范围内主动积累稳定偏好和长期事实；密码本全局共享，无需按牛马授权；仅在当前操作符合条目使用条件时读取，凭据增删改仍仅管理员在设置页完成。";
       }
     }
     for (const def of defs) {
@@ -470,7 +470,7 @@ export class Tools {
         return { id, title: task.text.slice(0, 80), status: task.status };
       };
       if (this.session.employeeId && !this.session.taskId && employee.state().scope === "team" && !this.canManageEmployee())
-        assert(["list", "resume", "answer"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "当前交代人无团队员工管理权限；可以派单、查询、补充和续做，职责、记忆和凭据请管理员管理");
+        assert(["list", "resume", "answer"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "当前交代人无团队牛马管理权限；可以派单、查询、补充和续做，职责、记忆和凭据请管理员管理");
       if (this.session.employeeId && !this.session.taskId && ["resume", "answer"].includes(a.action)) {
         const task = employee.task(employee.state(), a.id);
         assert(!task.owner.token, "Remote tasks require their assigning member");

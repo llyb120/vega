@@ -52,7 +52,7 @@ onBeforeUnmount(() => stackedMedia.removeEventListener("change", syncStacked));
 onMounted(() => void refresh());
 </script>
 <template>
-  <PageHeader :title="stacked && detailOpen && current ? current.task : '经验图谱'" :subtitle="stacked && detailOpen && current ? current.scope : '员工在网站上验证成功的操作路线'" :back="stacked && detailOpen ? '列表' : ''" @back="detailOpen = false">
+  <PageHeader :title="stacked && detailOpen && current ? current.task : '经验图谱'" :subtitle="stacked && detailOpen && current ? current.scope : '牛马在网站上验证成功的操作路线'" :back="stacked && detailOpen ? '列表' : ''" @back="detailOpen = false">
     <button type="button" class="sm" :disabled="busy" title="刷新" @click="refresh"><Icon name="refresh" :size="14" /><span class="hide-mobile">刷新</span></button>
   </PageHeader>
   <div class="experience-layout" :class="{ 'detail-open': detailOpen }">
@@ -84,7 +84,7 @@ onMounted(() => void refresh());
         </ol>
         <div v-if="current.pitfalls?.length" class="callout experience-cautions"><Icon name="alert" :size="16" /><div><strong>注意事项</strong><p v-for="text in current.pitfalls" :key="text">{{ text }}</p></div></div>
       </template>
-      <div v-else class="detail-empty"><Icon name="graph" :size="32" /><strong>{{ busy ? '加载中…' : '暂无经验' }}</strong><span>员工完成网页任务后，验证过的路线会沉淀在这里。</span></div>
+      <div v-else class="detail-empty"><Icon name="graph" :size="32" /><strong>{{ busy ? '加载中…' : '暂无经验' }}</strong><span>牛马完成网页任务后，验证过的路线会沉淀在这里。</span></div>
     </section>
   </div>
 </template>

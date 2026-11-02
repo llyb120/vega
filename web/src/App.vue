@@ -62,7 +62,7 @@ function retryLocalPairing() {
 }
 const mobileTitles = {
   chat: "对话",
-  employee: "数字员工",
+  employee: "数字牛马",
   debug: "调试会话",
   browser: "浏览器",
   experiences: "经验图谱",
@@ -369,7 +369,7 @@ function showTasks(filter = "active") {
   workRailOpen.value = false;
   employeeTab.value = "tasks";
 }
-const employeeGroups = computed(() => [['team', '团队员工'], ['personal', isAdmin.value ? '个人员工' : '我的员工']].map(([scope, label]) => ({ scope, label, entries: employees.value.filter((employee) => employee.scope === scope) })).filter((group) => group.entries.length));
+const employeeGroups = computed(() => [['team', '团队牛马'], ['personal', isAdmin.value ? '个人牛马' : '我的牛马']].map(([scope, label]) => ({ scope, label, entries: employees.value.filter((employee) => employee.scope === scope) })).filter((group) => group.entries.length));
 const labels = {
   queued: "排队中",
   running: "执行中",
@@ -993,7 +993,7 @@ async function handleEvent(event) {
     return;
   }
   if (event.type === "employee_takeover") {
-    if (confirm(`数字员工申请控制 Chrome：\n${event.data.text}\n允许吗？`))
+    if (confirm(`数字牛马申请控制 Chrome：\n${event.data.text}\n允许吗？`))
       await api("/employee/takeover", "POST", {
         id: event.data.id,
         accepted: true,
@@ -1116,7 +1116,7 @@ async function loadEmployee() {
   else { employee.value.tasks = data.tasks; employee.value.busy = data.busy; employee.value.chatRunning = data.chatRunning; employee.value.executionClients = data.executionClients; employee.value.execution = data.execution; employee.value.avatar = data.avatar; }
 }
 function employeeApi(path, method = "GET", data) {
-  if (!selectedEmployee.value) throw Error("请先创建员工");
+  if (!selectedEmployee.value) throw Error("请先创建牛马");
   return api(path.replace(/^\/employee(?=\/|$)/, `/employees/${selectedEmployee.value}`), method, data);
 }
 function employeeBrowserApi(path, method = "GET", data) {
@@ -1153,7 +1153,7 @@ async function createEmployee() {
 async function deleteEmployee() {
   if (employeeDeleting.value || !employee.value.id) return;
   const id = employee.value.id, name = employee.value.name;
-  if (!confirm(`永久删除「${name}」？\n\n将删除该员工的职责、记忆、所有任务和执行会话，并清除其浏览器登录数据。项目文件和共享密码本不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
+  if (!confirm(`永久删除「${name}」？\n\n将删除该牛马的职责、记忆、所有任务和执行会话，并清除其浏览器登录数据。项目文件和共享密码本不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
   employeeDeleting.value = true;
   try {
     await api(`/employees/${id}?confirmed=true`, "DELETE");
@@ -1270,7 +1270,7 @@ async function saveEmployeeSettings() {
       instruction: employee.value.instruction,
       cwd: employee.value.cwd,
     });
-    toast("员工设置已保存");
+    toast("牛马设置已保存");
     const updated = await api(`/employees/${id}`);
     if (selectedEmployee.value === id) employee.value = updated;
   }); } finally { employeeSaving.value = false; }
@@ -1291,9 +1291,9 @@ onBeforeUnmount(() => {
     <aside class="login-aside" aria-hidden="true">
       <div class="login-brand"><span class="brand-mark">V</span>Vega</div>
       <div class="login-pitch">
-        <h1>把目标交给数字员工，<br />你只处理需要决定的事。</h1>
+        <h1>把目标交给数字牛马，<br />你只处理需要决定的事。</h1>
         <ul>
-          <li><Icon name="chat" />用对话交代工作，员工自己拆解成任务并持续推进。</li>
+          <li><Icon name="chat" />用对话交代工作，牛马自己拆解成任务并持续推进。</li>
           <li><Icon name="hand" />需要审批或补充信息时，第一时间出现在你面前。</li>
           <li><Icon name="globe" />独立的浏览器与记忆，随时可以接手查看。</li>
         </ul>
@@ -1363,18 +1363,18 @@ onBeforeUnmount(() => {
             <option :value="stagePath[0].id">主对话</option>
             <option v-for="(stage, i) in stagePath.slice(1)" :key="stage.id" :value="stage.id">Stage {{ i + 1 }} · {{ stage.title }}</option>
           </select>
-          <button v-if="canExecute" class="primary sm" @click="openEmployee()"><Icon name="users" :size="15" /><span class="hide-mobile">交给员工</span></button>
+          <button v-if="canExecute" class="primary sm" @click="openEmployee()"><Icon name="users" :size="15" /><span class="hide-mobile">交给牛马</span></button>
         </PageHeader>
         <div v-if="localPairing && localPairing.code !== 'connected'" class="banner notice" role="status"><span>{{ localPairingText }}</span><button type="button" class="sm" @click="retryLocalPairing">重新检测</button></div>
         <div ref="transcript" :key="current?.id ?? 'none'" class="transcript" aria-live="polite">
           <div v-if="sessionLoading" class="context-note">正在加载会话…</div>
           <div v-if="!sessionLoading && !messages.length && !live" class="welcome">
             <h1>今天想完成什么？</h1>
-            <p>从一个问题开始。Vega 可以分析项目、探索网页，或把任务交给数字员工。</p>
+            <p>从一个问题开始。Vega 可以分析项目、探索网页，或把任务交给数字牛马。</p>
             <div v-if="canWriteCurrent" class="suggestions">
               <button @click="draft = '分析当前项目结构，提出最小改进方案'"><Icon name="code" /><span>分析一个项目<small>梳理结构，找到最小改进路径</small></span></button>
               <button @click="draft = '请用 Chrome 查看当前标签页'"><Icon name="globe" /><span>探索网页<small>查看当前页面并提取有效信息</small></span></button>
-              <button v-if="isAdmin" @click="openEmployee()"><Icon name="users" /><span>交给数字员工<small>创建可持续推进的独立任务</small></span></button>
+              <button v-if="isAdmin" @click="openEmployee()"><Icon name="users" /><span>交给数字牛马<small>创建可持续推进的独立任务</small></span></button>
             </div>
           </div>
           <div v-if="fireState" class="context-note">
@@ -1383,7 +1383,7 @@ onBeforeUnmount(() => {
           </div>
           <ConversationTimeline :key="current?.id ?? 'none'" :messages="messages" :running="!!isRunning" :live="live" :thinking="thinking" :active-tools="activeTools" :model="model" />
         </div>
-        <p v-if="!canWriteCurrent" class="context-note">历史会话仅供查阅；继续工作请交给员工，执行会话由员工管理。</p>
+        <p v-if="!canWriteCurrent" class="context-note">历史会话仅供查阅；继续工作请交给牛马，执行会话由牛马管理。</p>
         <div v-if="canWriteCurrent" class="composer-wrap">
           <form class="composer" @submit.prevent="send">
             <div v-if="attachments.length" class="attachments"><button v-for="(im, i) in attachments" :key="i" type="button" @click="attachments.splice(i, 1)"><Icon name="image" :size="12" />图片 {{ i + 1 }}<Icon name="close" :size="12" /></button></div>
@@ -1411,21 +1411,21 @@ onBeforeUnmount(() => {
       <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" />
       <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
         <template v-if="(creatingEmployee || !employees.length)">
-          <PageHeader :title="canExecute ? '创建新员工' : '数字员工'" :subtitle="canExecute ? '取个名字，交代工作方向，就可以开始了。' : ''" :back="employees.length ? '返回' : ''" @back="creatingEmployee = false" />
+          <PageHeader :title="canExecute ? '创建新牛马' : '数字牛马'" :subtitle="canExecute ? '取个名字，交代工作方向，就可以开始了。' : ''" :back="employees.length ? '返回' : ''" @back="creatingEmployee = false" />
           <div class="page-scroll create-page">
-            <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭员工错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
-            <div v-if="!canExecute" class="empty-state"><Icon name="users" :size="28" /><strong>还没有团队员工</strong><span>管理员创建的团队员工会出现在这里。</span></div>
+            <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭牛马错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
+            <div v-if="!canExecute" class="empty-state"><Icon name="users" :size="28" /><strong>还没有团队牛马</strong><span>管理员创建的团队牛马会出现在这里。</span></div>
             <form v-else class="card create-card" @submit.prevent="createEmployee">
-              <div class="create-head"><span class="create-icon" aria-hidden="true"><Icon name="users" :size="22" /></span><div><h3>你想把什么交给他？</h3><p class="hint">{{ isAdmin ? '团队员工 · 所有成员可见' : '个人员工 · 仅本人和管理员可见' }}</p></div></div>
+              <div class="create-head"><span class="create-icon" aria-hidden="true"><Icon name="users" :size="22" /></span><div><h3>你想把什么交给他？</h3><p class="hint">{{ isAdmin ? '团队牛马 · 所有成员可见' : '个人牛马 · 仅本人和管理员可见' }}</p></div></div>
               <div class="form-grid">
-                <label>员工名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
+                <label>牛马名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
                 <label>工作方向<textarea v-model="newEmployeeInstruction" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
               </div>
               <ul class="create-facts">
                 <li><Icon name="check" :size="14" />创建后即可接活，无需设置启用或工作时间</li>
                 <li><Icon name="check" :size="14" />独立的记忆、任务列表和浏览器会自动准备</li>
               </ul>
-              <div class="actions end"><button v-if="employees.length" type="button" class="ghost" @click="creatingEmployee = false">取消</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '正在创建…' : '创建员工' }}</button></div>
+              <div class="actions end"><button v-if="employees.length" type="button" class="ghost" @click="creatingEmployee = false">取消</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '正在创建…' : '创建牛马' }}</button></div>
             </form>
           </div>
         </template>
@@ -1448,7 +1448,7 @@ onBeforeUnmount(() => {
             @toggle-work="toggleWorkPanel"
             @menu="openNavigation"
           />
-          <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭员工错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
+          <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭牛马错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
           <div v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee" class="employee-chat-layout" :class="{ 'panel-inline': wide && workPanelVisible }">
             <div class="chat-main">
               <button v-if="attentionTasks.length && !workPanelVisible" type="button" class="attention-strip" @click="attentionTasks.length === 1 ? openEmployeeTask(attentionTasks[0].id) : showTasks('attention')">

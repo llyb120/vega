@@ -79,7 +79,7 @@ docker inspect --format '{{.State.Health.Status}}' vega
 
 此开关会在日志中告警。容器隔离不等于 Chromium 渲染器沙箱；关闭后访问恶意网页可能危及同容器的服务、数据库和挂载项目，不建议用于生产。
 
-## 数字员工与系统状态
+## 数字牛马与系统状态
 
 启动器只给同容器 Nitro 设置 `VEGA_BROWSER_MODE=isolated`：该模式明确声明控制对象是容器私有 Chromium，没有可抢占的宿主桌面，因此不依赖 `loginctl`/锁屏状态、不弹桌面接管倒计时。普通 Linux/Windows/macOS 运行方式不变，仍按实际桌面状态排队。不要对连接真实用户浏览器的常规部署设置此变量。
 

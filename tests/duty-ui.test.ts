@@ -67,7 +67,7 @@ test("a slow trigger save is not submitted twice and cannot clear a different em
   state.context.employeeAction = async (input: any) => { state.calls.push(input); await new Promise<void>(resolve => finish = resolve); };
   const pending = state.saveDuty(); await state.saveDuty();
   assert.equal(state.calls.length, 1);
-  const draft = { condition: "每天10点", text: "另一员工草稿" };
+  const draft = { condition: "每天10点", text: "另一牛马草稿" };
   state.context.selectedEmployee.value = "eb"; state.context.duty.value = draft;
   finish(); await pending;
   assert.equal(state.context.duty.value.text, draft.text); assert.equal(state.context.dutyOpen.value, true);

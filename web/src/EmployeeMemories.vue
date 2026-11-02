@@ -27,7 +27,7 @@ const match = (m) => !query.value || m.text.toLowerCase().includes(query.value.t
         <button class="primary" :disabled="saving">{{ id ? '更新' : '记住' }}</button>
         <button v-if="id" type="button" class="ghost" @click="cancel">取消</button>
       </form>
-      <div v-if="!memories.length" class="empty-state"><Icon name="memory" :size="28" /><strong>还没有记忆</strong><span>员工会在工作中积累记忆，你也可以在上方手动添加。</span></div>
+      <div v-if="!memories.length" class="empty-state"><Icon name="memory" :size="28" /><strong>还没有记忆</strong><span>牛马会在工作中积累记忆，你也可以在上方手动添加。</span></div>
       <ul v-else class="memory-list">
         <li v-for="m in memories.filter(match)" :key="m.id" :class="{ editing: id === m.id }">
           <span :class="['level', 'l' + m.importance]" :title="levels[m.importance]">{{ levels[m.importance] }}</span>

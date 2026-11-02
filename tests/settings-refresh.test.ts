@@ -207,7 +207,7 @@ test("UI keeps all pages Vapor, settings last, separate experiences, no whole-pa
   assert(nav.indexOf('"experiences"') >= 0 && nav.indexOf('"experiences"') < nav.lastIndexOf('"settings"'));
   assert(nav.trimEnd().endsWith('"settings"]];') || /\["settings", [^\]]*\]\];$/.test(nav.trim()), "settings stays last");
   assert(!app.includes("星轨"));
-  assert(!app.includes("员工工作目录"));
+  assert(!app.includes("牛马工作目录"));
   assert(!app.includes("模型配置 JSON"));
   assert(!app.includes("Nitro · SQLite"));
   assert(!app.includes("T1/T2/T3"));

@@ -124,7 +124,7 @@ onMounted(() => void run(refresh));
             </form>
           </template>
         </div>
-        <p class="hint isolation-note"><Icon name="lock" :size="12" />每个用户的会话和 Stage 仅本人可见；数字员工由管理员共享管理。</p>
+        <p class="hint isolation-note"><Icon name="lock" :size="12" />每个用户的会话和 Stage 仅本人可见；数字牛马由管理员共享管理。</p>
       </section>
     </div>
   </div>

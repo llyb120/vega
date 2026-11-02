@@ -23,7 +23,7 @@ const others = (list, attention) => list.filter((task) => !attention.includes(ta
           <button type="button" class="task-title" @click="emit('open', task.id)">{{ task.text }}</button>
           <p class="attention-text"><strong>{{ task.status === 'approval' ? '需要确认' : '需要补充' }}：</strong>{{ task.status === 'approval' ? task.approval : task.waiting }}</p>
           <div v-if="!readonly && task.status === 'approval'" class="actions"><button type="button" class="primary sm" :disabled="!!busy" @click="run(task, 'approve')"><Icon name="check" :size="14" />批准执行</button><button type="button" class="sm" :disabled="!!busy" @click="run(task, 'reject')">驳回</button></div>
-          <form v-else-if="!readonly" class="answer" @submit.prevent="run(task, 'answer')"><textarea v-model="answers[task.id]" rows="2" maxlength="8000" required :aria-label="'回复：' + task.text" placeholder="补充信息后，员工会继续原任务"></textarea><button class="primary sm" :disabled="!!busy || !answers[task.id]?.trim()">回复并继续</button></form>
+          <form v-else-if="!readonly" class="answer" @submit.prevent="run(task, 'answer')"><textarea v-model="answers[task.id]" rows="2" maxlength="8000" required :aria-label="'回复：' + task.text" placeholder="补充信息后，牛马会继续原任务"></textarea><button class="primary sm" :disabled="!!busy || !answers[task.id]?.trim()">回复并继续</button></form>
         </article>
       </section>
       <section class="panel-section">

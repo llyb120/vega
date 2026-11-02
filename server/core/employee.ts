@@ -432,7 +432,7 @@ export class Employee {
     assert(!this.deleted && !(this.employeeId === "default" && this.store.get("employee:default-deleted", false)), "Employee not found");
     const fallback: EmployeeState = {
       id: this.employeeId,
-      name: "默认员工",
+      name: "默认牛马",
       instruction: "",
       ownerId: "",
       enabled: true,
@@ -863,7 +863,7 @@ export class Employee {
           if (action === "ask") {
             t.status = "approval";
             t.approval = content;
-            this.note(s, t, "confirm", owner.name || "员工", content);
+            this.note(s, t, "confirm", owner.name || "牛马", content);
             if (t.owner.token)
               pendingSend = {
                 to: t.owner.token,
@@ -884,7 +884,7 @@ export class Employee {
               action === "vault_request"
                 ? "【请求密码本里的凭据】" + content
                 : content;
-            this.note(s, t, "help", "员工", t.waiting);
+            this.note(s, t, "help", "牛马", t.waiting);
             if (t.owner.token)
               pendingSend = {
                 to: t.owner.token,
@@ -1409,8 +1409,8 @@ export class Employee {
       const supplement = previous.answer !== undefined && input.answer.startsWith(previous.answer) ? input.answer.slice(previous.answer.length).trim() : input.answer;
       const snapshot = JSON.stringify({ plan: task.plan, planRevision: task.planRevision || 0, revision: task.revision || 0, progress: task.progress?.at(-1), checkpoint: task.checkpoint });
       const context = continuing
-        ? `[员工任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n当前计划和恢复点：${snapshot}`
-        : `[员工任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, fromDuty: task.fromDuty, triggerCondition: task.triggerCondition })}\n相关稳定记忆：${JSON.stringify(memories)}`;
+        ? `[牛马任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n当前计划和恢复点：${snapshot}`
+        : `[牛马任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, fromDuty: task.fromDuty, triggerCondition: task.triggerCondition })}\n相关稳定记忆：${JSON.stringify(memories)}`;
       const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason })}\n先检查现场与历史回执，诊断根因并改变无效方法，最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用help等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
@@ -1572,7 +1572,7 @@ export class Employee {
       this.update((s) => {
         const task: Task = {
           id: id("t"),
-          text: `替「${from.name}」的数字员工补充信息（它在做：${clip(data.task || "", 60)}）：${clip(data.question, 7000)}`,
+          text: `替「${from.name}」的数字牛马补充信息（它在做：${clip(data.task || "", 60)}）：${clip(data.question, 7000)}`,
           status: "queued",
           createdAt: Date.now(),
           profile: "lightweight",

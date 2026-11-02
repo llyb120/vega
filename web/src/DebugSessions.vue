@@ -27,13 +27,13 @@ onBeforeUnmount(() => { disposed = true; version++; });
         <button type="button" class="sm" :disabled="busy" title="刷新" @click="refresh"><Icon name="refresh" :size="14" /><span class="hide-mobile">刷新</span></button>
       </PageHeader>
       <div class="debug-filters">
-        <select v-model="employee" aria-label="员工"><option value="">全部员工</option><option v-for="[id, name] in employees" :key="id" :value="id">{{ name }}</option></select>
+        <select v-model="employee" aria-label="牛马"><option value="">全部牛马</option><option v-for="[id, name] in employees" :key="id" :value="id">{{ name }}</option></select>
         <label class="search"><Icon name="search" :size="14" /><input v-model="search" aria-label="查找会话" placeholder="会话 ID、标题或任务" /></label>
       </div>
       <p class="debug-count">{{ visible.length }} 个真实会话</p>
       <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span></p>
       <div class="debug-list">
-        <p v-if="!visible.length" class="empty-state">{{ busy ? '正在读取…' : '没有匹配的员工会话' }}</p>
+        <p v-if="!visible.length" class="empty-state">{{ busy ? '正在读取…' : '没有匹配的牛马会话' }}</p>
         <button v-for="session in visible" :key="session.id" type="button" class="debug-session" :class="{ selected: selected === session.id }" :aria-current="selected === session.id ? 'true' : undefined" @click="selected = session.id">
           <span class="debug-row"><strong>{{ session.employeeName }}</strong><span :class="['badge', session.kind === 'work' ? 'info' : '']">{{ labels[session.kind] }}</span><span v-if="session.running" class="badge ok"><span class="dot ok pulse"></span>执行中</span><time>{{ formatBeijing(session.createdAt) }}</time></span>
           <span class="debug-title">{{ session.title }}</span>

@@ -81,7 +81,7 @@ test("team chat management uses the current sender, not the employee owner or a 
     assert.equal(employee.state().duties.length, 1);
     tools.actorId = "member";
     assert(!action("remember") && !action("vault_get"));
-    await assert.rejects(tools.execute({ id: "denied", name: "employee", arguments: { action: "remember", text: "untrusted change" } }, {} as any), /无团队员工管理权限/);
+    await assert.rejects(tools.execute({ id: "denied", name: "employee", arguments: { action: "remember", text: "untrusted change" } }, {} as any), /无团队牛马管理权限/);
     await tools.execute({ id: "work", name: "employee", arguments: { action: "add", kind: "todo", text: "authorized work" } }, {} as any);
     tools.actorId = "admin";
     store.db.prepare("UPDATE web_users SET role='operator' WHERE id='admin'").run();

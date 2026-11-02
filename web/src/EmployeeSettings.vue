@@ -11,7 +11,7 @@ const local = computed(() => !!props.employee.execution?.localAgent);
   <div class="page-scroll settings-page">
     <div class="settings-grid">
       <form class="card profile" @submit.prevent="emit('save')">
-        <div class="card-head"><h3>员工资料</h3><p class="hint">保存后，新任务会使用更新的工作原则和目录。</p></div>
+        <div class="card-head"><h3>牛马资料</h3><p class="hint">保存后，新任务会使用更新的工作原则和目录。</p></div>
         <div class="form-grid">
           <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
           <label>工作原则<textarea v-model="employee.instruction" rows="6" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
@@ -31,7 +31,7 @@ const local = computed(() => !!props.employee.execution?.localAgent);
           <p v-if="!clients.length" class="hint">无在线客户端；连接后可切换。</p>
         </section>
         <section class="card danger-zone">
-          <div class="card-head"><h3>删除员工</h3><p class="hint">删除职责、记忆、所有任务和执行会话，并清除其浏览器登录数据。项目文件和共享密码本不会删除。</p></div>
+          <div class="card-head"><h3>删除牛马</h3><p class="hint">删除职责、记忆、所有任务和执行会话，并清除其浏览器登录数据。项目文件和共享密码本不会删除。</p></div>
           <button type="button" class="danger" :disabled="deleting" @click="emit('delete')"><Icon name="trash" :size="15" />{{ deleting ? '正在删除…' : '永久删除' }}</button>
         </section>
       </div>

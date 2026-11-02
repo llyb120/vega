@@ -215,14 +215,14 @@ onBeforeUnmount(() => { disposed = true; });
         </article>
       </div>
     </div>
-    <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号仅可查看团队员工的对话和任务。</p>
+    <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号仅可查看团队牛马的对话和任务。</p>
     <form v-else class="chat-composer" @submit.prevent="send">
       <div v-if="quoted" class="composer-quote"><Icon name="reply" :size="14" /><button type="button" @click="jumpTo(quoted.seq)"><strong>引用 {{ quoted.role === 'user' ? '我' : name }}</strong><span>{{ quoted.text }}</span></button><button type="button" class="icon sm" aria-label="取消引用" @click="quoted = undefined"><Icon name="close" :size="14" /></button></div>
       <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon name="image" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
       <div class="composer-row">
         <input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden multiple @change="upload" />
         <button type="button" class="icon attach" aria-label="添加图片" title="添加图片" @click="fileInput.click()"><Icon name="image" /></button>
-        <textarea ref="input" v-model="draft" aria-label="给员工的消息" placeholder="告诉我目标，剩下的交给我…" rows="1" @keydown="keydown"></textarea>
+        <textarea ref="input" v-model="draft" aria-label="给牛马的消息" placeholder="告诉我目标，剩下的交给我…" rows="1" @keydown="keydown"></textarea>
         <button v-if="running" type="button" class="stop" title="停止本轮" @click="stop"><Icon name="stop" :size="14" /><span>停止本轮</span></button>
         <button class="primary send" :disabled="busy || (!draft.trim() && !files.length)" :aria-label="busy ? '提交中' : '发送'" :title="busy ? '提交中…' : '发送'"><span v-if="busy" class="spinner"></span><Icon v-else name="send" :size="18" /></button>
       </div>

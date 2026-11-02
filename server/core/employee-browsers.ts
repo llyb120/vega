@@ -46,7 +46,7 @@ export class EmployeeBrowsers {
       }
       await current.browser.close();
       current.chrome.bridge.close();
-      throw Error("员工浏览器连接超时；可在原任务内恢复，不会重放页面操作");
+      throw Error("牛马浏览器连接超时；可在原任务内恢复，不会重放页面操作");
     })().finally(() => { current.starting = undefined; });
     return current.starting;
   }

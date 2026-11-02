@@ -31,10 +31,10 @@ function choose(localAgent, clientId) { close(place); emit("execution", localAge
       <span class="identity-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employee.id" :name="employee.name" :avatar="employee.avatar" /></span>
       <div class="identity-text">
         <h2 class="truncate">{{ employee.name || "加载中…" }}</h2>
-        <span :class="['identity-status', tone]" :title="employee.instruction || '把目标交给我，任务由我安排。'"><span class="dot" :class="[tone, { pulse: tone === 'info' }]" aria-hidden="true"></span>{{ status }}<span class="identity-scope"> · {{ employee.scope === 'personal' ? '个人员工' : '团队员工' }}</span></span>
+        <span :class="['identity-status', tone]" :title="employee.instruction || '把目标交给我，任务由我安排。'"><span class="dot" :class="[tone, { pulse: tone === 'info' }]" aria-hidden="true"></span>{{ status }}<span class="identity-scope"> · {{ employee.scope === 'personal' ? '个人牛马' : '团队牛马' }}</span></span>
       </div>
     </div>
-    <nav class="employee-tabs" aria-label="员工工作区">
+    <nav class="employee-tabs" aria-label="牛马工作区">
       <button v-for="[id, label] in tabs" :key="id" type="button" :class="{ selected: tab === id }" :aria-current="tab === id ? 'page' : undefined" @click="emit('tab', id)">
         <Icon :name="icons[id]" :size="16" /><span>{{ label }}</span><span v-if="counts?.[id]" :class="['count', id === 'tasks' && counts.attention ? 'warn' : '']">{{ counts[id] }}</span>
       </button>
@@ -53,11 +53,11 @@ function choose(localAgent, clientId) { close(place); emit("execution", localAge
       <span v-else class="place-chip static" :title="'新任务默认执行位置：' + location"><Icon :name="employee.execution?.localAgent ? 'laptop' : 'server'" :size="15" />{{ location }}</span>
       <button v-if="showWork" type="button" class="ghost work-toggle" :aria-pressed="workOpen" :title="workOpen ? '收起工作面板' : '展开工作面板'" @click="emit('toggle-work')"><Icon name="panel" :size="16" /><span class="work-label">工作面板</span><span v-if="workCount" class="count warn">{{ workCount }}</span></button>
       <details v-if="employee.canManage" ref="menu" class="popover">
-        <summary class="icon-summary" aria-label="员工更多操作" title="更多"><Icon name="more" /></summary>
+        <summary class="icon-summary" aria-label="牛马更多操作" title="更多"><Icon name="more" /></summary>
         <div class="popover-panel" role="menu">
           <p class="popover-meta">{{ employee.instruction || '把目标交给我，任务由我安排。' }}</p>
-          <button type="button" role="menuitem" @click="close(menu); emit('tab', 'settings')"><Icon name="settings" :size="16" /><span>员工设置</span></button>
-          <button type="button" role="menuitem" class="danger-item" :disabled="deleting" @click="close(menu); emit('delete')"><Icon name="trash" :size="16" /><span>{{ deleting ? '正在删除…' : '删除员工' }}</span></button>
+          <button type="button" role="menuitem" @click="close(menu); emit('tab', 'settings')"><Icon name="settings" :size="16" /><span>牛马设置</span></button>
+          <button type="button" role="menuitem" class="danger-item" :disabled="deleting" @click="close(menu); emit('delete')"><Icon name="trash" :size="16" /><span>{{ deleting ? '正在删除…' : '删除牛马' }}</span></button>
         </div>
       </details>
     </div>

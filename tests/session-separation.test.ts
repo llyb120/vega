@@ -45,7 +45,7 @@ test("ordinary conversations do not depend on employee state, schedule or task r
     events: any[] = [];
   engine.events.on("event", (event) => events.push(event));
   engine.providers.chat = async (_model, _system, history) => {
-    assert(!JSON.stringify(history).includes("[员工任务"));
+    assert(!JSON.stringify(history).includes("[牛马任务"));
     return { role: "assistant", text: "ordinary reply" };
   };
   try {
@@ -67,7 +67,7 @@ test("ordinary conversations do not depend on employee state, schedule or task r
       .definitions(model)
       .find((tool) => tool.name === "employee")!.description;
     assert(description.includes("普通会话"));
-    assert(description.includes("不需要员工启用"));
+    assert(description.includes("不需要牛马启用"));
     assert(tools.definitions(model).some((tool) => tool.name === "chrome"));
     assert(tools.definitions(model).some((tool) => tool.name === "vault"));
     const readOnlyTools = new Tools(
@@ -118,7 +118,7 @@ test("ordinary conversations do not depend on employee state, schedule or task r
       taskTools
         .definitions(model)
         .find((tool) => tool.name === "employee")!
-        .description.includes("当前会话属于员工任务"),
+        .description.includes("当前会话属于牛马任务"),
     );
     assert(
       !taskTools.definitions(model).some((tool) => tool.name === "vault"),

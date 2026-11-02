@@ -112,7 +112,7 @@ export default defineEventHandler(async (event) => {
       return store.sessions().filter((session) => session.employeeId || session.taskId).map((session) => {
         const linked = session.taskId ? tasks.get(session.taskId) : undefined;
         const employeeId = session.employeeId || linked?.employeeId || "";
-        return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联员工", taskText: linked?.task.text || "", kind: !session.taskId ? "chat" : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
+        return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联牛马", taskText: linked?.task.text || "", kind: !session.taskId ? "chat" : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
       });
     }
     if (path[0] === "bootstrap" && method === "GET")
@@ -165,7 +165,7 @@ export default defineEventHandler(async (event) => {
       }
       const employee = engine.employee.all().find((employee) => employee.employeeId === path[1]);
       check(employee && employee.accessible(user), 404, "Employee not found");
-      check(!employee.deleting, 409, "员工正在删除，请稍候");
+      check(!employee.deleting, 409, "牛马正在删除，请稍候");
       const state = employee.state();
       if (method !== "GET") check(user.role !== "viewer", 403, "只读账号不能执行操作");
       if (path[2] === "avatar") {
@@ -178,19 +178,19 @@ export default defineEventHandler(async (event) => {
           return send(event, Buffer.from(image.data));
         }
         if (method === "POST") {
-          check(employee.manageable(user), 403, "只有员工管理者可以修改头像");
+          check(employee.manageable(user), 403, "只有牛马管理者可以修改头像");
           return await updateEmployeeAvatar(employee, a);
         }
         check(false, 405, "Method not allowed");
       }
       if (path[2] === "execution" && method === "POST") {
-        check(employee.manageable(user), 403, "只有员工管理者可以切换默认执行位置");
+        check(employee.manageable(user), 403, "只有牛马管理者可以切换默认执行位置");
         return engine.switchEmployeeExecution(employee.employeeId, a.localAgent, a.clientId, user.id);
       }
       if (path.length === 2 && method === "DELETE") {
-        check(employee.manageable(user), 403, "只有员工管理者可以删除员工");
-        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认删除员工及其任务、会话和浏览器登录数据");
-        check(!employee.busy.size && !(state.chatSession && engine.active.has(state.chatSession)), 409, "员工仍在执行，请先停止任务和当前对话，再删除员工");
+        check(employee.manageable(user), 403, "只有牛马管理者可以删除牛马");
+        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认删除牛马及其任务、会话和浏览器登录数据");
+        check(!employee.busy.size && !(state.chatSession && engine.active.has(state.chatSession)), 409, "牛马仍在执行，请先停止任务和当前对话，再删除牛马");
         await engine.removeEmployee(employee.employeeId, async () => {
           const live = app().employeeLives.get(employee.employeeId);
           if (live) { await live.close(); app().employeeLives.delete(employee.employeeId); }
@@ -204,7 +204,7 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "messages" && method === "POST") {
         const session = employee.chat(user.id);
         const message = { ...await inputMessage(a, store, session.id), actorId: user.id };
-        check(!employee.deleting, 409, "员工正在删除，请稍候");
+        check(!employee.deleting, 409, "牛马正在删除，请稍候");
         if (engine.active.has(session.id)) engine.steer(session.id, message);
         else await engine.launch(session.id, message);
         return { id: session.id };
@@ -214,7 +214,7 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
       if (path[2] === "chrome") {
-        check(employee.manageable(user), 403, "只有员工管理者可以查看和控制浏览器登录环境");
+        check(employee.manageable(user), 403, "只有牛马管理者可以查看和控制浏览器登录环境");
         if (method === "POST" && a.operation === "close") {
           check(!employee.busy.size, 409, "Stop browser tasks first");
           const live = app().employeeLives.get(employee.employeeId);
@@ -223,7 +223,7 @@ export default defineEventHandler(async (event) => {
           return { ok: true };
         }
         const browser = await engine.browsers.get(employee.employeeId);
-        check(!employee.deleting, 409, "员工正在删除，请稍候");
+        check(!employee.deleting, 409, "牛马正在删除，请稍候");
         if (path[3] === "tabs" && method === "GET") return browserTabs(browser);
         if (path[3] === "live" && method === "POST") return employeeLive(employee.employeeId).ticket(who, a.tabTag);
         if (path[3] === "screenshot" && method === "POST") return browserScreenshot(browser, "employee-view:" + user.id, a.tabTag);
@@ -233,7 +233,7 @@ export default defineEventHandler(async (event) => {
         check(false, 404, "Browser route not found");
       }
       if (path[2] === "control" && method === "POST") {
-        if (["settings", "fire"].includes(a.action)) check(employee.manageable(user), 403, "只有员工管理者可以修改设置或触发职责");
+        if (["settings", "fire"].includes(a.action)) check(employee.manageable(user), 403, "只有牛马管理者可以修改设置或触发职责");
         return employee.control(a);
       }
       if (path[2] === "transcript" && method === "POST") return employee.transcript(a.threadId);
@@ -242,7 +242,7 @@ export default defineEventHandler(async (event) => {
         return { ...visible, canManage: employee.manageable(user), executionClients: employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
       }
       if (path.length === 2 && method === "POST") {
-        if (!employee.manageable(user)) check(a.action === "list" || (a.action === "add" && a.kind === "todo"), 403, "只有员工管理者可以修改职责、记忆和凭据");
+        if (!employee.manageable(user)) check(a.action === "list" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
         const result = await employee.execute("", await prepareDutyInput(engine, employee, a));
         return result.secret ? JSON.parse(result.secret) : result.value;
       }

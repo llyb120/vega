@@ -159,7 +159,7 @@ test("execution changes cannot overlap a running turn, Fire, another switch or e
   await switching;
   assert.equal(engine.executionSwitches.size, 0);
   const task = store.newSession({ ownerId: "alice", taskId: "task" });
-  await assert.rejects(engine.switchExecution(task.id, true), /员工任务/);
+  await assert.rejects(engine.switchExecution(task.id, true), /牛马任务/);
   await assert.rejects(engine.switchExecution(session.id, "server" as any), /Invalid execution mode/);
 });
 

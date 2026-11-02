@@ -20,7 +20,7 @@ test("work panel keeps long task titles, requests and reply controls inside narr
       <div id="fixture" style="position:relative;display:flex;height:500px">
         <aside class="work-panel"><header class="panel-head"><h3>工作面板</h3><button class="link">全部任务</button><button class="icon sm">×</button></header>
           <div class="panel-scroll"><section class="panel-section">
-            <article class="attention-card"><button class="task-title">${long}</button><p class="attention-text">需要补充：${long}\nTAPD_ACCESS_TOKEN_${"token".repeat(100)}</p><form class="answer"><textarea rows="2" placeholder="补充信息后，员工会继续原任务"></textarea><button class="primary sm">回复并继续</button></form></article>
+            <article class="attention-card"><button class="task-title">${long}</button><p class="attention-text">需要补充：${long}\nTAPD_ACCESS_TOKEN_${"token".repeat(100)}</p><form class="answer"><textarea rows="2" placeholder="补充信息后，牛马会继续原任务"></textarea><button class="primary sm">回复并继续</button></form></article>
             <article class="attention-card"><button class="task-title">${long}</button><p class="attention-text">需要确认：${long}</p><div class="actions"><button class="primary sm">批准执行</button><button class="sm">驳回</button></div></article>
             <button class="task-row"><span class="task-row-head"><span class="badge">进行中</span><time>刚刚</time></span><strong>${long}</strong><span class="task-row-note">${long}</span><span class="mini-progress"><span style="width:50%"></span></span></button>
           </section></div>
@@ -148,7 +148,7 @@ test("employee chat bubbles, citations and task jumps work on mobile while debug
     const keyboard = await evaluate("(()=>{const c=document.querySelector('.employee-composer').getBoundingClientRect(),t=document.querySelector('.employee-transcript').getBoundingClientRect();return {bottom:c.bottom,height:t.height}})()");
     assert(keyboard.bottom <= 481 && keyboard.height >= 200, JSON.stringify(keyboard));
     await command('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-    await evaluate("document.querySelector('[aria-label=\"员工更多操作\"]').click();[...document.querySelectorAll('.popover-panel button')].find(button=>button.textContent==='员工设置').click()");
+    await evaluate("document.querySelector('[aria-label=\"牛马更多操作\"]').click();[...document.querySelectorAll('.popover-panel button')].find(button=>button.textContent==='牛马设置').click()");
     await until("!!document.querySelector('.settings-page form.profile')");
     assert(await evaluate("document.querySelectorAll('.shape-grid button').length") >= 15);
     assert.equal(await evaluate("document.querySelectorAll('.color-row button').length"), 12);
@@ -157,11 +157,11 @@ test("employee chat bubbles, citations and task jumps work on mobile while debug
     await evaluate("document.querySelector('[aria-label=\"使用青色\"]').click()");
     await until("document.querySelector('[aria-label=\"使用青色\"]').getAttribute('aria-pressed')==='true' && document.querySelector('.avatar-current .bot-avatar path')?.getAttribute('fill')==='#0fb4a3' && document.querySelector('.avatar-current .bot-avatar')?.dataset.shape==='cloud'");
     const avatarFile = (await readFile("web/public/avatars/zodiac/leo.webp")).toString("base64");
-    await evaluate(`(()=>{const input=document.querySelector('[aria-label="上传员工头像图片"]'),transfer=new DataTransfer();transfer.items.add(new File([Uint8Array.from(atob(${JSON.stringify(avatarFile)}),char=>char.charCodeAt(0))],'custom.webp',{type:'image/webp'}));input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+    await evaluate(`(()=>{const input=document.querySelector('[aria-label="上传牛马头像图片"]'),transfer=new DataTransfer();transfer.items.add(new File([Uint8Array.from(atob(${JSON.stringify(avatarFile)}),char=>char.charCodeAt(0))],'custom.webp',{type:'image/webp'}));input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}))})()`);
     await until("document.querySelector('.avatar-current img')?.src.includes('/avatar?v=blob-') && document.querySelector('.avatar-current img').naturalWidth===512");
     await command("Page.reload");
     await until("document.querySelector('.chat-message.assistant .chat-avatar img')?.src.includes('/avatar?v=blob-') && document.querySelector('.chat-message.assistant .chat-avatar img').naturalWidth===512");
-    await evaluate("document.querySelector('[aria-label=\"员工更多操作\"]').click();[...document.querySelectorAll('.popover-panel button')].find(button=>button.textContent==='员工设置').click()");
+    await evaluate("document.querySelector('[aria-label=\"牛马更多操作\"]').click();[...document.querySelectorAll('.popover-panel button')].find(button=>button.textContent==='牛马设置').click()");
     await until("!!document.querySelector('.avatar-picker')");
     await evaluate("[...document.querySelectorAll('.avatar-actions button')].find(button=>button.textContent==='恢复默认头像').click()");
     await until("!document.querySelector('.avatar-current img') && !!document.querySelector('.avatar-current .bot-avatar')");
@@ -191,7 +191,7 @@ test("employee chat bubbles, citations and task jumps work on mobile while debug
     await evaluate("document.querySelector('.duty-form').requestSubmit()");
     await until(`!document.querySelector('.duty-form') && !![...(${dutyCard}).querySelectorAll('button')].find(button=>button.textContent==='启用')`);
     assert.equal(providerRequests.filter(request => request.tools?.some((tool: any) => tool.function?.name === 'compile_duty_trigger')).length, triggerCalls);
-    await evaluate("document.querySelector('[aria-label=\"员工更多操作\"]').click();[...document.querySelectorAll('.popover-panel button')].find(button=>button.textContent==='员工设置').click()");
+    await evaluate("document.querySelector('[aria-label=\"牛马更多操作\"]').click();[...document.querySelectorAll('.popover-panel button')].find(button=>button.textContent==='牛马设置').click()");
     await until("!!document.querySelector('[role=\"radiogroup\"][aria-label=\"新任务执行位置\"]')");
     assert.equal(await evaluate("document.querySelectorAll('.place-options [role=radio]').length>0 && document.querySelector('.place-options').getBoundingClientRect().width<=innerWidth"), true);
     await evaluate("[...document.querySelectorAll('.employee-tabs button')].find(button=>button.textContent==='对话').click()");

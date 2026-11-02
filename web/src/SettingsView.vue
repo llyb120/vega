@@ -14,7 +14,7 @@ const props = defineProps({
 });
 const emit = defineEmits(["saved", "error", "notice"]);
 const copy = (value) => JSON.parse(JSON.stringify(value));
-const sections = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"], ["skills", "技能", "zap", "员工可调用的技能包"], ["vault", "密码本", "key", "供员工取用的加密凭据"], ["mcp", "MCP", "plug", "外部工具服务"]];
+const sections = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"], ["skills", "技能", "zap", "牛马可调用的技能包"], ["vault", "密码本", "key", "供牛马取用的加密凭据"], ["mcp", "MCP", "plug", "外部工具服务"]];
 const section = ref("providers");
 const busy = ref(false),
   skills = ref([]),
@@ -132,7 +132,7 @@ onMounted(() => void run(async () => {
       <div :hidden="section !== 'providers'"><ProviderSettings :api="api" :config="config" :user-id="userId" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
       <div :hidden="section !== 'scenes'"><SceneSettings :api="api" :config="config" :models="models" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
       <section :hidden="section !== 'skills'" class="card">
-        <div class="card-head"><h3>技能</h3><p class="hint">上传 ZIP 格式的技能包，员工会在合适的任务中使用。</p></div>
+        <div class="card-head"><h3>技能</h3><p class="hint">上传 ZIP 格式的技能包，牛马会在合适的任务中使用。</p></div>
         <div class="upload-row">
           <input ref="upload" type="file" accept=".zip" aria-label="选择技能ZIP文件" />
           <label class="check"><input v-model="replace" type="checkbox" />覆盖同名技能</label>
@@ -148,7 +148,7 @@ onMounted(() => void run(async () => {
         </ul>
       </section>
       <section :hidden="section !== 'vault'" class="card">
-        <div class="card-head row"><div><h3>密码本 · {{ vault.length }} 条</h3><p class="hint">密码本全局共享，不归属员工，无需逐员工授权。可保存多条账号、密码或密钥，每条有独立的使用条件；凭据加密保存，只有管理员能修改。</p></div><button type="button" class="sm" :disabled="busy" @click="newVault">新增凭据</button></div>
+        <div class="card-head row"><div><h3>密码本 · {{ vault.length }} 条</h3><p class="hint">密码本全局共享，不归属牛马，无需逐牛马授权。可保存多条账号、密码或密钥，每条有独立的使用条件；凭据加密保存，只有管理员能修改。</p></div><button type="button" class="sm" :disabled="busy" @click="newVault">新增凭据</button></div>
         <p v-if="vaultForm.id" class="hint">正在编辑「{{ vaultForm.name }}」，凭据留空保留原内容。</p>
         <form class="form-grid two vault-form" @submit.prevent="saveVault">
           <label>名称<input v-model="vaultForm.name" required maxlength="100" placeholder="不要包含密钥内容" /></label>

@@ -67,7 +67,7 @@ async function loadExtension(child: ChildProcess, path: string) {
         try {
           const reply = JSON.parse(raw);
           if (reply.id === 1) {
-            finish(reply.error ? Error("加载员工扩展失败：" + reply.error.message) : undefined);
+            finish(reply.error ? Error("加载牛马扩展失败：" + reply.error.message) : undefined);
           }
         } catch { finish(Error("Invalid Chromium startup response")); }
       }
@@ -115,7 +115,7 @@ export class HeadlessBrowser {
     if (this.child) return;
     const binary = chromeBinary();
     if (!binary) {
-      if (instance) throw Error("员工浏览器找不到 Chromium；请配置 VEGA_CHROME_PATH");
+      if (instance) throw Error("牛马浏览器找不到 Chromium；请配置 VEGA_CHROME_PATH");
       console.warn(
         "[Vega] VEGA_BROWSER_MODE=isolated but no Chrome/Chromium binary found; set VEGA_CHROME_PATH",
       );

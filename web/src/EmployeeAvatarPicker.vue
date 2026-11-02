@@ -36,7 +36,7 @@ async function upload(event) {
 }
 </script>
 <template>
-  <section class="card avatar-picker" aria-label="员工头像" :aria-busy="busy">
+  <section class="card avatar-picker" aria-label="牛马头像" :aria-busy="busy">
     <div class="avatar-head">
       <span class="avatar-current" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" /></span>
       <div class="avatar-text"><h3>头像</h3><p class="hint">选一个形状和颜色，或上传自己的图片，立即生效。</p></div>
@@ -44,7 +44,7 @@ async function upload(event) {
     <div class="color-row" role="group" aria-label="头像颜色"><button v-for="color in BOT_AVATAR_COLORS" :key="color.id" type="button" :class="['swatch', { selected: current?.color === color.id }]" :style="{ '--swatch': color.hex }" :aria-pressed="current?.color === color.id" :aria-label="'使用' + color.name" :title="color.name" :disabled="busy" @click="pickColor(color.id)"></button></div>
     <div class="shape-grid" role="group" aria-label="头像形状"><button v-for="shape in BOT_AVATAR_SHAPES" :key="shape.id" type="button" :class="{ selected: current?.shape === shape.id }" :aria-pressed="current?.shape === shape.id" :aria-label="'使用' + shape.name + '形状'" :title="shape.name" :disabled="busy" @click="pickShape(shape.id)"><BotAvatar :shape="shape.id" :hex="current?.shape === shape.id ? colorHex : (current ? '#a3a3aa' : colorHex)" /></button></div>
     <div class="avatar-actions"><button type="button" class="sm" :disabled="busy" @click="fileInput.click()"><Icon name="image" :size="14" />上传图片</button><button type="button" class="sm ghost" :disabled="busy || !avatar" @click="choose('')">恢复默认头像</button></div>
-    <input ref="fileInput" type="file" hidden accept="image/png,image/jpeg,image/webp,image/gif" aria-label="上传员工头像图片" :disabled="busy" @change="upload" />
+    <input ref="fileInput" type="file" hidden accept="image/png,image/jpeg,image/webp,image/gif" aria-label="上传牛马头像图片" :disabled="busy" @change="upload" />
     <p v-if="error" class="error" role="alert">{{ error }}</p><p v-else class="hint foot">{{ busy ? '正在保存头像…' : '自定义图片会裁为正方形，GIF 取首帧；支持 PNG、JPEG、WebP、GIF，最大 5MiB。' }}</p>
   </section>
 </template>

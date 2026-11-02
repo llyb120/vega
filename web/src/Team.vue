@@ -48,7 +48,7 @@ async function assign() {
       args: { text: text.value },
     });
     text.value = "";
-    emit("notice", "已交给对方员工；缺信息和审批将找交代人，不会换任务重做");
+    emit("notice", "已交给对方牛马；缺信息和审批将找交代人，不会换任务重做");
   });
 }
 async function action(task, kind) {
@@ -95,7 +95,7 @@ onMounted(() => void refresh());
 <template>
   <section class="card">
     <div class="section-heading">
-      <h3>StarLink · 团队数字员工</h3>
+      <h3>StarLink · 团队数字牛马</h3>
       <button @click="refresh" :disabled="busy">刷新团队</button>
     </div>
     <p>
@@ -116,7 +116,7 @@ onMounted(() => void refresh());
           )
         "
       />
-      公开本机员工到团队</label
+      公开本机牛马到团队</label
     >
     <details>
       <summary>团队设置</summary>
@@ -142,7 +142,7 @@ onMounted(() => void refresh());
       </button>
     </div>
     <p v-if="!peers.length" class="hint">
-      仅同群组在线成员可见，远端员工必须公开后才能下达指令。
+      仅同群组在线成员可见，远端牛马必须公开后才能下达指令。
     </p>
     <template v-if="selected && snapshot"
       ><h3>成员：{{ selected.split("/")[0] }}</h3>
@@ -150,7 +150,7 @@ onMounted(() => void refresh());
         <input
           v-model="text"
           required
-          placeholder="交给这位成员的员工"
+          placeholder="交给这位成员的牛马"
         /><button class="primary" :disabled="busy">派发独立任务</button>
       </form>
       <article

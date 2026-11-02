@@ -19,7 +19,7 @@ const triggerTool = {
 
 export async function prepareDutyInput(engine: Engine, employee: Employee, input: Obj, caller = "", signal?: AbortSignal) {
   if (input.condition === undefined) return input;
-  assert(!employee.deleting && !employee.deleted, "员工已删除或正在删除，职责未保存");
+  assert(!employee.deleting && !employee.deleted, "牛马已删除或正在删除，职责未保存");
   const state = employee.state(), existing = input.action === "update" ? state.duties.find(duty => duty.id === input.id) : undefined;
   assert((input.action === "add" && input.kind === "duty") || existing, "触发条件只用于新增或修改职责");
   employee.authorize(state, caller, input);
@@ -33,7 +33,7 @@ export async function prepareDutyInput(engine: Engine, employee: Employee, input
   let reply: Message | undefined, failure: unknown;
   for (const selection of selections.filter(Boolean)) {
     abort.throwIfAborted();
-    assert(!employee.deleting && !employee.deleted, "员工已删除或正在删除，职责未保存");
+    assert(!employee.deleting && !employee.deleted, "牛马已删除或正在删除，职责未保存");
     try {
       const model = await engine.catalog.resolve(config, selection);
       reply = await engine.providers.chat(model,
@@ -45,7 +45,7 @@ export async function prepareDutyInput(engine: Engine, employee: Employee, input
   }
   if (!reply) throw failure || new Error("未能识别触发条件");
   abort.throwIfAborted();
-  assert(!employee.deleting && !employee.deleted, "员工已删除或正在删除，职责未保存");
+  assert(!employee.deleting && !employee.deleted, "牛马已删除或正在删除，职责未保存");
   assert(reply.calls?.length === 1 && reply.calls[0].name === triggerTool.name, "未能识别触发条件，请明确每天时刻、每隔多久检查，或按交代任务需要触发");
   const rule = reply.calls[0].arguments;
   assert(rule && ["manual", "daily", "interval", "dynamic", "unsupported"].includes(rule.mode), "触发规则格式无效");

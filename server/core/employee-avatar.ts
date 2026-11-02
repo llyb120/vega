@@ -16,7 +16,7 @@ export async function updateEmployeeAvatar(employee: Employee, input: Obj) {
     const metadata = await image.metadata();
     assert(metadata.format === types[input.mime], "头像内容与图片类型不符");
     const data = await image.rotate().resize(512, 512, { fit: "cover" }).webp({ quality: 86 }).toBuffer();
-    assert(!employee.deleting && !employee.deleted, "员工已删除或正在删除");
+    assert(!employee.deleting && !employee.deleted, "牛马已删除或正在删除");
     const avatar = employee.store.blob("image/webp", data);
     employee.update(state => { state.avatar = avatar; });
   }

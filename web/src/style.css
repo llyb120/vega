@@ -214,7 +214,7 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
 .toast button.icon { width: 24px; min-height: 24px; color: var(--muted); }
 .toast.action button:not(.icon) { min-height: 26px; font-size: 12px; }
 
-/* 页内横幅（员工错误等） */
+/* 页内横幅（牛马错误等） */
 .banner { display: flex; align-items: flex-start; gap: 8px; margin: 8px 12px; padding: 8px 8px 8px 12px; border-radius: var(--r-md); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .banner > :first-child { flex: 1; }
 .banner.error { background: var(--danger-soft); color: var(--danger); }

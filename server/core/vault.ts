@@ -216,7 +216,7 @@ export class Vault {
         privateKey.export({ format: "der", type: "pkcs8" }).subarray(-32),
         Buffer.from(their, "base64"),
       );
-    const content = this.get(key, "加密发给远程员工").content;
+    const content = this.get(key, "加密发给远程牛马").content;
     return {
       name: e.name,
       sealed: {
