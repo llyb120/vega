@@ -291,7 +291,7 @@ export class Tools {
         (this.session.taskId
           ? "当前会话属于员工任务。执行前progress保存完整计划，验证成功才标completed；ask等待用户审批、help找交代人补充、defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。vault_request/发送只限授权支援。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增独立todo、给自己改期或为所属动态职责安排下次/停用，不把本任务的步骤拆成todo。Chrome必须relay，coding用同会话switch_scene。"
           : this.session.employeeId
-            ? "当前是员工沟通会话。直接回答问题；需要持续执行的工作直接add todo，不要求用户说交给员工，不在沟通会话自己执行工作。通过list查看当前员工任务，resume(id,text)续做原任务或补充约束，answer(id,text)回答等待信息；审批只能用户点击。职责和记忆属于当前员工。任务完成必须由执行会话complete(text=验证证据)，普通结束不算完成。"
+            ? "当前是员工沟通会话。直接回答问题；需要持续执行的工作直接add todo，不要求用户说交给员工，不在沟通会话自己执行工作。通过list查看当前员工任务，resume(id,text)续做原任务或补充约束；不要为恢复重复提交已记录的补充，相同内容已记录时只继续原任务，不再追加或派新任务。answer(id,text)回答等待信息；审批只能用户点击。职责和记忆属于当前员工。任务完成必须由执行会话complete(text=验证证据)，普通结束不算完成。"
           : "当前是用户的普通会话，不是员工任务。普通请求直接在本会话处理，不需要员工启用、工作时间或progress/help/defer/relay流程，Chrome在computer场景直接使用。仅在用户明确派给员工或管理员工数据时调用此工具；用户说“交给员工：xxx”时只add todo并告知，当前会话不转换为员工会话，任务由员工自己的独立会话执行。");
       if (this.session.employeeId && !this.session.taskId) {
         const team = this.engine.employeeFor(this.session).state().scope === "team";

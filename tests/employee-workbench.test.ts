@@ -130,10 +130,12 @@ test("generic recovery diagnoses in the original task/session, requires verified
     assert.equal(current.workSession, originalSession);
     assert.equal(current.recovery.attempts, 2);
     current = await segment(employee, current);
+    assert.equal(current.status, "recovering", "three faults do not add an extra early-stop policy");
+    current = await segment(employee, current);
     assert.equal(current.status, "waiting");
-    assert.equal(current.recovery.attempts, 3);
+    assert.equal(current.recovery.attempts, 4);
     const reopened = new Employee(store, employee.vault, runtime);
-    assert.equal(reopened.state().tasks[0].recovery.attempts, 3);
+    assert.equal(reopened.state().tasks[0].recovery.attempts, 4);
     await employee.control({ action: "answer", id: job.id, text: "environment fixed, continue" });
     runtime.run = async () => {
       await assert.rejects(employee.execute(job.id, { action: "complete", text: "trust me" }), /verified plan/);
@@ -201,63 +203,85 @@ test("a crash before the runtime appends input cannot consume a supplement, and 
   } finally { employee.close(); store.close(); }
 });
 
-test("repeated interruption without new evidence trips a durable breaker; acknowledgements and repeated planning do not count as progress", async () => {
+test("the same supplement across interrupted runs is saved once without repeated delivery, version changes or recovery-budget resets", async () => {
   const { store, employee, runtime } = fixture();
-  const job = await task(employee);
-  employee.chat("owner");
-  let attempts = 0;
+  const job = await task(employee), text = "Preserve login\nand keep inline code unchanged";
+  const prompts: string[] = [];
   runtime.run = async (session, prompt, _signal, input) => {
-    attempts++;
+    prompts.push(prompt);
     store.append(session, { role: "user", text: prompt, taskInput: input });
-    store.append(session, { role: "assistant", text: "已收到补充，准备继续。" });
-    await employee.execute(job.id, { action: "progress", text: "starting again", plan: [{ content: "verify the target", status: "in_progress" }] });
-    store.append(session, { role: "assistant", calls: [{ id: "plan-" + attempts, name: "employee", arguments: { action: "progress" } }] });
-    store.append(session, { role: "tool", name: "employee", callId: "plan-" + attempts, text: '{"ok":true}' });
     throw Error("connection interrupted");
   };
   try {
+    await employee.control({ action: "resume", id: job.id, text });
     let current = await segment(employee, job);
-    const firstCheck = current.nextCheckAt;
-    current = await segment(employee, current);
-    assert(current.nextCheckAt > firstCheck, "consecutive faults back off instead of immediately spinning");
-    current = await segment(employee, current);
-    assert.equal(current.status, "waiting");
-    assert.equal(current.recovery.stalled, 3);
-    assert.equal(current.nextCheckAt, 0);
-    assert.match(current.waiting, /连续.*无.*进展/);
-    assert.match(store.messages(employee.state().chatSession!).at(-1)!.text!, /需要你处理/);
+    const originalAnswer = current.answer, checkAt = current.nextCheckAt;
+    const repeated = await employee.control({ action: "resume", id: job.id, text: "  " + text.replace(/\n/g, "\r\n") + "\n" });
+    assert.equal(repeated.duplicate, true);
+    current = employee.task(employee.state(), job.id);
+    assert.equal(current.answer, originalAnswer);
+    assert.equal(current.revision, 1);
+    assert.equal(current.supplementPending, false, "a consumed supplement is not pending again");
+    assert.equal(current.status, "recovering");
+    assert.equal(current.nextCheckAt, checkAt, "a duplicate does not bypass the existing recovery backoff");
     const reopened = new Employee(store, employee.vault, runtime);
     reopened.closed = true;
-    assert.equal(reopened.state().tasks[0].recovery.stalled, 3);
-    await employee.control({ action: "answer", id: job.id, text: "connection fixed, continue original work" });
-    assert.equal(employee.state().tasks[0].recovery, undefined);
-    assert.equal(employee.state().tasks[0].workSession, current.workSession);
+    assert.equal((await reopened.control({ action: "resume", id: job.id, text })).duplicate, true);
+    current = await segment(reopened, current);
+    assert(!prompts[1].includes(text), "the same content is not delivered again after restart");
+    assert.equal(current.recovery.attempts, 2);
+    await reopened.control({ action: "stop", id: job.id });
+    assert.equal((await reopened.control({ action: "resume", id: job.id, text })).duplicate, true);
+    current = reopened.task(reopened.state(), job.id);
+    assert.equal(current.status, "queued", "identical content can still explicitly resume stopped work");
+    assert.equal(current.revision, 1);
+    assert.equal(current.answer, originalAnswer);
+    assert.equal(current.recovery.attempts, 2);
   } finally { employee.close(); store.close(); }
 });
 
-test("only new successful tool evidence or newly verified plan steps reset the consecutive-stall counter, not the total recovery budget", async () => {
-  const { store, employee } = fixture();
-  const job = await task(employee), session = store.newSession({ taskId: job.id });
-  job.workSession = session.id;
-  const evidence = (id: string, path: string, error = false) => {
-    store.append(session.id, { role: "assistant", calls: [{ id, name: "read", arguments: { path } }] });
-    store.append(session.id, { role: "tool", name: "read", callId: id, text: "same observed state", error });
+test("repeated supplements do not invalidate a verified plan or bypass the first supplement's completion guard", async () => {
+  const { store, employee, runtime } = fixture();
+  const job = await task(employee);
+  runtime.run = async () => {
+    await employee.control({ action: "resume", id: job.id, text: "preserve login" });
+    assert.equal((await employee.control({ action: "resume", id: job.id, text: "preserve login" })).duplicate, true);
+    assert.equal(employee.state().tasks[0].revision, 1);
+    assert.equal((await employee.execute(job.id, { action: "complete", text: "old result" })).value.ok, false, "the first new supplement must still be consumed");
+    await employee.execute(job.id, { action: "progress", text: "latest requirements verified", plan: [{ content: "preserve login", status: "completed" }] });
+    await employee.control({ action: "resume", id: job.id, text: "preserve login" });
+    assert.equal((await employee.execute(job.id, { action: "complete", text: "verified login preserved" })).value.ok, true);
   };
+  try { assert.equal((await segment(employee, job)).status, "done"); }
+  finally { employee.close(); store.close(); }
+});
+
+test("supplement dedup is exact and consecutive, preserves real corrections, and supports existing tasks", async () => {
+  const { store, employee } = fixture();
+  const job = await task(employee);
+  employee.update((state) => { Object.assign(state.tasks[0], { answer: "\n用户补充：keep A", revision: 1, planRevision: 1 }); });
   try {
-    employee.recover(job, "interrupted", 1000);
-    assert.equal(job.recovery.stalled, 1);
-    evidence("first", "one");
-    employee.recover(job, "interrupted", 2000);
-    assert.equal(job.recovery.stalled, 0);
-    evidence("repeated", "one");
-    evidence("failed", "two", true);
-    employee.recover(job, "interrupted", 3000);
-    assert.equal(job.recovery.stalled, 1, "new call IDs and failed calls are not new successful evidence");
-    job.plan = [{ content: "verify original state", status: "completed" }];
-    employee.recover(job, "interrupted", 4000);
-    assert.equal(job.recovery.stalled, 0);
-    assert.equal(job.recovery.attempts, 4);
-    assert.equal(job.status, "waiting", "real progress does not allow unlimited automatic retries");
+    assert.equal((await employee.control({ action: "resume", id: job.id, text: "keep A" })).duplicate, true, "existing saved supplements do not require a new task");
+    for (const text of ["keep A and B", "keep A"]) await employee.control({ action: "resume", id: job.id, text });
+    let current = employee.task(employee.state(), job.id);
+    assert.equal(current.revision, 3, "A -> B -> A is an intentional new requirement, not a duplicate");
+    assert.equal(current.answer, "\n用户补充：keep A\n用户补充：keep A and B\n用户补充：keep A");
+    await employee.control({ action: "stop", id: job.id });
+    await employee.control({ action: "resume", id: job.id, text: "keep A" });
+    assert.equal(employee.state().tasks[0].revision, 3);
+    employee.update((state) => { state.tasks[0].status = "approval"; state.tasks[0].approval = "delete original data"; });
+    await assert.rejects(employee.control({ action: "resume", id: job.id, text: "keep A" }), /explicit approval/);
+    current = employee.task(employee.state(), job.id);
+    assert.equal(current.status, "approval");
+    assert.equal(current.revision, 3);
+    const other = await task(employee, "other authorized work");
+    const code = "  preserve login\n  keep code indentation\n";
+    await employee.control({ action: "resume", id: other.id, text: code });
+    const otherState = employee.task(employee.state(), other.id);
+    assert.equal(otherState.revision, 1);
+    assert(otherState.answer.endsWith(code), "dedup comparison must not rewrite the newly supplied content");
+    await employee.control({ action: "resume", id: other.id, text: "keep A" });
+    assert.equal(employee.task(employee.state(), other.id).revision, 2, "identical text on a different task is not a duplicate");
   } finally { employee.close(); store.close(); }
 });
 
@@ -290,6 +314,8 @@ test("real executor recovery preserves committed tool outcomes and consumes each
     await employee.control({ action: "resume", id: job.id, text: "preserve login" });
     current = await segment(employee, current);
     assert.equal(current.status, "recovering");
+    assert.equal((await employee.control({ action: "resume", id: job.id, text: "preserve login" })).duplicate, true);
+    assert.equal(employee.state().tasks[0].revision, 1);
     current = await segment(employee, current);
     assert.equal(current.status, "done");
     assert.equal(inputs.length, 3);
