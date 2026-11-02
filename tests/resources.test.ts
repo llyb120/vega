@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import vm from "node:vm";
+import { unzipSync } from "fflate";
+import { createServer } from "vite";
 
 const docker = readFileSync("Dockerfile", "utf8");
 const resources = readFileSync("web/src/ResourcesView.vue", "utf8");
@@ -34,6 +38,35 @@ test("Docker builds exactly the client platforms offered by Resources before bun
     assert(ignore.split(/\r?\n/).includes("!" + input));
   assert(ignore.split(/\r?\n/).includes("web/public/clients/"), "host binaries must not enter the build context");
   assert(!ignore.includes("!local/**"), "allow Go inputs, not local credentials or host executables");
+});
+
+test("Resources offers a Chrome extension ZIP containing only the current runtime files", async (t) => {
+  const publicDir = mkdtempSync(join(tmpdir(), "vega-resources-"));
+  const server = await createServer({
+    configFile: "web/vite.config.js",
+    publicDir,
+    logLevel: "silent",
+    server: { host: "127.0.0.1", port: 0 },
+    optimizeDeps: { noDiscovery: true, include: [] },
+  });
+  t.after(async () => {
+    await server.close();
+    rmSync(publicDir, { recursive: true, force: true });
+  });
+  await server.listen();
+  const response = await fetch(new URL("clients/nova-chrome.zip", server.resolvedUrls!.local[0]));
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type")!, /application\/zip/);
+  const files = unzipSync(new Uint8Array(await response.arrayBuffer()));
+  const expected = ["manifest.json", "worker.js", "content.js", "popup.html", "popup.js"];
+  assert.deepEqual(Object.keys(files).sort(), expected.sort());
+  for (const file of expected)
+    assert.deepEqual(Buffer.from(files[file]), readFileSync("extensions/nova-chrome/" + file));
+  assert.match(resources, /href="\/clients\/nova-chrome\.zip" download="nova-chrome\.zip"/);
+  assert.match(resources, /aria-label="下载 Chrome 扩展 ZIP"/);
+  assert.match(resources, /chrome:\/\/extensions/);
+  assert.match(resources, /加载已解压的扩展程序/);
+  assert.match(resources, /重新加载/);
 });
 
 test("Resources is available in desktop and mobile navigation with same-origin downloadable clients", () => {

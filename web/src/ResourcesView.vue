@@ -10,7 +10,7 @@ const clients = [
 
 <template>
   <header class="topbar">
-    <div><h2>资源</h2><p>下载与当前服务配套的本地执行客户端</p></div>
+    <div><h2>资源</h2><p>下载与当前服务配套的本地客户端和 Chrome 扩展</p></div>
   </header>
   <div class="page-scroll settings">
     <section aria-labelledby="clients-heading">
@@ -33,6 +33,17 @@ const clients = [
       </ol>
       <p class="hint">升级前先退出旧客户端，再启动新版本。下载的是未签名的可执行文件，Windows / macOS 可能提示安全拦截，请仅在确认本站与文件可信后按系统提示批准运行。</p>
       <p class="hint">仅授权可信站点：客户端可执行命令和读写本机文件。远程访问建议使用 HTTPS；HTTP 会明文传输登录信息、设备凭据和命令。</p>
+    </section>
+    <section class="card" aria-labelledby="chrome-extension-heading">
+      <h3 id="chrome-extension-heading">Chrome 扩展</h3>
+      <p class="hint">在需要操作 Chrome 的电脑上安装，复用浏览器的登录态与标签页。容器内置浏览器已自动加载扩展，无需重复安装。</p>
+      <a class="client-download" href="/clients/nova-chrome.zip" download="nova-chrome.zip" aria-label="下载 Chrome 扩展 ZIP">下载 Chrome 扩展（ZIP） ↓</a>
+      <ol>
+        <li>下载并解压 ZIP，保留解压后的文件夹。</li>
+        <li>打开 <code>chrome://extensions</code>，开启“开发者模式”，点击“加载已解压的扩展程序”，选择包含 <code>manifest.json</code> 的文件夹。</li>
+        <li>保持本地客户端运行，扩展会自动连接。更新扩展文件后，在扩展管理页点击“重新加载”。</li>
+      </ol>
+      <p class="hint">扩展可读取网页并执行浏览器操作，请仅安装来自可信站点的扩展包。</p>
     </section>
   </div>
 </template>
