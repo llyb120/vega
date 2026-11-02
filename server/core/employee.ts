@@ -1348,6 +1348,10 @@ export class Employee {
           const stored = this.store.session(session);
           assert(stored.taskId === task.id && (!stored.employeeId || stored.employeeId === this.employeeId), "Execution session belongs to another task or employee");
           stored.employeeId = this.employeeId;
+          if (computer && task.execution?.localAgent && !stored.localAgent) {
+            Object.assign(stored, task.execution, { cwd: task.cwd });
+            task.checkpoint = (task.checkpoint || "") + "\n电脑会话已恢复到任务绑定的客户端；历史网页结果来自服务端，不得复用旧标签/ref。先用 chrome tabs/inspect 核对本机现场，不重放已提交的操作。";
+          }
           stored.ownerId ||= task.execution?.ownerId || state.ownerId || undefined;
           stored.scene ||= scene;
           scene = stored.scene;
@@ -1365,9 +1369,8 @@ export class Employee {
         const created = this.store.newSession({
           title:
             state.name + " · " + [...task.text.split("\n")[0]].slice(0, 30).join(""),
-          cwd: computer && task.execution?.localAgent ? process.cwd() : task.cwd,
+          cwd: task.cwd,
           ...task.execution,
-          localAgent: computer ? false : task.execution?.localAgent,
           scene,
           model,
           taskId: task.id,
@@ -1414,7 +1417,7 @@ export class Employee {
       const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason })}\n先检查现场与历史回执，诊断根因并改变无效方法，最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用help等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用progress登记完整计划；续做保留已验证步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划，验证成功才标completed。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才help，低风险执行细节自行决定，不等待轮询。${computer ? "你在隔离的电脑/Chrome会话，只做交接内容。完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
+      const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用progress登记完整计划；续做保留已验证步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划，验证成功才标completed。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才help，低风险执行细节自行决定，不等待轮询。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       await this.runtime.run(session, prompt, AbortSignal.timeout(15 * 60000), input);
       const last = this.store.messages(session).at(-1);

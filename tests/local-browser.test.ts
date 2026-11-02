@@ -51,6 +51,60 @@ test("local Chrome tools and employee tasks use only their selected native brows
   assert.equal(agent.browserLeases.size, 0);
 });
 
+test("employee relay keeps its task-bound local Chrome for new and legacy computer sessions", async (t) => {
+  for (const legacy of [false, true]) await t.test(legacy ? "legacy session" : "new session", async (t) => {
+    const { engine, store, calls } = fixture(t), employee = engine.employee;
+    const config = { model: "fixture/model", provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true } } } } };
+    store.put("config", config);
+    engine.catalog.resolve = async () => resolveModel(config);
+    const execution = { localAgent: true, clientId: client.clientId, clientName: client.name, localPlatform: client.platform, ownerId: "alice" };
+    employee.update((state) => { state.cwd = client.cwd; state.execution = execution; });
+    const added = await employee.execute("", { action: "add", kind: "todo", text: "Use the existing local Chrome tab" });
+    const id = added.value.id;
+    let turns = 0;
+    engine.providers.chat = async () => {
+      if (++turns === 1) return { role: "assistant", calls: [{ id: "relay", name: "employee", arguments: { action: "relay", scene: "computer", text: "Inspect the existing local Chrome tab" } }] };
+      if (turns === 2) return { role: "assistant", calls: [{ id: "local-tabs", name: "chrome", arguments: { operation: "tabs" } }] };
+      return { role: "assistant", text: "Verified the selected local Chrome" };
+    };
+    employee.update((state) => { state.tasks[0].status = "running"; });
+    employee.busy.set(id, { computer: false, session: "" });
+    await employee.run(employee.task(employee.state(), id));
+    assert.equal(employee.task(employee.state(), id).side, "computer");
+    let previous = "";
+    if (legacy) {
+      previous = store.newSession({ ...execution, localAgent: false, cwd: process.cwd(), taskId: id, employeeId: employee.employeeId, scene: "computer", model: config.model }).id;
+      store.append(previous, { role: "user", text: "Previous server browser handoff" });
+      store.append(previous, { role: "assistant", text: "Previously observed a server tab; do not replay submissions" });
+    }
+    employee.update((state) => {
+      state.execution = { localAgent: false };
+      state.cwd = process.cwd();
+      const job = employee.task(state, id);
+      if (previous) job.computerSession = previous;
+      job.status = "running";
+    });
+    employee.busy.set(id, { computer: true, session: "" });
+    await employee.run(employee.task(employee.state(), id));
+    const job = employee.task(employee.state(), id), computer = store.session(job.computerSession);
+    assert.equal(computer.localAgent, true);
+    assert.equal(computer.clientId, client.clientId);
+    assert.equal(computer.ownerId, "alice");
+    assert.equal(computer.localPlatform, client.platform);
+    assert.equal(computer.cwd, client.cwd);
+    assert.notEqual(job.workSession, job.computerSession);
+    assert.equal(store.session(job.workSession).localAgent, true);
+    assert.equal(job.side, "work");
+    assert.match(job.answer, /Verified the selected local Chrome/);
+    assert(calls.some((call) => call.operation === "tabs"));
+    assert.equal(calls.at(-1).operation, "release");
+    if (legacy) {
+      assert.equal(job.computerSession, previous, "repair keeps the original session and its history");
+      assert.match(store.messages(previous).findLast((message) => message.role === "user")!.text!, /历史网页结果来自服务端/);
+    }
+  });
+});
+
 test("browser acquisition waits through a short outage instead of its old independent 15-second timeout", async (t) => {
   const { engine, session } = fixture(t);
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"] });
