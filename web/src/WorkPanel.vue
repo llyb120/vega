@@ -57,7 +57,7 @@ const others = (list, attention) => list.filter((task) => !attention.includes(ta
 .answer { display: grid; gap: 6px; }
 .answer textarea { width: 100%; font-size: 12px; }
 .answer button { justify-self: end; }
-.task-row { display: grid; gap: 4px; width: 100%; height: auto; margin-bottom: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); font-weight: 400; text-align: left; white-space: normal; }
+.task-row { display: grid; justify-content: stretch; gap: 4px; width: 100%; height: auto; margin-bottom: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); font-weight: 400; text-align: left; white-space: normal; }
 .task-row:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface); box-shadow: var(--sh-sm); }
 .task-row-head { display: flex; align-items: center; justify-content: space-between; }
 .task-row time { color: var(--muted); font-size: 11px; }

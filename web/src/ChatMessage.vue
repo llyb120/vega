@@ -48,7 +48,7 @@ const emit = defineEmits(["quote", "jump", "task"]);
 .chat-bubble :deep(.message-text) { font-size: 14px; }
 .chat-bubble :deep(.code-block) { margin-left: -4px; margin-right: -4px; }
 .chat-bubble img { display: block; max-width: 100%; max-height: 360px; margin-top: 6px; border-radius: var(--r-md); }
-.chat-quote { display: grid; justify-items: start; gap: 1px; width: 100%; height: auto; min-height: 0; margin: 0 0 6px; padding: 4px 8px; border: 0; border-left: 2px solid var(--accent); border-radius: 2px 6px 6px 2px; background: rgb(255 255 255 / 60%); color: var(--text-2); font-weight: 400; text-align: left; white-space: normal; }
+.chat-quote { display: grid; justify-content: stretch; justify-items: start; gap: 1px; width: 100%; height: auto; min-height: 0; margin: 0 0 6px; padding: 4px 8px; border: 0; border-left: 2px solid var(--accent); border-radius: 2px 6px 6px 2px; background: rgb(255 255 255 / 60%); color: var(--text-2); font-weight: 400; text-align: left; white-space: normal; }
 .chat-quote strong { font-size: 11px; }
 .chat-quote span { display: -webkit-box; overflow: hidden; font-size: 12px; line-height: 1.5; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .chat-tasks { display: grid; gap: 4px; width: 100%; }

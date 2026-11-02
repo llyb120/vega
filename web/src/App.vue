@@ -1200,7 +1200,6 @@ async function openEmployeeTask(id) {
   if (!task) { toast("这条任务记录已不存在"); return; }
   employeeTaskFilter.value = ended(task.status) ? "history" : "active";
   employeeTaskFocus.value = id;
-  workRailOpen.value = false;
   employeeTab.value = "tasks";
 }
 async function employeeTabChanged(id) {
@@ -1351,6 +1350,7 @@ onBeforeUnmount(() => {
         :creating="view === 'employee' && creatingEmployee"
         :open="navigationOpen"
         :client-ready="clientListReady"
+        :client-status="clientStatus"
         :clients="onlineClients"
         :pairing-text="localPairing ? localPairingText : ''"
         :pairing-code="localPairing?.code"
@@ -1470,7 +1470,7 @@ onBeforeUnmount(() => {
               <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" @task="openEmployeeTask" />
             </div>
             <button v-if="workPanelVisible && !wide" type="button" class="panel-backdrop" aria-label="关闭当前工作" tabindex="-1" @click="workRailOpen = false"></button>
-            <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :overlay="!wide" @open="openEmployeeTask" @all="showTasks" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
+            <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
           </div>
           <div v-if="employeeTab === 'browser' && selectedEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" /></div>
           <EmployeeTasks

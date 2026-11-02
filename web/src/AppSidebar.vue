@@ -12,6 +12,7 @@ const props = defineProps({
   creating: Boolean,
   open: Boolean,
   clientReady: Boolean,
+  clientStatus: String,
   clients: Array,
   pairingText: String,
   pairingCode: String,
@@ -78,9 +79,9 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
 
     <footer class="sidebar-footer">
       <div class="client-status">
-        <button type="button" class="nav-item" :aria-expanded="clientOpen" :title="pairingText || '本机客户端'" @click="clientOpen = !clientOpen">
+        <button type="button" class="nav-item" :aria-expanded="clientOpen" :title="clientStatus" @click="clientOpen = !clientOpen">
           <span class="nav-icon"><Icon name="laptop" /><span :class="['avatar-dot', !clientReady ? '' : clients?.length ? 'ok' : 'idle']" aria-hidden="true"></span></span>
-          <span class="nav-label nav-text"><strong>{{ !clientReady ? '客户端状态同步中' : clients?.length ? `客户端在线 · ${clients.length} 台` : '无在线客户端' }}</strong></span>
+          <span class="nav-label client-text" role="status" :title="clientStatus + ' · 新会话可选择任意在线客户端，已有会话不会自动切换'">{{ clientStatus }}</span>
         </button>
         <div v-if="clientOpen" class="client-popover" role="dialog" aria-label="本机客户端">
           <strong>本机客户端</strong>
@@ -138,7 +139,7 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
 .sidebar-footer { flex: none; padding: 6px 8px 10px; border-top: 1px solid var(--border); }
 .client-status { position: relative; }
 .client-status .nav-item { min-height: 32px; }
-.client-status .nav-text strong { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.client-text { flex: 1; min-width: 0; overflow: hidden; color: var(--text-2); font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .client-popover { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 50; display: grid; gap: 8px; width: 280px; padding: 12px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--sh-lg); animation: rise-in .15s ease; }
 .client-popover ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .client-popover li { display: flex; align-items: center; gap: 8px; font-size: 12px; }

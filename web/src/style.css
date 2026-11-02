@@ -205,7 +205,7 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
 .execution-switch[aria-checked="true"] .execution-track::after { transform: translateX(12px); }
 
 /* 浮动通知 */
-.toasts { position: fixed; z-index: 60; top: calc(var(--app-top, 0px) + 12px); right: 12px; display: grid; gap: 8px; width: min(400px, calc(100vw - 24px)); pointer-events: none; }
+.toasts { position: fixed; z-index: 60; top: calc(var(--app-top, 0px) + 64px); right: 12px; display: grid; gap: 8px; width: min(400px, calc(100vw - 24px)); pointer-events: none; }
 .toast { display: flex; align-items: flex-start; gap: 10px; padding: 10px 8px 10px 12px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--sh-lg); font-size: 13px; line-height: 1.55; pointer-events: auto; animation: rise-in .18s ease; overflow-wrap: anywhere; }
 .toast > .icon-svg { margin-top: 2px; }
 .toast > span { flex: 1; min-width: 0; }

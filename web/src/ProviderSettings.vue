@@ -1,4 +1,5 @@
 <script setup vapor>
+import Icon from "./Icon.vue";
 import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 const confirm = window.confirm.bind(window);
 const props = defineProps({ api: Function, config: Object, userId: String });
@@ -417,374 +418,141 @@ onBeforeUnmount(() => {
 </script>
 <template>
   <section class="card provider-settings">
-    <div class="section-heading">
-      <h3>服务商</h3>
-      <button @click="edit('', {})" :disabled="busy">＋ 添加服务商</button>
-    </div>
+    <div class="card-head row"><div><h3>服务商</h3><p class="hint">接入模型服务商，获取可用模型后在“场景模型”中分配。</p></div><button type="button" class="sm" :disabled="busy" @click="edit('', {})"><Icon name="plus" :size="14" />添加服务商</button></div>
     <div class="provider-layout">
-      <aside class="provider-list">
-        <button
-          v-for="[key, p] in providers"
-          :key="key"
-          :class="{ selected: selected === key && !creating }"
-          @click="edit(key, p)"
-        >
-          {{ p.name || key }}<small>{{ key }}</small>
+      <aside class="provider-list" aria-label="服务商列表">
+        <button v-for="[key, p] in providers" :key="key" type="button" :class="{ selected: selected === key && !creating }" :aria-current="selected === key && !creating ? 'true' : undefined" @click="edit(key, p)">
+          <span class="provider-mark" aria-hidden="true">{{ (p.name || key).slice(0, 1).toUpperCase() }}</span><span class="provider-text"><strong class="truncate">{{ p.name || key }}</strong><small class="truncate">{{ key }}</small></span>
         </button>
-        <p v-if="!providers.length" class="hint">还没有服务商</p>
+        <button v-if="creating" type="button" class="selected new-provider"><span class="provider-mark" aria-hidden="true"><Icon name="plus" :size="14" /></span><span class="provider-text"><strong>新服务商</strong><small>未保存</small></span></button>
+        <p v-if="!providers.length && !creating" class="hint">还没有服务商</p>
       </aside>
       <form class="provider-form" @submit.prevent="save">
-        <div class="form-grid">
-          <label
-            >服务商类型<select v-model="preset" @change="choosePreset">
-              <option v-for="p in presets" :key="p.id" :value="p.id">
-                {{ p.name }}
-              </option>
-            </select></label
-          >
-          <label
-            >名称<input
-              v-model="name"
-              required
-              placeholder="例如：我的 CodeBuddy"
-          /></label>
-        </div>
-        <template v-if="!source"
-          ><div class="form-grid">
-            <label
-              >接口格式<select v-model="apiType">
-                <option
-                  v-for="[value, label] in protocols"
-                  :key="value"
-                  :value="value"
-                >
-                  {{ label }}
-                </option>
-              </select></label
-            ><label
-              >API地址<input
-                v-model="baseURL"
-                required
-                type="url"
-                placeholder="https://api.example.com/v1" /></label
-            ><label
-              >API Key<input
-                v-model="apiKey"
-                type="password"
-                autocomplete="off"
-                :placeholder="
-                  apiKey === '__stored_secret__'
-                    ? '已保存，留原值保留'
-                    : 'API Key 或 {env:NAME}'
-                "
-            /></label></div
-        ></template>
-        <div v-else class="provider-login">
-          <div class="inline-form">
-            <select
-              v-if="source === 'codebuddy'"
-              v-model="site"
-              aria-label="CodeBuddy站点"
-              :disabled="!!login"
-            >
-              <option value="global">国际站</option>
-              <option value="cn">中国站</option></select
-            ><button
-              v-if="webLogin"
-              type="button"
-              class="primary"
-              @click="begin"
-              :disabled="busy"
-            >
-              {{ login ? "重新登录" : "登录 " + (name || source) }}</button
-            ><button type="button" @click="localImport" :disabled="busy">
-              读取服务端已有登录</button
-            ><button
-              v-if="webLogin && !creating"
-              type="button"
-              @click="
-                run(async () => {
-                  if (confirm('退出此服务商的网页登录？')) {
-                    stopPolling();
-                    await api('/providers/login', 'POST', {
-                      action: 'logout',
-                      source,
-                    });
-                    login = null;
-                    savePending(null);
-                    emit('notice', '已退出服务商登录');
-                  }
-                })
-              "
-            >
-              退出登录
-            </button>
+        <fieldset class="form-section">
+          <legend>基本信息</legend>
+          <div class="form-grid two">
+            <label>服务商类型<select v-model="preset" @change="choosePreset"><option v-for="p in presets" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
+            <label>名称<input v-model="name" required placeholder="例如：我的 CodeBuddy" /></label>
+            <template v-if="!source">
+              <label>接口格式<select v-model="apiType"><option v-for="[value, label] in protocols" :key="value" :value="value">{{ label }}</option></select></label>
+              <label>API 地址<input v-model="baseURL" required type="url" placeholder="https://api.example.com/v1" /></label>
+              <label class="span-2">API Key<input v-model="apiKey" type="password" autocomplete="off" :placeholder="apiKey === '__stored_secret__' ? '已保存，留原值保留' : 'API Key 或 {env:NAME}'" /></label>
+            </template>
           </div>
-          <div v-if="login" class="login-progress">
-            <p>请在新窗口完成登录，完成后这里会自动更新。</p>
-            <a :href="login.url" target="_blank" rel="noopener noreferrer"
-              >未打开窗口？点击继续登录 ↗</a
-            >
-            <details v-if="login.source === 'devin'">
-              <summary>没有自动返回？</summary>
-              <p class="hint">复制登录后浏览器最后跳转的完整地址到这里。</p>
-              <button type="button" @click="begin(true)">
-                改用手动回调登录
-              </button>
-              <input
-                v-model="pasted"
-                placeholder="粘贴本次登录的回调地址"
-                autocomplete="off"
-              /><button type="button" @click="poll(true)">完成登录</button>
-            </details>
-            <p v-if="loginError" class="error" role="alert">{{ loginError }}</p>
-            <button type="button" @click="poll(true)">检查登录结果</button>
-          </div>
-        </div>
-        <div class="section-heading">
-          <h3>
-            模型 <small>{{ Object.keys(modelMap).length }}</small>
-          </h3>
-          <button type="button" @click="discover" :disabled="busy">
-            获取模型
-          </button>
-        </div>
-        <input v-model="query" placeholder="搜索模型" aria-label="搜索模型" />
-        <div class="model-list">
-          <div v-for="[key, m] in visibleModels" :key="key" class="model-row">
-            <button
-              type="button"
-              class="model-name"
-              @click="editingModel = editingModel === key ? '' : key"
-            >
-              <strong>{{ m.name || key }}</strong
-              ><small>{{ key }}</small></button
-            ><span
-              v-if="m.supportsImages || m.modalities?.input?.includes('image')"
-              class="pill"
-              >图片</span
-            ><button
-              type="button"
-              class="link"
-              @click="
-                {
-                  const next = { ...modelMap };
-                  delete next[key];
-                  modelMap = next;
-                }
-              "
-            >
-              移除
-            </button>
-            <div v-if="editingModel === key" class="model-edit form-grid">
-              <label>显示名称<input v-model="m.name" /></label
-              ><label
-                >上下文长度<input
-                  :value="m.limit?.context || m.contextWindow || 200000"
-                  type="number"
-                  min="1024"
-                  @change="
-                    limitValue(key, 'context', $event.target.value)
-                  " /></label
-              ><label
-                >输出上限<input
-                  :value="m.limit?.output || m.maxOutputTokens || 32000"
-                  type="number"
-                  min="32"
-                  @change="
-                    limitValue(key, 'output', $event.target.value)
-                  " /></label
-              ><label
-                ><input
-                  :checked="
-                    m.supportsImages || m.modalities?.input?.includes('image')
-                  "
-                  type="checkbox"
-                  @change="imageValue(key, $event.target.checked)"
-                />支持图片</label
-              ><label
-                ><input v-model="m.reasoning" type="checkbox" />支持思考</label
-              >
+          <div v-if="source" class="provider-login">
+            <div class="login-actions">
+              <select v-if="source === 'codebuddy'" v-model="site" aria-label="CodeBuddy站点" :disabled="!!login"><option value="global">国际站</option><option value="cn">中国站</option></select>
+              <button v-if="webLogin" type="button" class="primary sm" :disabled="busy" @click="begin"><Icon name="key" :size="14" />{{ login ? "重新登录" : "登录 " + (name || source) }}</button>
+              <button type="button" class="sm" :disabled="busy" @click="localImport">读取服务端已有登录</button>
+              <button v-if="webLogin && !creating" type="button" class="sm ghost" @click="run(async () => { if (confirm('退出此服务商的网页登录？')) { stopPolling(); await api('/providers/login', 'POST', { action: 'logout', source }); login = null; savePending(null); emit('notice', '已退出服务商登录'); } })">退出登录</button>
+            </div>
+            <div v-if="login" class="login-progress callout info">
+              <Icon name="external" :size="14" />
+              <div>
+                <p>请在新窗口完成登录，完成后这里会自动更新。</p>
+                <a :href="login.url" target="_blank" rel="noopener noreferrer">未打开窗口？点击继续登录 ↗</a>
+                <details v-if="login.source === 'devin'">
+                  <summary>没有自动返回？</summary>
+                  <p class="hint">复制登录后浏览器最后跳转的完整地址到这里。</p>
+                  <button type="button" class="sm" @click="begin(true)">改用手动回调登录</button>
+                  <div class="inline-form"><input v-model="pasted" placeholder="粘贴本次登录的回调地址" autocomplete="off" /><button type="button" class="sm" @click="poll(true)">完成登录</button></div>
+                </details>
+                <p v-if="loginError" class="error" role="alert">{{ loginError }}</p>
+                <button type="button" class="sm" @click="poll(true)">检查登录结果</button>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="inline-form">
-          <input
-            v-model="modelID"
-            placeholder="手动添加模型ID"
-            aria-label="手动模型ID"
-            @keydown.enter.prevent="addModel"
-          /><button type="button" @click="addModel">添加模型</button>
-        </div>
-        <details>
-          <summary>高级参数</summary>
-          <label
-            >服务商标识<input
-              v-model="id"
-              :disabled="!creating"
-              pattern="[a-zA-Z0-9_.-]{1,80}"
-              required
-          /></label>
-          <div class="form-grid">
-            <label
-              >请求头<textarea
-                v-model="headers"
-                rows="3"
-                spellcheck="false"
-              ></textarea></label
-            ><label
-              >模型请求参数<textarea
-                v-model="options"
-                rows="3"
-                spellcheck="false"
-              ></textarea>
-            </label>
+        </fieldset>
+        <fieldset class="form-section">
+          <legend>模型 <span class="count">{{ Object.keys(modelMap).length }}</span></legend>
+          <div class="model-tools">
+            <label class="search"><Icon name="search" :size="14" /><input v-model="query" placeholder="搜索模型" aria-label="搜索模型" /></label>
+            <button type="button" class="sm" :disabled="busy" @click="discover"><Icon name="refresh" :size="14" />获取模型</button>
+          </div>
+          <div class="model-list">
+            <p v-if="!visibleModels.length" class="hint model-empty">{{ Object.keys(modelMap).length ? '没有匹配的模型' : '还没有模型，点“获取模型”或手动添加。' }}</p>
+            <div v-for="[key, m] in visibleModels" :key="key" class="model-row" :class="{ open: editingModel === key }">
+              <button type="button" class="model-name" :aria-expanded="editingModel === key" @click="editingModel = editingModel === key ? '' : key"><Icon name="right" :size="12" class="chev" /><span><strong>{{ m.name || key }}</strong><small>{{ key }}</small></span></button>
+              <span v-if="m.supportsImages || m.modalities?.input?.includes('image')" class="badge info">图片</span>
+              <span v-if="m.reasoning" class="badge">思考</span>
+              <button type="button" class="icon sm" :aria-label="'移除 ' + key" title="移除" @click="{ const next = { ...modelMap }; delete next[key]; modelMap = next; }"><Icon name="close" :size="14" /></button>
+              <div v-if="editingModel === key" class="model-edit">
+                <label>显示名称<input v-model="m.name" /></label>
+                <label>上下文长度<input :value="m.limit?.context || m.contextWindow || 200000" type="number" min="1024" @change="limitValue(key, 'context', $event.target.value)" /></label>
+                <label>输出上限<input :value="m.limit?.output || m.maxOutputTokens || 32000" type="number" min="32" @change="limitValue(key, 'output', $event.target.value)" /></label>
+                <div class="model-flags"><label class="check"><input :checked="m.supportsImages || m.modalities?.input?.includes('image')" type="checkbox" @change="imageValue(key, $event.target.checked)" />支持图片</label><label class="check"><input v-model="m.reasoning" type="checkbox" />支持思考</label></div>
+              </div>
+            </div>
+          </div>
+          <div class="inline-form model-add"><input v-model="modelID" placeholder="手动添加模型 ID" aria-label="手动模型ID" @keydown.enter.prevent="addModel" /><button type="button" class="sm" @click="addModel"><Icon name="plus" :size="14" />添加模型</button></div>
+        </fieldset>
+        <details class="advanced">
+          <summary><Icon name="right" :size="12" class="chev" />高级参数</summary>
+          <div class="form-grid two">
+            <label class="span-2">服务商标识<input v-model="id" class="mono-input" :disabled="!creating" pattern="[a-zA-Z0-9_.-]{1,80}" required /></label>
+            <label>请求头<textarea v-model="headers" class="mono-input" rows="3" spellcheck="false"></textarea></label>
+            <label>模型请求参数<textarea v-model="options" class="mono-input" rows="3" spellcheck="false"></textarea></label>
           </div>
         </details>
-        <div class="actions">
-          <button class="primary" :disabled="busy">
-            {{ busy ? "处理中…" : "保存服务商" }}</button
-          ><button
-            v-if="!creating"
-            type="button"
-            class="danger-text"
-            :disabled="busy"
-            @click="remove(selected)"
-          >
-            删除服务商
-          </button>
+        <div class="form-footer">
+          <button v-if="!creating" type="button" class="sm danger-text" :disabled="busy" @click="remove(selected)"><Icon name="trash" :size="14" />删除服务商</button>
+          <button class="primary" :disabled="busy">{{ busy ? "处理中…" : "保存服务商" }}</button>
         </div>
       </form>
     </div>
   </section>
 </template>
 <style scoped>
-.provider-layout {
-  display: grid;
-  grid-template-columns: 190px minmax(0, 1fr);
-  gap: 24px;
+.provider-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 20px; }
+.provider-list { display: grid; align-content: start; gap: 2px; }
+.provider-list button { justify-content: flex-start; gap: 10px; width: 100%; height: auto; min-height: 44px; padding: 6px 8px; border: 1px solid transparent; background: transparent; font-weight: 400; text-align: left; }
+.provider-list button:hover:not(:disabled) { background: var(--surface-2); }
+.provider-list button.selected { border-color: var(--border); background: var(--surface-2); }
+.provider-mark { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 8px; background: var(--surface-3); color: var(--text-2); font-size: 12px; font-weight: 700; }
+.provider-list button.selected .provider-mark { background: var(--accent-soft); color: var(--accent); }
+.provider-text { display: grid; min-width: 0; }
+.provider-text strong { font-size: 13px; font-weight: 600; }
+.provider-text small { color: var(--muted); font-size: 11px; }
+.provider-form { display: grid; gap: 16px; min-width: 0; padding-left: 20px; border-left: 1px solid var(--border); }
+.form-section { min-width: 0; margin: 0; padding: 0; border: 0; }
+.form-section legend { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; padding: 0; color: var(--text); font-size: 13px; font-weight: 600; }
+.provider-login { display: grid; gap: 10px; margin-top: 12px; }
+.login-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.login-progress > div { display: grid; gap: 6px; justify-items: start; }
+.model-tools { display: flex; gap: 6px; margin-bottom: 8px; }
+.search { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; }
+.search .icon-svg { position: absolute; left: 9px; color: var(--muted); pointer-events: none; }
+.search input { width: 100%; padding-left: 28px; }
+.model-list { max-height: 360px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--r-md); scrollbar-width: thin; }
+.model-empty { padding: 16px; text-align: center; }
+.model-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 6px 4px 4px; border-top: 1px solid var(--border); }
+.model-row:first-child { border-top: 0; }
+.model-row.open { background: var(--surface-2); }
+.model-name { flex: 1; justify-content: flex-start; gap: 6px; min-width: 0; height: auto; min-height: 36px; padding: 4px 6px; border: 0; background: transparent; font-weight: 400; text-align: left; }
+.model-name > span { display: grid; min-width: 0; }
+.model-name strong { overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.model-name small { overflow: hidden; color: var(--muted); font-family: var(--mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.chev { flex: none; color: var(--muted); transition: transform .15s ease; }
+.model-row.open .chev, .advanced[open] .chev { transform: rotate(90deg); }
+.model-edit { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; flex-basis: 100%; padding: 4px 6px 8px 28px; }
+.model-edit > label { display: grid; gap: 4px; font-size: 12px; }
+.model-flags { display: flex; gap: 16px; grid-column: 1 / -1; }
+.model-add { margin-top: 8px; }
+.advanced summary { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 13px; font-weight: 600; cursor: pointer; list-style: none; }
+.advanced summary::-webkit-details-marker { display: none; }
+.advanced .form-grid { margin-top: 10px; }
+.form-footer { position: sticky; bottom: -40px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 -16px -16px; padding: 12px 16px; border-top: 1px solid var(--border); border-radius: 0 0 var(--r-lg) var(--r-lg); background: var(--surface); }
+.form-footer .danger-text { margin-right: auto; }
+@media (max-width: 1099px) {
+  .provider-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .provider-list { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
+  .provider-list::-webkit-scrollbar { display: none; }
+  .provider-list button { flex: none; width: auto; max-width: 220px; min-height: 40px; border-color: var(--border); }
+  .provider-list button.selected { border-color: var(--accent); background: var(--accent-softer); }
+  .provider-form { padding-left: 0; border-left: 0; }
 }
-.provider-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.provider-list button {
-  text-align: left;
-  color: #606677;
-  padding: 11px 13px;
-}
-.provider-list small,
-.model-name small {
-  display: block;
-  word-break: break-all;
-}
-.provider-list .selected {
-  border-color: #d9d9f5;
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-.provider-form {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  min-width: 0;
-}
-.model-list {
-  max-height: 360px;
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  scrollbar-width: thin;
-}
-.model-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 10px 12px;
-  background: #fff;
-  border-bottom: 1px solid var(--border);
-}
-.model-row:last-child {
-  border: 0;
-}
-.model-name {
-  text-align: left;
-  flex: 1;
-  border: 0;
-  background: none;
-  min-width: 100px;
-  word-break: break-word;
-}
-.model-edit {
-  width: 100%;
-  padding: 12px;
-  background: #f7f8fb;
-  border-radius: 9px;
-}
-.model-edit label {
-  min-width: 140px;
-}
-.provider-login {
-  padding: 15px;
-  background: #f4f4fc;
-  border: 1px solid #e3e3f5;
-  border-radius: 11px;
-}
-.login-progress {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 12px;
-}
-.login-progress p {
-  margin: 0;
-}
-.provider-form details textarea {
-  width: 100%;
-  font-family: monospace;
-}
-.provider-form h3 {
-  margin: 0;
-}
-@media (max-width: 760px) {
-  .provider-layout {
-    grid-template-columns: 1fr;
-    gap: 20px;
-  }
-  .provider-list {
-    flex-direction: row;
-    overflow: auto;
-    margin: 0 -16px;
-    padding: 0 16px 4px;
-    scrollbar-width: none;
-  }
-  .provider-list::-webkit-scrollbar {
-    display: none;
-  }
-  .provider-list button {
-    min-width: 140px;
-    max-width: 220px;
-    flex-shrink: 0;
-    overflow-wrap: anywhere;
-  }
-  .provider-login {
-    padding: 10px;
-  }
-  .model-row {
-    padding: 8px;
-    gap: 4px;
-  }
-  .model-edit label {
-    min-width: 0;
-  }
-  .provider-form .actions {
-    flex-wrap: wrap;
-  }
-  .provider-form .section-heading {
-    flex-direction: row;
-    align-items: center;
-  }
+@media (max-width: 767px) {
+  .model-edit { grid-template-columns: minmax(0, 1fr); padding-left: 6px; }
+  .form-footer { margin: 0 -12px -12px; padding: 10px 12px; }
 }
 </style>

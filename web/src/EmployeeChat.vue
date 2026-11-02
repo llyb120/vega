@@ -158,19 +158,20 @@ onBeforeUnmount(() => { disposed = true; request++; });
 .typing-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); animation: typing 1.2s ease-in-out infinite; }
 .typing-dots i:nth-child(2) { animation-delay: .15s; }
 .typing-dots i:nth-child(3) { animation-delay: .3s; }
+@media (prefers-reduced-motion: reduce) { .typing-dots i { animation: none; opacity: .7; } }
 @keyframes typing { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
 .readonly-note { display: flex; align-items: center; justify-content: center; gap: 6px; flex: none; padding: 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
 .chat-composer { flex: none; width: calc(100% - 48px); max-width: 772px; margin: 0 auto 12px; padding: 6px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--sh-sm); }
 .chat-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 .composer-row { display: flex; align-items: flex-end; gap: 4px; }
 .composer-row textarea { flex: 1; min-height: 36px; max-height: 200px; padding: 8px 4px; border: 0; box-shadow: none; resize: none; font-size: 14px; line-height: 1.45; }
-.composer-row textarea:focus { box-shadow: none; }
+.composer-row textarea:focus, .composer-row textarea:focus-visible { box-shadow: none; outline: none; }
 .attach { width: 36px; min-height: 36px; color: var(--muted); }
 .send { width: 36px; min-height: 36px; padding: 0; border-radius: 10px; }
 .stop { min-height: 36px; padding: 0 10px; border-color: var(--border); color: var(--danger); font-size: 12px; }
 .composer-hint { padding: 0 8px 0 44px; color: var(--faint); font-size: 11px; }
 .composer-quote { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 4px 4px 4px 10px; border-left: 3px solid var(--accent); border-radius: 4px var(--r-md) var(--r-md) 4px; background: var(--surface-2); color: var(--muted); }
-.composer-quote > button:nth-child(2) { display: grid; flex: 1; gap: 1px; min-width: 0; height: auto; min-height: 0; padding: 2px 0; border: 0; background: transparent; font-weight: 400; text-align: left; }
+.composer-quote > button:nth-child(2) { display: grid; justify-content: stretch; flex: 1; gap: 1px; min-width: 0; height: auto; min-height: 0; padding: 2px 0; border: 0; background: transparent; font-weight: 400; text-align: left; }
 .composer-quote strong { color: var(--text-2); font-size: 11px; }
 .composer-quote span { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .attachments { padding: 2px 4px 6px; }
