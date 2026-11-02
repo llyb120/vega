@@ -287,6 +287,7 @@ export class Tools {
         );
       delete employee.parameters.properties.events;
       employee.parameters.properties.condition = { type: "string", minLength: 1, maxLength: 2000, description: "职责的自然语言触发条件，配合text职责内容即可；新建/修改时自动识别，不与times/everyMinutes/nextAt混填。示例每天9点、每30分钟检查、按交代任务需要。无法自动监听的外部事件须明确检查频率，不能假称已订阅。" };
+      employee.parameters.properties.text.description += "。remember仅一条稳定事实，去除首尾空白后须为1–200字符（中英文、标点与换行均计数），建议100字符以内；长度报错后先精简text，多件事分开保存，不要原样重试或直接截断。";
       employee.parameters.properties.profile.description = "兼容字段：新主任务始终从lightweight起步，不用profile直接选择编码模型；实际涉及编码时由原主会话switch_scene升级，续做保留现场，但可按后续需求回轻量或再次升级。";
       if (this.session.taskId) {
         employee.parameters.properties.action.enum.push("complete");

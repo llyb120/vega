@@ -24,7 +24,11 @@ test("employee memory instructions require durable write before acknowledgement 
   engine.providers.chat = async (_model, system, _messages, definitions) => {
     assert(system.includes("主动积累") && system.includes("先调用remember成功"));
     assert(system.includes("临时进度") && system.includes("不能派任务绕过记忆权限"));
-    assert(definitions.find(tool => tool.name === "employee")!.description.includes("主动积累"));
+    const definition = definitions.find(tool => tool.name === "employee")!;
+    assert(definition.description.includes("主动积累"));
+    assert(system.includes("不要原样重试或直接截断"));
+    assert(definition.parameters.properties.text.description.includes("不要原样重试或直接截断"));
+    assert.equal(definition.parameters.properties.text.maxLength, 8000, "other actions must retain their text limit");
     if (requests++ % 2 === 0) return phase === "forget"
       ? action("forget", { action: "forget", id: memory })
       : action(phase, { action: "remember", ...(memory ? { id: memory } : {}), text: phase === "remember" ? "Project Aurora uses the east region." : "Project Aurora now uses the west region.", importance: 2 });
@@ -48,6 +52,30 @@ test("employee memory instructions require durable write before acknowledgement 
     assert.equal(employee.state().memories.length, 0);
     const other = engine.employee.for(engine.employee.create({ name: "Other" }, "other").id);
     assert.equal(other.state().memories.length, 0);
+  } finally { await engine.close(); store.close(); }
+});
+
+test("remember reports rejected lengths without truncating or changing saved memories", async () => {
+  const { store, engine, employee } = fixture();
+  const boundary = "字".repeat(100) + "😀".repeat(100);
+  try {
+    await employee.execute("", { action: "remember", text: "字" });
+    const saved = await employee.execute("", { action: "remember", text: ` \n${boundary}\t`, importance: 3 });
+    assert.equal(employee.state().memories[1].text, boundary);
+    const before = structuredClone(employee.state().memories);
+    for (const { text, length } of [{ text: undefined, length: 0 }, { text: " \t\n", length: 0 }, { text: boundary + "。", length: 201 }]) {
+      for (const id of [undefined, saved.value.id]) {
+        await assert.rejects(employee.execute("", { action: "remember", id, text }), {
+          message: new RegExp(`记忆未保存：.* ${length} 字，要求 1–200 字。.*不要原样重试或直接截断`),
+        });
+        assert.deepEqual(employee.state().memories, before);
+      }
+    }
+    const updated = await employee.execute("", { action: "remember", id: saved.value.id, text: "项目固定使用TypeScript。" });
+    assert.equal(updated.value.id, saved.value.id);
+    assert.equal(employee.state().memories.length, 2);
+    assert.equal(employee.state().memories[1].text, "项目固定使用TypeScript。");
+    assert.equal(employee.state().memories[1].importance, 3);
   } finally { await engine.close(); store.close(); }
 });
 

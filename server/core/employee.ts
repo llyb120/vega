@@ -932,9 +932,10 @@ export class Employee {
           };
         }
         case "remember": {
+          const length = [...content].length;
           assert(
-            content && [...content].length <= 200,
-            "Memory requires 1–200 characters",
+            length > 0 && length <= 200,
+            `记忆未保存：text 去除首尾空白后为 ${length} 字，要求 1–200 字。请提炼一条非空的稳定事实（建议 100 字以内），多件事分开保存；修改 text 后再试，不要原样重试或直接截断。`,
           );
           const importance = a.importance ?? 1;
           assert(
