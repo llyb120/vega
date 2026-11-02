@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import sharp from "sharp";
 import { ZODIAC_AVATARS, BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS, isAvatarPreset, employeeAvatarURL, parseBotAvatar, defaultBotAvatar, botAvatarPreset } from "../shared/employee-avatars";
-import { BOT_SHAPE_GEOMETRY, BOT_POSES, LOOK_POSES, MESSAGE_POSE, nextPose, holdDuration, blinkPlan } from "../web/src/bot-avatar.js";
+import { BOT_SHAPE_GEOMETRY, BOT_POSES, LOOK_POSES, MESSAGE_POSE, projectFace, shade, nextPose, holdDuration, blinkPlan } from "../web/src/bot-avatar.js";
 import { updateEmployeeAvatar } from "../server/core/employee-avatar";
 import { Employee, type EmployeeRuntime } from "../server/core/employee";
 import { Store } from "../server/core/store";
@@ -54,8 +54,9 @@ test("bot avatars encode shape and color in the preset string and every shape ha
   for (const value of ["bot:", "bot:round", "bot:round:", "bot:unknown:red", "bot:round:unknown", "bot:round:red:extra", "bot:round:#ff0000", "bot:../x:red", "BOT:round:red"]) assert.equal(isAvatarPreset(value), false, value);
   assert.deepEqual(defaultBotAvatar("employee-a"), defaultBotAvatar("employee-a"), "the default bot is stable per employee");
   assert(new Set(["a", "b", "c", "d", "e", "f", "g", "h"].map(seed => JSON.stringify(defaultBotAvatar(seed)))).size > 4, "default bots vary across employees");
-  assert(LOOK_POSES.length >= 15 && !LOOK_POSES.includes("blink") && "blink" in BOT_POSES);
-  assert(LOOK_POSES.includes(MESSAGE_POSE) && BOT_POSES[MESSAGE_POSE].l.x > 0 && BOT_POSES[MESSAGE_POSE].l.y < 0, "message avatars glance up-right");
+  assert(LOOK_POSES.length >= 15 && !LOOK_POSES.some((id) => /blink|wink|cross|daze|skeptic|squint|sleepy/.test(id)), "variety comes from head turns, not 2D expressions");
+  for (const id of LOOK_POSES) { const { yaw, pitch } = (BOT_POSES as Record<string, { yaw: number; pitch: number }>)[id]; assert(Math.abs(yaw) <= 40 && Math.abs(pitch) <= 30); }
+  assert(LOOK_POSES.includes(MESSAGE_POSE) && BOT_POSES[MESSAGE_POSE].yaw >= 20 && BOT_POSES[MESSAGE_POSE].pitch >= 12, "message avatars turn up-right");
   for (let i = 0; i < 200; i++) { const pose = nextPose("left", "up"); assert(pose !== "left" && pose !== "up" && LOOK_POSES.includes(pose)); }
   // Random, not a fixed cycle: two independently generated sequences differ, and many poses get visited.
   const walk = () => { const seq: string[] = []; let current = "center", previous; for (let i = 0; i < 30; i++) { const next = nextPose(current, previous); previous = current; current = next; seq.push(next); } return seq; };
@@ -122,3 +123,22 @@ test("invalid, oversized and disguised image uploads leave the current avatar an
     assert.equal((store.db.prepare("SELECT COUNT(*) count FROM blobs").get() as any).count, before);
   } finally { root.close(); store.close(); }
 });
+
+test("bot faces are projected onto a turning 3D head", () => {
+  const round = BOT_SHAPE_GEOMETRY.round, front = projectFace(round, 0, 0);
+  assert(Math.abs(front.left.rx - front.right.rx) < 1e-9 && Math.abs(front.left.cx + front.right.cx - 100) < 1e-6, "symmetric when facing front");
+  const right = projectFace(round, 30, 0), gap = (f: ReturnType<typeof projectFace>) => f.right.cx - f.left.cx;
+  assert(right.left.cx > front.left.cx + 8 && right.right.cx > front.right.cx + 4, "eyes travel with the turn");
+  assert(right.right.rx < right.left.rx * 0.85 && right.right.ry < right.left.ry, "far eye narrows and shrinks");
+  assert(right.left.ry > front.left.ry, "near eye grows");
+  assert(gap(right) < gap(front) * 0.9, "far eye moves toward the near eye");
+  const up = projectFace(round, 0, 24);
+  assert(up.left.cy < front.left.cy - 8 && up.left.ry < front.left.ry * 0.95, "vertical turns move and foreshorten the eyes");
+  const rest = projectFace(round, BOT_POSES[MESSAGE_POSE].yaw, BOT_POSES[MESSAGE_POSE].pitch);
+  assert(rest.left.rx > rest.right.rx * 1.15 && rest.light.x > front.light.x && rest.light.y < front.light.y, "up-right rest pose: near eye bigger, shading follows");
+  const closed = projectFace(round, 10, 5, 0.05);
+  assert(closed.left.ry < 1 && closed.right.ry < 1, "eyelids close vertically");
+  assert.equal(shade("#000000", 0.5), "#808080");
+  assert.equal(shade("#ffffff", -1), "#000000");
+});
+
