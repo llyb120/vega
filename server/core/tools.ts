@@ -151,7 +151,7 @@ export class Tools {
         ),
         schema(
           "bash",
-          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. Browser interaction MUST use the chrome tool through its authorized extension. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If the extension cannot proceed or a native dialog is required, STOP and let the user handle it.",
+          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome. All webpage interaction MUST use the chrome tool through its authorized extension. Web-field fill/type and press Enter via chrome are permitted; employee main tasks must relay to their computer session. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
           { command: string, timeout: integer },
           ["command"],
         ),
@@ -219,7 +219,7 @@ export class Tools {
           name: chromeDefinition.name,
           description: chromeDefinition.description.replace(
             "Chrome原生对话框和其它桌面应用用jianlai；两工具不能并行，切换后先观察。",
-            "仅通过授权扩展控制Chrome网页；不提供桌面应用或原生对话框操作。扩展不可用或无法继续时停止并请用户处理；禁止用bash、脚本、Win32、UI自动化、外部程序、直接CDP/WebDriver或切换场景绕行，禁止控制真实鼠标、键盘和窗口焦点。原生对话框请用户处理。",
+            "仅通过授权扩展控制Chrome网页；网页输入和回车使用本工具的fill/type/press，不是系统键盘注入。不提供桌面应用或原生对话框操作。若原绑定客户端的Chrome未启动，可用bash仅启动Chrome（不携带导航URL），随后回到本工具检查连接；已启动后扩展仍不可用或无法继续时停止并请用户处理；禁止用bash、脚本、Win32、UI自动化、外部程序、直接CDP/WebDriver或切换场景绕行，禁止控制真实鼠标、键盘和窗口焦点。原生对话框请用户处理。",
           ),
           parameters: chromeDefinition.inputSchema,
         });

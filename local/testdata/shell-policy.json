@@ -31,7 +31,20 @@
     "chrome.exe --remote-debugging-port=9222",
     "node -e \"cdp.send('Input.dispatchMouseEvent', {})\"",
     "PWSh -NoProfile -EncodedCommand ZgA=",
-    "powershell -enc ZgA="
+    "powershell -enc ZgA=",
+    "Start-Process 'https://www.baidu.com/s?wd=hello'",
+    "Start-Process -FilePath 'chrome.exe' -ArgumentList 'https://example.com'",
+    "saps https://example.com",
+    "cmd /c start \"\" \"https://example.com\"",
+    "Invoke-Item 'https://example.com'",
+    "xdg-open https://example.com",
+    "open -a 'Google Chrome' https://example.com",
+    "gio open https://example.com",
+    "rundll32.exe url.dll,FileProtocolHandler https://example.com",
+    "[System.Diagnostics.Process]::Start('https://example.com')",
+    "python -c \"import webbrowser; webbrowser.open('https://example.com')\"",
+    "& 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' 'https://example.com'",
+    "chrome.exe https://example.com"
   ],
   "allowed": [
     "git status --short",
@@ -44,6 +57,22 @@
     "node -e \"console.log('ok')\"",
     "python -c \"print('ok')\"",
     "curl https://example.com",
-    "(Get-CimInstance Win32_Process).Name"
+    "(Get-CimInstance Win32_Process).Name",
+    "Start-Process node -ArgumentList 'server.mjs'",
+    "Get-Command chrome.exe",
+    "Get-Item 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'",
+    "Write-Output 'chrome.exe'",
+    "Write-Output 'https://example.com'",
+    "Get-Content ./open.txt; curl https://example.com",
+    "Start-Process -FilePath 'chrome.exe'",
+    "Start-Process -FilePath 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'",
+    "Start-Process chrome -ArgumentList '--profile-directory=Default'",
+    "[System.Diagnostics.Process]::Start('chrome.exe')",
+    "google-chrome --new-window",
+    "/usr/bin/chromium",
+    "& 'chrome.exe'",
+    "& 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'",
+    "/usr/bin/chromium\nGet-Process",
+    "open -a 'Google Chrome'"
   ]
 }

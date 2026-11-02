@@ -107,7 +107,7 @@ test("shell uses real PowerShell/POSIX process and preserves split UTF-8 output"
   assert.equal(result.error, false, JSON.stringify(result.value));
   assert.equal(result.value.output, "你好");
 });
-test("shell policy rejects desktop and alternative browser automation without blocking ordinary commands", () => {
+test("shell policy permits browser cold starts but rejects shell navigation and desktop automation", () => {
   for (const command of commandCases.blocked)
     assert.throws(() => assertShellCommand(command), { message: SHELL_POLICY_ERROR }, command);
   for (const command of commandCases.allowed)
@@ -137,6 +137,11 @@ test("computer and coding scenes retain shell without allowing desktop automatio
   await assert.rejects(tools.execute({ id: "blocked", name: "bash", arguments: { command: "[Native]::SetCursorPos(10, 20)" } }, {} as any), { message: SHELL_POLICY_ERROR });
   assert.match(definitions.find((tool) => tool.name === "chrome")!.description, /禁止.*绕行/);
   assert.match(CODING_RULES, /Chrome 只能通过 chrome 工具的授权扩展操作/);
+  assert.match(CODING_RULES, /例外仅限进程冷启动/);
+  assert.match(CODING_RULES, /确认任务绑定的客户端 Chrome 未启动时/);
+  assert.match(CODING_RULES, /网页输入和回车不是系统键盘注入/);
+  assert.match(CODING_RULES, /不能用拼接\/打开结果 URL 或读取浏览历史替代并标记完成/);
+  assert.match(definitions.find((tool) => tool.name === "chrome")!.description, /网页输入和回车使用本工具的fill\/type\/press/);
   session.scene = "coding";
   assert(tools.definitions().some((tool) => tool.name === "bash"));
 });
