@@ -146,7 +146,9 @@ async function send() {
   if (props.readonly || (!draft.value.trim() && !files.value.length)) return;
   if (outbox.value.length >= 16) { error.value = "请先重发未送达的消息（最多保留16条）"; return; }
   error.value = "";
-  outbox.value.push({ role: "user", text: draft.value, images: files.value.map(({ mime, data }) => ({ mime, data })), quote: quoted.value, clientMessageId: crypto.randomUUID(), afterSeq: history.lastSeq(), at: Date.now(), sendStatus: "pending" });
+  // getRandomValues also works over LAN HTTP, where randomUUID is unavailable.
+  const clientMessageId = [...crypto.getRandomValues(new Uint8Array(16))].map((n) => n.toString(16).padStart(2, "0")).join("");
+  outbox.value.push({ role: "user", text: draft.value, images: files.value.map(({ mime, data }) => ({ mime, data })), quote: quoted.value, clientMessageId, afterSeq: history.lastSeq(), at: Date.now(), sendStatus: "pending" });
   const message = outbox.value.at(-1);
   draft.value = ""; files.value = []; quoted.value = undefined;
   void scroll();

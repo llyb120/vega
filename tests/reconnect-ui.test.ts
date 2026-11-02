@@ -23,7 +23,7 @@ function mount() {
   }
   const context: any = {
     Blob, URL, WebSocket: Socket, Date: { now: () => now }, Math,
-    AbortSignal: { timeout: () => new AbortController().signal },
+    AbortController, AbortSignal: { timeout: () => new AbortController().signal },
     navigator: { onLine: true },
     window: { location: { href: "https://vega.test/" }, addEventListener: (type: string, fn: any) => listeners[type] = fn, removeEventListener() {} },
     document: { hidden: false, addEventListener: (type: string, fn: any) => listeners[type] = fn, removeEventListener() {} },
@@ -56,6 +56,40 @@ test("chat submissions use bounded authenticated HTTP even while realtime is dis
   s.context.fetch = async () => { throw Error("offline"); };
   await assert.rejects(s.api("/employees/one/messages", "POST", { text: "hello", clientMessageId: "stable-message-id" }), (error: any) => error.network === true);
   assert.equal(s.context.error.value, "");
+});
+
+test("older mobile browsers without AbortSignal.timeout can send and obtain realtime tickets", async () => {
+  const s = mount();
+  s.context.AbortSignal = {};
+  await s.api("/employees/one/messages", "POST", { text: "手机消息", clientMessageId: "mobile-message-id" });
+  assert.equal(s.calls.length, 1, "send reaches fetch instead of throwing on unsupported API");
+  assert.equal(s.timers.size, 0, "completed requests release their timeout");
+  s.connectEvents(); await tick();
+  assert.equal(s.sockets.length, 1);
+  assert.equal(s.timers.size, 0);
+});
+
+test("compatible request timeout covers the response body and clears after success or failure", async () => {
+  for (const phase of ["fetch", "body"]) {
+    const s = mount();
+    s.context.AbortSignal = {};
+    let signal: AbortSignal | undefined;
+    s.context.fetch = (_url: string, init: any) => {
+      signal = init.signal;
+      const pending = () => new Promise((_resolve, reject) => signal!.addEventListener("abort", () => reject(Error("aborted")), { once: true }));
+      return phase === "fetch" ? pending() : Promise.resolve({ ok: true, status: 200, json: pending });
+    };
+    const result = s.api("/employees/one/messages", "POST", { text: "hello", clientMessageId: "mobile-message-id" });
+    const failed = assert.rejects(result, (error: any) => error.network === true);
+    await tick();
+    assert(signal);
+    const timeout = [...s.timers.values()].find((timer) => timer.ms === 30000);
+    assert(timeout, "sending cannot remain stuck on an older browser");
+    timeout.fn();
+    await failed;
+    assert.equal(signal.aborted, true);
+    assert.equal(s.timers.size, 0);
+  }
 });
 
 test("realtime failures retain client state, stay silent and reconnect with bounded backoff", async () => {

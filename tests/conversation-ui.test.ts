@@ -9,11 +9,11 @@ import { employeeChatMessages } from "../web/src/conversation.js";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
 const between = (start: string, end: string) => chat.slice(chat.indexOf(start), chat.indexOf(end));
-function mount(api: any = async () => ({ messages: [], running: false })) {
+function mount(api: any = async () => ({ messages: [], running: false }), crypto: any = webcrypto) {
   const messages = ref<any[]>([]), running = ref(false), hasMore = ref(false);
   const history = createChatHistory({ api, path: () => "/employees/fixture/chat", messages, running, hasMore });
   const context: any = {
-    console, ref, computed, watch, crypto: webcrypto, nextTick, history, messages, running, hasMore, runningFrom: ref(null), disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
+    console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, runningFrom: ref(null), disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
     props: { employeeId: "fixture", api, composer: reactive({ text: "", images: [], quote: undefined }) },
     visible: computed(() => employeeChatMessages(messages.value, running.value)), employeeChatMessages, frozen: [] as any[],
   };
@@ -54,6 +54,28 @@ test("employee sends leave older history immediately and reveal the sent message
   assert.equal(transcript.scrollTop, 2400, "sending bypasses the near-bottom restriction after rendering");
   assert.equal(state.props.composer.text, "");
   assert.equal(state.busy.value, false);
+});
+
+test("mobile HTTP contexts without randomUUID can send and retry with the same secure message ID", async () => {
+  const calls: any[] = [];
+  const state = mount(async (_path: string, method: string, body: any) => {
+    if (method !== "POST") return { messages: [], running: true };
+    calls.push(body);
+    if (calls.length === 1) throw Error("offline");
+    return {};
+  }, { getRandomValues: webcrypto.getRandomValues.bind(webcrypto) });
+  state.props.composer.text = "手机消息";
+  await state.send();
+  const message = state.outbox.value[0];
+  assert.equal(message.sendStatus, "failed");
+  assert.match(message.clientMessageId, /^[a-zA-Z0-9_-]{16,80}$/);
+  assert.equal(state.props.composer.text, "");
+  await state.retry(message);
+  assert.equal(message.sendStatus, "sent");
+  assert.equal(calls[1].clientMessageId, calls[0].clientMessageId);
+  state.props.composer.text = "下一条";
+  await state.send();
+  assert.notEqual(calls[2].clientMessageId, calls[0].clientMessageId);
 });
 
 test("incoming messages do not pull a reader away from older history", async () => {

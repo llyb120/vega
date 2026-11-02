@@ -397,12 +397,16 @@ function isChatSend(path, method, data) {
   return method === "POST" && /^\/employees\/[^/]+\/messages$/.test(path) && !!data?.clientMessageId;
 }
 async function httpApi(path, method = "GET", data) {
-  let response, result;
+  let response, result, timer;
   try {
+    const timeout = path === "/events" ? 15000 : (method === "GET" || isChatSend(path, method, data)) ? 30000 : 0;
+    // Older mobile WebViews support AbortController but not AbortSignal.timeout.
+    const controller = timeout ? new AbortController() : undefined;
+    if (controller) timer = setTimeout(() => controller.abort(), timeout);
     response = await fetch(`/api${path}`, {
       method,
       credentials: "same-origin",
-      signal: path === "/events" ? AbortSignal.timeout(15000) : (method === "GET" || isChatSend(path, method, data)) ? AbortSignal.timeout(30000) : undefined,
+      signal: controller?.signal,
       headers: {
         ...(!["GET", "HEAD"].includes(method) && csrfToken.value
           ? { "X-CSRF-Token": csrfToken.value }
@@ -415,6 +419,8 @@ async function httpApi(path, method = "GET", data) {
     result = await response.json();
   } catch {
     throw Object.assign(Error("网络暂时不可用，请稍后重试"), { network: true, status: response?.status });
+  } finally {
+    clearTimeout(timer);
   }
   if (!response.ok)
     throw Object.assign(Error(
