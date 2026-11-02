@@ -1,12 +1,54 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { readFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import WebSocket from "ws";
 import { sleep } from "../server/core/util";
+
+test("work panel keeps long task titles, requests and reply controls inside narrow cards", { skip: process.env.VEGA_TEST_CHROME !== "1", timeout: 30000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "vega-work-panel-"));
+  try {
+    const [component, global] = await Promise.all([readFile("web/src/WorkPanel.vue", "utf8"), readFile("web/src/style.css", "utf8")]);
+    const styles = component.match(/<style scoped>([\s\S]*?)<\/style>/)![1];
+    const long = "接单 Tapd 需求：https://tapd.tencent.com/tapd_fe/20427644/story/detail/" + "112042764413955".repeat(30);
+    const file = join(dir, "panel.html");
+    await writeFile(file, `<!doctype html><meta charset="utf-8"><style>${global}\n${styles}</style>
+      <div id="fixture" style="position:relative;display:flex;height:500px">
+        <aside class="work-panel"><header class="panel-head"><h3>工作面板</h3><button class="link">全部任务</button><button class="icon sm">×</button></header>
+          <div class="panel-scroll"><section class="panel-section">
+            <article class="attention-card"><button class="task-title">${long}</button><p class="attention-text">需要补充：${long}\nTAPD_ACCESS_TOKEN_${"token".repeat(100)}</p><form class="answer"><textarea rows="2" placeholder="补充信息后，员工会继续原任务"></textarea><button class="primary sm">回复并继续</button></form></article>
+            <article class="attention-card"><button class="task-title">${long}</button><p class="attention-text">需要确认：${long}</p><div class="actions"><button class="primary sm">批准执行</button><button class="sm">驳回</button></div></article>
+            <button class="task-row"><span class="task-row-head"><span class="badge">进行中</span><time>刚刚</time></span><strong>${long}</strong><span class="task-row-note">${long}</span><span class="mini-progress"><span style="width:50%"></span></span></button>
+          </section></div>
+        </aside>
+      </div><pre id="result"></pre><script>
+        const fixture = document.querySelector('#fixture'), panel = document.querySelector('.work-panel'), results = [];
+        for (const width of [280, 320, 360]) {
+          fixture.style.width = width + 'px';
+          for (const overlay of [false, true]) {
+            panel.classList.toggle('overlay', overlay);
+            const bounds = panel.getBoundingClientRect();
+            const overflow = [...panel.querySelectorAll('.panel-scroll,.attention-card,.task-title,.attention-text,.answer,.answer textarea,.actions,.task-row,.task-row strong,.task-row-note')].filter(element => {
+              const rect = element.getBoundingClientRect();
+              return element.scrollWidth > element.clientWidth + 1 || rect.left < bounds.left - 1 || rect.right > bounds.right + 1;
+            }).map(element => element.className || element.tagName);
+            results.push({ width, overlay, overflow });
+          }
+        }
+        document.querySelector('#result').textContent = JSON.stringify(results);
+      </script>`);
+    const output = execFileSync(process.env.VEGA_CHROME_PATH || "C:/Program Files/Google/Chrome/Application/chrome.exe", ["--headless=new", "--no-first-run", "--no-default-browser-check", "--no-sandbox", "--disable-gpu", "--user-data-dir=" + join(dir, "profile"), "--dump-dom", pathToFileURL(file).href], { encoding: "utf8", timeout: 20000, windowsHide: true });
+    const results = JSON.parse(output.match(/<pre id="result">([\s\S]*?)<\/pre>/)![1]);
+    assert.equal(results.length, 6);
+    for (const result of results) assert.deepEqual(result.overflow, [], JSON.stringify(result));
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
 
 test("employee chat bubbles, citations and task jumps work on mobile while debug records retain Nova process details", { skip: !process.env.VEGA_EMPLOYEE_UI_URL, timeout: 45000 }, async () => {
   const base = process.env.VEGA_EMPLOYEE_UI_URL!;

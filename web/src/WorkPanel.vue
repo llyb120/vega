@@ -49,15 +49,15 @@ const others = (list, attention) => list.filter((task) => !attention.includes(ta
 .panel-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 12px 16px; scrollbar-width: thin; }
 .panel-section h4 { display: flex; align-items: center; gap: 8px; margin: 12px 4px 8px; color: var(--text-2); font-size: 12px; }
 .panel-section h4 .count { margin-left: auto; }
-.attention-card { display: grid; gap: 8px; margin-bottom: 8px; padding: 10px 12px; border: 1px solid var(--warn-border); border-left: 3px solid var(--warn); border-radius: var(--r-md); background: var(--surface); }
-.task-title { display: block; height: auto; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--text); font-weight: 600; line-height: 1.45; text-align: left; white-space: normal; }
+.attention-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-bottom: 8px; padding: 10px 12px; border: 1px solid var(--warn-border); border-left: 3px solid var(--warn); border-radius: var(--r-md); background: var(--surface); }
+.task-title { display: block; height: auto; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--text); font-weight: 600; line-height: 1.45; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .task-title:hover:not(:disabled) { background: transparent; color: var(--accent-text); }
 .attention-text { color: var(--text-2); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .attention-text strong { color: var(--warn); font-weight: 600; }
 .answer { display: grid; gap: 6px; }
 .answer textarea { width: 100%; font-size: 12px; }
 .answer button { justify-self: end; }
-.task-row { display: grid; justify-content: stretch; gap: 4px; width: 100%; height: auto; margin-bottom: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); font-weight: 400; text-align: left; white-space: normal; }
+.task-row { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; gap: 4px; width: 100%; height: auto; margin-bottom: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); font-weight: 400; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .task-row:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface); box-shadow: var(--sh-sm); }
 .task-row-head { display: flex; align-items: center; justify-content: space-between; }
 .task-row time { color: var(--muted); font-size: 11px; }

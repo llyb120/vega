@@ -3,9 +3,9 @@ import { computed, onBeforeUnmount, ref, watch, nextTick } from "vue";
 import Icon from "./Icon.vue";
 import TaskDetail from "./TaskDetail.vue";
 import { taskLabel, taskTone, planProgress, shortTime, needsAttention } from "./task-status";
-const props = defineProps({ active: Array, attention: Array, history: Array, filter: String, focus: String, readonly: Boolean, canCreate: Boolean, act: Function, add: Function });
+const props = defineProps({ active: Array, attention: Array, history: Array, filter: String, focus: String, readonly: Boolean, act: Function });
 const emit = defineEmits(["filter", "select", "inspect", "chat"]);
-const text = ref(""), adding = ref(false), list = ref(null);
+const list = ref(null);
 const media = window.matchMedia("(min-width: 1024px)"), twoPane = ref(media.matches);
 const sync = () => { twoPane.value = media.matches; };
 media.addEventListener("change", sync);
@@ -19,23 +19,12 @@ watch(() => props.focus, async (id) => {
   await nextTick();
   list.value?.querySelector(`[data-row="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
 }, { immediate: true });
-async function submit() {
-  if (adding.value || !text.value.trim()) return;
-  adding.value = true;
-  try { if (await props.add(text.value) === true) text.value = ""; }
-  finally { adding.value = false; }
-}
 function location(task) { return task.execution?.localAgent ? task.execution.clientName || "客户端" : "服务端"; }
 </script>
 <template>
   <div class="tasks-layout" :class="{ 'show-detail': !!selected && !twoPane }">
     <section class="task-list-pane" aria-label="任务列表">
       <div class="task-toolbar">
-        <form v-if="canCreate" class="task-add" @submit.prevent="submit">
-          <Icon name="plus" :size="16" />
-          <input v-model="text" required aria-label="新任务" placeholder="交给员工：一件有明确目标的事" />
-          <button class="primary sm" :disabled="adding || !text.trim()">交给员工</button>
-        </form>
         <div class="segmented" role="group" aria-label="筛选任务">
           <button v-for="[id, label, count] in filters" :key="id" type="button" :class="{ selected: filter === id }" :aria-pressed="filter === id" @click="emit('filter', id)">{{ label }}<span :class="['count', id === 'attention' && count ? 'warn' : '']">{{ count }}</span></button>
         </div>
@@ -54,7 +43,7 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
         <div v-if="!visible.length" class="empty-state">
           <Icon name="inbox" :size="28" />
           <strong>{{ filter === 'attention' ? '没有需要你处理的事项' : filter === 'history' ? '还没有结束的任务' : '暂时没有进行中的任务' }}</strong>
-          <span>在对话中交代工作，或在上方直接创建任务。</span>
+          <span>在对话中交代工作。</span>
           <button v-if="filter !== 'history'" type="button" class="sm" @click="emit('chat')">去对话交代</button>
         </div>
       </div>
@@ -70,10 +59,6 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
 .tasks-layout { display: grid; grid-template-columns: minmax(340px, 420px) minmax(0, 1fr); flex: 1; min-height: 0; }
 .task-list-pane { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: var(--surface); }
 .task-toolbar { display: grid; gap: 10px; flex: none; padding: 12px; border-bottom: 1px solid var(--border); }
-.task-add { display: flex; align-items: center; gap: 6px; padding: 3px 3px 3px 10px; border: 1px solid var(--border-strong); border-radius: var(--r-md); background: var(--surface); }
-.task-add:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
-.task-add .icon-svg { color: var(--muted); }
-.task-add input { flex: 1; min-height: 28px; padding: 0 2px; border: 0; box-shadow: none !important; }
 .segmented { display: flex; }
 .segmented > button { flex: 1; }
 .task-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; scrollbar-width: thin; }
@@ -110,7 +95,6 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
 }
 @media (max-width: 767px) {
   .task-toolbar { padding: 10px; }
-  .task-add input { min-height: 34px; }
   .task-item { padding: 12px 10px; }
   .task-tip { display: none; }
 }

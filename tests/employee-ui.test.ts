@@ -133,6 +133,14 @@ test("chat task links reveal the matching task and refresh stale lists without j
   assert.equal(context.employeeTab.value, "chat");
 });
 
+test("employee task lists direct new work to chat without a separate creation form", () => {
+  const tasks = readFileSync("web/src/EmployeeTasks.vue", "utf8");
+  assert(!tasks.includes("<form") && !tasks.includes('aria-label="新任务"'));
+  assert(!tasks.includes("task-add") && !tasks.includes("上方直接创建任务"));
+  assert(tasks.includes("在对话中交代工作。") && tasks.includes("emit('chat')"));
+  assert(!source.includes(':add="addTask"') && !source.includes(":can-create="));
+});
+
 test("employee task creation never asks users to choose the initial model", () => {
   const workspace = source + ["EmployeeTasks", "EmployeeDuties", "TaskDetail", "WorkPanel"].map((file) => readFileSync(`web/src/${file}.vue`, "utf8")).join("\n");
   assert(!workspace.includes("taskProfile") && !workspace.includes('v-model="duty.profile"'));

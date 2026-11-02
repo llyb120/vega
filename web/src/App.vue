@@ -1235,17 +1235,6 @@ async function control(data) {
   await employeeApi("/employee/control", "POST", data);
   await loadEmployee();
 }
-async function addTask(text) {
-  return attempt(async () => {
-    await employeeAction({
-      action: "add",
-      kind: "todo",
-      text,
-      cwd: employee.value.cwd,
-    });
-    return true;
-  });
-}
 async function saveDuty(data) {
   const employeeId = selectedEmployee.value, actor = user.value?.id;
   return attempt(async () => {
@@ -1480,9 +1469,7 @@ onBeforeUnmount(() => {
             :filter="employeeTaskFilter"
             :focus="employeeTaskFocus"
             :readonly="!canExecute"
-            :can-create="canExecute"
             :act="employeeTaskAction"
-            :add="addTask"
             @filter="employeeTaskFilter = $event"
             @select="employeeTaskFocus = $event"
             @inspect="openEmployee($event)"

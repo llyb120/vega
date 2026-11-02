@@ -1092,12 +1092,18 @@ test(
         ),
         "cancelling must retain the skill",
       );
+      const createdTask = await fetch(base + "/api/employee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + token, Origin: base },
+        body: JSON.stringify({ action: "add", kind: "todo", text: "手机提交的独立任务", cwd: dir }),
+      });
+      assert.equal(createdTask.status, 200);
       await nav("数字员工");
-      await fill(
-        'input[placeholder="交给员工：一件有明确目标的事"]',
-        "手机提交的独立任务",
+      assert.equal(
+        await evaluate(`document.querySelector('input[aria-label="新任务"]')===null`),
+        true,
+        "new work is assigned through chat, not a separate task form",
       );
-      await byText("交给员工");
       await until(
         `document.querySelector('.task-card')?.textContent.includes('手机提交的独立任务')`,
       );
