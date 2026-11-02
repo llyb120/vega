@@ -111,6 +111,62 @@ test("employee conversation delegates through the existing engine without leakin
   } finally { await engine.close(); store.close(); }
 });
 
+test("employee chat delegates evidence-dependent questions, follows an existing investigation and answers known facts without a task", async () => {
+  const store = new Store(":memory:");
+  const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  engine.employee.closed = true;
+  store.put("config", { model: "fixture/model", provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test/v1", models: { model: { limit: { context: 128000, output: 8192 } } } } } });
+  const employee = engine.employee.for(engine.employee.create({ name: "Investigator" }, "owner").id), chat = employee.chat("owner");
+  const question = "刚才任务调用 API 的地址是啥？";
+  const investigation = "只读调查刚才任务的 HTTP response headers timed out：核对实际模型、网关、请求 URL 和日志证据。只返回脱敏后的 origin/path，不输出 API Key、Token 或带凭据的查询参数；不得修改配置、修复代码或重试原请求。";
+  const source = await task(employee, "Original coding work");
+  employee.update((state) => { Object.assign(state.tasks[0], { status: "failed", result: "HTTP response headers timed out" }); });
+  const follow = (id: string, arguments_: any) => ({ role: "assistant", calls: [{ id, name: "employee", arguments: arguments_ }] });
+  engine.providers.chat = async (_model, system, messages, definitions) => {
+    assert(system.includes("需要现场证据的问题") && system.includes("自动安排只读调查"));
+    assert(system.includes("不能以沟通会话没有 shell") && system.includes("不是实际发起的请求地址"));
+    assert(system.includes("用户明确要求只讨论、不执行时遵守") && system.includes("不得擅自重启用户停止的任务或绕过审批"));
+    const description = definitions.find((tool) => tool.name === "employee")!.description;
+    assert(description.includes("自动安排只读调查") && description.includes("不要重复派单"));
+    assert(!definitions.some((tool) => ["bash", "write", "edit", "chrome", "switch_scene"].includes(tool.name)));
+    const last = messages.at(-1)!;
+    if (last.role === "user" && last.text?.includes("1+1")) return { role: "assistant", text: "2" };
+    if (last.role === "user") return follow("inspect", { action: "list" });
+    const result = JSON.parse(last.text!);
+    if (result.tasks) {
+      assert(result.tasks.some((task: any) => task.id === source.id && task.result.includes("timed out")));
+      const current = result.tasks.find((task: any) => task.key === "endpoint-investigation");
+      return current
+        ? follow("follow-up", { action: "resume", id: current.id, text: "优先核对实际请求 origin/path，保留只读范围。" })
+        : follow("investigate", { action: "add", kind: "todo", profile: "coding", key: "endpoint-investigation", text: investigation });
+    }
+    if (result.id) {
+      assert(system.includes(result.id), "the next model request sees tasks created in this turn, not a stale task index");
+      return { role: "assistant", text: `已安排只读调查（任务 ${result.id}），查到实际请求地址和证据后会回到这里。` };
+    }
+    return { role: "assistant", text: "已跟进原调查，不重复派单。" };
+  };
+  try {
+    await engine.run(chat.id, { role: "user", text: question });
+    const job = employee.state().tasks.find((task) => task.key === "endpoint-investigation")!;
+    assert(job && job.profile === "coding" && job.text === investigation);
+    assert.equal(employee.state().tasks.length, 2);
+    await engine.run(chat.id, { role: "user", text: question });
+    assert.equal(employee.state().tasks.length, 2, "a follow-up does not create a second investigation");
+    assert.match(employee.task(employee.state(), job.id).answer, /保留只读范围/);
+    await engine.run(chat.id, { role: "user", text: "1+1 等于多少？" });
+    assert.equal(store.messages(chat.id).at(-1)?.text, "2");
+    assert.equal(employee.state().tasks.length, 2, "ordinary answers remain ordinary answers");
+    employee.runtime.run = async (_session, prompt) => {
+      assert(prompt.includes(investigation) && prompt.includes("不得修改配置"));
+      await employee.execute(job.id, { action: "progress", text: "checked sanitized request evidence", plan: [{ content: "read-only investigation", status: "completed" }] });
+      await employee.execute(job.id, { action: "complete", text: "实际请求地址：https://gateway.example/v1/responses；已核对脱敏日志，未修改配置或重试请求。" });
+    };
+    assert.equal((await segment(employee, job)).status, "done");
+    assert.match(store.messages(chat.id).at(-1)!.text!, /实际请求地址：https:\/\/gateway.example\/v1\/responses/);
+  } finally { await engine.close(); store.close(); }
+});
+
 test("generic recovery diagnoses in the original task/session, requires verified completion and stops at its durable budget", async () => {
   const { store, employee, runtime } = fixture();
   try {
