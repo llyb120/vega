@@ -35,6 +35,7 @@ export class Chrome {
   observations = new Map<string, Observation>();
   cancelled = new Map<string, AbortController>();
   experiences: Experiences;
+  workspaceFile = workspaceFile;
   constructor(
     public store: Store,
     public bridge: ChromeBridge,
@@ -793,7 +794,7 @@ export class Chrome {
         "upload requires a frame, unique selector and 1–16 workspace files",
       );
       const files = await Promise.all(
-        a.files.map((p: string) => workspaceFile(cwd, p)),
+        a.files.map((p: string) => this.workspaceFile(cwd, p)),
       );
       const r = await this.cdp(
         tag,

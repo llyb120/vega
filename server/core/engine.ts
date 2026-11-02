@@ -18,6 +18,7 @@ import { Tools, type Outcome } from "./tools";
 import { Context, estimate, ACP_GUIDE } from "./context";
 import { Employee, recallMemory, type EmployeeRuntime } from "./employee";
 import { EmployeeBrowsers } from "./employee-browsers";
+import { LocalBrowsers } from "./local-browsers";
 import { Vault } from "./vault";
 import { Relay } from "./relay";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
@@ -81,6 +82,7 @@ export class Engine {
   providers = new Providers();
   employee: Employee;
   browsers: EmployeeBrowsers;
+  localBrowsers: LocalBrowsers;
   vault: Vault;
   relay: Relay;
   fire: Fire;
@@ -100,6 +102,7 @@ export class Engine {
   async releaseSession(key: string) {
     const entry = this.mcpSessions.get(key);
     this.mcpSessions.delete(key);
+    await this.localBrowsers.release(key, true);
     await entry?.client.close();
   }
 
@@ -197,6 +200,7 @@ export class Engine {
     };
     this.employee = new Employee(store, this.vault, runtime);
     this.browsers = new EmployeeBrowsers(store, chrome.pageScript);
+    this.localBrowsers = new LocalBrowsers(store, this.localAgents, chrome.pageScript);
     this.fire = new Fire(
       store,
       (session, message) => this.run(session, message),
@@ -298,6 +302,7 @@ export class Engine {
     this.catalog.auth.close();
     this.chrome.bridge.close();
     await this.browsers.close();
+    await this.localBrowsers.close();
   }
   async removeEmployee(key: string, beforeRemove: () => Promise<void> = async () => {}) {
     const employee = this.employee.for(key), state = employee.state();
@@ -330,7 +335,8 @@ export class Engine {
     }
     return this.employee;
   }
-  async chromeFor(session: Session) {
+  async chromeFor(session: Session, signal?: AbortSignal) {
+    if (session.localAgent) return this.localBrowsers.get(session, signal);
     if (!session.employeeId && !session.taskId) return this.chrome;
     return this.browsers.get(this.employeeFor(session).employeeId);
   }
@@ -929,7 +935,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       throw error;
     } finally {
       try {
-        await tools?.close();
+        try { await tools?.close(); }
+        finally { await this.localBrowsers.release(key); }
         if (control.signal.aborted) await this.releaseSession(key);
         if (session && original) {
           if (!session.taskId) {
@@ -938,7 +945,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
           this.store.saveSession(session);
         }
-        const browser = session?.employeeId ? this.browsers.peek(session.employeeId) : this.chrome;
+        const browser = session?.localAgent ? this.localBrowsers.peek(key) : session?.employeeId ? this.browsers.peek(session.employeeId) : this.chrome;
         browser?.experiences.finish(key, !error);
       } catch (cleanupError: any) {
         error ||= new Error(String(redact.value(cleanupError?.message || cleanupError)));

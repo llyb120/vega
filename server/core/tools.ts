@@ -486,7 +486,7 @@ export class Tools {
       return this.engine.vault.executeTool(a);
     }
     if (call.name === "chrome") {
-      const browser = await this.engine.chromeFor(this.session);
+      const browser = await this.engine.chromeFor(this.session, this.signal);
       const result = await browser.execute(
         this.session.id,
         this.session.cwd,

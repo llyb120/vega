@@ -46,6 +46,10 @@ func main() {
 	must(err)
 	lis, err := net.Listen("tcp", localAddress)
 	must(err)
+	browserServer, browserErr := localChrome.start()
+	if browserErr != nil {
+		fmt.Fprintln(os.Stderr, "vega-local browser:", browserErr)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent", a.serveWS)
 	mux.HandleFunc("/config/"+a.configToken, a.configure)
@@ -63,6 +67,9 @@ func main() {
 		}
 		a.mu.Unlock()
 		_ = srv.Close()
+		if browserServer != nil {
+			_ = browserServer.Close()
+		}
 		os.Exit(0)
 	})
 }
@@ -286,6 +293,25 @@ func fileOperation(req fileReq) map[string]any {
 	case "stat":
 		st, err := os.Stat(path)
 		return map[string]any{"path": path, "isDir": err == nil && st.IsDir()}
+	case "upload":
+		root, err := filepath.EvalSymlinks(req.Cwd)
+		if err != nil {
+			return failure(err.Error())
+		}
+		root, err = filepath.Abs(root)
+		if err != nil {
+			return failure(err.Error())
+		}
+		file, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return failure(err.Error())
+		}
+		rel, err := filepath.Rel(root, file)
+		st, statErr := os.Stat(file)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) || statErr != nil || !st.Mode().IsRegular() {
+			return failure("Only regular files within the working directory may be uploaded")
+		}
+		return map[string]any{"path": file}
 	case "read":
 		f, err := os.Open(path)
 		if err != nil {

@@ -8,5 +8,5 @@ web/dist/
 *.db-wal
 *.db-shm
 *.log
-local/vega-local.exe
+local/vega-local*
 .env

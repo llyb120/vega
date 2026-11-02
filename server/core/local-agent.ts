@@ -105,7 +105,7 @@ export class LocalAgents {
     if (agent.transport) agent.transport.send(job);
     else this.emit({ type: "local_agent_request", targetUser: agent.userId, data: { instance: agent.instance, ...job } });
   }
-  request(agent: Agent, op: "exec" | "file", args: Obj, signal: AbortSignal) {
+  request(agent: Agent, op: "exec" | "file" | "browser", args: Obj, signal: AbortSignal) {
     signal.throwIfAborted();
     assert(agent.pending.size < 16, "Too many local operations");
     if (this.active(agent.userId, agent.clientId) !== agent) throw new LocalAgentUnavailable();

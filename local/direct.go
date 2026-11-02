@@ -219,7 +219,7 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 }
 func runJobs(parent context.Context, conn *websocket.Conn) {
 	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
+	defer func() { cancel(); localChrome.releaseConnection(ctx) }()
 	var writes, tasks sync.Mutex
 	write := func(value any) {
 		writes.Lock()
@@ -279,7 +279,12 @@ func runJobs(parent context.Context, conn *websocket.Conn) {
 		pending[request.ID] = stop
 		tasks.Unlock()
 		go func(request job) {
-			result := execute(taskCtx, request)
+			var result map[string]any
+			if request.Op == "browser" {
+				result = localChrome.execute(ctx, taskCtx, request)
+			} else {
+				result = execute(taskCtx, request)
+			}
 			stop()
 			tasks.Lock()
 			delete(pending, request.ID)
