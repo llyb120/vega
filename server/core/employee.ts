@@ -4,7 +4,8 @@ import {
   beijingDateTime,
 } from "../../shared/time";
 import { systemPresence, type Presence } from "./presence";
-import type { Store, Session } from "./store";
+import type { Store, Session, Message } from "./store";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { assert, id, clone, clip, type Obj } from "./util";
 import { Vault } from "./vault";
@@ -237,7 +238,7 @@ export function workSlot(start: string, end: string, now: number) {
   return next;
 }
 export type EmployeeRuntime = {
-  run: (session: string, text: string, signal?: AbortSignal) => Promise<void>;
+  run: (session: string, text: string, signal?: AbortSignal, input?: Message["taskInput"]) => Promise<void>;
   cancel: (session: string) => void;
   isRunning: (session: string) => boolean;
   emit: (type: string, data?: any) => void;
@@ -371,14 +372,34 @@ export class Employee {
   }
   recover(t: Task, reason: string, now = Date.now()) {
     const recovery = t.recovery ||= { attempts: 0, startedAt: now, history: [] };
+    const observations: unknown[] = (t.planRevision || 0) === (t.revision || 0)
+      ? (t.plan || []).filter((step: Obj) => step.status === "completed").map((step: Obj) => ["step", step.content]) : [];
+    for (const key of [t.workSession, t.computerSession].filter(Boolean)) {
+      let session: Session;
+      try { session = this.store.session(key); } catch { continue; }
+      if (session.taskId !== t.id || (session.employeeId && session.employeeId !== this.employeeId)) continue;
+      const rows = this.store.messages(key);
+      const calls = new Map<string, Obj>();
+      for (const message of rows) {
+        for (const call of message.calls || []) calls.set(call.id, call);
+        if (message.role !== "tool" || message.error || ["employee", "context_budget", "acp_status", "compress", "decompress", "recall", "search_context"].includes(message.name || "")) continue;
+        const { _after, ...args } = calls.get(message.callId!)?.arguments || {};
+        observations.push(["tool", message.name, args, message.text, message.images]);
+      }
+    }
+    const evidence = new Set<string>(recovery.evidence || []), before = evidence.size;
+    for (const observation of observations) evidence.add(createHash("sha256").update(JSON.stringify(observation)).digest("hex"));
+    recovery.stalled = evidence.size > before ? 0 : (recovery.stalled || 0) + 1;
+    recovery.evidence = [...evidence];
     recovery.attempts++;
     recovery.reason = clip(String(reason), 2000);
-    recovery.history.push({ at: now, reason: recovery.reason });
+    recovery.history.push({ at: now, reason: recovery.reason, stalled: recovery.stalled });
     recovery.history = recovery.history.slice(-5);
     t.result = recovery.reason;
-    if (recovery.attempts > 3 || now - recovery.startedAt > 30 * 60000) {
+    if (recovery.stalled >= 3 || recovery.attempts > 3 || now - recovery.startedAt > 30 * 60000) {
       t.status = "waiting";
-      t.waiting = "自动恢复已达上限，需要你处理：" + recovery.reason;
+      t.nextCheckAt = 0;
+      t.waiting = (recovery.stalled >= 3 ? "连续多次中断且无新增进展，自动恢复已暂停，需要你处理：" : "自动恢复已达上限，需要你处理：") + recovery.reason;
       return;
     }
     t.status = "recovering";
@@ -860,6 +881,7 @@ export class Employee {
             assert(!t.waiting && !t.approval, "Cannot relay a suspended task");
             t.side = "computer";
             t.handoff = content;
+            t.handoffRevision = (t.handoffRevision || 0) + 1;
             t.status = "queued";
             t.nextCheckAt = 0;
           }
@@ -1327,10 +1349,24 @@ export class Employee {
       task.supplementPending = false;
       this.save(state);
       if (computer && !this.runtime.isolated) stopMonitor = this.monitorComputer(task.id, session);
-      const prompt = `[员工任务 ${task.id}]\n${computer ? task.handoff || task.text : task.text}\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/进度/恢复点/补充（仅续做未完成事项；提交过的作业只检查原作业，不重复提交）：${JSON.stringify({ plan: task.plan, progress: task.progress, checkpoint: task.checkpoint, answer: task.answer, event: task.event, fromDuty: task.fromDuty })}\n相关稳定记忆：${JSON.stringify(memories)}\n执行前用 employee progress 登记完整计划（保留未来步骤）；验证成功才标 completed。ask/help/defer/relay 后立即结束本轮；缺信息找交代人，不等待轮询。${computer ? "你在隔离的电脑/Chrome 会话，只做交接内容。完成后报告实际结果，系统自动返回主会话；不编码、不再次 relay。" : "编码使用 switch_scene（主会话共享历史），Chrome 操作必须 relay scene=computer（独立工具/历史）。"}\n不得自建 worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
-      const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify(task.recovery)}\n先检查现场与历史回执，诊断根因，采取最小修复，再验证并继续原计划。此前外部提交结果不明则核验，无法核验用help等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
-      const after = this.store.messages(session).at(-1)?.seq || 0;
-      await this.runtime.run(session, prompt + recovery + "\n主任务交付前必须调用complete，text写实际验证证据；不能把正常结束一轮当作任务完成。电脑会话只交回结果，不调用complete。", AbortSignal.timeout(15 * 60000));
+      const rowsBefore = this.store.messages(session), continuing = rowsBefore.some((message) => message.role === "user");
+      const previous = {
+        answer: rowsBefore.findLast((message) => message.taskInput?.answer !== undefined)?.taskInput?.answer,
+        handoff: rowsBefore.findLast((message) => message.taskInput?.handoff !== undefined)?.taskInput?.handoff,
+        handoffRevision: rowsBefore.findLast((message) => message.taskInput?.handoffRevision !== undefined)?.taskInput?.handoffRevision,
+      };
+      const input = { answer: task.answer || "", handoff: computer ? task.handoff || "" : "", handoffRevision: computer ? task.handoffRevision || 0 : undefined };
+      // Delivery is acknowledged by the persisted input/result, never before the runtime actually appends it.
+      const supplement = previous.answer !== undefined && input.answer.startsWith(previous.answer) ? input.answer.slice(previous.answer.length).trim() : input.answer;
+      const snapshot = JSON.stringify({ plan: task.plan, planRevision: task.planRevision || 0, revision: task.revision || 0, progress: task.progress?.at(-1), checkpoint: task.checkpoint });
+      const context = continuing
+        ? `[员工任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n当前计划和恢复点：${snapshot}`
+        : `[员工任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, fromDuty: task.fromDuty })}\n相关稳定记忆：${JSON.stringify(memories)}`;
+      const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
+      const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, stalled: task.recovery.stalled || 0, reason: task.recovery.reason })}\n先检查现场与历史回执，诊断根因并改变无效方法，最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用help等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
+      const prompt = context + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n首次执行先用progress登记完整计划；续做保留已验证步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划，验证成功才标completed。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；缺信息找交代人，不等待轮询。${computer ? "你在隔离的电脑/Chrome会话，只做交接内容。完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写验证证据；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
+      const after = rowsBefore.at(-1)?.seq || 0;
+      await this.runtime.run(session, prompt, AbortSignal.timeout(15 * 60000), input);
       const rows = this.store.messages(session);
       result =
         [...rows].reverse().find((m) => m.role === "assistant" && m.text && m.seq! > after)

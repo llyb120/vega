@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { Store } from "../server/core/store";
 import { Engine } from "../server/core/engine";
+import { ProviderError } from "../server/core/provider";
 import { Catalog } from "../server/core/catalog";
 import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
@@ -129,11 +130,10 @@ test("generic recovery diagnoses in the original task/session, requires verified
     assert.equal(current.workSession, originalSession);
     assert.equal(current.recovery.attempts, 2);
     current = await segment(employee, current);
-    current = await segment(employee, current);
     assert.equal(current.status, "waiting");
-    assert.equal(current.recovery.attempts, 4);
+    assert.equal(current.recovery.attempts, 3);
     const reopened = new Employee(store, employee.vault, runtime);
-    assert.equal(reopened.state().tasks[0].recovery.attempts, 4);
+    assert.equal(reopened.state().tasks[0].recovery.attempts, 3);
     await employee.control({ action: "answer", id: job.id, text: "environment fixed, continue" });
     runtime.run = async () => {
       await assert.rejects(employee.execute(job.id, { action: "complete", text: "trust me" }), /verified plan/);
@@ -144,6 +144,211 @@ test("generic recovery diagnoses in the original task/session, requires verified
     assert.equal(current.status, "done");
     assert.equal(current.workSession, originalSession);
     assert.equal(store.sessions().length, 1);
+  } finally { employee.close(); store.close(); }
+});
+
+test("consecutive interruptions resume with only new supplements and the current checkpoint, durably in the same session", async () => {
+  const { store, employee, runtime } = fixture();
+  const firstText = "Unique original task: inspect the submitted external job without resubmitting";
+  const job = await task(employee, firstText);
+  employee.update((state) => { state.tasks[0].checkpoint = "external job-123 submitted; only inspect"; });
+  const prompts: string[] = [], sessions: string[] = [];
+  runtime.run = async (session, prompt, _signal, input) => {
+    sessions.push(session); prompts.push(prompt);
+    store.append(session, { role: "user", text: prompt, taskInput: input });
+    throw Error("connection interrupted");
+  };
+  try {
+    let current = await segment(employee, job);
+    assert.equal(prompts[0].split(firstText).length - 1, 1, "the original task is sent once, not duplicated inside its first prompt");
+    await employee.control({ action: "resume", id: job.id, text: "preserve login" });
+    current = await segment(employee, current);
+    assert.match(prompts[1], /preserve login/);
+    assert(!prompts[1].includes(firstText), "recovery is a continuation, not a re-dispatch of the full task");
+    assert.match(prompts[1], /external job-123/);
+    assert.match(prompts[1], /不重复.*确认|不要.*确认/);
+    const reopened = new Employee(store, employee.vault, runtime);
+    reopened.closed = true;
+    current = await segment(reopened, current);
+    assert(!prompts[2].includes("preserve login"), "a previously delivered supplement is not repeatedly acknowledged after restart");
+    assert(sessions.every((session) => session === sessions[0]));
+    assert.equal(store.sessions().length, 1);
+  } finally { employee.close(); store.close(); }
+});
+
+test("a crash before the runtime appends input cannot consume a supplement, and a replacement session gets the full recovery context", async () => {
+  const { store, employee, runtime } = fixture();
+  const job = await task(employee, "Original authorized task");
+  await employee.control({ action: "resume", id: job.id, text: "must preserve login" });
+  const prompts: string[] = [];
+  runtime.run = async (_session, prompt) => { prompts.push(prompt); throw Error("failed before input was persisted"); };
+  try {
+    let current = await segment(employee, job);
+    runtime.run = async (session, prompt, _signal, input) => {
+      prompts.push(prompt);
+      store.append(session, { role: "user", text: prompt, taskInput: input });
+      throw Error("interrupted after input was persisted");
+    };
+    current = await segment(employee, current);
+    assert.match(prompts[1], /must preserve login/, "unpersisted supplements must be sent again");
+    store.deleteSession(current.workSession);
+    await employee.control({ action: "resume", id: job.id, text: "also keep the original settings" });
+    current = await segment(employee, current);
+    assert.match(prompts[2], /Original authorized task/);
+    assert.match(prompts[2], /must preserve login/);
+    assert.match(prompts[2], /also keep the original settings/);
+    assert.equal(current.previousSessions.length, 1);
+  } finally { employee.close(); store.close(); }
+});
+
+test("repeated interruption without new evidence trips a durable breaker; acknowledgements and repeated planning do not count as progress", async () => {
+  const { store, employee, runtime } = fixture();
+  const job = await task(employee);
+  employee.chat("owner");
+  let attempts = 0;
+  runtime.run = async (session, prompt, _signal, input) => {
+    attempts++;
+    store.append(session, { role: "user", text: prompt, taskInput: input });
+    store.append(session, { role: "assistant", text: "已收到补充，准备继续。" });
+    await employee.execute(job.id, { action: "progress", text: "starting again", plan: [{ content: "verify the target", status: "in_progress" }] });
+    store.append(session, { role: "assistant", calls: [{ id: "plan-" + attempts, name: "employee", arguments: { action: "progress" } }] });
+    store.append(session, { role: "tool", name: "employee", callId: "plan-" + attempts, text: '{"ok":true}' });
+    throw Error("connection interrupted");
+  };
+  try {
+    let current = await segment(employee, job);
+    const firstCheck = current.nextCheckAt;
+    current = await segment(employee, current);
+    assert(current.nextCheckAt > firstCheck, "consecutive faults back off instead of immediately spinning");
+    current = await segment(employee, current);
+    assert.equal(current.status, "waiting");
+    assert.equal(current.recovery.stalled, 3);
+    assert.equal(current.nextCheckAt, 0);
+    assert.match(current.waiting, /连续.*无.*进展/);
+    assert.match(store.messages(employee.state().chatSession!).at(-1)!.text!, /需要你处理/);
+    const reopened = new Employee(store, employee.vault, runtime);
+    reopened.closed = true;
+    assert.equal(reopened.state().tasks[0].recovery.stalled, 3);
+    await employee.control({ action: "answer", id: job.id, text: "connection fixed, continue original work" });
+    assert.equal(employee.state().tasks[0].recovery, undefined);
+    assert.equal(employee.state().tasks[0].workSession, current.workSession);
+  } finally { employee.close(); store.close(); }
+});
+
+test("only new successful tool evidence or newly verified plan steps reset the consecutive-stall counter, not the total recovery budget", async () => {
+  const { store, employee } = fixture();
+  const job = await task(employee), session = store.newSession({ taskId: job.id });
+  job.workSession = session.id;
+  const evidence = (id: string, path: string, error = false) => {
+    store.append(session.id, { role: "assistant", calls: [{ id, name: "read", arguments: { path } }] });
+    store.append(session.id, { role: "tool", name: "read", callId: id, text: "same observed state", error });
+  };
+  try {
+    employee.recover(job, "interrupted", 1000);
+    assert.equal(job.recovery.stalled, 1);
+    evidence("first", "one");
+    employee.recover(job, "interrupted", 2000);
+    assert.equal(job.recovery.stalled, 0);
+    evidence("repeated", "one");
+    evidence("failed", "two", true);
+    employee.recover(job, "interrupted", 3000);
+    assert.equal(job.recovery.stalled, 1, "new call IDs and failed calls are not new successful evidence");
+    job.plan = [{ content: "verify original state", status: "completed" }];
+    employee.recover(job, "interrupted", 4000);
+    assert.equal(job.recovery.stalled, 0);
+    assert.equal(job.recovery.attempts, 4);
+    assert.equal(job.status, "waiting", "real progress does not allow unlimited automatic retries");
+  } finally { employee.close(); store.close(); }
+});
+
+test("real executor recovery preserves committed tool outcomes and consumes each supplement once before final verification", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "vega-interrupted-task-")), store = new Store(":memory:");
+  const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  engine.employee.closed = true;
+  store.put("config", { model: "fixture/model", provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test/v1", models: { model: { limit: { context: 128000, output: 8192 } } } } } });
+  const employee = engine.employee, job = await task(employee, "Keep this original task", { cwd: dir });
+  let phase = 0, writes = 0;
+  const inputs: string[] = [];
+  engine.events.on("event", (event) => { if (event.type === "tool_start" && event.data.name === "write") writes++; });
+  engine.providers.chat = async (_model, _system, messages) => {
+    const input = messages.findLast((message) => message.role === "user")!;
+    if (inputs.at(-1) !== input.text) inputs.push(input.text!);
+    if (phase++ === 0) return { role: "assistant", calls: [{ id: "write-once", name: "write", arguments: { path: "proof.txt", content: "do not repeat" } }] };
+    if (phase === 2) throw new ProviderError("connection interrupted after write", 400);
+    if (phase === 3) {
+      assert.match(input.text!, /preserve login/);
+      return { role: "assistant", text: "已收到补充，准备继续。" };
+    }
+    assert(!input.text!.includes("preserve login"), "the continuation must not re-acknowledge a supplement already in history");
+    assert(messages.some((message) => message.role === "tool" && message.callId === "write-once"));
+    if (phase === 4) return { role: "assistant", calls: [{ id: "verify", name: "employee", arguments: { action: "progress", text: "verified retained file and requirements", plan: [{ content: "preserve file and login", status: "completed" }] } }] };
+    return { role: "assistant", calls: [{ id: "finish", name: "employee", arguments: { action: "complete", text: "verified original write and latest supplement; no repeated write" } }] };
+  };
+  try {
+    let current = await segment(employee, job);
+    assert.equal(current.status, "recovering");
+    await employee.control({ action: "resume", id: job.id, text: "preserve login" });
+    current = await segment(employee, current);
+    assert.equal(current.status, "recovering");
+    current = await segment(employee, current);
+    assert.equal(current.status, "done");
+    assert.equal(inputs.length, 3);
+    assert.equal(writes, 1);
+    assert.equal(await readFile(join(dir, "proof.txt"), "utf8"), "do not repeat");
+    assert.equal(store.sessions().length, 1);
+    assert.equal(store.messages(current.workSession).filter((message) => message.taskInput).length, 3);
+    assert.equal(store.messages(current.workSession).filter((message) => message.role === "tool" && message.callId === "write-once").length, 1);
+  } finally { await engine.close(); store.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a supplement delivered by a completion guard is not re-injected after another interruption", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "vega-pending-supplement-")), store = new Store(":memory:");
+  const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  engine.employee.closed = true;
+  store.put("config", { model: "fixture/model", provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test/v1", models: { model: { limit: { context: 128000, output: 8192 } } } } } });
+  const employee = engine.employee, job = await task(employee, "Original work", { cwd: dir });
+  let requests = 0;
+  engine.providers.chat = async (_model, _system, messages) => {
+    requests++;
+    if (requests === 1) {
+      await employee.execute(job.id, { action: "progress", text: "old goal verified", plan: [{ content: "old goal", status: "completed" }] });
+      await employee.control({ action: "resume", id: job.id, text: "latest requirement" });
+      return { role: "assistant", calls: [{ id: "guard", name: "employee", arguments: { action: "complete", text: "old goal done" } }] };
+    }
+    if (requests === 2) throw new ProviderError("interrupted after receiving supplement", 400);
+    assert(!messages.findLast((message) => message.role === "user")!.text!.includes("latest requirement"));
+    assert(messages.some((message) => message.role === "tool" && message.taskInput?.answer?.includes("latest requirement")));
+    await employee.execute(job.id, { action: "progress", text: "latest goal verified", plan: [{ content: "latest requirement", status: "completed" }] });
+    return { role: "assistant", calls: [{ id: "finish", name: "employee", arguments: { action: "complete", text: "latest goal verified" } }] };
+  };
+  try {
+    let current = await segment(employee, job);
+    assert.equal(current.status, "recovering");
+    current = await segment(employee, current);
+    assert.equal(current.status, "done");
+    assert.equal(requests, 3);
+  } finally { await engine.close(); store.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a genuinely new browser handoff is delivered even when its wording matches an earlier handoff", async () => {
+  const { store, employee, runtime } = fixture();
+  const job = await task(employee, "Original work");
+  employee.update((state) => { Object.assign(state.tasks[0], { side: "computer", handoff: "Inspect original job-123", handoffRevision: 1 }); });
+  const prompts: string[] = [];
+  runtime.run = async (session, prompt, _signal, input) => {
+    store.append(session, { role: "user", text: prompt, taskInput: input });
+    if (store.session(session).scene === "computer") {
+      prompts.push(prompt);
+      store.append(session, { role: "assistant", text: "original job is still running" });
+    } else await employee.execute(job.id, { action: "relay", scene: "computer", text: "Inspect original job-123" });
+  };
+  try {
+    let current = await segment(employee, job);
+    current = await segment(employee, current);
+    current = await segment(employee, current);
+    assert.equal(prompts.length, 2);
+    assert(prompts.every((prompt) => prompt.includes("本次电脑交接：Inspect original job-123")));
+    assert.equal(store.sessions().length, 2, "the browser session itself is still reused");
   } finally { employee.close(); store.close(); }
 });
 

@@ -9,6 +9,7 @@ export type Message = {
   text?: string;
   displayText?: string;
   actorId?: string;
+  taskInput?: { answer?: string; handoff?: string; handoffRevision?: number };
   thinking?: string;
   signature?: string;
   opaque?: any[];

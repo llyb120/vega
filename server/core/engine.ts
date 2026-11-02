@@ -187,7 +187,7 @@ export class Engine {
     this.events.setMaxListeners(256);
     this.vault = new Vault(store);
     const runtime: EmployeeRuntime = {
-      run: (s, text, signal) => this.run(s, { role: "user", text }, undefined, signal),
+      run: (s, text, signal, taskInput) => this.run(s, { role: "user", text, taskInput }, undefined, signal),
       cancel: (s) => this.cancel(s),
       isRunning: (s) => this.active.has(s),
       emit: (type, data) => this.emit({ type, data }),
@@ -934,6 +934,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       callId: call.id,
       name: call.name,
       text,
+      taskInput: call.name === "employee" && !o.error && typeof value?.supplement === "string" ? { answer: value.supplement } : undefined,
       images: o.images,
       error: o.error,
     });
