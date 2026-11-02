@@ -9,12 +9,14 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
 const extensionOrigin = "chrome-extension://mdicifjlbgnkkdkcbfdnebeghhlamjbm"
+const extensionVersion = "0.1.14"
 
 var extensionClientID = regexp.MustCompile(`(?i)^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 var localChrome = newBrowserBridge()
@@ -32,16 +34,20 @@ type browserCommand struct {
 	generation uint64
 	reply      chan browserReply
 }
+type browserPeer struct {
+	lastAt  time.Time
+	browser string
+}
 type browserBridge struct {
 	mu                   sync.Mutex
 	token                string
 	port                 int
-	client, browser      string
-	lastAt               time.Time
+	clients              map[string]browserPeer
+	primaryID            string
 	connection           context.Context
 	session, leaseClient string
 	generation           uint64
-	queue                chan *browserCommand
+	queues               map[string]chan *browserCommand
 	pending              map[string]*browserCommand
 }
 
@@ -50,7 +56,7 @@ func newBrowserBridge() *browserBridge {
 	if _, err := rand.Read(token); err != nil {
 		panic(err)
 	}
-	return &browserBridge{token: hex.EncodeToString(token), queue: make(chan *browserCommand, 16), pending: make(map[string]*browserCommand)}
+	return &browserBridge{token: hex.EncodeToString(token), clients: make(map[string]browserPeer), queues: make(map[string]chan *browserCommand), pending: make(map[string]*browserCommand)}
 }
 func (b *browserBridge) start() (*http.Server, error) {
 	for port := 47653; port <= 47662; port++ {
@@ -67,13 +73,51 @@ func (b *browserBridge) start() (*http.Server, error) {
 	}
 	return nil, fmt.Errorf("Chrome extension loopback ports 47653–47662 are occupied")
 }
+
+// The caller holds b.mu for status and queue selection.
 func (b *browserBridge) status() map[string]any {
-	connected := b.client != "" && time.Since(b.lastAt) < 45*time.Second
-	browsers := []string{}
-	if connected {
-		browsers = append(browsers, b.browser)
+	live := []string{}
+	for client, peer := range b.clients {
+		if time.Since(peer.lastAt) >= 45*time.Second {
+			delete(b.clients, client)
+			delete(b.queues, client)
+		} else {
+			live = append(live, client)
+		}
 	}
-	return map[string]any{"connected": connected, "browser": b.browser, "browsers": browsers, "origin": fmt.Sprintf("http://127.0.0.1:%d", b.port), "extensionId": strings.TrimPrefix(extensionOrigin, "chrome-extension://"), "extensionVersion": "0.1.14"}
+	sort.Strings(live)
+	current, connected := b.clients[b.primaryID]
+	if !connected || current.browser != "Google Chrome" {
+		if !connected {
+			b.primaryID = ""
+			if len(live) > 0 {
+				b.primaryID = live[0]
+			}
+		}
+		for _, client := range live {
+			if b.clients[client].browser == "Google Chrome" {
+				b.primaryID = client
+				break
+			}
+		}
+	}
+	client := b.primaryID
+	// A turn stays bound to its acquired browser even when another profile connects.
+	if b.leaseClient != "" {
+		client = b.leaseClient
+	}
+	peer, connected := b.clients[client]
+	browsers := []string{}
+	for _, client := range live {
+		browsers = append(browsers, b.clients[client].browser)
+	}
+	return map[string]any{"connected": connected, "browser": peer.browser, "browsers": browsers, "origin": fmt.Sprintf("http://127.0.0.1:%d", b.port), "extensionId": strings.TrimPrefix(extensionOrigin, "chrome-extension://"), "extensionVersion": extensionVersion}
+}
+func (b *browserBridge) queue(client string) chan *browserCommand {
+	if b.queues[client] == nil {
+		b.queues[client] = make(chan *browserCommand, 128)
+	}
+	return b.queues[client]
 }
 func (b *browserBridge) releaseConnection(connection context.Context, retained ...string) {
 	b.mu.Lock()
@@ -122,15 +166,16 @@ func (b *browserBridge) execute(connection, ctx context.Context, j job) map[stri
 		b.mu.Unlock()
 		return map[string]any{"result": status}
 	}
-	if status["connected"] != true || (b.leaseClient != "" && b.leaseClient != b.client) {
+	if status["connected"] != true {
 		b.mu.Unlock()
 		return map[string]any{"status": "unavailable", "error": "客户端本地 Chrome 扩展未连接或已更换，请在所选电脑加载/重新连接 Nova Chrome 扩展后继续；不会使用服务端浏览器。"}
 	}
 	if req.Operation == "acquire" {
 		if b.connection == nil {
 			b.generation++
+			b.leaseClient = b.primaryID
 		}
-		b.connection, b.session, b.leaseClient = connection, req.Session, b.client
+		b.connection, b.session = connection, req.Session
 		b.mu.Unlock()
 		return map[string]any{"result": status}
 	}
@@ -157,14 +202,19 @@ func (b *browserBridge) execute(connection, ctx context.Context, j job) map[stri
 		b.mu.Unlock()
 		return failure("Unknown browser operation")
 	}
-	command := &browserCommand{ID: j.ID, Operation: req.Operation, Args: req.Args, ExpiresAt: time.Now().Add(10 * time.Second).UnixMilli(), client: b.client, generation: b.generation, reply: make(chan browserReply, 1)}
+	timeout := 3 * time.Second
+	if req.Operation == "cdp" || req.Operation == "devtools" {
+		timeout = 10 * time.Second
+	}
+	command := &browserCommand{ID: j.ID, Operation: req.Operation, Args: req.Args, ExpiresAt: time.Now().Add(timeout).UnixMilli(), client: b.leaseClient, generation: b.generation, reply: make(chan browserReply, 1)}
 	b.pending[j.ID] = command
+	queue := b.queue(command.client)
 	b.mu.Unlock()
 	defer func() { b.mu.Lock(); delete(b.pending, j.ID); b.mu.Unlock() }()
-	timer := time.NewTimer(12 * time.Second)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case b.queue <- command:
+	case queue <- command:
 	default:
 		return failure("Local browser queue is full; input not sent")
 	}
@@ -189,6 +239,7 @@ func (b *browserBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Connection", "close")
 	if r.Method == http.MethodOptions {
 		_, _ = w.Write([]byte("{}"))
 		return
@@ -202,7 +253,7 @@ func (b *browserBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Header.Get("Authorization") != "Bearer "+b.token {
-		http.Error(w, "Unauthorized", 401)
+		http.Error(w, "Unauthorized", 403)
 		return
 	}
 	var body struct {
@@ -217,36 +268,33 @@ func (b *browserBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/poll":
 		b.mu.Lock()
-		if b.client != "" && b.client != body.ClientID && time.Since(b.lastAt) < 45*time.Second {
-			b.mu.Unlock()
-			http.Error(w, "Another browser is connected", 409)
-			return
-		}
-		b.client, b.lastAt = body.ClientID, time.Now()
+		browser := "unknown"
 		ua := r.Header.Get("User-Agent")
 		switch {
 		case strings.Contains(ua, "Edg/"):
-			b.browser = "Microsoft Edge"
+			browser = "Microsoft Edge"
+		case strings.Contains(ua, "OPR/"):
+			browser = "Opera"
 		case strings.Contains(ua, "Chrome/"):
-			b.browser = "Google Chrome"
-		default:
-			b.browser = "Chromium"
+			browser = "Google Chrome"
 		}
+		b.clients[body.ClientID] = browserPeer{lastAt: time.Now(), browser: browser}
+		queue := b.queue(body.ClientID)
 		b.mu.Unlock()
 		timer := time.NewTimer(20 * time.Second)
 		defer timer.Stop()
 		for {
 			select {
-			case command := <-b.queue:
+			case command := <-queue:
 				b.mu.Lock()
 				valid := b.pending[command.ID] == command && b.connection != nil && command.generation == b.generation && command.client == body.ClientID && command.ExpiresAt > time.Now().UnixMilli()
 				b.mu.Unlock()
 				if valid {
-					_ = json.NewEncoder(w).Encode(map[string]any{"command": command})
+					_ = json.NewEncoder(w).Encode(map[string]any{"command": command, "version": extensionVersion})
 					return
 				}
 			case <-timer.C:
-				_, _ = w.Write([]byte(`{"command":null}`))
+				_ = json.NewEncoder(w).Encode(map[string]any{"command": nil, "version": extensionVersion})
 				return
 			case <-r.Context().Done():
 				return
@@ -254,6 +302,11 @@ func (b *browserBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	case "/reply":
 		b.mu.Lock()
+		if _, known := b.clients[body.ClientID]; !known {
+			b.mu.Unlock()
+			http.Error(w, "Unknown Chrome client", 409)
+			return
+		}
 		command := b.pending[body.ID]
 		if command != nil && command.client == body.ClientID {
 			select {

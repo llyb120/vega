@@ -22,7 +22,7 @@ func browserJob(operation, session string) job {
 }
 func connectedBrowser() *browserBridge {
 	b := newBrowserBridge()
-	b.client, b.browser, b.lastAt = browserClient, "Google Chrome", time.Now()
+	b.clients[browserClient] = browserPeer{lastAt: time.Now(), browser: "Google Chrome"}
 	return b
 }
 func TestBrowserLeaseIsGlobalAcrossSessionsAndServerConnections(t *testing.T) {
@@ -62,7 +62,8 @@ func TestBrowserLeaseIsGlobalAcrossSessionsAndServerConnections(t *testing.T) {
 	if r := call(first, "acquire", browserClient); r["error"] != nil {
 		t.Fatal("disconnect did not release lease", r)
 	}
-	b.client = "44444444-4444-4444-8444-444444444444"
+	delete(b.clients, browserClient)
+	b.clients["44444444-4444-4444-8444-444444444444"] = browserPeer{lastAt: time.Now(), browser: "Google Chrome"}
 	if r := call(first, "tabs", browserClient); r["status"] != "unavailable" {
 		t.Fatal("lease silently switched browser profile", r)
 	}
@@ -108,7 +109,7 @@ func TestBrowserBridgeAuthenticatedExtensionRoundtripAndCancellation(t *testing.
 	}
 	_, pair := post("/pair", extensionOrigin, "", nil)
 	token := pair["token"].(string)
-	if status, _ := post("/poll", extensionOrigin, "wrong", map[string]any{"clientId": browserClient}); status != 401 {
+	if status, _ := post("/poll", extensionOrigin, "wrong", map[string]any{"clientId": browserClient}); status != 403 {
 		t.Fatal(status)
 	}
 	if r := b.execute(connection, connection, browserJob("acquire", browserSession)); r["error"] != nil {
@@ -121,8 +122,11 @@ func TestBrowserBridgeAuthenticatedExtensionRoundtripAndCancellation(t *testing.
 		t.Fatal(status, poll)
 	}
 	command := poll["command"].(map[string]any)
-	if command["operation"] != "tabs" || command["id"] != browserJob("", "").ID {
+	if poll["version"] != extensionVersion || command["operation"] != "tabs" || command["id"] != browserJob("", "").ID {
 		t.Fatal(command)
+	}
+	if remaining := time.Until(time.UnixMilli(int64(command["expiresAt"].(float64)))); remaining <= 0 || remaining > 3*time.Second {
+		t.Fatal("ordinary command did not use Nova's 3-second budget", remaining)
 	}
 	_, _ = post("/reply", extensionOrigin, token, map[string]any{"clientId": browserSession, "id": command["id"], "result": map[string]any{"stolen": true}})
 	select {
@@ -135,8 +139,9 @@ func TestBrowserBridgeAuthenticatedExtensionRoundtripAndCancellation(t *testing.
 		t.Fatal(r)
 	}
 	ctx, stop := context.WithCancel(connection)
+	queue := b.queues[browserClient]
 	go func() { result <- b.execute(connection, ctx, browserJob("tabs", browserSession)) }()
-	queued := <-b.queue
+	queued := <-queue
 	stop()
 	if r := <-result; !strings.Contains(r["error"].(string), "may have executed") {
 		t.Fatal(r)
@@ -144,10 +149,117 @@ func TestBrowserBridgeAuthenticatedExtensionRoundtripAndCancellation(t *testing.
 	b.mu.Lock()
 	_, pending := b.pending[queued.ID]
 	b.mu.Unlock()
-	if pending || len(b.queue) != 0 {
+	if pending || len(queue) != 0 {
 		t.Fatal("cancelled operation retained for replay")
 	}
 }
+func TestBrowserPrimaryMatchesNovaAndKeepsAnActiveLeasePinned(t *testing.T) {
+	b := newBrowserBridge()
+	b.clients[browserSession] = browserPeer{lastAt: time.Now(), browser: "Microsoft Edge"}
+	if status := b.status(); status["browser"] != "Microsoft Edge" {
+		t.Fatal(status)
+	}
+	b.clients[browserClient] = browserPeer{lastAt: time.Now(), browser: "Google Chrome"}
+	if status := b.status(); status["browser"] != "Google Chrome" || len(status["browsers"].([]string)) != 2 {
+		t.Fatal("Chrome did not become primary", status)
+	}
+	owner, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if result := b.execute(owner, owner, browserJob("acquire", browserSession)); result["error"] != nil {
+		t.Fatal(result)
+	}
+	other := "00000000-0000-4000-8000-000000000000"
+	b.clients[other] = browserPeer{lastAt: time.Now(), browser: "Google Chrome"}
+	b.status()
+	if b.primaryID != browserClient || b.leaseClient != browserClient {
+		t.Fatal("another Chrome profile changed the selected browser")
+	}
+	b.clients[browserClient] = browserPeer{lastAt: time.Now().Add(-46 * time.Second), browser: "Google Chrome"}
+	if status := b.status(); status["connected"] != false {
+		t.Fatal("expired lease silently switched profiles", status)
+	}
+	if _, exists := b.queues[browserClient]; exists {
+		t.Fatal("expired browser retained its queue")
+	}
+	b.execute(owner, owner, browserJob("release", browserSession))
+	if status := b.status(); status["browser"] != "Google Chrome" || b.primaryID != other {
+		t.Fatal("next turn did not select a live Chrome profile", status)
+	}
+}
+
+func TestBrowserExtensionCDPRoundtripUsesPerClientQueues(t *testing.T) {
+	b := connectedBrowser()
+	server := httptest.NewServer(b)
+	defer server.Close()
+	owner, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if result := b.execute(owner, owner, browserJob("acquire", browserSession)); result["error"] != nil {
+		t.Fatal(result)
+	}
+	args, _ := json.Marshal(map[string]any{"session": browserSession, "operation": "cdp", "args": map[string]any{"tabTag": "C1-test", "method": "Runtime.evaluate", "params": map[string]any{"expression": "6 * 7", "returnByValue": true}, "sessionId": "child-session"}})
+	result := make(chan map[string]any, 1)
+	go func() { result <- b.execute(owner, owner, job{ID: "cdp-roundtrip", Op: "browser", Args: args}) }()
+	post := func(ctx context.Context, path, client string, value map[string]any) (*http.Response, error) {
+		value["clientId"] = client
+		data, _ := json.Marshal(value)
+		req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+path, bytes.NewReader(data))
+		req.Header.Set("Origin", extensionOrigin)
+		req.Header.Set("Authorization", "Bearer "+b.token)
+		req.Header.Set("Content-Type", "application/json")
+		ua := "Chrome/130.0"
+		if client == browserSession {
+			ua += " Edg/130.0"
+		}
+		req.Header.Set("User-Agent", ua)
+		return server.Client().Do(req)
+	}
+	// Edge must remain connected without stealing the command addressed to Chrome.
+	edgeCtx, stopEdge := context.WithTimeout(owner, 100*time.Millisecond)
+	defer stopEdge()
+	if response, err := post(edgeCtx, "/poll", browserSession, map[string]any{}); err == nil {
+		response.Body.Close()
+		t.Fatalf("Edge poll returned HTTP %d instead of waiting on its own queue", response.StatusCode)
+	}
+	response, err := post(owner, "/poll", browserClient, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var poll struct {
+		Command browserCommand `json:"command"`
+		Version string         `json:"version"`
+	}
+	err = json.NewDecoder(response.Body).Decode(&poll)
+	response.Body.Close()
+	if err != nil || !response.Close || response.StatusCode != 200 || poll.Version != extensionVersion || poll.Command.Operation != "cdp" {
+		t.Fatalf("incompatible poll response: %+v, %v", poll, err)
+	}
+	var received map[string]any
+	_ = json.Unmarshal(poll.Command.Args, &received)
+	if received["tabTag"] != "C1-test" || received["method"] != "Runtime.evaluate" || received["sessionId"] != "child-session" || received["params"].(map[string]any)["expression"] != "6 * 7" {
+		t.Fatal("CDP arguments changed in transit", received)
+	}
+	if remaining := time.Until(time.UnixMilli(poll.Command.ExpiresAt)); remaining <= 3*time.Second || remaining > 10*time.Second {
+		t.Fatal("CDP did not use Nova's 10-second budget", remaining)
+	}
+	for _, client := range []string{browserSession, browserClient} {
+		response, err := post(owner, "/reply", client, map[string]any{"id": poll.Command.ID, "result": map[string]any{"result": map[string]any{"type": "number", "value": 42}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if client == browserSession {
+			select {
+			case value := <-result:
+				t.Fatal("another browser supplied the CDP result", value)
+			default:
+			}
+		}
+	}
+	if value := <-result; value["error"] != nil || value["result"].(map[string]any)["result"].(map[string]any)["value"] != float64(42) {
+		t.Fatal("CDP result did not reach its caller", value)
+	}
+}
+
 func TestLocalBrowserUploadOnlyAllowsRegularWorkspaceFiles(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "upload.txt")
