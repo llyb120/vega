@@ -17,7 +17,7 @@ var iconData []byte
 func systrayRun(configure, onQuit func()) {
 	systray.Run(func() {
 		systray.SetIcon(iconData)
-		systray.SetTitle("Vega Local")
+		systray.SetTitle("牵牛星")
 		trayState.Lock()
 		trayState.ready = true
 		systray.SetTooltip(connectionTooltip(trayState.connected))
@@ -46,9 +46,9 @@ var trayState struct {
 
 func connectionTooltip(connected bool) string {
 	if connected {
-		return "Vega 本地执行端 · 已连接"
+		return "牵牛星 · 已连接"
 	}
-	return "Vega 本地执行端 · 未连接"
+	return "牵牛星 · 未连接"
 }
 
 func setState(connected bool) {

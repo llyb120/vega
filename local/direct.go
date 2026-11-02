@@ -209,7 +209,7 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	}
 	name, _ := os.Hostname()
 	if name == "" {
-		name = "Vega " + runtime.GOOS
+		name = "牵牛星 " + runtime.GOOS
 	}
 	a.mu.Lock()
 	clientID := a.config.ClientID

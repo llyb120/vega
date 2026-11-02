@@ -54,9 +54,9 @@ func TestTrayRetainsConnectionStateBeforeReady(t *testing.T) {
 		if got != connected {
 			t.Fatalf("tray lost connection state before initialization: got %v, want %v", got, connected)
 		}
-		expected := "Vega 本地执行端 · 未连接"
+		expected := "牵牛星 · 未连接"
 		if connected {
-			expected = "Vega 本地执行端 · 已连接"
+			expected = "牵牛星 · 已连接"
 		}
 		if tooltip := connectionTooltip(got); tooltip != expected {
 			t.Fatalf("tray tooltip = %q, want %q", tooltip, expected)
