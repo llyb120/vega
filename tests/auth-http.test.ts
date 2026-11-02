@@ -540,6 +540,13 @@ test(
         if (!quotedChat.running && quotedChat.messages.some((message: any) => message.text === "explain the quoted finding")) break;
         await sleep(20);
       }
+      const latest = await ok(`/employees/${team.id}/chat?limit=2`, "GET", undefined, a);
+      assert.deepEqual(latest.messages.map((message: any) => message.seq), quotedChat.messages.slice(-2).map((message: any) => message.seq), "a paged chat returns the newest window");
+      assert.equal(latest.hasMore, quotedChat.messages.length > 2);
+      const older = await ok(`/employees/${team.id}/chat?before=${latest.messages[0].seq}&limit=500`, "GET", undefined, a);
+      assert.deepEqual([...older.messages, ...latest.messages].map((message: any) => message.seq), quotedChat.messages.map((message: any) => message.seq));
+      assert.deepEqual((await ok(`/employees/${team.id}/chat?after=${latest.messages[0].seq}`, "GET", undefined, a)).messages.map((message: any) => message.seq), [latest.messages[1].seq]);
+      assert.equal((await req(`/employees/${team.id}/chat?limit=0`, "GET", undefined, a)).r.status, 400);
       const cited = quotedChat.messages.find((message: any) => message.text === "explain the quoted finding");
       assert.equal(cited.quote.seq, source.seq);
       assert.equal(cited.quote.text, source.text);
