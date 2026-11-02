@@ -6,7 +6,7 @@ import { Catalog } from "../server/core/catalog";
 import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
-import { LocalAgentUnavailable } from "../server/core/local-agent";
+import { LocalAgents, LocalAgentUnavailable } from "../server/core/local-agent";
 import { Tools } from "../server/core/tools";
 import { resolveModel } from "../server/core/config";
 
@@ -44,8 +44,45 @@ test("local Chrome tools and employee tasks use only their selected native brows
   const upload = calls.find((c) => c.operation === "workspace_file");
   assert.deepEqual(upload.args, { cwd: client.cwd, path: "upload.txt" });
   assert.equal(new Set(calls.map((c) => c.session)).size, 1, "same session keeps a lease across tool calls");
+  const agent = engine.localAgents.active("alice", client.clientId)!;
+  assert.deepEqual([...agent.browserLeases], [calls[0].session]);
   await engine.localBrowsers.release(session.id);
   assert.equal(calls.at(-1).operation, "release");
+  assert.equal(agent.browserLeases.size, 0);
+});
+
+test("browser acquisition waits through a short outage instead of its old independent 15-second timeout", async (t) => {
+  const { engine, session } = fixture(t);
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"] });
+  engine.localAgents.request = LocalAgents.prototype.request;
+  const jobs: any[] = [];
+  const transport = { send: (job: any) => {
+    jobs.push(job);
+    if (job.op !== "cancel") queueMicrotask(() => engine.localAgents.result("alice", { instance: client.instance, id: job.id, result: { result: { connected: true } } }));
+  }, close: () => {} };
+  engine.localAgents.connect("alice", client, transport);
+  const agent = engine.localAgents.active("alice", client.clientId)!;
+  engine.localAgents.suspend("alice", client.instance);
+  const acquiring = engine.chromeFor(session);
+  t.mock.timers.tick(16000);
+  await Promise.resolve();
+  assert.equal(agent.pending.size, 1);
+  assert.equal(jobs.length, 0);
+  engine.localAgents.connect("alice", client, transport);
+  await acquiring;
+  assert.equal(jobs[0].args.operation, "acquire");
+  await engine.localBrowsers.release(session.id);
+});
+
+test("ending a browser turn during an outage clears its retained lease even if cleanup cannot be delivered", async (t) => {
+  const { engine, session } = fixture(t);
+  await engine.chromeFor(session);
+  const agent = engine.localAgents.active("alice", client.clientId)!;
+  assert.equal(agent.browserLeases.size, 1);
+  engine.localAgents.suspend("alice", client.instance);
+  engine.localAgents.request = async () => { throw Error("cleanup offline"); };
+  await assert.rejects(engine.localBrowsers.release(session.id), /cleanup offline/);
+  assert.equal(agent.browserLeases.size, 0, "reconnect must not retain a finished turn's browser lease");
 });
 
 test("competing sessions pause without input; releasing a turn admits the next session", async (t) => {
@@ -67,6 +104,7 @@ test("offline, unbound and old clients never fall back to any server browser", a
   await assert.rejects(engine.chromeFor({ ...session, clientId: undefined }), /尚未绑定/);
   engine.localAgents.request = async () => ({ error: "Unknown operation" });
   await assert.rejects(engine.chromeFor(session), /升级客户端/);
+  assert.equal(engine.localAgents.active("alice", client.clientId)!.browserLeases.size, 0);
   engine.localAgents.disconnect("alice");
   await assert.rejects(engine.chromeFor(session), LocalAgentUnavailable);
 });

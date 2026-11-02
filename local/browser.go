@@ -75,9 +75,14 @@ func (b *browserBridge) status() map[string]any {
 	}
 	return map[string]any{"connected": connected, "browser": b.browser, "browsers": browsers, "origin": fmt.Sprintf("http://127.0.0.1:%d", b.port), "extensionId": strings.TrimPrefix(extensionOrigin, "chrome-extension://"), "extensionVersion": "0.1.14"}
 }
-func (b *browserBridge) releaseConnection(connection context.Context) {
+func (b *browserBridge) releaseConnection(connection context.Context, retained ...string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	for _, session := range retained {
+		if b.session == session {
+			return
+		}
+	}
 	if b.connection == connection {
 		b.generation++
 		b.connection, b.session, b.leaseClient = nil, "", ""

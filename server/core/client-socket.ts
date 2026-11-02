@@ -2,13 +2,13 @@ import { randomBytes } from "node:crypto";
 import type { Peer } from "crossws";
 import { Auth, digest } from "./auth";
 import type { Store } from "./store";
-import { LocalAgents, validateClient } from "./local-agent";
+import { CLIENT_HEARTBEAT_TIMEOUT, LocalAgents, validateClient, type Agent } from "./local-agent";
 import { assert, type Obj } from "./util";
 
 export const CLIENT_BODY_LIMIT = 48 << 20;
 type Socket = Pick<Peer, "id" | "request" | "send" | "close">;
 type Grant = { hash: string; userId: string; clientId: string; createdAt: number };
-type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj };
+type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj; transport?: Agent["transport"] };
 
 export class ClientSockets {
   private connections = new Map<string, Connection>();
@@ -18,7 +18,8 @@ export class ClientSockets {
     auth.events.on("revoke", this.onRevoke);
     this.timer = setInterval(() => {
       for (const [id, connection] of this.connections) {
-        if (Date.now() - connection.lastAt > 20000 || !this.valid(connection.grant)) this.close(id);
+        if (!this.valid(connection.grant)) this.close(id, true);
+        else if (Date.now() - connection.lastAt > CLIENT_HEARTBEAT_TIMEOUT) this.close(id);
       }
     }, 5000);
     this.timer.unref();
@@ -61,6 +62,7 @@ export class ClientSockets {
   message(socket: Socket, raw: string) {
     const connection = this.connections.get(socket.id);
     if (!connection) return;
+    let accepted = false;
     try {
       assert(this.valid(connection.grant), "Client authorization revoked");
       assert(Buffer.byteLength(raw) <= CLIENT_BODY_LIMIT, "Client message too large");
@@ -72,42 +74,54 @@ export class ClientSockets {
         assert(value.type === "hello" && value.clientId === grant.clientId, "Client identity mismatch");
         validateClient(value);
         const previous = this.hub.active(grant.userId, grant.clientId);
-        if (previous) this.hub.disconnect(grant.userId, previous.instance);
-        this.hub.connect(grant.userId, value, {
+        if (previous && previous.instance !== value.instance) this.hub.disconnect(grant.userId, previous.instance);
+        connection.transport = {
           send: (job) => socket.send(JSON.stringify(job)),
           close: () => this.close(socket.id),
-        });
-        connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform };
-        socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId }));
+        };
+        this.hub.connect(grant.userId, value, connection.transport);
+        connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, resume: value.resume === true };
+        const agent = this.hub.active(grant.userId, grant.clientId)!;
+        accepted = true;
+        socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) }));
         return;
       }
       if (value.type === "ping") {
         this.hub.connect(grant.userId, connection.details);
+        accepted = true;
         socket.send(JSON.stringify({ type: "pong" }));
       } else {
         assert(value.type === "result", "Client may only send heartbeats and job results");
         this.hub.result(grant.userId, { id: value.id, result: value.result, instance: connection.details.instance });
+        accepted = true;
+        if (connection.details.resume) socket.send(JSON.stringify({ type: "ack", id: value.id }));
       }
-    } catch { this.close(socket.id); }
+    } catch { this.close(socket.id, !accepted); }
   }
   revoke(userId: string, clientId?: string) {
     for (const grant of this.store.objects<Grant>("client-token")) {
       if (grant.userId === userId && (!clientId || grant.clientId === clientId)) this.store.remove("client-token", grant.hash);
     }
     for (const [id, connection] of this.connections) {
-      if (connection.grant.userId === userId && (!clientId || connection.grant.clientId === clientId)) this.close(id);
+      if (connection.grant.userId === userId && (!clientId || connection.grant.clientId === clientId)) this.close(id, true);
     }
+    const agent = clientId ? this.hub.active(userId, clientId) : undefined;
+    if (agent) this.hub.disconnect(userId, agent.instance);
+    else if (!clientId) this.hub.disconnect(userId);
   }
-  close(id: string) {
+  close(id: string, permanent = false) {
     const connection = this.connections.get(id);
     if (!connection) return;
     this.connections.delete(id);
-    if (connection.details) this.hub.disconnect(connection.grant.userId, connection.details.instance);
+    if (connection.details) {
+      if (permanent) this.hub.disconnect(connection.grant.userId, connection.details.instance, connection.transport);
+      else this.hub.suspend(connection.grant.userId, connection.details.instance, connection.transport);
+    }
     connection.socket.close(1000, "Client connection closed");
   }
   closeAll() {
     clearInterval(this.timer);
     this.auth.events.off("revoke", this.onRevoke);
-    for (const id of this.connections.keys()) this.close(id);
+    for (const id of this.connections.keys()) this.close(id, true);
   }
 }

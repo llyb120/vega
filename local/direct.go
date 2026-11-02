@@ -17,6 +17,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const reconnectGrace = 60 * time.Second
+
 type ServerCredential struct {
 	Origin string `json:"origin"`
 	UserID string `json:"userId"`
@@ -27,11 +29,13 @@ type connectionStatus struct {
 	HTTPStatus int    `json:"httpStatus,omitempty"`
 }
 type directConnection struct {
-	origin  string
-	token   string
-	cancel  context.CancelFunc
-	status  connectionStatus
-	changed chan struct{}
+	origin   string
+	token    string
+	instance string
+	jobs     *jobRunner
+	cancel   context.CancelFunc
+	status   connectionStatus
+	changed  chan struct{}
 }
 
 func (a *Agent) connectionStatus(connection *directConnection, status connectionStatus) {
@@ -113,10 +117,10 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
-	connection := &directConnection{origin: saved.Origin, token: token, cancel: cancel, status: connectionStatus{Code: "backend_connecting"}, changed: make(chan struct{})}
+	connection := &directConnection{origin: saved.Origin, token: token, jobs: newJobRunner(ctx, true), cancel: cancel, status: connectionStatus{Code: "backend_connecting"}, changed: make(chan struct{})}
 	a.direct[key] = connection
 	go func() {
-		defer cancel()
+		defer func() { cancel(); connection.jobs.close() }()
 		defer func() {
 			a.mu.Lock()
 			if a.direct[key] == connection {
@@ -124,10 +128,20 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 			}
 			a.mu.Unlock()
 		}()
+		id := make([]byte, 16)
+		if _, err := rand.Read(id); err != nil {
+			a.connectionStatus(connection, connectionStatus{Code: "backend_internal"})
+			return
+		}
+		connection.instance = hex.EncodeToString(id)
 		delay := time.Second
 		for ctx.Err() == nil {
-			if !a.connectBackend(ctx, saved, connection) {
+			retry, connected := a.connectBackend(ctx, saved, connection)
+			if !retry {
 				return // Revoked credentials need a new explicit website handshake.
+			}
+			if connected {
+				delay = time.Second
 			}
 			timer := time.NewTimer(delay)
 			select {
@@ -146,7 +160,7 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	}()
 	return connection
 }
-func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, connection *directConnection) bool {
+func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, connection *directConnection) (bool, bool) {
 	u, _ := url.Parse(saved.Origin + "/api/local-agent/socket")
 	if u.Scheme == "https" {
 		u.Scheme = "wss"
@@ -168,20 +182,15 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 			}
 		}
 		a.connectionStatus(connection, status)
-		return response == nil || (response.StatusCode != 401 && response.StatusCode != 403)
+		return response == nil || (response.StatusCode != 401 && response.StatusCode != 403), false
 	}
 	defer conn.Close()
 	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopClose()
-	id := make([]byte, 16)
-	if _, err = rand.Read(id); err != nil {
-		a.connectionStatus(connection, connectionStatus{Code: "backend_internal"})
-		return true
-	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_cwd"})
-		return true
+		return true, false
 	}
 	name, _ := os.Hostname()
 	if name == "" {
@@ -191,16 +200,20 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	clientID := a.config.ClientID
 	a.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": hex.EncodeToString(id), "clientId": clientID, "name": name, "cwd": cwd, "platform": runtime.GOOS}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "name": name, "cwd": cwd, "platform": runtime.GOOS, "resume": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
-		return true
+		return true, false
 	}
 	conn.SetReadLimit(maxBody)
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	var ready struct{ Type, UserID, ClientID string }
+	var ready struct {
+		Type, UserID, ClientID string
+		Resume                 bool
+		Pending, Leases        []string
+	}
 	if conn.ReadJSON(&ready) != nil || ready.Type != "ready" || ready.UserID != saved.UserID || ready.ClientID != clientID {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_protocol"})
-		return true
+		return true, false
 	}
 	a.mu.Lock()
 	a.connections[conn] = struct{}{}
@@ -213,22 +226,106 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 		a.mu.Unlock()
 	}()
 	a.connectionStatus(connection, connectionStatus{Code: "connected"})
-	runJobs(ctx, conn)
+	if ready.Resume {
+		connection.jobs.run(conn, ready.Pending, ready.Leases)
+	} else {
+		runJobs(ctx, conn)
+	}
 	a.connectionStatus(connection, connectionStatus{Code: "backend_disconnected"})
-	return true
+	return true, true
+}
+
+type localJob struct {
+	cancel context.CancelFunc
+	result map[string]any
+}
+type jobRunner struct {
+	ctx       context.Context
+	mu        sync.Mutex
+	conn      *websocket.Conn
+	tasks     map[string]*localJob
+	resumable bool
+	recovery  *time.Timer
+}
+
+func newJobRunner(ctx context.Context, resumable bool) *jobRunner {
+	return &jobRunner{ctx: ctx, tasks: make(map[string]*localJob), resumable: resumable}
 }
 func runJobs(parent context.Context, conn *websocket.Conn) {
 	ctx, cancel := context.WithCancel(parent)
-	defer func() { cancel(); localChrome.releaseConnection(ctx) }()
-	var writes, tasks sync.Mutex
-	write := func(value any) {
-		writes.Lock()
-		defer writes.Unlock()
-		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		if conn.WriteJSON(value) != nil {
-			_ = conn.Close()
+	runner := newJobRunner(ctx, false)
+	defer func() { cancel(); runner.close() }()
+	runner.run(conn, nil, nil)
+}
+func (runner *jobRunner) close() {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if runner.recovery != nil {
+		runner.recovery.Stop()
+	}
+	for _, task := range runner.tasks {
+		task.cancel()
+	}
+	localChrome.releaseConnection(runner.ctx)
+}
+func (runner *jobRunner) suspend(conn *websocket.Conn) {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if runner.conn != conn {
+		return
+	}
+	runner.conn = nil
+	if runner.resumable {
+		var timer *time.Timer
+		timer = time.AfterFunc(reconnectGrace, func() {
+			runner.mu.Lock()
+			defer runner.mu.Unlock()
+			if runner.recovery != timer || runner.conn != nil {
+				return
+			}
+			for _, task := range runner.tasks {
+				task.cancel()
+			}
+			localChrome.releaseConnection(runner.ctx)
+		})
+		runner.recovery = timer
+	}
+}
+func (runner *jobRunner) write(value any) {
+	if runner.conn == nil {
+		return
+	}
+	_ = runner.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if runner.conn.WriteJSON(value) != nil {
+		_ = runner.conn.Close()
+	}
+}
+func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
+	runner.mu.Lock()
+	if runner.recovery != nil {
+		runner.recovery.Stop()
+		runner.recovery = nil
+	}
+	runner.conn = conn
+	if runner.resumable {
+		localChrome.releaseConnection(runner.ctx, leases...)
+		wanted := make(map[string]bool, len(pending))
+		for _, id := range pending {
+			wanted[id] = true
+		}
+		for id, task := range runner.tasks {
+			if !wanted[id] {
+				task.cancel()
+				delete(runner.tasks, id)
+			} else if task.result != nil {
+				runner.write(task.result)
+			}
 		}
 	}
+	runner.mu.Unlock()
+	defer runner.suspend(conn)
+	ctx, cancel := context.WithCancel(runner.ctx)
+	defer cancel()
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -237,21 +334,17 @@ func runJobs(parent context.Context, conn *websocket.Conn) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				write(map[string]string{"type": "ping"})
+				runner.mu.Lock()
+				if runner.conn == conn {
+					runner.write(map[string]string{"type": "ping"})
+				}
+				runner.mu.Unlock()
 			}
 		}
 	}()
-	pending := map[string]context.CancelFunc{}
 	seen := map[string]bool{}
-	defer func() {
-		tasks.Lock()
-		defer tasks.Unlock()
-		for _, cancel := range pending {
-			cancel()
-		}
-	}()
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		var request job
 		if conn.ReadJSON(&request) != nil {
 			return
@@ -262,34 +355,49 @@ func runJobs(parent context.Context, conn *websocket.Conn) {
 		if len(request.ID) != 36 {
 			return
 		}
-		tasks.Lock()
-		if request.Op == "cancel" {
-			if stop := pending[request.ID]; stop != nil {
-				stop()
+		runner.mu.Lock()
+		if request.Type == "ack" {
+			if task := runner.tasks[request.ID]; task != nil && task.result != nil {
+				delete(runner.tasks, request.ID)
 			}
-			tasks.Unlock()
+			runner.mu.Unlock()
 			continue
 		}
-		if seen[request.ID] || len(pending) >= 16 || len(seen) >= 4096 {
-			tasks.Unlock()
+		if request.Op == "cancel" {
+			if task := runner.tasks[request.ID]; task != nil {
+				task.cancel()
+			}
+			runner.mu.Unlock()
+			continue
+		}
+		if seen[request.ID] || runner.tasks[request.ID] != nil || len(runner.tasks) >= 16 || len(seen) >= 4096 {
+			runner.mu.Unlock()
 			return
 		}
 		seen[request.ID] = true
-		taskCtx, stop := context.WithCancel(ctx)
-		pending[request.ID] = stop
-		tasks.Unlock()
+		taskCtx, stop := context.WithCancel(runner.ctx)
+		task := &localJob{cancel: stop}
+		runner.tasks[request.ID] = task
+		runner.mu.Unlock()
 		go func(request job) {
 			var result map[string]any
 			if request.Op == "browser" {
-				result = localChrome.execute(ctx, taskCtx, request)
+				result = localChrome.execute(runner.ctx, taskCtx, request)
 			} else {
 				result = execute(taskCtx, request)
 			}
 			stop()
-			tasks.Lock()
-			delete(pending, request.ID)
-			tasks.Unlock()
-			write(map[string]any{"type": "result", "id": request.ID, "result": result})
+			runner.mu.Lock()
+			defer runner.mu.Unlock()
+			if runner.tasks[request.ID] != task {
+				return
+			}
+			// Keep only results, never inputs: reconnecting must not replay an operation.
+			task.result = map[string]any{"type": "result", "id": request.ID, "result": result}
+			runner.write(task.result)
+			if !runner.resumable {
+				delete(runner.tasks, request.ID)
+			}
 		}(request)
 	}
 }

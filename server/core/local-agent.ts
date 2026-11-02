@@ -2,12 +2,15 @@ import { randomUUID } from "node:crypto";
 import { assert, type Obj } from "./util";
 import type { Auth, Principal } from "./auth";
 
+export const CLIENT_HEARTBEAT_TIMEOUT = 30000;
+export const CLIENT_RECONNECT_GRACE = 60000;
+
 export class LocalAgentUnavailable extends Error {
-  constructor(message = "所选客户端连接中断，操作结果不确定。请先检查该客户端的实际结果并修复连接，再回复「继续」；本轮已暂停，不会自动重试、切换到其他客户端或改在服务端执行。") {
+  constructor(message = "所选客户端连接未能自动恢复，或原执行实例已失效，操作结果不确定。请先检查该客户端的实际结果并修复连接，再回复「继续」；本轮已暂停，不会自动重试操作、切换到其他客户端或改在服务端执行。") {
     super(message);
   }
 }
-type Pending = { resolve: (result: Obj) => void; reject: (error: Error) => void };
+type Pending = { resolve: (result: Obj) => void; reject: (error: Error) => void; suspend: () => void; resume: () => void };
 export type Agent = {
   userId: string;
   clientId: string;
@@ -16,7 +19,9 @@ export type Agent = {
   cwd: string;
   platform: string;
   pending: Map<string, Pending>;
+  browserLeases: Set<string>;
   onlineUntil: number;
+  reconnecting?: boolean;
   heartbeat?: ReturnType<typeof setTimeout>;
   transport?: { send: (job: Obj) => void; close: () => void };
 };
@@ -57,8 +62,7 @@ export class LocalAgents {
     const online: Agent[] = [];
     for (const agent of this.agents.values()) {
       if (agent.userId !== userId) continue;
-      if (agent.onlineUntil <= Date.now()) this.disconnect(agent.userId, agent.instance);
-      else online.push(agent);
+      if (this.active(userId, agent.clientId) === agent) online.push(agent);
     }
     return online.map(({ clientId: id, name, cwd, platform }) => ({ id, name, cwd, platform }));
   }
@@ -71,8 +75,11 @@ export class LocalAgents {
     }
     const agent = this.agents.get(userId + ":" + clientId);
     if (agent && agent.onlineUntil <= Date.now()) {
-      this.disconnect(userId, agent.instance);
-      return;
+      if (agent.reconnecting) {
+        this.disconnect(userId, agent.instance);
+        return;
+      }
+      this.suspend(userId, agent.instance);
     }
     return agent;
   }
@@ -83,14 +90,27 @@ export class LocalAgents {
     if (!agent) {
       assert(this.list(userId).length < 8, "Too many connected clients");
       assert(![...this.agents.values()].some((item) => item.userId === userId && item.instance === a.instance), "Agent instance already registered");
-      agent = { userId, clientId, name: a.name?.trim() || "客户端 " + clientId.slice(0, 8), instance: a.instance, cwd: a.cwd, platform: a.platform, pending: new Map(), onlineUntil: Date.now() + 15000, transport };
+      agent = { userId, clientId, name: a.name?.trim() || "客户端 " + clientId.slice(0, 8), instance: a.instance, cwd: a.cwd, platform: a.platform, pending: new Map(), browserLeases: new Set(), onlineUntil: Date.now() + CLIENT_HEARTBEAT_TIMEOUT, transport };
       this.agents.set(userId + ":" + clientId, agent);
       this.emit({ type: "clients_changed", targetUser: userId });
     }
+    const recovering = agent.reconnecting, previous = agent.transport;
+    if (transport) agent.transport = transport;
+    agent.reconnecting = false;
     clearTimeout(agent.heartbeat);
-    agent.onlineUntil = Date.now() + 15000;
-    agent.heartbeat = setTimeout(() => this.disconnect(userId, a.instance), 15000);
+    agent.onlineUntil = Date.now() + CLIENT_HEARTBEAT_TIMEOUT;
+    agent.heartbeat = setTimeout(() => this.suspend(userId, a.instance), CLIENT_HEARTBEAT_TIMEOUT);
     agent.heartbeat.unref();
+    if (transport && previous !== transport) try { previous?.close(); } catch {}
+    if (recovering) {
+      this.emit({ type: "clients_changed", targetUser: userId });
+      // Let the socket send readiness before dispatching operations queued during recovery.
+      const resumed = agent;
+      queueMicrotask(() => {
+        if (this.active(userId, clientId) === resumed && !resumed.reconnecting)
+          for (const pending of resumed.pending.values()) pending.resume();
+      });
+    }
     return { ok: true };
   }
   result(userId: string, a: Obj) {
@@ -102,6 +122,7 @@ export class LocalAgents {
     return { ok: true };
   }
   private send(agent: Agent, job: Obj) {
+    if (agent.reconnecting) throw new LocalAgentUnavailable();
     if (agent.transport) agent.transport.send(job);
     else this.emit({ type: "local_agent_request", targetUser: agent.userId, data: { instance: agent.instance, ...job } });
   }
@@ -111,7 +132,11 @@ export class LocalAgents {
     if (this.active(agent.userId, agent.clientId) !== agent) throw new LocalAgentUnavailable();
     const id = randomUUID();
     return new Promise<Obj>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined, sent = false, settled = false, recovered = false;
+      let remaining = op === "exec" ? (args.timeout + 15) * 1000 : 30000, deadline = 0;
       const finish = (error?: Error, value?: Obj) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         signal.removeEventListener("abort", abort);
         agent.pending.delete(id);
@@ -119,21 +144,52 @@ export class LocalAgents {
         else resolve(value!);
       };
       const cancel = (error: Error) => {
-        try { this.send(agent, { id, op: "cancel" }); } catch {}
+        if (sent) try { this.send(agent, { id, op: "cancel" }); } catch {}
         finish(error);
       };
       const abort = () => cancel(signal.reason);
-      const timer = setTimeout(() => cancel(new LocalAgentUnavailable()), op === "exec" ? (args.timeout + 15) * 1000 : 30000);
-      agent.pending.set(id, { resolve: (r) => finish(undefined, r), reject: (e) => finish(e) });
+      const resume = () => {
+        if (settled || agent.reconnecting || timer) return;
+        deadline = Date.now() + remaining;
+        timer = setTimeout(() => {
+          // Recover a lost response once without ever resending its operation.
+          if (!recovered && agent.transport) this.suspend(agent.userId, agent.instance);
+          else cancel(new LocalAgentUnavailable());
+        }, remaining);
+        if (sent) return;
+        sent = true;
+        try { this.send(agent, { id, op, args }); }
+        catch { this.suspend(agent.userId, agent.instance); }
+      };
+      const suspend = () => {
+        if (!timer) return;
+        recovered = true;
+        remaining = Math.max(10000, deadline - Date.now());
+        clearTimeout(timer);
+        timer = undefined;
+      };
+      agent.pending.set(id, { resolve: (r) => finish(undefined, r), reject: (e) => finish(e), suspend, resume });
       signal.addEventListener("abort", abort, { once: true });
-      try { this.send(agent, { id, op, args }); }
-      catch { finish(new LocalAgentUnavailable()); }
+      resume();
     });
   }
-  disconnect(userId: string, instance?: string) {
+  suspend(userId: string, instance: string, transport?: Agent["transport"]) {
+    const agent = [...this.agents.values()].find((item) => item.userId === userId && item.instance === instance);
+    if (!agent || agent.reconnecting || (transport && agent.transport !== transport)) return;
+    const previous = agent.transport;
+    agent.transport = undefined;
+    agent.reconnecting = true;
+    clearTimeout(agent.heartbeat);
+    agent.onlineUntil = Date.now() + CLIENT_RECONNECT_GRACE;
+    agent.heartbeat = setTimeout(() => this.disconnect(userId, instance), CLIENT_RECONNECT_GRACE);
+    agent.heartbeat.unref();
+    for (const pending of agent.pending.values()) pending.suspend();
+    try { previous?.close(); } catch {}
+  }
+  disconnect(userId: string, instance?: string, transport?: Agent["transport"]) {
     let changed = false;
     for (const [key, agent] of this.agents) {
-      if (agent.userId !== userId || (instance && agent.instance !== instance)) continue;
+      if (agent.userId !== userId || (instance && agent.instance !== instance) || (transport && agent.transport !== transport)) continue;
       this.agents.delete(key);
       clearTimeout(agent.heartbeat);
       for (const pending of [...agent.pending.values()]) pending.reject(new LocalAgentUnavailable());

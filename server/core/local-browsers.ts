@@ -9,7 +9,7 @@ class LocalBridge extends ChromeBridge {
   private info = super.status();
   readonly lease = randomUUID();
   constructor(private hub: LocalAgents, readonly agent: Agent) { super(); }
-  private async send(operation: string, args: Obj, signal = AbortSignal.timeout(15000)) {
+  private async send(operation: string, args: Obj, signal = new AbortController().signal) {
     const r = await this.hub.request(this.agent, "browser", { session: this.lease, operation, args }, signal);
     if (r.error) {
       if (r.error === "Unknown operation") throw new LocalAgentUnavailable("所选客户端版本不支持本地浏览器，请升级客户端并重新加载 Nova Chrome 扩展后继续；不会改用服务端浏览器。");
@@ -45,7 +45,10 @@ export class LocalBrowsers {
       this.sessions.set(session.id, entry = { agent, chrome, held: false });
     }
     // The native client owns the lease across accounts, servers and the whole model turn.
-    await (entry.chrome.bridge as LocalBridge).claim(signal);
+    const bridge = entry.chrome.bridge as LocalBridge;
+    agent.browserLeases.add(bridge.lease);
+    try { await bridge.claim(signal); }
+    catch (error) { agent.browserLeases.delete(bridge.lease); throw error; }
     entry.held = true;
     return entry.chrome;
   }
@@ -53,6 +56,7 @@ export class LocalBrowsers {
   async release(key: string, remove = false) {
     const entry = this.sessions.get(key);
     if (remove) this.sessions.delete(key);
+    if (entry) entry.agent.browserLeases.delete((entry.chrome.bridge as LocalBridge).lease);
     if (!entry?.held) return;
     if (this.hub.active(entry.agent.userId, entry.agent.clientId) !== entry.agent) { entry.held = false; return; }
     try { await (entry.chrome.bridge as LocalBridge).release(); }

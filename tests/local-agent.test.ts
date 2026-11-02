@@ -73,6 +73,10 @@ test("multiple owned clients route by device and expire independently without fa
   assert.deepEqual(await second, { content: "home" });
   const lost = assert.rejects(first, LocalAgentUnavailable);
   office.onlineUntil = Date.now() - 1;
+  assert.deepEqual(hub.list("alice").map((c) => c.id), [details.clientId, other.clientId]);
+  assert.equal(office.reconnecting, true, "a missed heartbeat starts recovery rather than failing work");
+  assert.equal(office.pending.size, 1);
+  office.onlineUntil = Date.now() - 1;
   assert.deepEqual(hub.list("alice").map((c) => c.id), [other.clientId]);
   await lost;
   assert.equal(hub.active("alice", details.clientId), undefined);

@@ -67,6 +67,22 @@ func TestBrowserLeaseIsGlobalAcrossSessionsAndServerConnections(t *testing.T) {
 		t.Fatal("lease silently switched browser profile", r)
 	}
 }
+func TestBrowserLeaseReconcilesActiveSessionsAfterReconnect(t *testing.T) {
+	b := connectedBrowser()
+	owner, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if result := b.execute(owner, owner, browserJob("acquire", browserSession)); result["error"] != nil {
+		t.Fatal(result)
+	}
+	b.releaseConnection(owner, browserSession)
+	if b.connection != owner || b.session != browserSession {
+		t.Fatal("reconnect lost the active browser lease")
+	}
+	b.releaseConnection(owner, browserClient)
+	if b.connection != nil || b.session != "" {
+		t.Fatal("reconnect retained a finished browser turn")
+	}
+}
 func TestBrowserBridgeAuthenticatedExtensionRoundtripAndCancellation(t *testing.T) {
 	b := connectedBrowser()
 	server := httptest.NewServer(b)
