@@ -11,6 +11,7 @@ const props = defineProps({
 });
 const emit = defineEmits(["back"]);
 const raw = ref(false);
+const record = ref(null);
 const session = ref(null),
   messages = ref([]),
   running = ref(false),
@@ -20,6 +21,7 @@ let version = 0;
 async function refresh() {
   const request = ++version;
   if (session.value?.id !== props.sessionId) {
+    record.value = null;
     session.value = null;
     messages.value = [];
     running.value = false;
@@ -32,6 +34,7 @@ async function refresh() {
     );
     if (request !== version) return;
     if (!result.session.taskId && !(props.debug && result.session.employeeId)) throw Error("这不是牛马的会话");
+    record.value = result;
     session.value = result.session;
     messages.value = result.messages || [];
     running.value = result.running;
@@ -39,6 +42,25 @@ async function refresh() {
     if (request === version) error.value = e.message;
   } finally {
     if (request === version) busy.value = false;
+  }
+}
+function exportSession() {
+  if (!props.debug || busy.value || !record.value) return;
+  error.value = "";
+  const link = document.createElement("a");
+  let url;
+  try {
+    const json = JSON.stringify({ exportedAt: new Date().toISOString(), ...record.value }, null, 2);
+    url = URL.createObjectURL(new Blob([json + "\n"], { type: "application/json;charset=utf-8" }));
+    link.href = url;
+    link.download = "vega-session-" + record.value.session.id + ".json";
+    document.body.append(link);
+    link.click();
+  } catch (e) {
+    error.value = "导出失败：" + e.message;
+  } finally {
+    link.remove();
+    setTimeout(() => { if (url) URL.revokeObjectURL(url); }, 1000);
   }
 }
 watch(
@@ -52,6 +74,7 @@ onBeforeUnmount(() => version++);
   <PageHeader :title="session?.title || '牛马会话记录'" :subtitle="debug ? '调试会话' : '只读执行记录'" :back="debug ? '调试会话' : '返回牛马'" @back="emit('back')">
     <template #title-extra><span :class="['badge', running ? 'info' : '']"><span v-if="running" class="dot info pulse"></span>{{ running ? "执行中" : "执行记录" }}</span></template>
     <button v-if="debug" type="button" class="sm" :aria-pressed="raw" @click="raw = !raw"><Icon name="code" :size="14" /><span class="hide-mobile">{{ raw ? '整理视图' : '原始消息' }}</span></button>
+    <button v-if="debug" type="button" class="sm" :disabled="busy || !record" title="导出当前会话记录（JSON）" aria-label="导出会话（JSON）" @click="exportSession"><Icon name="download" :size="14" /><span class="hide-mobile">导出会话</span></button>
     <button type="button" class="sm" :disabled="busy" title="刷新记录" @click="refresh"><Icon name="refresh" :size="14" /><span class="hide-mobile">刷新记录</span></button>
   </PageHeader>
   <section
@@ -59,7 +82,7 @@ onBeforeUnmount(() => version++);
     aria-label="牛马会话记录"
     :aria-busy="busy"
   >
-    <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；补充、审批或续做请返回对应牛马，不能在这里输入或重放操作。</span></p>
+    <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；补充、审批或续做请返回对应牛马，不能在这里输入或重放操作。<template v-if="debug">导出包含原始消息、工具参数与本地路径，分享前请脱敏；图片仅保留引用。</template></span></p>
     <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>牛马 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>模型 / 场景</dt><dd>{{ session.model || '默认' }} / {{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-if="busy && !messages.length" class="context-note" role="status"><span class="spinner"></span>正在加载记录…</p>
