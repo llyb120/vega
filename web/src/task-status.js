@@ -23,6 +23,8 @@ const TONES = {
 };
 export const taskTone = (status) => TONES[status] || "neutral";
 export const taskLabel = (status) => TASK_LABELS[status] || status || "";
+/** Actively being worked on right now: the statuses the shared mapping shows in the "info" tone. */
+export const isInProgress = (status) => taskTone(status) === "info";
 export const isEnded = (status) => ["done", "failed", "cancelled", "stopped"].includes(status);
 export const needsAttention = (status) => ["waiting", "approval"].includes(status);
 export function planProgress(plan) {

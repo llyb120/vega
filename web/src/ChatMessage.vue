@@ -3,14 +3,20 @@ import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
-import { taskLabel, taskTone, shortTime } from "./task-status";
+import { computed } from "vue";
+import { taskLabel, taskTone, shortTime, isInProgress } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, quotable: Boolean });
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, quotable: Boolean });
 const emit = defineEmits(["quote", "jump", "task"]);
+// Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
+const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
+// While a linked task is actively running, this reply's bot keeps glancing around like the typing avatar.
+// Only live statuses count, so an old snapshot saying "running" never animates forever.
+const working = computed(() => !!props.message.tasks?.some((task) => isInProgress(props.taskStatus?.[task.id])));
 </script>
 <template>
   <article class="chat-message" :class="message.role" :data-message-seq="message.seq" tabindex="-1">
-    <span v-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="MESSAGE_POSE" :from="enterFrom" /></span>
+    <span v-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="MESSAGE_POSE" :from="enterFrom" :animate="working" /></span>
     <div class="chat-content">
       <div class="chat-heading">
         <strong v-if="message.role !== 'user'">{{ name }}</strong>
@@ -25,7 +31,7 @@ const emit = defineEmits(["quote", "jump", "task"]);
       </div>
       <div v-if="message.tasks?.length" class="chat-tasks">
         <button v-for="task in message.tasks" :key="task.id" type="button" class="chat-task-link" :data-task-id="task.id" :aria-label="'查看任务：' + task.title" @click="emit('task', task.id)">
-          <Icon name="tasks" :size="15" /><span class="truncate">{{ task.title }}</span><span v-if="task.status" :class="['badge', taskTone(task.status)]">{{ taskLabel(task.status) }}</span><Icon name="right" :size="14" />
+          <Icon name="tasks" :size="15" /><span class="truncate">{{ task.title }}</span><span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span><Icon name="right" :size="14" />
         </button>
       </div>
     </div>

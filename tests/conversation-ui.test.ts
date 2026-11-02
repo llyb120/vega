@@ -143,3 +143,14 @@ test("quoted replies send only a source sequence, preserve drafts on error, and 
   assert.equal(props.composer.quote.seq, 8);
   assert.equal(props.composer.text, "explain this");
 });
+
+test("reply avatars animate only while a linked task is live and actively in progress", async () => {
+  const { isInProgress } = await import("../web/src/task-status.js");
+  assert.deepEqual(["running", "recovering", "in_progress"].filter(isInProgress), ["running", "recovering", "in_progress"]);
+  for (const status of ["queued", "pending", "deferred", "waiting", "approval", "blocked", "done", "completed", "failed", "stopped", "cancelled", undefined]) assert.equal(isInProgress(status), false, String(status));
+  const bubble = readFileSync("web/src/ChatMessage.vue", "utf8");
+  assert(bubble.includes("isInProgress(props.taskStatus?.[task.id])"), "only the live status (never the stored snapshot) can start the animation");
+  assert(chat.includes(':task-status="taskStatus"') && readFileSync("web/src/App.vue", "utf8").includes(':tasks="employee.tasks"'));
+  const avatar = readFileSync("web/src/BotAvatar.vue", "utf8");
+  assert(avatar.includes("IntersectionObserver"), "off-screen avatars pause");
+});

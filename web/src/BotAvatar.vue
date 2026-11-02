@@ -17,17 +17,18 @@ const headStyle = computed(() => {
   return { transform: `translate(${x * 0.45}px, ${y * 0.35}px) scale(${1 - Math.abs(x) * 0.007}, 1) skewY(${x * 0.35}deg)` };
 });
 const eyeStyle = side => { const pose = shown.value[side]; return { transform: `translate(${pose.x}px, ${pose.y}px) scale(${pose.sx}, ${pose.sy})` }; };
-let lookTimer = 0, blinkTimer = 0, previous;
+let lookTimer = 0, blinkTimer = 0, previous, onScreen = true, observer;
+const root = ref(null), playing = ref(false);
 const reduced = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 function glance() {
-  if (!props.animate) return;
+  if (!playing.value) return;
   const next = nextPose(look.value, previous);
   previous = look.value; look.value = next;
   emit("pose", next);
   lookTimer = setTimeout(glance, holdDuration());
 }
 function blink() {
-  if (!props.animate) return;
+  if (!playing.value) return;
   const { delay, double } = blinkPlan();
   blinkTimer = setTimeout(() => {
     blinking.value = true;
@@ -38,23 +39,31 @@ function blink() {
     }, 120);
   }, delay);
 }
-function stop() { clearTimeout(lookTimer); clearTimeout(blinkTimer); blinking.value = false; }
+function stop() { clearTimeout(lookTimer); clearTimeout(blinkTimer); blinking.value = false; playing.value = false; }
+/** Play only while asked to and on screen; otherwise ease back to the resting pose. Every avatar draws its own random timeline. */
 function sync() {
+  const play = props.animate && onScreen && !reduced();
+  if (play === playing.value) return;
   stop();
-  if (props.animate && !reduced()) { previous = undefined; lookTimer = setTimeout(glance, Math.random() * 250); blink(); }
+  if (play) { playing.value = true; previous = undefined; lookTimer = setTimeout(glance, Math.random() * 250); blink(); }
   else look.value = props.pose;
 }
 watch(() => props.animate, sync);
 watch(() => props.pose, (pose) => { if (!props.animate) look.value = pose; });
 onMounted(() => {
+  // Many replies can point at running tasks: pause the ones scrolled out of view.
+  if (typeof IntersectionObserver === "function" && root.value) {
+    observer = new IntersectionObserver((entries) => { onScreen = entries.at(-1).isIntersecting; sync(); });
+    observer.observe(root.value);
+  }
   if (props.animate) return sync();
   // Ease from the typing row's last glance into the resting pose after the first paint.
   if (props.from && props.from !== props.pose) requestAnimationFrame(() => requestAnimationFrame(() => { look.value = props.pose; }));
 });
-onBeforeUnmount(stop);
+onBeforeUnmount(() => { stop(); observer?.disconnect(); });
 </script>
 <template>
-  <svg :class="['bot-avatar', { animate }]" viewBox="0 0 100 100" role="img" aria-hidden="true" :data-shape="geometry === BOT_SHAPE_GEOMETRY[shape] ? shape : 'round'" :data-pose="blinking ? 'blink' : look">
+  <svg ref="root" :class="['bot-avatar', { animate: playing }]" :data-playing="playing ? '' : undefined" viewBox="0 0 100 100" role="img" aria-hidden="true" :data-shape="geometry === BOT_SHAPE_GEOMETRY[shape] ? shape : 'round'" :data-pose="blinking ? 'blink' : look">
     <g class="bot-body"><g class="bot-head" :style="headStyle"><path :d="geometry.d" :fill="hex || '#7c7c84'" /><ellipse class="bot-eye" :cx="eyes.x - eyes.gap" :cy="eyes.y" :rx="eyes.rx" :ry="eyes.ry" :style="eyeStyle('l')" /><ellipse class="bot-eye" :cx="eyes.x + eyes.gap" :cy="eyes.y" :rx="eyes.rx" :ry="eyes.ry" :style="eyeStyle('r')" /></g></g>
   </svg>
 </template>
