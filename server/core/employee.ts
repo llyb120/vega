@@ -182,6 +182,7 @@ export function recallMemory(
   state: EmployeeState,
   task: string,
   now = Date.now(),
+  reinforce = true,
 ) {
   state.memories = state.memories.filter((m) => retention(m, now) >= 0.05);
   const words = bigrams(task),
@@ -198,14 +199,14 @@ export function recallMemory(
         r: r[i],
         score:
           (top ? (3 * r[i]) / top : 0) +
-          (Math.max(1, m.importance) - 1) +
+          (Math.max(1, m.importance || 1) - 1) +
           0.5 * retention(m, now),
       }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 12);
   for (const { m, r } of scored)
-    if (r >= 0.2) {
-      m.strength = Math.max(1, m.strength) + 1;
+    if (reinforce && r >= 0.2) {
+      m.strength = Math.max(1, m.strength || 1) + 1;
       m.usedAt = now;
     }
   return scored.map((v) => v.m);
