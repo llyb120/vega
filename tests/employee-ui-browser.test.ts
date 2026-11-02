@@ -23,6 +23,11 @@ test("employee chat bubbles, citations and task jumps work on mobile while debug
   const provider = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString()); providerRequests.push(body);
+    if (body.tools?.some((tool: any) => tool.function?.name === "compile_duty_trigger")) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.end("data: " + JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "ui-duty", type: "function", function: { name: "compile_duty_trigger", arguments: '{"mode":"manual"}' } }] }, finish_reason: "tool_calls" }] }) + "\n\ndata: [DONE]\n\n");
+      return;
+    }
     const final = body.messages.at(-1)?.role === "tool";
     res.setHeader("Content-Type", "text/event-stream"); res.write(": heartbeat\n\n");
     providerTimers.push(setTimeout(() => res.end("data: " + JSON.stringify({ choices: [{ index: 0, delta: final ? { content: "引用内容已核对，结论：只查看已验证的结果。" } : { content: "中间工具过程不应显示", reasoning_content: "internal thought", tool_calls: [{ index: 0, id: "ui-list", type: "function", function: { name: "employee", arguments: '{"action":"list"}' } }] }, finish_reason: final ? "stop" : "tool_calls" }] }) + "\n\ndata: [DONE]\n\n"), final ? 900 : 50));
@@ -118,6 +123,30 @@ test("employee chat bubbles, citations and task jumps work on mobile while debug
     await until("!document.querySelector('.avatar-current img')");
     await evaluate("document.querySelector('[aria-label=\"使用狮子座头像\"]').click()");
     await until("document.querySelector('.avatar-current img')?.src.endsWith('/avatars/zodiac/leo.webp')");
+    await evaluate("[...document.querySelectorAll('.employee-tabs button')].find(button=>button.textContent==='职责').click()");
+    await until("[...document.querySelectorAll('.section-heading button')].some(button=>button.textContent.includes('新增职责'))");
+    await evaluate("[...document.querySelectorAll('.section-heading button')].find(button=>button.textContent.includes('新增职责')).click()");
+    await until("!!document.querySelector('.duty-editor')");
+    assert.equal(await evaluate("document.querySelectorAll('.duty-editor textarea').length"), 2);
+    assert.equal(await evaluate("document.querySelectorAll('.duty-editor input,.duty-editor select').length"), 0);
+    if (process.env.VEGA_EMPLOYEE_UI_SCREENSHOT) {
+      const shot = await command("Page.captureScreenshot", { format: "png" });
+      await writeFile(process.env.VEGA_EMPLOYEE_UI_SCREENSHOT.replace(/\.png$/, "-duty.png"), Buffer.from(shot.data, "base64"));
+    }
+    const dutyText = "two-field-duty-ui-" + Date.now();
+    await evaluate(`(()=>{const form=document.querySelector('.duty-editor'),boxes=form.querySelectorAll('textarea');boxes[0].value='按交代的任务需要，不自动触发';boxes[1].value=${JSON.stringify(dutyText)};boxes.forEach(box=>box.dispatchEvent(new Event('input',{bubbles:true})));form.requestSubmit()})()`);
+    const dutyCard = `[...document.querySelectorAll('article.card')].find(card=>card.querySelector('.employee-duty-content')?.textContent===${JSON.stringify(dutyText)})`;
+    await until(`!document.querySelector('.duty-editor') && !!(${dutyCard})`);
+    const triggerCalls = providerRequests.filter(request => request.tools?.some((tool: any) => tool.function?.name === 'compile_duty_trigger')).length;
+    assert.equal(triggerCalls, 1);
+    await evaluate(`[...(${dutyCard}).querySelectorAll('button')].find(button=>button.textContent==='停用').click()`);
+    await until(`!![...(${dutyCard}).querySelectorAll('button')].find(button=>button.textContent==='启用')`);
+    await evaluate(`[...(${dutyCard}).querySelectorAll('button')].find(button=>button.textContent==='编辑').click()`);
+    await until("!!document.querySelector('.duty-editor')");
+    assert.equal(await evaluate("document.querySelector('.duty-editor textarea').value"), "按交代的任务需要，不自动触发");
+    await evaluate("document.querySelector('.duty-editor').requestSubmit()");
+    await until(`!document.querySelector('.duty-editor') && !![...(${dutyCard}).querySelectorAll('button')].find(button=>button.textContent==='启用')`);
+    assert.equal(providerRequests.filter(request => request.tools?.some((tool: any) => tool.function?.name === 'compile_duty_trigger')).length, triggerCalls);
     await evaluate("[...document.querySelectorAll('.employee-tabs button')].find(button=>button.textContent==='对话').click();document.querySelector('.employee-mobile-menu summary').click();[...document.querySelectorAll('.employee-mobile-actions button')].find(button=>button.textContent.includes('新任务执行位置')).click()");
     assert.equal(await evaluate("getComputedStyle(document.querySelector('.employee-execution-bar')).display==='flex'"), true);
     await evaluate("document.querySelector('.employee-mobile-menu summary').click();[...document.querySelectorAll('.employee-mobile-actions button')].find(button=>button.textContent.includes('新任务执行位置')).click()");

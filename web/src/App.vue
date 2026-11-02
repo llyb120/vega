@@ -4,6 +4,7 @@ import { LocalAgentPairing, canBridgeLocal, pairingStatusText } from "./local-ag
 import ConversationTimeline from "./ConversationTimeline.vue";
 import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
+import { dutyCondition, dutyContent } from "../../shared/duty-condition";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
 import EmployeeChat from "./EmployeeChat.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
@@ -216,6 +217,7 @@ const employee = ref({
   importance = ref(1),
   activeTaskCount = ref(null);
 const duty = ref(emptyDuty()),
+  dutySaving = ref(false),
   dutyOpen = ref(false);
 
 let eventsSocket,
@@ -234,14 +236,8 @@ const wsRequests = new Map(),
 function emptyDuty() {
   return {
     id: "",
+    condition: "",
     text: "",
-    note: "",
-    profile: "lightweight",
-    trigger: "manual",
-    times: "09:00",
-    everyMinutes: 60,
-    nextAt: "",
-    enabled: true,
   };
 }
 const isRunning = computed(
@@ -1218,47 +1214,22 @@ async function addTask() {
   });
 }
 function editDuty(d) {
-  duty.value = {
-    ...emptyDuty(),
-    ...d,
-    trigger: d.manual
-      ? "manual"
-      : d.everyMinutes
-        ? "interval"
-        : d.times?.length
-          ? "times"
-          : "dynamic",
-    times: (d.times || ["09:00"]).join(","),
-  };
+  duty.value = { id: d.id, condition: dutyCondition(d), text: dutyContent(d) };
   dutyOpen.value = true;
 }
 async function saveDuty() {
-  await attempt(async () => {
+  if (dutySaving.value) return;
+  const employeeId = selectedEmployee.value, actor = user.value?.id;
+  dutySaving.value = true;
+  try { await attempt(async () => {
     const d = duty.value;
-    const data = {
-      action: d.id ? "update" : "add",
-      kind: "duty",
-      id: d.id || undefined,
-      text: d.text,
-      note: d.note,
-      profile: d.profile,
-      enabled: d.enabled,
-      manual: d.trigger === "manual",
-      times: [],
-      everyMinutes: 0,
-      events: [],
-    };
-    if (d.trigger === "times")
-      data.times = d.times
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-    if (d.trigger === "interval") data.everyMinutes = Number(d.everyMinutes);
-    if (d.trigger === "dynamic") data.nextAt = d.nextAt.replace("T", " ");
-    await employeeAction(data);
+    await employeeAction({ action: d.id ? "update" : "add", kind: "duty", id: d.id || undefined, condition: d.condition, text: d.text, note: "" }).catch(error => {
+      if (selectedEmployee.value === employeeId && user.value?.id === actor) throw error;
+    });
+    if (selectedEmployee.value !== employeeId || user.value?.id !== actor || duty.value !== d) return;
     dutyOpen.value = false;
     duty.value = emptyDuty();
-  });
+  }); } finally { dutySaving.value = false; }
 }
 async function addMemory() {
   await attempt(async () => {
@@ -1816,54 +1787,11 @@ onBeforeUnmount(() => {
                 ＋ 新增职责
               </button>
             </div>
-            <form
-              v-if="dutyOpen"
-              class="card form-grid"
-              @submit.prevent="saveDuty"
-            >
-              <label
-                >要做什么<textarea
-                  v-model="duty.text"
-                  required
-                  rows="3"
-                ></textarea></label
-              ><label
-                >补充要求<textarea v-model="duty.note" rows="2"></textarea>
-              </label>
-              <div class="inline-form">
-                <label
-                  >触发方式<select v-model="duty.trigger">
-                    <option value="manual">不定时，手动匹配</option>
-                    <option value="times">每天固定时刻</option>
-                    <option value="interval">固定间隔</option>
-                    <option value="dynamic">动态安排</option>
-                  </select></label>
-              </div>
-              <label v-if="duty.trigger === 'times'"
-                >时刻（逗号分隔）<input
-                  v-model="duty.times"
-                  placeholder="09:00,14:30"
-                  required /></label
-              ><label v-if="duty.trigger === 'interval'"
-                >完成后间隔（分钟）<input
-                  v-model="duty.everyMinutes"
-                  type="number"
-                  min="1"
-                  max="10080"
-                  required /></label
-              ><label v-if="duty.trigger === 'dynamic'"
-                >首次执行<input
-                  v-model="duty.nextAt"
-                  type="datetime-local"
-                  required /></label
-              ><label
-                ><input v-model="duty.enabled" type="checkbox" />
-                启用此职责</label
-              >
-              <div class="actions">
-                <button class="primary">保存职责</button
-                ><button type="button" @click="dutyOpen = false">取消</button>
-              </div>
+            <form v-if="dutyOpen && employee.canManage" class="card form-grid duty-editor" @submit.prevent="saveDuty">
+              <label>触发条件<textarea v-model="duty.condition" rows="2" maxlength="2000" required :disabled="dutySaving" placeholder="例如：每天上午9点；每30分钟检查一次；按交代的任务需要"></textarea></label>
+              <label>职责内容<textarea v-model="duty.text" rows="5" maxlength="8000" required :disabled="dutySaving" placeholder="说明要做什么、处理范围和交付要求"></textarea></label>
+              <p class="hint">保存时自动识别触发方式，时间按北京时间；无法自动执行的条件会明确提示。</p>
+              <div class="actions"><button class="primary" :disabled="dutySaving">{{ dutySaving ? '正在保存…' : '保存职责' }}</button><button type="button" :disabled="dutySaving" @click="dutyOpen = false">取消</button></div>
             </form>
             <div
               v-if="!employee.duties?.length && !dutyOpen"
@@ -1877,22 +1805,12 @@ onBeforeUnmount(() => {
               class="card"
             >
               <div class="card-top">
-                <span class="pill">{{
-                  d.manual
-                    ? "不定时"
-                    : d.everyMinutes
-                      ? `每 ${d.everyMinutes} 分钟`
-                      : d.times?.join("、") ||
-                        d.events?.join("、") ||
-                        "动态安排"
-                }}</span
-                ><span class="hint">{{ d.enabled ? "启用" : "停用" }}</span>
+                <span class="pill duty-condition">{{ dutyCondition(d) }}</span><span class="hint">{{ d.enabled ? "启用" : "停用" }}</span>
               </div>
-              <h3>{{ d.text }}</h3>
-              <p>{{ d.note }}</p>
+              <p class="employee-duty-content">{{ dutyContent(d) }}</p>
               <div class="card-actions">
-                <button v-if="employee.canManage" @click="editDuty(d)">编辑</button
-                ><button
+                <button v-if="employee.canManage" @click="editDuty(d)">编辑</button><button v-if="employee.canManage" class="link" @click="attempt(() => employeeAction({ action: 'update', id: d.id, enabled: !d.enabled }))">{{ d.enabled ? '停用' : '启用' }}</button>
+                <button
                   v-if="employee.canManage"
                   class="link"
                   @click="
@@ -2045,6 +1963,8 @@ onBeforeUnmount(() => {
 .employee-section-heading { margin-bottom: 20px; }
 .employee-section-heading h3 { margin: 0 0 7px; font-size: 20px; }
 .employee-section-heading p { color: var(--muted); font-size: 13px; margin: 0; }
+.duty-condition { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.employee-duty-content { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.75; }
 .employee-task-form { background: var(--surface); padding: 12px; border: 1px solid var(--border); border-radius: 12px; }
 .employee-task-form input { min-width: 140px; }
 .employee-task-filters { display: flex; gap: 6px; margin-bottom: 18px; overflow-x: auto; }

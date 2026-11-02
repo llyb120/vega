@@ -1,4 +1,5 @@
 import { updateEmployeeAvatar } from "../../core/employee-avatar";
+import { prepareDutyInput } from "../../core/duty-condition";
 import { uploadSkill } from "../../core/skill-upload";
 import {
   browserTabs,
@@ -242,7 +243,7 @@ export default defineEventHandler(async (event) => {
       }
       if (path.length === 2 && method === "POST") {
         if (!employee.manageable(user)) check(a.action === "list" || (a.action === "add" && a.kind === "todo"), 403, "只有员工管理者可以修改职责、记忆和凭据");
-        const result = await employee.execute("", a);
+        const result = await employee.execute("", await prepareDutyInput(engine, employee, a));
         return result.secret ? JSON.parse(result.secret) : result.value;
       }
       check(false, 404, "Employee route not found");

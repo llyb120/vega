@@ -30,7 +30,7 @@ test(
         Buffer.from("secret-image-fixture"),
       );
     seeded.close();
-    let thinkingRequests = 0;
+    let thinkingRequests = 0, triggerRequests = 0;
     const mock = createServer(async (req, res) => {
       if (req.method === "GET" && req.url === "/models") {
         res.setHeader("Content-Type", "application/json");
@@ -67,6 +67,14 @@ test(
       )
         await sleep(1000);
       const payload = JSON.parse(Buffer.concat(chunks).toString());
+      if (payload.tools?.some((tool: any) => tool.function?.name === "compile_duty_trigger")) {
+        triggerRequests++;
+        const condition = JSON.parse(payload.messages.at(-1).content).condition;
+        const rule = condition.includes("unsupported-event-fixture") ? { mode: "unsupported", reason: "没有外部事件源，请明确检查频率" } : condition.includes("每天") ? { mode: "daily", times: ["23:59"] } : { mode: "manual" };
+        res.setHeader("Content-Type", "text/event-stream");
+        res.end("data: " + JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "duty-rule", type: "function", function: { name: "compile_duty_trigger", arguments: JSON.stringify(rule) } }] }, finish_reason: "tool_calls" }] }) + "\n\ndata: [DONE]\n\n");
+        return;
+      }
       const userAt = payload.messages?.findLastIndex((message: any) => message.role === "user") ?? -1;
       const content = payload.messages?.[userAt]?.content;
       const memory = typeof content === "string" ? content.match(/team-memory-fixture-(?:admin|member)/)?.[0] : undefined;
@@ -422,6 +430,20 @@ test(
       assert.deepEqual((await ok("/employees", "GET", undefined, a)).filter((employee: any) => employee.scope === "personal").map((employee: any) => employee.id), [workerA.id]);
       const team = await ok("/employees", "POST", { name: "Team worker", cwd: dir, scope: "personal" }, admin);
       assert.equal(team.scope, "team");
+      const beforeDutyCalls = triggerRequests;
+      for (const login of [a, b, v]) assert.equal((await req(`/employees/${team.id}`, "POST", { action: "add", kind: "duty", condition: "每天23:59", text: "两框职责" }, login)).r.status, 403);
+      assert.equal(triggerRequests, beforeDutyCalls, "unauthorized writes do not invoke the trigger interpreter");
+      const duty = await ok(`/employees/${team.id}`, "POST", { action: "add", kind: "duty", condition: "每天23:59", text: "两框职责内容" }, admin);
+      let savedDuty = (await ok(`/employees/${team.id}`, "GET", undefined, admin)).duties.find((entry: any) => entry.id === duty.id);
+      assert.equal(savedDuty.condition, "每天23:59"); assert.deepEqual(savedDuty.times, ["23:59"]);
+      await ok(`/employees/${team.id}`, "POST", { action: "update", id: duty.id, enabled: false }, admin);
+      const afterDutyCalls = triggerRequests;
+      await ok(`/employees/${team.id}`, "POST", { action: "update", id: duty.id, condition: "每天23:59", text: "只修改职责内容" }, admin);
+      assert.equal(triggerRequests, afterDutyCalls, "unchanged triggers preserve their compiled schedule");
+      savedDuty = (await ok(`/employees/${team.id}`, "GET", undefined, admin)).duties.find((entry: any) => entry.id === duty.id);
+      assert.equal(savedDuty.enabled, false); assert.equal(savedDuty.text, "只修改职责内容");
+      assert.equal((await req(`/employees/${team.id}`, "POST", { action: "update", id: duty.id, condition: "unsupported-event-fixture" }, admin)).r.status, 400);
+      assert.equal((await ok(`/employees/${team.id}`, "GET", undefined, admin)).duties.find((entry: any) => entry.id === duty.id).condition, "每天23:59");
       const avatarData = (await sharp({ create: { width: 32, height: 24, channels: 3, background: "#5577bb" } }).png().toBuffer()).toString("base64");
       const customAvatar = await ok(`/employees/${workerA.id}/avatar`, "POST", { mime: "image/png", data: avatarData }, a);
       assert.match(customAvatar.avatar, /^blob-/);
