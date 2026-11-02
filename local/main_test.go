@@ -39,6 +39,54 @@ func TestExactEditsCRLFAndAtomicFailure(t *testing.T) {
 		t.Fatal("overlapping duplicate matches accepted")
 	}
 }
+func TestShellCommandPolicy(t *testing.T) {
+	data, err := os.ReadFile("testdata/shell-policy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases struct {
+		Blocked []string `json:"blocked"`
+		Allowed []string `json:"allowed"`
+	}
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	if len(cases.Blocked) == 0 || len(cases.Allowed) == 0 {
+		t.Fatal("command policy fixtures must cover both outcomes")
+	}
+	for _, command := range cases.Blocked {
+		if got := commandPolicyError(command); got != shellPolicyError {
+			t.Errorf("automation command accepted: %q", command)
+		}
+	}
+	for _, command := range cases.Allowed {
+		if got := commandPolicyError(command); got != "" {
+			t.Errorf("ordinary command rejected: %q: %s", command, got)
+		}
+	}
+	ctx := context.Background()
+	cwd := t.TempDir()
+	blocked := execReq{Cwd: cwd, Command: "throw 'must not execute'; [Native]::SetCursorPos(10, 20)", Timeout: 10}
+	if result := runCommand(ctx, blocked); result["error"] != shellPolicyError {
+		t.Fatalf("runCommand did not reject before process creation: %v", result)
+	}
+	args, err := json.Marshal(blocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := execute(ctx, job{Op: "exec", Args: args}); result["error"] != shellPolicyError {
+		t.Fatalf("exec dispatch bypassed command policy: %v", result)
+	}
+	command := "printf ok"
+	if runtime.GOOS == "windows" {
+		command = "Write-Output 'ok'"
+	}
+	result := runCommand(ctx, execReq{Cwd: cwd, Command: command, Timeout: 10})
+	if result["exitCode"] != 0 || strings.TrimSpace(result["output"].(string)) != "ok" {
+		t.Fatalf("ordinary shell command failed: %v", result)
+	}
+}
+
 func TestShellCancellationAndOutputLimit(t *testing.T) {
 	command := "sleep 10"
 	if runtime.GOOS == "windows" {

@@ -13,6 +13,7 @@ import { resolve, dirname, extname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { spawn } from "node:child_process";
 import { windowsShell } from "./presence";
+import { assertShellCommand } from "./shell-policy";
 import sharp from "sharp";
 import chromeDefinition from "../../shared/chrome-tool.json";
 import employeeDefinition from "../../shared/employee-tool.json";
@@ -150,7 +151,7 @@ export class Tools {
         ),
         schema(
           "bash",
-          "Run a shell command in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s; do not drive Chrome UI through shell.",
+          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. Browser interaction MUST use the chrome tool through its authorized extension. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If the extension cannot proceed or a native dialog is required, STOP and let the user handle it.",
           { command: string, timeout: integer },
           ["command"],
         ),
@@ -218,7 +219,7 @@ export class Tools {
           name: chromeDefinition.name,
           description: chromeDefinition.description.replace(
             "Chrome原生对话框和其它桌面应用用jianlai；两工具不能并行，切换后先观察。",
-            "仅控制授权Chrome网页；不提供桌面应用或原生对话框操作，原生对话框请用户处理。",
+            "仅通过授权扩展控制Chrome网页；不提供桌面应用或原生对话框操作。扩展不可用或无法继续时停止并请用户处理；禁止用bash、脚本、Win32、UI自动化、外部程序、直接CDP/WebDriver或切换场景绕行，禁止控制真实鼠标、键盘和窗口焦点。原生对话框请用户处理。",
           ),
           parameters: chromeDefinition.inputSchema,
         });
@@ -323,7 +324,7 @@ export class Tools {
     if (this.session.employeeId && !this.session.taskId)
       return defs.filter((def) => ["employee", "read", "compress", "decompress", "recall", "search_context", "context_budget", "acp_status"].includes(def.name));
     if (this.session.taskId && this.session.scene === "computer")
-      return defs.filter((def) => !["bash", "write", "edit", "change_working_directory", "mcp", "switch_scene"].includes(def.name));
+      return defs.filter((def) => !["write", "edit", "change_working_directory", "mcp", "switch_scene"].includes(def.name));
     return defs;
   }
   private agent() {
@@ -740,6 +741,7 @@ export async function shell(
   emit: (type: string, data: any) => void,
 ): Promise<Outcome> {
   assert(typeof a.command === "string" && a.command.trim(), "command required");
+  assertShellCommand(a.command);
   const timeout = a.timeout ?? 120;
   assert(
     Number.isInteger(timeout) && timeout >= 1 && timeout <= 600,

@@ -9,7 +9,9 @@ import { resolve, dirname, join, basename } from "node:path";
 import type { Config } from "./config";
 import type { Session, Store } from "./store";
 import { clip, assert, type Obj } from "./util";
-export const CODING_RULES = `先理解再修改，保持改动聚焦。未知位置先用 rg/git grep 定位，再 read 必要行段；搜索须限定路径/类型并排除依赖、构建与缓存，禁止无界递归。已有文件局部修改用 edit，oldText 唯一且所有 edits 针对原文件；同一文件禁止并发 edit，改动完成后不为确认重复 read。read 支持行段；本地图片用 read，不打开后截图。长编译/测试不要接过滤管道吞进度。按最小影响面验证，不虚报成功。最终采用例外汇报，先说用户可感知的结果，不罗列过程；图片用 Markdown 内联展示；本地图片先 read，再使用工具返回的 url（/api/blobs/...），不要把磁盘路径当成网页地址，也不编造路径或 URL。`;
+export const CODING_RULES = `先理解再修改，保持改动聚焦。未知位置先用 rg/git grep 定位，再 read 必要行段；搜索须限定路径/类型并排除依赖、构建与缓存，禁止无界递归。已有文件局部修改用 edit，oldText 唯一且所有 edits 针对原文件；同一文件禁止并发 edit，改动完成后不为确认重复 read。read 支持行段；本地图片用 read，不打开后截图。长编译/测试不要接过滤管道吞进度。
+浏览器与桌面边界：Chrome 只能通过 chrome 工具的授权扩展操作；员工主会话没有 chrome 工具时须先 employee.relay(scene=computer)，在独立电脑会话操作，不能因当前工具列表没有 chrome 就断言 CDP 不可用。电脑会话保留 bash 做文件与命令工作，但网页交互只能用 chrome。扩展通过 47653–47662 的本机 HTTP 桥接连接，再使用 chrome.debugger 发送 CDP，不依赖 9222/9223 等远程调试端口；探测这些端口超时不代表扩展失败。扩展不可用、连接失败、CDP不可用或遇到原生对话框时必须停止并交给用户，不得降级为桌面自动化。禁止用 bash/exec、PowerShell、Win32/user32、SendInput/keybd_event/mouse_event/SendKeys、UIA、AppleScript、Python/Node自动化库、外部程序、直接CDP/WebDriver或MCP绕过扩展控制浏览器；禁止移动真实鼠标、注入系统键盘、恢复/激活窗口或抢前台焦点。不得通过编码、写入后执行脚本、辅助进程或切换场景绕过限制；这些限制适用于所有场景和执行位置。正常的文件、构建、测试、进程与网络诊断命令仍可使用，但不操作浏览器界面。
+按最小影响面验证，不虚报成功。最终采用例外汇报，先说用户可感知的结果，不罗列过程；图片用 Markdown 内联展示；本地图片先 read，再使用工具返回的 url（/api/blobs/...），不要把磁盘路径当成网页地址，也不编造路径或 URL。`;
 export const EMPLOYEE_SCENE_RULES = `新主任务统一先用轻量模型判断目标与计划，不因任务profile、上一个任务、后台执行或使用文件/命令工具直接进入coding；沟通会话始终轻量派单。普通信息查询不因使用read或bash而升级：查任务状态、查实际API地址、读取现有配置/日志、整理总结等在轻量场景完成。
 实际涉及编写/修改代码、代码审查、深入源码分析、工程调试或验证代码的构建测试，才属于编码工作；有开放的coding且当前模型未覆盖时，先单独switch_scene(scene=coding)再执行该块工作，按分析、修改、验证整块完成，不逐个工具切模型。不要把“只读调查”一概当成编码，也不要把真正的代码排错留在轻量场景。
 同一任务续做默认沿用上次执行现场，但不是任务级永久锁定：后续仍是编码/调试/验证就继续coding，工作转为普通查询、协调或独立整理时可按后续需求回到lightweight，之后再需要编码也可再次升级。均在原主会话保留历史、计划、恢复点和授权，不重做已完成操作；不要为一句重复收尾来回切换。新的独立任务重新从轻量开始。当前数字员工的独立任务可并行；不要因为另一个任务还未结束而拒绝派单。仅同一任务、同一浏览器或工作区写入冲突时让系统协调；工具返回工作区queued时本步未执行，立即结束本轮，系统在资源释放后续做，不忙等、不反复重试、不新建重复任务。浏览器操作通过relay进入独立computer会话；当前首选模型已覆盖目标场景时不重复切换，故障只在当前场景的候选模型中回退。`;

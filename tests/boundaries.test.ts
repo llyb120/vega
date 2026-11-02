@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { gunzipSync, gzipSync, deflateRawSync } from "node:zlib";
 import { decodeRelayFrame, legacyRelayData } from "../server/core/relay";
 import { ChromeBridge } from "../server/core/chrome-bridge";
-import { shell } from "../server/core/tools";
+import { shell, Tools } from "../server/core/tools";
+import { assertShellCommand, SHELL_POLICY_ERROR } from "../server/core/shell-policy";
+import { LocalAgents, localShell } from "../server/core/local-agent";
+import { Store } from "../server/core/store";
+import { Vault } from "../server/core/vault";
+import { CODING_RULES } from "../server/core/prompt";
+import commandCases from "../local/testdata/shell-policy.json";
 const cleanup: (() => any)[] = [];
 afterEach(async () => {
   for (const f of cleanup.splice(0).reverse()) await f();
@@ -100,4 +106,37 @@ test("shell uses real PowerShell/POSIX process and preserves split UTF-8 output"
   );
   assert.equal(result.error, false, JSON.stringify(result.value));
   assert.equal(result.value.output, "你好");
+});
+test("shell policy rejects desktop and alternative browser automation without blocking ordinary commands", () => {
+  for (const command of commandCases.blocked)
+    assert.throws(() => assertShellCommand(command), { message: SHELL_POLICY_ERROR }, command);
+  for (const command of commandCases.allowed)
+    assert.doesNotThrow(() => assertShellCommand(command), command);
+});
+test("forbidden shell input is rejected before server spawn or local job dispatch", async (t) => {
+  const signal = new AbortController().signal;
+  const command = "throw 'must not execute'; [Native]::SetCursorPos(10, 20)";
+  let sent = 0;
+  const hub = new LocalAgents((event) => { if (event.type === "local_agent_request") sent++; });
+  t.after(() => hub.close());
+  hub.connect("alice", { instance: "a".repeat(32), clientId: "b".repeat(32), platform: "windows", cwd: "C:\\client" });
+  const agent = hub.active("alice")!;
+  await assert.rejects(shell(process.cwd(), { command }, signal, () => {}), { message: SHELL_POLICY_ERROR });
+  await assert.rejects(localShell(hub, agent, agent.cwd, { command }, signal), { message: SHELL_POLICY_ERROR });
+  assert.equal(sent, 0);
+  assert.equal(agent.pending.size, 0);
+});
+test("computer and coding scenes retain shell without allowing desktop automation", async (t) => {
+  const store = new Store(":memory:");
+  t.after(() => store.close());
+  const session = store.newSession({ scene: "computer" });
+  const tools = new Tools({ store, vault: new Vault(store), mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, new AbortController().signal, () => {});
+  const definitions = tools.definitions();
+  assert(definitions.some((tool) => tool.name === "chrome"));
+  assert(definitions.some((tool) => tool.name === "bash"));
+  await assert.rejects(tools.execute({ id: "blocked", name: "bash", arguments: { command: "[Native]::SetCursorPos(10, 20)" } }, {} as any), { message: SHELL_POLICY_ERROR });
+  assert.match(definitions.find((tool) => tool.name === "chrome")!.description, /禁止.*绕行/);
+  assert.match(CODING_RULES, /Chrome 只能通过 chrome 工具的授权扩展操作/);
+  session.scene = "coding";
+  assert(tools.definitions().some((tool) => tool.name === "bash"));
 });

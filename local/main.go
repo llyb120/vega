@@ -218,6 +218,9 @@ func (b *limitedOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 func runCommand(parent context.Context, req execReq) map[string]any {
+	if message := commandPolicyError(req.Command); message != "" {
+		return failure(message)
+	}
 	if req.Timeout < 1 || req.Timeout > 600 {
 		return failure("Invalid timeout")
 	}

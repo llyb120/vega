@@ -51,7 +51,8 @@ test("even a coding-profile task starts lightweight, upgrades in the same work s
     }
     if (phase === 3) {
       assert.equal(model.selection, "p/vision");
-      assert(!definitions.some(tool => ["write", "edit", "bash", "switch_scene"].includes(tool.name)));
+      assert(definitions.some(tool => tool.name === "bash"));
+      assert(!definitions.some(tool => ["write", "edit", "switch_scene"].includes(tool.name)));
       return { role: "assistant", text: "浏览器已验证。" };
     }
     assert.equal(model.selection, "p/code", "returning from the browser must not reset an upgraded task to lightweight");

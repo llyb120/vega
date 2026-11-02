@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assert, type Obj } from "./util";
+import { assertShellCommand } from "./shell-policy";
 import type { Auth, Principal } from "./auth";
 
 export const CLIENT_HEARTBEAT_TIMEOUT = 30000;
@@ -127,6 +128,10 @@ export class LocalAgents {
     else this.emit({ type: "local_agent_request", targetUser: agent.userId, data: { instance: agent.instance, ...job } });
   }
   request(agent: Agent, op: "exec" | "file" | "browser", args: Obj, signal: AbortSignal) {
+    if (op === "exec") {
+      assert(typeof args.command === "string" && args.command.trim(), "command required");
+      assertShellCommand(args.command);
+    }
     signal.throwIfAborted();
     assert(agent.pending.size < 16, "Too many local operations");
     if (this.active(agent.userId, agent.clientId) !== agent) throw new LocalAgentUnavailable();

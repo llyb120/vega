@@ -100,7 +100,8 @@ test("employee conversation delegates through the existing engine without leakin
     const computer = store.newSession({ employeeId: a.employeeId, taskId: a.state().tasks[0].id, scene: "computer" });
     const tools = new Tools(engine, computer, engine.config(), new AbortController().signal, () => {});
     const definitions = tools.definitions(await engine.catalog.resolve(engine.config(), "fixture/model"));
-    assert(!definitions.some((tool) => ["bash", "write", "edit", "mcp", "switch_scene"].includes(tool.name)));
+    assert(definitions.some((tool) => tool.name === "bash"));
+    assert(!definitions.some((tool) => ["write", "edit", "mcp", "switch_scene"].includes(tool.name)));
     const close = Tools.prototype.close;
     try {
       Tools.prototype.close = async () => { throw Error("cleanup failed"); };
