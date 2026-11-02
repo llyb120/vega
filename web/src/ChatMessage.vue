@@ -1,12 +1,13 @@
 <script setup vapor>
 import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
-const props = defineProps({ message: Object, name: String, quotable: Boolean });
+import EmployeeAvatar from "./EmployeeAvatar.vue";
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, quotable: Boolean });
 const emit = defineEmits(["quote", "jump", "task"]);
 </script>
 <template>
   <article class="chat-message" :class="message.role" :data-message-seq="message.seq" tabindex="-1">
-    <span class="chat-avatar" aria-hidden="true">{{ message.role === 'user' ? '我' : name?.slice(0, 1) || '员' }}</span>
+    <span class="chat-avatar" aria-hidden="true"><span v-if="message.role === 'user'">我</span><EmployeeAvatar v-else :employee-id="employeeId" :name="name" :avatar="avatar" /></span>
     <div class="chat-message-content">
       <div class="chat-message-heading"><span>{{ message.role === 'user' ? '我' : name }}</span><button v-if="quotable && message.seq" type="button" class="chat-reply" aria-label="引用这条消息" @click="emit('quote', message)">引用</button></div>
       <div class="chat-bubble" :class="{ failed: message.error }" :role="message.error ? 'alert' : undefined">

@@ -1,3 +1,4 @@
+import { updateEmployeeAvatar } from "../../core/employee-avatar";
 import { uploadSkill } from "../../core/skill-upload";
 import {
   browserTabs,
@@ -153,7 +154,7 @@ export default defineEventHandler(async (event) => {
       if (path.length === 1) {
         if (method === "GET") return engine.employee.all().filter((employee) => employee.accessible(user)).map((employee) => {
           const s = employee.state();
-          return { id: s.id, name: s.name, instruction: s.instruction, scope: s.scope, canManage: employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
+          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, scope: s.scope, canManage: employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
         });
         if (method === "POST") {
           check(user.role !== "viewer", 403, "Execution permission required");
@@ -165,6 +166,21 @@ export default defineEventHandler(async (event) => {
       check(!employee.deleting, 409, "员工正在删除，请稍候");
       const state = employee.state();
       if (method !== "GET") check(user.role !== "viewer", 403, "只读账号不能执行操作");
+      if (path[2] === "avatar") {
+        if (method === "GET") {
+          check(/^blob-[a-f\d]{32}$/.test(state.avatar || ""), 404, "Avatar not found");
+          const image = store.blobData(state.avatar!);
+          check(image && image.mime === "image/webp", 404, "Avatar not found");
+          setHeader(event, "Content-Type", "image/webp");
+          setHeader(event, "Cache-Control", "private, max-age=86400");
+          return send(event, Buffer.from(image.data));
+        }
+        if (method === "POST") {
+          check(employee.manageable(user), 403, "只有员工管理者可以修改头像");
+          return await updateEmployeeAvatar(employee, a);
+        }
+        check(false, 405, "Method not allowed");
+      }
       if (path[2] === "execution" && method === "POST") {
         check(employee.manageable(user), 403, "只有员工管理者可以切换默认执行位置");
         return engine.switchEmployeeExecution(employee.employeeId, a.localAgent, a.clientId, user.id);

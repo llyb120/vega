@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import WebSocket from "ws";
+import sharp from "sharp";
 import { Store } from "../server/core/store";
 import { sleep } from "../server/core/util";
 type Login = { cookie: string; csrf: string; id: string };
@@ -421,6 +422,28 @@ test(
       assert.deepEqual((await ok("/employees", "GET", undefined, a)).filter((employee: any) => employee.scope === "personal").map((employee: any) => employee.id), [workerA.id]);
       const team = await ok("/employees", "POST", { name: "Team worker", cwd: dir, scope: "personal" }, admin);
       assert.equal(team.scope, "team");
+      const avatarData = (await sharp({ create: { width: 32, height: 24, channels: 3, background: "#5577bb" } }).png().toBuffer()).toString("base64");
+      const customAvatar = await ok(`/employees/${workerA.id}/avatar`, "POST", { mime: "image/png", data: avatarData }, a);
+      assert.match(customAvatar.avatar, /^blob-/);
+      const ownAvatar = await fetch(base + `/api/employees/${workerA.id}/avatar?v=${customAvatar.avatar}`, { headers: { Cookie: a.cookie } });
+      assert.equal(ownAvatar.status, 200); assert.match(ownAvatar.headers.get("content-type")!, /image\/webp/);
+      assert.equal((await sharp(Buffer.from(await ownAvatar.arrayBuffer())).metadata()).width, 512);
+      assert.equal((await req(`/employees/${workerA.id}/avatar`, "GET", undefined, b)).r.status, 404);
+      assert.equal((await req(`/blobs/${customAvatar.avatar}`, "GET", undefined, a)).r.status, 404, "custom avatars are not granted through an unrelated conversation");
+      assert.equal((await req(`/employees/${workerA.id}/avatar`, "POST", { mime: "image/png", data: avatarData }, b)).r.status, 404);
+      assert.equal((await req(`/employees/${team.id}/avatar`, "POST", { preset: "zodiac:leo" }, a)).r.status, 403);
+      assert.equal((await req(`/employees/${team.id}/avatar`, "POST", { preset: "zodiac:leo" }, v)).r.status, 403);
+      assert.equal((await req(`/employees/${workerA.id}/avatar`, "POST", { preset: "https://tracker.example/pixel" }, a)).r.status, 400);
+      assert.equal((await ok(`/employees/${workerA.id}`, "GET", undefined, a)).avatar, customAvatar.avatar);
+      await ok(`/employees/${team.id}/avatar`, "POST", { mime: "image/png", data: avatarData }, admin);
+      for (const login of [a, b, v]) {
+        const image = await fetch(base + `/api/employees/${team.id}/avatar`, { headers: { Cookie: login.cookie } });
+        assert.equal(image.status, 200); await image.arrayBuffer();
+      }
+      await ok(`/employees/${team.id}/avatar`, "POST", { preset: "zodiac:pisces" }, admin);
+      assert.equal((await ok(`/employees/${team.id}`, "GET", undefined, v)).avatar, "zodiac:pisces");
+      const zodiacAsset = await fetch(base + "/avatars/zodiac/pisces.webp");
+      assert.equal(zodiacAsset.status, 200); assert.match(zodiacAsset.headers.get("content-type")!, /image\/webp/); await zodiacAsset.arrayBuffer();
       for (const login of [a, b, v]) {
         assert((await ok("/employees", "GET", undefined, login)).some((employee: any) => employee.id === team.id));
         assert.equal((await ok(`/employees/${team.id}`, "GET", undefined, login)).canManage, false);
@@ -494,6 +517,7 @@ test(
       assert.equal((await req(`/employees/${workerA.id}?confirmed=true`, "DELETE", undefined, b)).r.status, 404);
       await ok(`/employees/${workerA.id}?confirmed=true`, "DELETE", undefined, a);
       assert.equal((await req(`/employees/${workerA.id}`, "GET", undefined, a)).r.status, 404);
+      assert.equal((await req(`/employees/${workerA.id}/avatar`, "GET", undefined, a)).r.status, 404);
       assert.equal((await req(`/sessions/${chat.session.id}`, "GET", undefined, a)).r.status, 404);
       assert((await ok("/employees", "GET", undefined, b)).some((employee: any) => employee.id === workerB.id));
       assert(

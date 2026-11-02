@@ -1,8 +1,9 @@
 <script setup vapor>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import ChatMessage from "./ChatMessage.vue";
+import EmployeeAvatar from "./EmployeeAvatar.vue";
 import { employeeChatMessages } from "./conversation";
-const props = defineProps({ api: Function, employeeId: String, name: String, revision: Number, event: Object, composer: Object, readonly: Boolean });
+const props = defineProps({ api: Function, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean });
 const emit = defineEmits(["task"]);
 const messages = ref([]), running = ref(false), busy = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
@@ -107,8 +108,8 @@ onBeforeUnmount(() => { disposed = true; request++; });
   <section class="employee-chat">
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <div ref="transcript" class="employee-transcript" aria-live="polite">
-      <div v-if="!messages.length" class="employee-welcome"><span class="welcome-avatar" aria-hidden="true">{{ name?.slice(0, 1) }}</span><span class="welcome-label">你的数字搭档已就位</span><h3>今天，想交给我什么？</h3><p>直接告诉我目标。我会安排任务、跟进结果，<br />需要你决定时再回来。</p><div v-if="!readonly" class="welcome-prompts"><button @click="draft = '帮我处理一项工作：'; input?.focus()"><span aria-hidden="true">↗</span> 交代新工作</button><button @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><span aria-hidden="true">☷</span> 看看工作进度</button></div></div>
-      <ChatMessage v-for="message in visible" :key="message.seq" :message="message" :name="name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" />
+      <div v-if="!messages.length" class="employee-welcome"><span class="welcome-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" /></span><span class="welcome-label">你的数字搭档已就位</span><h3>今天，想交给我什么？</h3><p>直接告诉我目标。我会安排任务、跟进结果，<br />需要你决定时再回来。</p><div v-if="!readonly" class="welcome-prompts"><button @click="draft = '帮我处理一项工作：'; input?.focus()"><span aria-hidden="true">↗</span> 交代新工作</button><button @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><span aria-hidden="true">☷</span> 看看工作进度</button></div></div>
+      <ChatMessage v-for="message in visible" :key="message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" />
       <div v-if="running" class="employee-typing" role="status" aria-label="正在输入中"><span>{{ name }}</span><div>正在输入中<span class="typing-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></div></div>
     </div>
     <p v-if="readonly" class="readonly-note">当前账号仅可查看团队员工的对话和任务。</p>

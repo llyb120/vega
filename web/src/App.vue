@@ -6,6 +6,8 @@ import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
 import EmployeeChat from "./EmployeeChat.vue";
+import EmployeeAvatar from "./EmployeeAvatar.vue";
+import EmployeeAvatarPicker from "./EmployeeAvatarPicker.vue";
 import EmployeeTaskCard from "./EmployeeTaskCard.vue";
 import DebugSessions from "./DebugSessions.vue";
 import BrowserView from "./BrowserView.vue";
@@ -1075,7 +1077,7 @@ async function loadEmployee() {
   const data = await api(`/employees/${id}`);
   if (user.value?.id !== owner || selectedEmployee.value !== id) return;
   if (employeeTab.value !== "settings" || employee.value.id !== id) employee.value = data;
-  else { employee.value.tasks = data.tasks; employee.value.busy = data.busy; employee.value.chatRunning = data.chatRunning; employee.value.executionClients = data.executionClients; employee.value.execution = data.execution; }
+  else { employee.value.tasks = data.tasks; employee.value.busy = data.busy; employee.value.chatRunning = data.chatRunning; employee.value.executionClients = data.executionClients; employee.value.execution = data.execution; employee.value.avatar = data.avatar; }
 }
 function employeeApi(path, method = "GET", data) {
   if (!selectedEmployee.value) throw Error("请先创建员工");
@@ -1451,7 +1453,7 @@ onBeforeUnmount(() => {
       <div class="employee-list">
         <template v-for="group in employeeGroups" :key="group.scope"><div class="employee-group-label"><span>{{ group.label }}</span><span>{{ group.entries.length }}</span></div>
         <button v-for="entry in group.entries" :key="entry.id" class="session-row" :class="{ active: view === 'employee' && selectedEmployee === entry.id }" @click="chooseEmployee(entry.id)">
-          <span class="employee-nav-avatar" aria-hidden="true">{{ entry.name.slice(0, 1) }}</span><span class="employee-nav-info"><strong class="truncate">{{ entry.name }}</strong><small>{{ entry.attentionTasks ? entry.attentionTasks + ' 项待处理' : entry.activeTasks ? entry.activeTasks + ' 项进行中' : '随时待命' }}</small></span><span v-if="entry.activeTasks" :class="['count', { attention: entry.attentionTasks }]">{{ entry.activeTasks }}</span>
+          <span class="employee-nav-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="entry.id" :name="entry.name" :avatar="entry.avatar" /></span><span class="employee-nav-info"><strong class="truncate">{{ entry.name }}</strong><small>{{ entry.attentionTasks ? entry.attentionTasks + ' 项待处理' : entry.activeTasks ? entry.activeTasks + ' 项进行中' : '随时待命' }}</small></span><span v-if="entry.activeTasks" :class="['count', { attention: entry.attentionTasks }]">{{ entry.activeTasks }}</span>
         </button></template>
       </div>
       <nav aria-label="主导航" @click="closeNavigation">
@@ -1749,7 +1751,7 @@ onBeforeUnmount(() => {
       />
       <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
         <header class="employee-header">
-          <div class="employee-identity"><span class="employee-avatar" aria-hidden="true">{{ (creatingEmployee ? '+' : employee.name?.slice(0, 1)) || '员' }}</span><div><span class="employee-eyebrow">{{ employee.scope === 'team' ? '团队数字员工' : '个人数字员工' }}</span><h2>{{ creatingEmployee || !employees.length ? '创建新员工' : employee.name || '加载中…' }}</h2><p>{{ creatingEmployee || !employees.length ? '取个名字，交代他的工作方向，就可以开始了。' : employee.instruction || '把目标交给我，任务由我安排。' }}</p></div></div>
+          <div class="employee-identity"><span class="employee-avatar" aria-hidden="true"><span v-if="creatingEmployee">+</span><EmployeeAvatar v-else :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" /></span><div><span class="employee-eyebrow">{{ employee.scope === 'team' ? '团队数字员工' : '个人数字员工' }}</span><h2>{{ creatingEmployee || !employees.length ? '创建新员工' : employee.name || '加载中…' }}</h2><p>{{ creatingEmployee || !employees.length ? '取个名字，交代他的工作方向，就可以开始了。' : employee.instruction || '把目标交给我，任务由我安排。' }}</p></div></div>
           <div v-if="employees.length && !creatingEmployee" class="employee-header-actions"><span class="employee-status" :class="{ attention: attentionTasks.length }"><span aria-hidden="true">●</span> {{ employeeStatus }}</span><button v-if="employee.canManage" @click="employeeTabChanged('settings')" :aria-pressed="employeeTab === 'settings'" title="编辑员工资料">员工设置</button><button v-if="employee.canManage" class="employee-delete" :disabled="employeeDeleting" @click="deleteEmployee">{{ employeeDeleting ? '正在删除…' : '删除员工' }}</button></div>
         </header>
         <nav v-if="employees.length && !creatingEmployee" class="employee-tabs" aria-label="员工工作空间">
@@ -1776,6 +1778,7 @@ onBeforeUnmount(() => {
             <p class="hint">创建后即可接活。独立记忆、任务和浏览器会自动准备，无需设置启用或工作时间。</p>
             <div class="actions"><button v-if="employees.length" type="button" @click="creatingEmployee = false">取消</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '正在创建…' : '创建员工' }}</button></div>
           </form>
+          <EmployeeAvatarPicker v-if="employeeTab === 'settings' && employee.canManage && employees.length && !creatingEmployee" :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" @change="selectedEmployee === $event.employeeId && (employee.avatar = $event.avatar)" />
           <form v-if="employeeTab === 'settings' && employee.canManage && employees.length && !creatingEmployee" class="employee-settings-form card form-grid" @submit.prevent="saveEmployeeSettings">
             <div><h3>员工资料</h3><p class="hint">保存后，新任务会使用更新的工作原则和目录。</p></div>
             <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
@@ -1785,7 +1788,7 @@ onBeforeUnmount(() => {
             <div class="actions"><button type="button" @click="employeeTab = 'chat'">返回对话</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '保存中…' : '保存修改' }}</button></div>
           </form>
           <div v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee && !creatingEmployee" class="employee-chat-layout">
-            <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" @task="openEmployeeTask" />
+            <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" @task="openEmployeeTask" />
             <aside class="employee-work-summary" aria-label="当前工作"><div class="summary-heading"><h3>当前工作</h3><button class="link" @click="employeeTab = 'tasks'">全部任务 ↗</button></div><button v-if="attentionTasks.length" class="attention-shortcut" @click="employeeTaskFilter = 'attention'; employeeTab = 'tasks'"><strong>{{ attentionTasks.length }} 项需要你处理</strong><span>补充信息或审批后继续 →</span></button><div v-if="!activeTasks.length" class="summary-empty"><span aria-hidden="true">✓</span><strong>手头很清爽</strong><p>交代一个目标，我会在这里更新进度。</p></div><button v-for="task in activeTasks.slice(0, 5)" :key="task.id" class="summary-task" @click="employeeTaskFilter = ['waiting', 'approval'].includes(task.status) ? 'attention' : 'active'; employeeTab = 'tasks'"><span :class="['summary-task-status', task.status]">{{ labels[task.status] }}</span><strong>{{ task.text }}</strong><span v-if="task.progress?.length">{{ task.progress.at(-1).text }}</span></button></aside>
           </div>
           <div v-if="employeeTab === 'browser' && selectedEmployee && !creatingEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" /></div>
