@@ -297,7 +297,7 @@ export class Tools {
       employee.description =
         "管理数字员工职责、待办、记忆和全局共享密码本（不归属员工）。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
         (this.session.taskId
-          ? "当前会话属于员工任务。执行前progress保存完整计划，验证成功才标completed；ask等待用户审批、help找交代人补充、defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。vault_request/发送只限授权支援。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增独立todo、给自己改期或为所属动态职责安排下次/停用，不把本任务的步骤拆成todo。Chrome必须relay，coding用同会话switch_scene。"
+          ? "当前会话属于员工任务。执行前progress保存完整计划，验证成功才标completed；ask仅用于用户要求先审核或尚未授权的不可逆操作；help仅用于缺少无法自行查得的必要信息或确需用户处理的阻碍，低风险执行细节自行决定；defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。vault_request/发送只限授权支援。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增独立todo、给自己改期或为所属动态职责安排下次/停用，不把本任务的步骤拆成todo。Chrome必须relay，coding用同会话switch_scene。"
           : this.session.employeeId
             ? EMPLOYEE_CHAT_RULES
           : "当前是用户的普通会话，不是员工任务。普通请求直接在本会话处理，不需要员工启用、工作时间或progress/help/defer/relay流程，Chrome在computer场景直接使用。仅在用户明确派给员工或管理员工数据时调用此工具；用户说“交给员工：xxx”时只add todo并告知，当前会话不转换为员工会话，任务由员工自己的独立会话执行。");
