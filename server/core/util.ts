@@ -69,13 +69,15 @@ export async function request(
   url: string,
   init: RequestInit = {},
   timeout = 180000,
+  headersTimeout = 180000,
 ): Promise<Response> {
   const dispatcher = await proxyDispatcher();
+  // Nova gives model streams 180s for response headers, then a fresh 180s idle budget per chunk.
   const controller = timeout === 0 ? new AbortController() : undefined;
   const timer = controller
     ? setTimeout(
-        () => controller.abort(Error("HTTP response headers timed out")),
-        20000,
+        () => controller.abort(Error(`HTTP response headers timed out after ${headersTimeout / 1000}s`)),
+        headersTimeout,
       )
     : undefined;
   try {
@@ -189,20 +191,26 @@ export async function readChunk(
   signal?: AbortSignal,
   idleMs = 180000,
 ) {
+  signal?.throwIfAborted();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
   try {
     return await Promise.race([
       reader.read(),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          void reader.cancel();
-          reject(Error(`Stream idle for ${idleMs}ms`));
-        }, idleMs);
-        signal?.throwIfAborted();
+        const cancel = (reason: unknown) => {
+          reject(reason);
+          void reader.cancel().catch(() => {});
+        };
+        timer = setTimeout(() => cancel(Error(`Stream idle for ${idleMs}ms`)), idleMs);
+        abort = () => cancel(signal!.reason);
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
       }),
     ]);
   } finally {
     clearTimeout(timer);
+    if (abort) signal?.removeEventListener("abort", abort);
   }
 }
 export async function* sse(

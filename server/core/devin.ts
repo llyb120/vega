@@ -286,7 +286,7 @@ export async function devinStream(
       "connect-accept-encoding": "gzip",
     },
     signal,
-  });
+  }, 0);
   assert(response.ok, `Devin upstream HTTP ${response.status}`);
   assert(
     response.headers

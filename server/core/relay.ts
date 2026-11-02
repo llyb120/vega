@@ -125,6 +125,7 @@ export class Relay {
             signal,
           },
           0,
+          20000,
         );
         assert(response.ok, `Relay SSE HTTP ${response.status}`);
         this.connected = true;
