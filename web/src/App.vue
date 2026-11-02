@@ -248,6 +248,7 @@ let eventsSocket,
   eventsWasConnected = false,
   eventGeneration = 0,
   eventReconnect,
+  eventRetryDelay = 500,
   eventsHeartbeat,
   eventQueue = Promise.resolve(),
   wsRequestSerial = 0,
@@ -392,28 +393,37 @@ function ended(s) {
 function date(at) {
   return formatBeijing(at);
 }
+function isChatSend(path, method, data) {
+  return method === "POST" && /^\/employees\/[^/]+\/messages$/.test(path) && !!data?.clientMessageId;
+}
 async function httpApi(path, method = "GET", data) {
-  const response = await fetch(`/api${path}`, {
-    method,
-    credentials: "same-origin",
-    headers: {
-      ...(!["GET", "HEAD"].includes(method) && csrfToken.value
-        ? { "X-CSRF-Token": csrfToken.value }
-        : {}),
-      ...(data !== undefined ? { "Content-Type": "application/json" } : {}),
-    },
-    body: data === undefined ? undefined : JSON.stringify(data),
-  });
-  const result = await response.json();
-  if (response.status === 401 && authenticated.value) resetLogin();
+  let response, result;
+  try {
+    response = await fetch(`/api${path}`, {
+      method,
+      credentials: "same-origin",
+      signal: path === "/events" ? AbortSignal.timeout(15000) : (method === "GET" || isChatSend(path, method, data)) ? AbortSignal.timeout(30000) : undefined,
+      headers: {
+        ...(!["GET", "HEAD"].includes(method) && csrfToken.value
+          ? { "X-CSRF-Token": csrfToken.value }
+          : {}),
+        ...(data !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: data === undefined ? undefined : JSON.stringify(data),
+    });
+    if (response.status === 401 && authenticated.value) resetLogin();
+    result = await response.json();
+  } catch {
+    throw Object.assign(Error("网络暂时不可用，请稍后重试"), { network: true, status: response?.status });
+  }
   if (!response.ok)
-    throw Error(
+    throw Object.assign(Error(
       result.data?.error ||
         result.statusMessage ||
         result.message ||
         (typeof result.error === "string" ? result.error : "") ||
         response.statusText,
-    );
+    ), { status: response.status });
   return result;
 }
 async function api(path, method = "GET", data) {
@@ -421,7 +431,8 @@ async function api(path, method = "GET", data) {
   if (
     size > WS_BODY_LIMIT ||
     /^\/(auth|blobs)(\/|$)/.test(path) ||
-    path === "/chrome/live"
+    path === "/chrome/live" ||
+    isChatSend(path, method, data)
   )
     return httpApi(path, method, data);
   if (eventsReady && eventsSocket?.readyState === WebSocket.OPEN)
@@ -429,6 +440,7 @@ async function api(path, method = "GET", data) {
       const id = String(++wsRequestSerial).padStart(8, "0"),
         timer = setTimeout(() => {
           wsRequests.delete(id);
+          if (method === "GET") { resolve(httpApi(path, method, data)); return; }
           reject(
             Error(
               method === "GET"
@@ -455,6 +467,10 @@ async function api(path, method = "GET", data) {
 function rejectSocketRequests(reason) {
   for (const request of wsRequests.values()) {
     clearTimeout(request.timer);
+    if (request.method === "GET" && !closed && authenticated.value) {
+      request.resolve(httpApi(request.path));
+      continue;
+    }
     request.reject(
       Error(
         request.method === "GET"
@@ -502,14 +518,25 @@ function socketMessage(value) {
   }
   eventQueue = eventQueue
     .then(() => handleEvent(value))
-    .catch((e) => (error.value = e.message));
+    .catch((e) => { if (!e.network) error.value = e.message; });
+}
+function reconnectEvents(generation) {
+  if (generation !== eventGeneration || closed || !authenticated.value) return;
+  clearTimeout(eventReconnect);
+  const delay = eventRetryDelay * (0.75 + Math.random() * 0.5);
+  eventRetryDelay = Math.min(eventRetryDelay * 2, 10000);
+  eventReconnect = setTimeout(() => {
+    if (generation === eventGeneration) connectEvents();
+  }, delay);
 }
 function connectEvents() {
+  if (closed || !authenticated.value || navigator.onLine === false) return;
   const generation = ++eventGeneration;
   clearTimeout(eventReconnect);
   clearInterval(eventsHeartbeat);
   eventsReady = false;
   eventsSocket?.close();
+  rejectSocketRequests("实时连接正在恢复");
   void httpApi("/events", "POST", {})
     .then(({ ticket }) => {
       if (generation !== eventGeneration) return;
@@ -520,37 +547,47 @@ function connectEvents() {
     })
     .catch((e) => {
       if (generation !== eventGeneration || closed) return;
-      error.value = `实时通道认证失败：${e.message}`;
-      eventReconnect = setTimeout(() => {
-        if (generation === eventGeneration) connectEvents();
-      }, 1500);
+      if (e.status === 401 || e.status === 403) {
+        error.value = "实时通道认证失效，请重新登录";
+        return;
+      }
+      reconnectEvents(generation);
     });
 }
 function openEventSocket(url, generation) {
   const ws = new WebSocket(url);
   eventsSocket = ws;
-  ws.onopen = () => {
+  let lastMessage = Date.now(), readyAt = 0;
+  eventsHeartbeat = setInterval(() => {
     if (generation !== eventGeneration) return;
-    eventsHeartbeat = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN)
-        ws.send(JSON.stringify({ type: "ping" }));
-    }, 10000);
-  };
+    if (Date.now() - lastMessage > 30000) { ws.close(); return; }
+    if (readyAt && Date.now() - readyAt >= 30000) eventRetryDelay = 500;
+    if (ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: "ping" })); }
+      catch { ws.close(); }
+    }
+  }, 10000);
   ws.onmessage = ({ data }) => {
     if (generation !== eventGeneration) return;
     try {
       const value = JSON.parse(data);
+      lastMessage = Date.now();
       if (value.type === "ready") {
         const reconnect = eventsWasConnected;
         eventsReady = true;
         eventsWasConnected = true;
-        if (error.value.includes("实时")) error.value = "";
+        readyAt = Date.now();
         if (reconnect)
-          void attempt(async () => {
+          void (async () => {
             await bootstrap();
+            if (generation !== eventGeneration) return;
             if (current.value) await refreshCurrent();
-            if (view.value === "employee" && !employeeSession.value)
-              await refreshEmployee();
+            if (view.value === "employee" && !employeeSession.value) await loadEmployee();
+            employeeSessionVersion.value++;
+          })().catch((e) => {
+            if (generation !== eventGeneration) return;
+            if (e.network) ws.close();
+            else error.value = e.message;
           });
         return;
       }
@@ -559,29 +596,31 @@ function openEventSocket(url, generation) {
       error.value = `实时消息无效：${e.message}`;
     }
   };
-  ws.onerror = () => {
-    if (generation === eventGeneration)
-      error.value = "实时通道连接失败，请检查反向代理的 WebSocket 配置";
-  };
+  ws.onerror = () => { if (generation === eventGeneration) ws.close(); };
   ws.onclose = (event) => {
     if (generation !== eventGeneration) return;
     eventsReady = false;
-    clientListReady.value = false;
-    onlineClients.value = [];
     clearInterval(eventsHeartbeat);
-    rejectSocketRequests("实时连接已中断");
-    if (closed || !authenticated.value) return;
     if (event.code === 4401) {
       resetLogin();
       error.value = "登录已过期或被撤销，请重新登录";
       return;
     }
-    error.value = "实时连接中断，正在重连；未完成的操作不会自动重发。";
-    eventReconnect = setTimeout(() => {
-      if (generation === eventGeneration) connectEvents();
-    }, 1500);
+    rejectSocketRequests("实时连接正在恢复");
+    reconnectEvents(generation);
   };
 }
+function recoverEvents() {
+  if (!document.hidden && !eventsReady && authenticated.value && !closed) connectEvents();
+}
+onMounted(() => {
+  window.addEventListener("online", recoverEvents);
+  document.addEventListener("visibilitychange", recoverEvents);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("online", recoverEvents);
+  document.removeEventListener("visibilitychange", recoverEvents);
+});
 async function attempt(fn) {
   error.value = "";
   notice.value = "";
@@ -1216,7 +1255,7 @@ async function refreshEmployee() {
   try {
     await loadEmployee();
   } catch (e) {
-    employeeError.value = e.message;
+    if (!e.network) employeeError.value = e.message;
   }
 }
 function queueEmployeeRefresh() {

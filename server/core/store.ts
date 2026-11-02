@@ -9,6 +9,8 @@ export type Message = {
   text?: string;
   displayText?: string;
   actorId?: string;
+  clientMessageId?: string;
+  clientMessageHash?: string;
   taskInput?: { answer?: string; handoff?: string; handoffRevision?: number; quoteSeq?: number };
   quote?: { seq: number; role: string; text: string; taskId?: string };
   tasks?: { id: string; title: string; status: string }[];
@@ -80,6 +82,7 @@ export class Store {
    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,data TEXT NOT NULL,updated INTEGER NOT NULL);
    CREATE TABLE IF NOT EXISTS messages(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,seq INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,seq));
+   CREATE INDEX IF NOT EXISTS messages_client_id ON messages(session,json_extract(data,'$.actorId'),json_extract(data,'$.clientMessageId')) WHERE json_extract(data,'$.clientMessageId') IS NOT NULL;
    CREATE TABLE IF NOT EXISTS folds(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,id));
    CREATE TABLE IF NOT EXISTS objects(kind TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(kind,id));
    CREATE TABLE IF NOT EXISTS blobs(id TEXT PRIMARY KEY,mime TEXT NOT NULL,data BLOB NOT NULL,created INTEGER NOT NULL);

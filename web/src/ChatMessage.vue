@@ -7,7 +7,7 @@ import { computed } from "vue";
 import { taskLabel, taskTone, shortTime, isInProgress } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
 const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, quotable: Boolean });
-const emit = defineEmits(["quote", "jump", "task"]);
+const emit = defineEmits(["quote", "jump", "task", "retry"]);
 // Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
 const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
 // While a linked task is actively running, this reply's bot keeps glancing around like the typing avatar.
@@ -29,6 +29,11 @@ const working = computed(() => !!props.message.tasks?.some((task) => isInProgres
         <MessageText v-else-if="message.text" :text="message.displayText || message.text" />
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`" alt="消息附图" />
       </div>
+      <div v-if="message.sendStatus" class="chat-send-status" role="status">
+        <span v-if="message.sendStatus === 'sending'"><span class="spinner" aria-hidden="true"></span>发送中…</span>
+        <button v-else-if="message.sendStatus === 'failed'" type="button" :disabled="!quotable" :title="message.sendError" aria-label="重发这条消息" @click="emit('retry', message)">发送未确认 · 点击重发</button>
+        <span v-else>已送达</span>
+      </div>
       <div v-if="message.tasks?.length" class="chat-tasks">
         <button v-for="task in message.tasks" :key="task.id" type="button" class="chat-task-link" :data-task-id="task.id" :aria-label="'查看任务：' + task.title" @click="emit('task', task.id)">
           <Icon name="tasks" :size="15" /><span class="truncate">{{ task.title }}</span><span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span><Icon name="right" :size="14" />
@@ -49,6 +54,10 @@ const working = computed(() => !!props.message.tasks?.some((task) => isInProgres
 .user .chat-content > * { max-width: 100%; }
 .chat-heading { display: flex; align-items: center; gap: 8px; min-height: 20px; color: var(--muted); font-size: 11px; }
 .chat-heading strong { color: var(--text-2); font-size: 12px; font-weight: 600; }
+.chat-send-status { color: var(--muted); font-size: 11px; }
+.chat-send-status > span { display: flex; align-items: center; gap: 5px; }
+.chat-send-status .spinner { width: 11px; height: 11px; }
+.chat-send-status button { min-height: 28px; padding: 2px 4px; border: 0; background: transparent; color: var(--danger); font-size: 12px; }
 .chat-reply { gap: 3px; min-height: 20px; padding: 0 4px; border: 0; background: transparent; color: var(--muted); font-size: 11px; font-weight: 400; opacity: 0; }
 .chat-message:hover .chat-reply, .chat-reply:focus-visible { opacity: 1; }
 .chat-reply:hover:not(:disabled) { background: var(--surface-2); color: var(--accent); }

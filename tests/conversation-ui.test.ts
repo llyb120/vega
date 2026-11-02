@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { webcrypto } from "node:crypto";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
 import { employeeChatMessages } from "../web/src/conversation.js";
@@ -12,7 +13,7 @@ function mount(api: any = async () => ({ messages: [], running: false })) {
   const messages = ref<any[]>([]), running = ref(false), hasMore = ref(false);
   const history = createChatHistory({ api, path: () => "/employees/fixture/chat", messages, running, hasMore });
   const context: any = {
-    console, ref, computed, nextTick, history, messages, running, hasMore, runningFrom: ref(null), disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
+    console, ref, computed, watch, crypto: webcrypto, nextTick, history, messages, running, hasMore, runningFrom: ref(null), disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
     props: { employeeId: "fixture", api, composer: reactive({ text: "", images: [], quote: undefined }) },
     visible: computed(() => employeeChatMessages(messages.value, running.value)), employeeChatMessages, frozen: [] as any[],
   };
@@ -20,13 +21,14 @@ function mount(api: any = async () => ({ messages: [], running: false })) {
   const methods = vm.runInNewContext([
     "let turn = 0;",
     between("const draft = computed", "// While a turn runs"),
+    between("const displayed =", "const history ="),
     between("const nearBottom =", "/** Prepend one older page"),
     between("async function refresh(apply", "async function upload("),
     between("async function send()", "async function stop()"),
     between("function handleEvent(event)", "watch(() => props.revision"),
-    "({ refresh, handleEvent, finishTurn, send })",
+    "({ refresh, handleEvent, finishTurn, send, retry, outbox, displayed })",
   ].join("\n"), context);
-  return { ...context, ...methods };
+  return { ...context, ...methods, dispose: () => { context.disposed = true; } };
 }
 
 test("employee sends leave older history immediately and reveal the sent message after refresh", async () => {
@@ -161,28 +163,141 @@ test("chat history pages backwards and merges without duplicates", async () => {
   assert.deepEqual(mergeMessages([{ seq: 1 }, { seq: 3 }] as any, [{ seq: 2 }, { seq: 3, text: "x" }] as any), [{ seq: 1 }, { seq: 2 }, { seq: 3, text: "x" }]);
 });
 
-test("quoted replies send only a source sequence, preserve drafts on error, and do not clear a quote changed during submission", async () => {
+test("offline messages appear immediately; retry preserves ID, images and quote without touching the next draft", async () => {
   const calls: any[] = [];
   let fail = true, finish!: (value: any) => void;
-  const props = { employeeId: "fixture", composer: reactive({ text: "explain this", images: [], quote: { seq: 7, text: "source" } as any }), api: async (...args: any[]) => {
-    calls.push(args);
+  const state = mount(async (_path: string, method: string, body: any) => {
+    if (method !== "POST") return { session: { id: "s" }, messages: [], running: true };
+    calls.push(body);
     if (fail) throw Error("offline");
     return new Promise((resolve) => finish = resolve);
-  } };
-  const context: any = { ref, computed, props, busy: ref(false), error: ref(""), refresh: async () => {}, scroll: async () => {} };
-  const methods = vm.runInNewContext(between("const draft = computed", "// While a turn runs") + between("async function send()", "async function stop()") + "\n({send})", { ...context, nextTick: async () => {}, input: ref(null) });
-  await methods.send();
-  assert.equal(props.composer.quote.seq, 7);
-  assert.equal(props.composer.text, "explain this");
-  assert.equal(calls[0][2].quoteSeq, 7);
-  assert.equal(calls[0][2].quote, undefined, "quoted content is resolved by the server, not trusted from the browser");
-  fail = false;
-  const sending = methods.send();
-  props.composer.quote = { seq: 8, text: "new source" };
-  finish({});
+  });
+  const composer = state.props.composer;
+  composer.text = "explain this";
+  composer.images = [{ mime: "image/png", data: "YQ==" }];
+  composer.quote = { seq: 7, text: "source" };
+  const sending = state.send();
+  assert.equal(state.outbox.value[0].text, "explain this");
+  assert.equal(state.outbox.value[0].sendStatus, "sending");
+  assert.equal(composer.text, "");
+  assert.equal(composer.images.length, 0);
   await sending;
-  assert.equal(props.composer.quote.seq, 8);
-  assert.equal(props.composer.text, "explain this");
+  const message = state.outbox.value[0];
+  assert.equal(message.sendStatus, "failed");
+  assert.equal(state.error.value, "", "delivery failures stay on the message, not in a banner");
+  assert.equal(calls[0].quoteSeq, 7);
+  assert.equal(calls[0].quote, undefined);
+  fail = false;
+  const retry = state.retry(message);
+  state.retry(message);
+  composer.text = "next draft";
+  composer.quote = { seq: 8, text: "new source" };
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  finish({});
+  await retry;
+  assert.equal(calls.length, 2, "double-clicking retry sends only once");
+  assert.deepEqual(calls[1], calls[0]);
+  assert.equal(message.sendStatus, "sent");
+  assert.equal(composer.quote.seq, 8);
+  assert.equal(composer.text, "next draft");
+  state.messages.value = [{ seq: 1, role: "user", clientMessageId: message.clientMessageId }];
+  await nextTick();
+  assert.equal(state.outbox.value.length, 0, "server echo replaces the local bubble");
+});
+
+test("new messages stay sendable and ordered while an earlier delivery is pending", async () => {
+  const sent: string[] = [];
+  let finish!: () => void;
+  const state = mount(async (_path: string, method: string, body: any) => {
+    if (method !== "POST") return { messages: [], running: false };
+    sent.push(body.text);
+    if (sent.length === 1) await new Promise<void>((resolve) => finish = resolve);
+    return {};
+  });
+  state.props.composer.text = "first";
+  const first = state.send();
+  state.props.composer.text = "second";
+  const second = state.send();
+  assert.equal(state.outbox.value.length, 2);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, ["first"]);
+  finish();
+  await Promise.all([first, second]);
+  assert.deepEqual(sent, ["first", "second"]);
+});
+
+test("lost history refresh does not turn an acknowledged send into failure", async () => {
+  const state = mount(async (_path: string, method: string) => {
+    if (method !== "POST") throw Object.assign(Error("offline"), { network: true });
+    return {};
+  });
+  state.props.composer.text = "accepted";
+  await state.send();
+  assert.equal(state.outbox.value[0].sendStatus, "sent");
+  assert.equal(state.error.value, "");
+});
+
+test("unmount never sends queued messages into another workspace or login", async () => {
+  let finish!: () => void, posts = 0;
+  const state = mount(async (_path: string, method: string) => {
+    if (method !== "POST") return { messages: [], running: false };
+    posts++;
+    await new Promise<void>((resolve) => finish = resolve);
+    return {};
+  });
+  state.props.composer.text = "first";
+  const first = state.send();
+  state.props.composer.text = "second";
+  const second = state.send();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  state.dispose();
+  finish();
+  await Promise.all([first, second]);
+  assert.equal(state.outbox.value[0].sendStatus, "sent");
+  assert.equal(state.outbox.value[1].sendStatus, "failed");
+  assert.equal(posts, 1);
+});
+
+test("server echoes keep pending bubbles in place and a late failed acknowledgement cannot recreate a delivered message", async () => {
+  let fail!: (error: Error) => void;
+  const state = mount(async (_path: string, method: string) => {
+    if (method !== "POST") return { messages: [], running: true };
+    return new Promise((_resolve, reject) => fail = reject);
+  });
+  state.props.composer.text = "first";
+  const first = state.send();
+  state.props.composer.text = "second";
+  const second = state.send();
+  const firstId = state.outbox.value[0].clientMessageId;
+  state.messages.value = [{ seq: 1, role: "user", text: "first", clientMessageId: firstId }];
+  await nextTick();
+  assert.deepEqual(Array.from(state.displayed.value, (message: any) => message.text), ["first", "second"]);
+  assert.equal(state.outbox.value[0].afterSeq, 1);
+  state.dispose();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  fail(Error("acknowledgement lost"));
+  await Promise.all([first, second]);
+  assert.equal(state.outbox.value.length, 1);
+  assert.equal(state.outbox.value[0].sendStatus, "failed");
+});
+
+test("failed earlier messages stay before later server messages, and interrupted queued messages become retryable", async () => {
+  const state = mount(async () => { throw Error("offline"); });
+  state.props.composer.text = "failed first";
+  await state.send();
+  state.props.composer.text = "later";
+  await state.send();
+  const later = state.outbox.value[1];
+  state.messages.value = [{ seq: 1, role: "user", text: "later", clientMessageId: later.clientMessageId }];
+  await nextTick();
+  assert.deepEqual(Array.from(state.displayed.value, (message: any) => message.text), ["failed first", "later"]);
+  const queued = state.outbox.value[0];
+  queued.sendStatus = "sent";
+  state.running.value = true;
+  await nextTick();
+  state.running.value = false;
+  await nextTick();
+  assert.equal(queued.sendStatus, "failed", "accepted but unprocessed messages can be resent after interruption");
 });
 
 test("reply avatars animate only while a linked task is live and actively in progress", async () => {

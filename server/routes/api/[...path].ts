@@ -11,6 +11,7 @@ import { publicOrigin, principal } from "../../core/http-auth";
 import { authRoute, bodyJSON } from "../../core/http-auth-routes";
 import { check } from "../../core/auth";
 import { readFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { importSkill, materializeSkill } from "../../core/skills";
 import { skillMetadata } from "../../core/prompt";
 import {
@@ -202,11 +203,15 @@ export default defineEventHandler(async (event) => {
         return { session, ...chatHistory(store, session.id, getRequestURL(event).searchParams), running: engine.active.has(session.id) };
       }
       if (path[2] === "messages" && method === "POST") {
+        check(a.clientMessageId === undefined || (typeof a.clientMessageId === "string" && /^[a-zA-Z0-9_-]{16,80}$/.test(a.clientMessageId)), 400, "Invalid message ID");
         const session = employee.chat(user.id);
-        const message = { ...await inputMessage(a, store, session.id), actorId: user.id };
+        const message = {
+          ...await inputMessage(a, store, session.id), actorId: user.id,
+          clientMessageId: a.clientMessageId,
+          clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.quoteSeq ?? null])).digest("hex") : undefined,
+        };
         check(!employee.deleting, 409, "牛马正在删除，请稍候");
-        if (engine.active.has(session.id)) engine.steer(session.id, message);
-        else await engine.launch(session.id, message);
+        await engine.submitChat(session.id, message);
         return { id: session.id };
       }
       if (path[2] === "cancel" && method === "POST") {

@@ -7,10 +7,25 @@ import { employeeChatMessages } from "./conversation";
 import { createChatHistory } from "./chat-history.js";
 const props = defineProps({ api: Function, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array });
 const emit = defineEmits(["task"]);
-const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), busy = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
+const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
 const files = computed({ get: () => props.composer.images, set: (images) => props.composer.images = images });
 const quoted = computed({ get: () => props.composer.quote, set: (quote) => props.composer.quote = quote });
+// shortcut: unsent messages live with this page; use durable storage if reload recovery is required.
+const outbox = computed(() => props.composer.outbox ||= []);
+watch([messages, running], ([rows, active]) => {
+  const delivered = new Map(rows.filter((message) => message.clientMessageId).map((message) => [message.clientMessageId, message.seq]));
+  let anchor = 0;
+  props.composer.outbox = outbox.value.filter((message) => {
+    message.afterSeq = Math.max(message.afterSeq, anchor);
+    if (delivered.has(message.clientMessageId)) { anchor = Math.max(anchor, delivered.get(message.clientMessageId)); return false; }
+    if (!active && message.sendStatus === "sent") {
+      message.sendStatus = "failed";
+      message.sendError = "本轮已结束，但尚未确认这条消息；可安全重发";
+    }
+    return true;
+  });
+});
 // While a turn runs, its own assistant output stays hidden until `done`. When we saw the turn start we know exactly
 // where it begins, so earlier replies stay put instead of being hidden as "the last turn" until the new user message loads.
 const runningFrom = ref(null);
@@ -19,6 +34,14 @@ const visible = computed(() => {
   if (!running.value || runningFrom.value === null) return employeeChatMessages(messages.value, running.value);
   const settled = messages.value.filter((message) => message.seq <= runningFrom.value);
   return [...employeeChatMessages(settled, false), ...messages.value.filter((message) => message.seq > runningFrom.value && (message.role === "user" || message.delivery))];
+});
+const displayed = computed(() => {
+  const rows = [...visible.value];
+  for (const message of outbox.value) {
+    const next = rows.findIndex((row) => !row.sendStatus && row.seq > message.afterSeq);
+    rows.splice(next < 0 ? rows.length : next, 0, message);
+  }
+  return rows;
 });
 const history = createChatHistory({ api: (...args) => props.api(...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore });
 
@@ -78,7 +101,7 @@ async function load() {
     await scroll();
     await fillViewport();
     ready = true;
-  } catch (e) { if (!disposed) error.value = e.message; }
+  } catch (e) { if (!disposed && !e.network) error.value = e.message; }
 }
 /** Fetch only messages after the newest one we hold; `apply` runs in the same tick as the merge. */
 async function refresh(apply, syncRunning = true) {
@@ -86,7 +109,7 @@ async function refresh(apply, syncRunning = true) {
   try {
     await history.newer(apply, syncRunning);
     if (!disposed && atBottom) await scroll();
-  } catch (e) { if (!disposed) { error.value = e.message; apply?.([]); } }
+  } catch (e) { if (!disposed && !e.network) { error.value = e.message; apply?.([]); } }
 }
 /**
  * The turn is over. Keep the typing row on screen until the reply is in hand, then swap them in one tick:
@@ -120,17 +143,40 @@ async function upload(event) {
   event.target.value = "";
 }
 async function send() {
-  if (busy.value || (!draft.value.trim() && !files.value.length)) return;
-  busy.value = true; error.value = "";
-  const text = draft.value, images = files.value, quote = quoted.value;
+  if (props.readonly || (!draft.value.trim() && !files.value.length)) return;
+  if (outbox.value.length >= 16) { error.value = "请先重发未送达的消息（最多保留16条）"; return; }
+  error.value = "";
+  outbox.value.push({ role: "user", text: draft.value, images: files.value.map(({ mime, data }) => ({ mime, data })), quote: quoted.value, clientMessageId: crypto.randomUUID(), afterSeq: history.lastSeq(), at: Date.now(), sendStatus: "pending" });
+  const message = outbox.value.at(-1);
+  draft.value = ""; files.value = []; quoted.value = undefined;
   void scroll();
-  try {
-    await props.api(`/employees/${props.employeeId}/messages`, "POST", { text, images: images.map(({ mime, data }) => ({ mime, data })), ...(quote ? { quoteSeq: quote.seq } : {}) });
-    if (draft.value === text && files.value === images && quoted.value === quote) { draft.value = ""; files.value = []; quoted.value = undefined; }
-    await refresh();
-    await scroll();
-  } catch (e) { error.value = e.message; }
-  finally { busy.value = false; }
+  return retry(message);
+}
+let sendQueue = Promise.resolve();
+function retry(message) {
+  if (props.readonly || message.sendStatus === "sending" || message.sendStatus === "sent") return;
+  message.sendStatus = "sending";
+  message.sendError = "";
+  const employeeId = props.employeeId;
+  const submit = async () => {
+    try {
+      if (disposed || props.readonly) throw Error("发送已暂停，请回到对话后重发");
+      await props.api(`/employees/${employeeId}/messages`, "POST", {
+        text: message.text, images: message.images, clientMessageId: message.clientMessageId,
+        ...(message.quote ? { quoteSeq: message.quote.seq } : {}),
+      });
+      message.sendStatus = "sent";
+      return true;
+    } catch (e) {
+      message.sendStatus = "failed";
+      message.sendError = e.message;
+      return false;
+    }
+  };
+  sendQueue = sendQueue.then(submit, submit);
+  return sendQueue.then(async (sent) => {
+    if (sent && !disposed) { await refresh(); await scroll(); }
+  });
 }
 async function stop() {
   try { await props.api(`/employees/${props.employeeId}/cancel`, "POST", {}); }
@@ -188,7 +234,7 @@ onBeforeUnmount(() => { disposed = true; });
     <div ref="transcript" class="chat-scroll" aria-live="polite" @scroll.passive="onScroll">
       <div class="chat-column">
         <div v-if="hasMore" class="chat-older" :aria-busy="loadingOlder"><span v-if="loadingOlder" class="spinner" aria-label="正在加载更早的消息"></span><span v-else>上滑查看更早的消息</span></div>
-        <div v-if="!messages.length && !running" class="chat-welcome">
+        <div v-if="!messages.length && !outbox.length && !running" class="chat-welcome">
           <h3>今天，想交给{{ name }}什么？</h3>
           <p>直接告诉我目标。我会安排任务、跟进结果，需要你决定时再回来找你。</p>
           <div v-if="!readonly" class="welcome-prompts">
@@ -196,7 +242,7 @@ onBeforeUnmount(() => { disposed = true; });
             <button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><Icon name="tasks" :size="15" />看看工作进度</button>
           </div>
         </div>
-        <ChatMessage v-for="message in visible" :key="message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :enter-from="entering[message.seq]" :task-status="taskStatus" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" />
+        <ChatMessage v-for="message in displayed" :key="message.clientMessageId || message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :enter-from="entering[message.seq]" :task-status="taskStatus" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" />
         <article v-if="running" class="chat-message assistant chat-typing" role="status" aria-label="正在输入中">
           <span class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" animate @pose="typingPose = $event" /></span>
           <div class="chat-content">
@@ -215,7 +261,7 @@ onBeforeUnmount(() => { disposed = true; });
         <button type="button" class="icon attach" aria-label="添加图片" title="添加图片" @click="fileInput.click()"><Icon name="image" /></button>
         <textarea ref="input" v-model="draft" aria-label="给牛马的消息" placeholder="告诉我目标，剩下的交给我…" rows="1" @keydown="keydown"></textarea>
         <button v-if="running" type="button" class="stop" title="停止本轮" @click="stop"><Icon name="stop" :size="14" /><span>停止本轮</span></button>
-        <button class="primary send" :disabled="busy || (!draft.trim() && !files.length)" :aria-label="busy ? '提交中' : '发送'" :title="busy ? '提交中…' : '发送'"><span v-if="busy" class="spinner"></span><Icon v-else name="send" :size="18" /></button>
+        <button class="primary send" :disabled="!draft.trim() && !files.length" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
       </div>
       <p class="composer-hint">Enter 发送 · Shift + Enter 换行</p>
     </form>

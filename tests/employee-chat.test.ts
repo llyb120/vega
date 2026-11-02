@@ -19,6 +19,60 @@ function fixture() {
   return { store, engine, employee, chat };
 }
 
+test("chat retries share an in-flight submission and failed setup remains retryable", async () => {
+  const { store, engine, chat } = fixture();
+  const message = { role: "user", actorId: "owner", text: "once", clientMessageId: "message-identifier-one", clientMessageHash: "hash-one" };
+  let starts = 0, release!: () => void;
+  engine.launch = async (session, input) => {
+    starts++;
+    await new Promise<void>((resolve) => release = resolve);
+    if (starts === 1) throw Error("setup unavailable");
+    store.append(session, input);
+  };
+  try {
+    const one = engine.submitChat(chat.id, message), two = engine.submitChat(chat.id, message);
+    const failures = Promise.allSettled([one, two]);
+    await Promise.resolve();
+    assert.equal(starts, 1);
+    release();
+    assert((await failures).every((result) => result.status === "rejected"));
+    const retry = engine.submitChat(chat.id, message);
+    await Promise.resolve(); release(); await retry;
+    await engine.submitChat(chat.id, message);
+    assert.equal(starts, 2);
+    assert.equal(store.messages(chat.id).length, 1);
+    await assert.rejects(engine.submitChat(chat.id, { ...message, clientMessageHash: "changed" }), /different content/);
+    const other = engine.submitChat(chat.id, { ...message, actorId: "other-user" });
+    await Promise.resolve(); release(); await other;
+    assert.equal(store.messages(chat.id).length, 2, "IDs are scoped to the authenticated sender");
+  } finally { await engine.close(); store.close(); }
+});
+
+test("queued chat retries are deduplicated without inserting the next actor's input into the current model turn", async () => {
+  const { store, engine, chat } = fixture();
+  let finish!: () => void, calls = 0;
+  const gate = new Promise<void>((resolve) => finish = resolve);
+  engine.providers.chat = async () => { if (++calls === 1) await gate; return { role: "assistant", text: "done" }; };
+  const first = { role: "user", actorId: "owner", text: "first", clientMessageId: "message-identifier-first", clientMessageHash: "first-hash" };
+  const second = { ...first, text: "second", clientMessageId: "message-identifier-second", clientMessageHash: "second-hash" };
+  const done = new Promise<void>((resolve) => engine.events.on("event", (event) => { if (event.type === "done" && event.session === chat.id) resolve(); }));
+  try {
+    await engine.submitChat(chat.id, first);
+    // Wait until the first model turn, so the next message takes the steer path.
+    for (let i = 0; i < 100 && !calls; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(calls, 1);
+    await Promise.all([engine.submitChat(chat.id, second), engine.submitChat(chat.id, second)]);
+    assert.equal(engine.active.get(chat.id)!.steer.length, 1);
+    assert.equal(store.messages(chat.id).filter((message) => message.role === "user").length, 1, "steering enters history only when its actor becomes active");
+    finish(); await done;
+    assert.equal(calls, 2);
+    await engine.submitChat(chat.id, first);
+    await engine.submitChat(chat.id, second);
+    assert.equal(calls, 2);
+    assert.equal(store.messages(chat.id).filter((message) => message.role === "user").length, 2);
+  } finally { finish(); await engine.close(); store.close(); }
+});
+
 test("employee chat shows user messages and final conclusions only; process details and partial streaming text stay in execution records", () => {
   const messages = [
     { seq: 1, role: "user", text: "work" },

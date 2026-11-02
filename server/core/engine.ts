@@ -78,6 +78,7 @@ export class Engine {
     string,
     { control: AbortController; steer: Message[]; context?: Context }
   >();
+  private chatSubmissions = new Map<string, { message: Message; done: Promise<void> }>();
   redactors = new Map<string, Redactor>();
   providers = new Providers();
   employee: Employee;
@@ -293,6 +294,27 @@ export class Engine {
     assert(run, "Session not running");
     assert(run.steer.length < 16, "Steer queue full");
     run.steer.push({ ...m, role: "user" });
+  }
+  async submitChat(session: string, message: Message) {
+    const send = async () => {
+      if (this.active.has(session)) this.steer(session, message);
+      else await this.launch(session, message);
+    };
+    if (!message.clientMessageId) return send();
+    const key = JSON.stringify([session, message.actorId, message.clientMessageId]);
+    const pending = this.chatSubmissions.get(key);
+    const row = this.store.db.prepare("SELECT data FROM messages WHERE session=? AND json_extract(data,'$.actorId')=? AND json_extract(data,'$.clientMessageId')=?").get(session, message.actorId!, message.clientMessageId) as { data: string } | undefined;
+    const queued = this.active.get(session)?.steer.find((entry) => entry.actorId === message.actorId && entry.clientMessageId === message.clientMessageId);
+    const previous: Message | undefined = row ? JSON.parse(row.data) : pending?.message || queued;
+    if (previous) {
+      assert(previous.clientMessageHash === message.clientMessageHash, "Message ID already used for different content");
+      return pending?.done;
+    }
+    // Reserve before asynchronous model setup; reconnects must not enqueue the same instruction twice.
+    const done = Promise.resolve().then(send);
+    this.chatSubmissions.set(key, { message, done });
+    try { await done; }
+    finally { this.chatSubmissions.delete(key); }
   }
   async close() {
     this.closing = true;
