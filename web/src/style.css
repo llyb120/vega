@@ -9,13 +9,13 @@
   font-synthesis: none;
   color-scheme: light;
 
-  /* Brand — bright blue, reserved for actions and current state */
-  --accent: oklch(0.55 0.215 255);
-  --accent-hover: oklch(0.49 0.205 255);
-  --accent-active: oklch(0.44 0.19 255);
-  --accent-soft: oklch(0.95 0.025 255);
-  --accent-softer: oklch(0.975 0.012 255);
-  --accent-ring: oklch(0.55 0.215 255 / 16%);
+  /* Brand — primary blue #0066ff */
+  --accent: #0066ff;
+  --accent-hover: #0057e0;
+  --accent-active: #004bcc;
+  --accent-soft: #e8f1ff;
+  --accent-softer: #f3f8ff;
+  --accent-ring: rgb(0 102 255 / 16%);
 
   /* Semantic */
   --green: oklch(0.56 0.13 155);
@@ -49,8 +49,8 @@
   --sh-accent: 0 2px 6px var(--accent-ring);
 
   /* Layout */
-  --sidebar-w: 248px;
-  --topbar-h: 76px;
+  --sidebar-w: 232px;
+  --topbar-h: 52px;
   --maxw: 1040px;
 }
 
@@ -375,20 +375,20 @@ label {
   background: var(--surface-sunken);
 }
 .login-card {
-  width: min(430px, 92vw);
+  width: min(400px, 92vw);
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 42px;
+  gap: 12px;
+  padding: 28px 24px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-xl);
-  box-shadow: var(--sh-md);
+  box-shadow: var(--sh-sm);
 }
 .login-card h1 {
-  font-size: 34px;
-  letter-spacing: -1.2px;
-  margin: 4px 0 0;
+  font-size: 26px;
+  letter-spacing: -0.6px;
+  margin: 0;
 }
 .login-card p {
   color: var(--muted);
@@ -425,7 +425,7 @@ label {
   flex-shrink: 0;
   background: var(--surface-sunken);
   border-right: 1px solid var(--border);
-  padding: 16px 12px 12px;
+  padding: 10px 10px 8px;
   display: flex;
   flex-direction: column;
 }
@@ -433,8 +433,8 @@ label {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 44px;
-  padding: 0 8px 16px;
+  min-height: 40px;
+  padding: 0 8px 8px;
 }
 .brand strong {
   font-size: 19px;
@@ -455,8 +455,8 @@ label {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 42px;
-  margin: 0 0 16px;
+  min-height: 40px;
+  margin: 0 0 8px;
   background: var(--surface);
   border-color: var(--border);
   color: var(--text);
@@ -667,7 +667,7 @@ nav button.selected {
   background: var(--surface-raised);
 }
 .topbar {
-  padding: 14px 32px;
+  padding: 8px 20px;
   border-bottom: 1px solid var(--border);
   display: flex;
   justify-content: space-between;
@@ -682,13 +682,7 @@ nav button.selected {
 }
 .topbar-eyebrow,
 .welcome-kicker {
-  display: block;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  line-height: 1.4;
-  text-transform: uppercase;
+  display: none;
 }
 .topbar p {
   font-size: 11px;
@@ -780,19 +774,15 @@ nav button.selected {
 }
 .welcome {
   max-width: 760px;
-  margin: clamp(36px, 9vh, 96px) auto 48px;
+  margin: 16px auto 20px;
   text-align: left;
 }
-.welcome-kicker {
-  margin-bottom: 14px;
-  color: var(--accent);
-}
 .welcome h1 {
-  font-size: clamp(30px, 3vw, 40px);
-  font-weight: 600;
-  letter-spacing: -0.045em;
-  line-height: 1.2;
-  margin: 0 0 14px;
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+  margin: 0 0 8px;
   color: var(--text);
 }
 .welcome p {
@@ -805,7 +795,7 @@ nav button.selected {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
-  margin-top: 32px;
+  margin-top: 16px;
 }
 .suggestions button {
   display: grid;
@@ -2124,16 +2114,13 @@ summary {
   }
   .welcome {
     max-width: 440px;
-    margin: clamp(24px, 6dvh, 48px) auto 28px;
-  }
-  .welcome-kicker {
-    margin-bottom: 10px;
+    margin: 8px auto 12px;
   }
   .welcome h1 {
-    font-size: clamp(27px, 7.5vw, 32px);
+    font-size: 22px;
     line-height: 1.25;
-    letter-spacing: -0.04em;
-    margin-bottom: 12px;
+    letter-spacing: -0.03em;
+    margin-bottom: 8px;
   }
   .welcome p {
     max-width: 340px;
