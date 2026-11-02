@@ -35,37 +35,288 @@ async function run(action) {
   </article>
 </template>
 <style scoped>
-.work-item { padding: 20px 22px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); overflow-wrap: anywhere; }
-.work-item.highlighted, .work-item:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
-.work-item.attention { border-color: oklch(0.86 0.08 75); }
-.work-meta { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
-.work-meta time { margin-left: auto; font-size: 11px; }
-.work-status { color: var(--text-secondary); font-weight: 600; }
-.work-status span { font-size: 8px; vertical-align: middle; }
-.work-status.running, .work-status.recovering { color: var(--accent); }
-.work-status.waiting, .work-status.approval { color: var(--amber); }
-.work-status.done { color: var(--green); }
-h3 { font-size: 15px; line-height: 1.65; margin: 12px 0 8px; white-space: pre-wrap; }
-.work-update { font-size: 13px; color: var(--text-secondary); line-height: 1.65; margin: 8px 0 14px; }
-.work-progress { display: flex; gap: 12px; align-items: center; margin: 16px 0; }
-progress { width: 100%; height: 5px; border: none; accent-color: var(--accent); border-radius: 4px; }
-progress::-webkit-progress-bar { background: var(--surface-sunken); border-radius: 4px; }
-progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; }
-.work-progress span { color: var(--muted); font-size: 11px; }
-.work-attention { background: var(--amber-soft); padding: 16px; margin: 16px 0; border-radius: 10px; }
-.work-attention p { white-space: pre-wrap; line-height: 1.65; font-size: 13px; }
-.answer-label { display: grid; gap: 7px; font-size: 12px; }
-.answer-label textarea { width: 100%; min-width: 0; }
-.work-attention > button { margin-top: 10px; }
-.work-details { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 16px; }
-.work-details summary { color: var(--text-secondary); font-size: 12px; cursor: pointer; min-height: 28px; }
-.work-plan { padding: 0; list-style: none; font-size: 13px; }
-.work-plan li { display: flex; align-items: baseline; gap: 12px; margin: 10px 0; }
-.work-plan span { flex: none; color: var(--muted); font-size: 11px; }
-.work-plan .completed { color: var(--green); }
-.work-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
-.work-actions button { min-height: 36px; font-size: 12px; }
-.work-footer { justify-content: flex-end; }
-.danger-text { color: var(--red); }
-@media (max-width: 600px) { .work-item { padding: 16px; } .work-actions button, summary { min-height: 44px; } .work-meta time { font-size: 10px; } }
+.work-item {
+  padding: var(--space-6) var(--space-5);
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  overflow-wrap: anywhere;
+  transition: all var(--duration-base) var(--ease-out);
+}
+
+.work-item:hover {
+  border-color: var(--border-medium);
+  box-shadow: var(--shadow-sm);
+}
+
+.work-item.highlighted,
+.work-item:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.work-item.attention {
+  border-color: var(--warning-500);
+  background: var(--warning-50);
+}
+
+.work-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-tertiary);
+  font-size: 0.875rem;
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+
+.work-meta time {
+  margin-left: auto;
+  font-size: 0.8125rem;
+}
+
+.work-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.work-status span {
+  font-size: 8px;
+  line-height: 1;
+}
+
+.work-status.running,
+.work-status.recovering {
+  color: var(--accent);
+}
+
+.work-status.waiting,
+.work-status.approval {
+  color: var(--warning-600);
+}
+
+.work-status.done {
+  color: var(--success-600);
+}
+
+.work-status.failed,
+.work-status.stopped {
+  color: var(--error-500);
+}
+
+h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.6;
+  margin: var(--space-3) 0 var(--space-2);
+  white-space: pre-wrap;
+  color: var(--text-primary);
+}
+
+.work-update {
+  font-size: 0.9375rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin: var(--space-2) 0 var(--space-4);
+}
+
+.work-progress {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  margin: var(--space-4) 0;
+}
+
+progress {
+  flex: 1;
+  height: 8px;
+  border: none;
+  accent-color: var(--accent);
+  border-radius: var(--radius-full);
+  background: var(--bg-sunken);
+}
+
+progress::-webkit-progress-bar {
+  background: var(--bg-sunken);
+  border-radius: var(--radius-full);
+}
+
+progress::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: var(--radius-full);
+}
+
+progress::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: var(--radius-full);
+}
+
+.work-progress span {
+  color: var(--text-tertiary);
+  font-size: 0.875rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.work-attention {
+  background: var(--warning-50);
+  border: 1px solid var(--warning-200);
+  padding: var(--space-4);
+  margin: var(--space-4) 0;
+  border-radius: var(--radius-lg);
+}
+
+.work-attention strong {
+  display: block;
+  color: var(--warning-700);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  margin-bottom: var(--space-2);
+}
+
+.work-attention p {
+  white-space: pre-wrap;
+  line-height: 1.6;
+  font-size: 0.9375rem;
+  color: var(--warning-700);
+  margin: var(--space-2) 0;
+}
+
+.answer-label {
+  display: grid;
+  gap: var(--space-2);
+  font-size: 0.875rem;
+  margin-top: var(--space-3);
+  color: var(--warning-700);
+  font-weight: 500;
+}
+
+.answer-label textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 80px;
+}
+
+.work-attention > button {
+  margin-top: var(--space-3);
+}
+
+.work-details {
+  border-top: 1px solid var(--border-light);
+  padding-top: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.work-details summary {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  user-select: none;
+  transition: background var(--duration-base) var(--ease-out);
+}
+
+.work-details summary:hover {
+  background: var(--bg-secondary);
+}
+
+.work-details[open] summary {
+  margin-bottom: var(--space-3);
+}
+
+.work-plan {
+  padding: 0;
+  margin: var(--space-3) 0;
+  list-style: none;
+  font-size: 0.9375rem;
+}
+
+.work-plan li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin: var(--space-2) 0;
+  line-height: 1.6;
+}
+
+.work-plan span {
+  flex: none;
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  min-width: 64px;
+}
+
+.work-plan .completed {
+  color: var(--success-600);
+}
+
+.work-plan .in_progress,
+.work-plan .pending {
+  color: var(--accent);
+}
+
+.work-plan .blocked {
+  color: var(--error-500);
+}
+
+.work-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+  align-items: center;
+}
+
+.work-actions button {
+  min-height: 36px;
+  font-size: 0.875rem;
+}
+
+.work-footer {
+  justify-content: flex-end;
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-light);
+}
+
+.danger-text {
+  color: var(--error-500);
+  background: transparent;
+  border: none;
+  font-weight: 500;
+}
+
+.danger-text:hover:not(:disabled) {
+  background: var(--error-50);
+}
+
+@media (max-width: 768px), (pointer: coarse) {
+  .work-item {
+    padding: var(--space-4);
+  }
+
+  .work-actions button,
+  summary {
+    min-height: 44px !important;
+  }
+
+  .work-meta time {
+    font-size: 0.75rem;
+  }
+
+  h3 {
+    font-size: 0.9375rem;
+  }
+}
 </style>
