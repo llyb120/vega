@@ -15,7 +15,7 @@ function mount(api: any = async () => ({ messages: [], running: false })) {
     console, ref, history, messages, running, hasMore, runningFrom: ref(null), disposed: false, turn: 0, error: ref(""), transcript: ref(null), props: { employeeId: "fixture" },
     nearBottom: () => true, scroll: async () => {}, visible: computed(() => employeeChatMessages(messages.value, running.value)), employeeChatMessages, frozen: [] as any[],
   };
-  context.freezePose = (seqs: number[]) => context.frozen.push(...seqs);
+  context.easeIn = (seqs: number[]) => context.frozen.push(...seqs);
   const methods = vm.runInNewContext("let turn = 0;" + between("async function refresh(apply", "async function upload(") + between("function handleEvent(event)", "watch(() => props.revision") + "\n({ refresh, handleEvent, finishTurn })", context);
   return { ...context, ...methods };
 }
@@ -64,7 +64,7 @@ test("a delayed history response cannot clear a newer typing state", async () =>
   assert.equal(state.running.value, true);
 });
 
-test("the typing row turns into the reply in one tick: reply merged, typing cleared and pose frozen together", async () => {
+test("the typing row turns into the reply in one tick: reply merged, typing cleared and the reply avatar eases out of the typing glance", async () => {
   const replies: any[] = [];
   let release!: () => void;
   const gate = new Promise<void>((resolve) => release = resolve);
@@ -87,7 +87,7 @@ test("the typing row turns into the reply in one tick: reply merged, typing clea
   assert.equal(state.running.value, false);
   assert.deepEqual(state.visible.value.map((message: any) => message.seq), [1, 2]);
   assert.equal(state.error.value, "");
-  assert.deepEqual(state.frozen, [2], "the new reply receives the frozen typing pose");
+  assert.deepEqual(state.frozen, [2], "only the new reply eases in from the typing avatar");
   assert(!seen.some(([running, count]) => !running && count < 2), "no state where typing is gone but the reply is not shown: " + JSON.stringify(seen));
   assert(replies.slice(1).every((path) => /\?after=[12]$/.test(path)), "only messages after the newest known sequence are fetched: " + replies.join(", "));
 });
@@ -142,4 +142,15 @@ test("quoted replies send only a source sequence, preserve drafts on error, and 
   await sending;
   assert.equal(props.composer.quote.seq, 8);
   assert.equal(props.composer.text, "explain this");
+});
+
+test("reply avatars animate only while a linked task is live and actively in progress", async () => {
+  const { isInProgress } = await import("../web/src/task-status.js");
+  assert.deepEqual(["running", "recovering", "in_progress"].filter(isInProgress), ["running", "recovering", "in_progress"]);
+  for (const status of ["queued", "pending", "deferred", "waiting", "approval", "blocked", "done", "completed", "failed", "stopped", "cancelled", undefined]) assert.equal(isInProgress(status), false, String(status));
+  const bubble = readFileSync("web/src/ChatMessage.vue", "utf8");
+  assert(bubble.includes("isInProgress(props.taskStatus?.[task.id])"), "only the live status (never the stored snapshot) can start the animation");
+  assert(chat.includes(':task-status="taskStatus"') && readFileSync("web/src/App.vue", "utf8").includes(':tasks="employee.tasks"'));
+  const avatar = readFileSync("web/src/BotAvatar.vue", "utf8");
+  assert(avatar.includes("IntersectionObserver"), "off-screen avatars pause");
 });

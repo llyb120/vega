@@ -423,5 +423,9 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
 }
 
+/* One avatar size for chat replies and the typing row, so the typing row turns into the reply without moving. */
+.chat-message { --chat-avatar: 44px; --chat-gap: 10px; }
+@media (max-width: 767px) { .chat-message { --chat-avatar: 40px; --chat-gap: 8px; } }
+
 /* Bot avatars are silhouettes: drop the tinted square behind them wherever an avatar slot is used. */
 :is(.nav-avatar, .chat-avatar, .avatar-current, .identity-avatar):has(> .employee-picture.is-bot) { background: transparent; overflow: visible; }

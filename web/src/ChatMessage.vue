@@ -3,13 +3,20 @@ import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
-import { taskLabel, taskTone, shortTime } from "./task-status";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, pose: String, quotable: Boolean });
+import { computed } from "vue";
+import { taskLabel, taskTone, shortTime, isInProgress } from "./task-status";
+import { MESSAGE_POSE } from "./bot-avatar.js";
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, quotable: Boolean });
 const emit = defineEmits(["quote", "jump", "task"]);
+// Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
+const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
+// While a linked task is actively running, this reply's bot keeps glancing around like the typing avatar.
+// Only live statuses count, so an old snapshot saying "running" never animates forever.
+const working = computed(() => !!props.message.tasks?.some((task) => isInProgress(props.taskStatus?.[task.id])));
 </script>
 <template>
   <article class="chat-message" :class="message.role" :data-message-seq="message.seq" tabindex="-1">
-    <span v-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="pose" /></span>
+    <span v-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="MESSAGE_POSE" :from="enterFrom" :animate="working" /></span>
     <div class="chat-content">
       <div class="chat-heading">
         <strong v-if="message.role !== 'user'">{{ name }}</strong>
@@ -24,19 +31,19 @@ const emit = defineEmits(["quote", "jump", "task"]);
       </div>
       <div v-if="message.tasks?.length" class="chat-tasks">
         <button v-for="task in message.tasks" :key="task.id" type="button" class="chat-task-link" :data-task-id="task.id" :aria-label="'查看任务：' + task.title" @click="emit('task', task.id)">
-          <Icon name="tasks" :size="15" /><span class="truncate">{{ task.title }}</span><span v-if="task.status" :class="['badge', taskTone(task.status)]">{{ taskLabel(task.status) }}</span><Icon name="right" :size="14" />
+          <Icon name="tasks" :size="15" /><span class="truncate">{{ task.title }}</span><span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span><Icon name="right" :size="14" />
         </button>
       </div>
     </div>
   </article>
 </template>
 <style scoped>
-.chat-message { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 16px; min-width: 0; outline: none; }
+.chat-message { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 16px; min-width: 0; outline: none; }
 .chat-message.user { justify-content: flex-end; }
-.chat-avatar { display: grid; place-items: center; flex: none; width: 28px; height: 28px; margin-top: 2px; overflow: hidden; border-radius: 8px; background: var(--accent-soft); color: var(--accent-text); font-size: 12px; font-weight: 600; }
+.chat-avatar { display: grid; place-items: center; flex: none; width: var(--chat-avatar); height: var(--chat-avatar); overflow: hidden; border-radius: 12px; background: var(--accent-soft); color: var(--accent-text); font-size: 16px; font-weight: 600; }
 /* One shrinkable column: grid items default to an automatic minimum of their min-content width, so a single
    nowrap child (a long task title, URL or code line) would otherwise widen the track past the screen. */
-.chat-content { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; max-width: min(100% - 38px, 680px); }
+.chat-content { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; max-width: min(100% - var(--chat-avatar) - var(--chat-gap), 680px); }
 .chat-content > * { min-width: 0; }
 .user .chat-content { justify-items: end; max-width: min(85%, 620px); }
 .user .chat-content > * { max-width: 100%; }
@@ -64,8 +71,7 @@ const emit = defineEmits(["quote", "jump", "task"]);
 .chat-task-link:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-softer); }
 @media (hover: none) { .chat-reply { opacity: .7; } .reply-label { display: none; } }
 @media (max-width: 767px) {
-  .chat-message { gap: 8px; margin-bottom: 14px; }
-  .chat-content { max-width: calc(100% - 36px); }
+  .chat-message { margin-bottom: 14px; }
   .user .chat-content { max-width: 88%; }
   .chat-reply { min-height: 28px; padding: 0 6px; }
 }

@@ -1454,7 +1454,7 @@ onBeforeUnmount(() => {
               <button v-if="attentionTasks.length && !workPanelVisible" type="button" class="attention-strip" @click="attentionTasks.length === 1 ? openEmployeeTask(attentionTasks[0].id) : showTasks('attention')">
                 <Icon name="hand" :size="16" /><span><strong>{{ attentionTasks.length }} 项需要你处理</strong><span class="truncate">{{ attentionTasks[0].text }}</span></span><Icon name="right" :size="16" />
               </button>
-              <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" @task="openEmployeeTask" />
+              <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" :tasks="employee.tasks" @task="openEmployeeTask" />
             </div>
             <button v-if="workPanelVisible && !wide" type="button" class="panel-backdrop" aria-label="关闭当前工作" tabindex="-1" @click="workRailOpen = false"></button>
             <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
