@@ -5,7 +5,6 @@ import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { employeeChatMessages } from "./conversation";
 import { createChatHistory } from "./chat-history.js";
-import { poseForSeed } from "./bot-avatar.js";
 const props = defineProps({ api: Function, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean });
 const emit = defineEmits(["task"]);
 const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), busy = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
@@ -23,21 +22,10 @@ const visible = computed(() => {
 });
 const history = createChatHistory({ api: (...args) => props.api(...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore });
 
-// Each reply keeps the expression the typing avatar had at the instant it turned into that reply.
-// Stored per browser (bounded); replies never seen live get a stable pose derived from their sequence.
-const poseKey = () => `vega:chat-poses:${props.employeeId}`;
-function readPoses() { try { return JSON.parse(localStorage.getItem(poseKey()) || "{}") || {}; } catch { return {}; } }
-const poses = ref(readPoses()), typingPose = ref("center");
-function freezePose(seqs) {
-  if (!seqs.length) return;
-  const next = { ...poses.value };
-  for (const seq of seqs) next[seq] = typingPose.value;
-  const kept = Object.keys(next).map(Number).sort((a, b) => b - a).slice(0, 400);
-  poses.value = Object.fromEntries(kept.map((seq) => [seq, next[seq]]));
-  try { localStorage.setItem(poseKey(), JSON.stringify(poses.value)); } catch {}
-}
-const poseOf = (message) => poses.value[message.seq] || poseForSeed(`${props.employeeId}:${message.seq}`);
-
+// Message avatars rest on one up-right glance. The reply that replaces the typing row starts from the typing
+// avatar's last glance and eases into it (in memory only; nothing is persisted).
+const typingPose = ref("center"), entering = ref({});
+function easeIn(seqs) { entering.value = Object.fromEntries(seqs.map((seq) => [seq, typingPose.value])); }
 function quoteMessage(message) {
   const text = (message.displayText || message.text || "[图片]").replace(/[`*_#>]/g, "").replace(/\s+/g, " ").trim();
   quoted.value = { seq: message.seq, role: message.role, text: text.length > 160 ? text.slice(0, 160) + "…" : text };
@@ -101,14 +89,14 @@ async function refresh(apply, syncRunning = true) {
 }
 /**
  * The turn is over. Keep the typing row on screen until the reply is in hand, then swap them in one tick:
- * merge the reply, clear `running` and freeze the avatar pose together so no frame shows neither.
+ * merge the reply and clear `running` together so no frame shows neither; the reply avatar eases out of the typing glance.
  */
 function finishTurn() {
   const current = turn;
   const before = new Set(visible.value.map((message) => message.seq));
   return refresh(() => {
     if (current !== turn) return; // a new turn already started; it owns the typing row now
-    freezePose(employeeChatMessages(messages.value, false).filter((message) => message.role !== "user" && !before.has(message.seq)).map((message) => message.seq));
+    easeIn(employeeChatMessages(messages.value, false).filter((message) => message.role !== "user" && !before.has(message.seq)).map((message) => message.seq));
     running.value = false;
   });
 }
@@ -205,7 +193,7 @@ onBeforeUnmount(() => { disposed = true; });
             <button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><Icon name="tasks" :size="15" />看看工作进度</button>
           </div>
         </div>
-        <ChatMessage v-for="message in visible" :key="message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :pose="poseOf(message)" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" />
+        <ChatMessage v-for="message in visible" :key="message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :enter-from="entering[message.seq]" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" />
         <article v-if="running" class="chat-message assistant chat-typing" role="status" aria-label="正在输入中">
           <span class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" animate @pose="typingPose = $event" /></span>
           <div class="chat-content">
@@ -243,9 +231,9 @@ onBeforeUnmount(() => { disposed = true; });
 .chat-older { display: grid; place-items: center; height: 32px; color: var(--faint); font-size: 11px; }
 .chat-older .spinner { width: 14px; height: 14px; }
 /* The typing row mirrors ChatMessage's assistant row (same avatar slot, heading and bubble) so the reply replaces it in place. */
-.chat-typing { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 16px; min-width: 0; }
-.chat-typing .chat-avatar { display: grid; place-items: center; flex: none; width: 28px; height: 28px; margin-top: 2px; border-radius: 8px; background: var(--accent-soft); }
-.chat-typing .chat-content { display: grid; gap: 4px; min-width: 0; }
+.chat-typing { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 16px; min-width: 0; }
+.chat-typing .chat-avatar { display: grid; place-items: center; flex: none; width: var(--chat-avatar); height: var(--chat-avatar); border-radius: 12px; background: var(--accent-soft); }
+.chat-typing .chat-content { display: grid; gap: 4px; min-width: 0; max-width: min(100% - var(--chat-avatar) - var(--chat-gap), 680px); }
 .chat-typing .chat-heading { display: flex; align-items: center; gap: 8px; min-height: 20px; color: var(--muted); font-size: 11px; }
 .chat-typing .chat-heading strong { color: var(--text-2); font-size: 12px; font-weight: 600; }
 .chat-typing .chat-bubble { justify-self: start; padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: var(--surface-2); line-height: 1.65; }
@@ -275,7 +263,7 @@ onBeforeUnmount(() => { disposed = true; });
   .chat-column { padding: 12px 12px 4px; }
   .chat-welcome { padding: 16px 0; }
   .chat-welcome h3 { font-size: 18px; }
-  .chat-typing { gap: 8px; margin-bottom: 14px; }
+  .chat-typing { margin-bottom: 14px; }
   .chat-composer { width: calc(100% - 16px); margin: 0 8px max(8px, env(safe-area-inset-bottom, 0px)); border-radius: 12px; }
   .composer-row textarea { font-size: 16px; padding: 7px 2px; }
   .attach, .send { width: 40px; min-height: 40px; }

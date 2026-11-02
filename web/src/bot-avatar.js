@@ -94,19 +94,25 @@ export const BOT_POSES = {
   crossed: { l: eye(4, 1), r: eye(-4, 1) }, dazed: { l: eye(-3, 3, 0.9), r: eye(4, -3, 0.9) },
   blink: both(0, 1, 0.08, 1.15),
 };
-export const FREEZABLE_POSES = Object.keys(BOT_POSES).filter(id => id !== "blink");
+/** Poses the typing animation glances between ("blink" is an overlay, not a look). */
+export const LOOK_POSES = Object.keys(BOT_POSES).filter(id => id !== "blink");
+/** Message avatars all rest on one pose: glancing up-right, toward the sender name and the bubble. */
+export const MESSAGE_POSE = "upRight";
 
-/** Deterministic pose for messages that never saw a live transition (older history, other devices). */
-export function poseForSeed(seed) {
-  let hash = 2166136261;
-  for (const char of String(seed)) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
-  return FREEZABLE_POSES[hash % FREEZABLE_POSES.length];
-}
-
-/** Next pose for the typing animation: a different look, sometimes preceded by a quick blink. */
-export function nextPose(current, random = Math.random) {
-  const options = FREEZABLE_POSES.filter(id => id !== current);
-  // Return to center now and then so the motion reads as glancing around rather than random jumps.
-  if (current !== "center" && random() < 0.1) return "center";
+/**
+ * Next glance for the typing animation, chosen at random. Never repeats the current pose, and avoids
+ * bouncing straight back to the previous one, so no two typing bursts play the same sequence.
+ */
+export function nextPose(current, previous, random = Math.random) {
+  if (current !== "center" && previous !== "center" && random() < 0.1) return "center";
+  const options = LOOK_POSES.filter(id => id !== current && id !== previous);
   return options[Math.floor(random() * options.length)];
+}
+/** How long to hold a glance: mostly short darts, sometimes a longer stare. */
+export function holdDuration(random = Math.random) {
+  return random() < 0.2 ? 1000 + random() * 900 : 280 + random() * 620;
+}
+/** When the next blink starts, and whether it is a double blink (about one in four). */
+export function blinkPlan(random = Math.random) {
+  return { delay: 700 + random() * 2600, double: random() < 0.25 };
 }

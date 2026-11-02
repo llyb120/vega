@@ -4,12 +4,13 @@ import UserMessage from "./UserMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, pose: String, quotable: Boolean });
+import { MESSAGE_POSE } from "./bot-avatar.js";
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, quotable: Boolean });
 const emit = defineEmits(["quote", "jump", "task"]);
 </script>
 <template>
   <article class="chat-message" :class="message.role" :data-message-seq="message.seq" tabindex="-1">
-    <span v-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="pose" /></span>
+    <span v-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="MESSAGE_POSE" :from="enterFrom" /></span>
     <div class="chat-content">
       <div class="chat-heading">
         <strong v-if="message.role !== 'user'">{{ name }}</strong>
@@ -31,12 +32,12 @@ const emit = defineEmits(["quote", "jump", "task"]);
   </article>
 </template>
 <style scoped>
-.chat-message { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 16px; min-width: 0; outline: none; }
+.chat-message { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 16px; min-width: 0; outline: none; }
 .chat-message.user { justify-content: flex-end; }
-.chat-avatar { display: grid; place-items: center; flex: none; width: 28px; height: 28px; margin-top: 2px; overflow: hidden; border-radius: 8px; background: var(--accent-soft); color: var(--accent-text); font-size: 12px; font-weight: 600; }
+.chat-avatar { display: grid; place-items: center; flex: none; width: var(--chat-avatar); height: var(--chat-avatar); overflow: hidden; border-radius: 12px; background: var(--accent-soft); color: var(--accent-text); font-size: 16px; font-weight: 600; }
 /* One shrinkable column: grid items default to an automatic minimum of their min-content width, so a single
    nowrap child (a long task title, URL or code line) would otherwise widen the track past the screen. */
-.chat-content { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; max-width: min(100% - 38px, 680px); }
+.chat-content { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; max-width: min(100% - var(--chat-avatar) - var(--chat-gap), 680px); }
 .chat-content > * { min-width: 0; }
 .user .chat-content { justify-items: end; max-width: min(85%, 620px); }
 .user .chat-content > * { max-width: 100%; }
@@ -64,8 +65,7 @@ const emit = defineEmits(["quote", "jump", "task"]);
 .chat-task-link:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-softer); }
 @media (hover: none) { .chat-reply { opacity: .7; } .reply-label { display: none; } }
 @media (max-width: 767px) {
-  .chat-message { gap: 8px; margin-bottom: 14px; }
-  .chat-content { max-width: calc(100% - 36px); }
+  .chat-message { margin-bottom: 14px; }
   .user .chat-content { max-width: 88%; }
   .chat-reply { min-height: 28px; padding: 0 6px; }
 }

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import sharp from "sharp";
 import { ZODIAC_AVATARS, BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS, isAvatarPreset, employeeAvatarURL, parseBotAvatar, defaultBotAvatar, botAvatarPreset } from "../shared/employee-avatars";
-import { BOT_SHAPE_GEOMETRY, BOT_POSES, FREEZABLE_POSES, poseForSeed, nextPose } from "../web/src/bot-avatar.js";
+import { BOT_SHAPE_GEOMETRY, BOT_POSES, LOOK_POSES, MESSAGE_POSE, nextPose, holdDuration, blinkPlan } from "../web/src/bot-avatar.js";
 import { updateEmployeeAvatar } from "../server/core/employee-avatar";
 import { Employee, type EmployeeRuntime } from "../server/core/employee";
 import { Store } from "../server/core/store";
@@ -54,9 +54,19 @@ test("bot avatars encode shape and color in the preset string and every shape ha
   for (const value of ["bot:", "bot:round", "bot:round:", "bot:unknown:red", "bot:round:unknown", "bot:round:red:extra", "bot:round:#ff0000", "bot:../x:red", "BOT:round:red"]) assert.equal(isAvatarPreset(value), false, value);
   assert.deepEqual(defaultBotAvatar("employee-a"), defaultBotAvatar("employee-a"), "the default bot is stable per employee");
   assert(new Set(["a", "b", "c", "d", "e", "f", "g", "h"].map(seed => JSON.stringify(defaultBotAvatar(seed)))).size > 4, "default bots vary across employees");
-  assert(FREEZABLE_POSES.length >= 15 && !FREEZABLE_POSES.includes("blink") && "blink" in BOT_POSES);
-  assert.equal(poseForSeed("e:42"), poseForSeed("e:42"));
-  for (let i = 0; i < 50; i++) { const pose = nextPose("left"); assert(pose !== "left" && FREEZABLE_POSES.includes(pose)); }
+  assert(LOOK_POSES.length >= 15 && !LOOK_POSES.includes("blink") && "blink" in BOT_POSES);
+  assert(LOOK_POSES.includes(MESSAGE_POSE) && BOT_POSES[MESSAGE_POSE].l.x > 0 && BOT_POSES[MESSAGE_POSE].l.y < 0, "message avatars glance up-right");
+  for (let i = 0; i < 200; i++) { const pose = nextPose("left", "up"); assert(pose !== "left" && pose !== "up" && LOOK_POSES.includes(pose)); }
+  // Random, not a fixed cycle: two independently generated sequences differ, and many poses get visited.
+  const walk = () => { const seq: string[] = []; let current = "center", previous; for (let i = 0; i < 30; i++) { const next = nextPose(current, previous); previous = current; current = next; seq.push(next); } return seq; };
+  const a = walk(), b = walk();
+  assert.notDeepEqual(a, b);
+  assert(new Set(a).size >= 8);
+  assert(a.every((pose, i) => !i || pose !== a[i - 1]), "never repeats the same pose back to back");
+  const holds = Array.from({ length: 200 }, () => holdDuration());
+  assert(Math.min(...holds) >= 280 && Math.max(...holds) <= 1900 && new Set(holds.map(Math.round)).size > 100);
+  const blinks = Array.from({ length: 400 }, () => blinkPlan());
+  assert(blinks.some(plan => plan.double) && blinks.some(plan => !plan.double));
 });
 
 test("preset selection, clearing and reopening preserve the employee's own avatar without accepting an arbitrary blob reference", async () => {
