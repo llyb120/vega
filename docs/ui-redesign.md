@@ -82,6 +82,7 @@
 
 ## 6. 验证方式
 
-- `npm run build:web` 构建通过。
-- 使用 mock 后端（HTTP + WebSocket，数据覆盖各任务状态、对话、职责、记忆、浏览器画面、调试会话、经验、服务商、账号）与 Playwright 在 1440×900、768×1024、375×812 下截图对比，并脚本点击核心流程。
-- 另用真实后端（`npm run dev`，空数据库）验证登录、创建员工、新建任务、职责、记忆、设置页可用。
+- `npm run build:web`、`npm run check` 通过；`npm test` 与 master 结果一致（唯一失败的 Go vendored 摘要用例在 master 上同样失败，与前端无关）。
+- 3 个界面源码检查测试（`tests/employee-ui.test.ts`、`tests/local-agent-ui.test.ts`、`tests/settings-refresh.test.ts`）原本按旧文件结构读取 `App.vue` / `EmployeeTaskCard.vue`，已改为读取新组件（`AppSidebar.vue`、`EmployeeTasks.vue`、`TaskDetail.vue`、`WorkPanel.vue`），断言的约束不变。
+- 使用 mock 后端（HTTP + WebSocket，数据覆盖各任务状态、对话、职责、记忆、浏览器画面、调试会话、经验、服务商、账号）与 Playwright 在 1440×900、768×1024、375×812 下截图对比，并脚本点击核心流程（导航、抽屉开关与焦点、发消息与引用、工作面板审批、任务跳转与新建、职责/记忆新增、员工设置保存、执行位置切换、系统设置分区、密码本新增、调试会话双栏、成员重置密码）。
+- 另用真实后端（`npm run dev`，本地数据库）验证登录、员工加载、新建任务、保存员工设置，以及职责、记忆、设置、系统设置、调试会话、经验图谱页面渲染；该环境未配置模型服务商，发送消息会返回 “Provider not configured”，界面按原逻辑显示错误。
