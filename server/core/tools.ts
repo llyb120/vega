@@ -349,6 +349,8 @@ export class Tools {
       this.definitions(model).some((t) => t.name === call.name),
       "Tool unavailable in this scene",
     );
+    const waiting = this.session.employeeId && this.session.taskId && this.engine.employeeFor(this.session).state().tasks.find(task => task.id === this.session.taskId)?.workspaceWait;
+    if (waiting) return { value: { status: "queued", reason: "工作区写入占用，任务已暂停，本步未执行；资源释放后自动续做。" }, error: true, stop: true };
     if (call.name === "read")
       return this.read(a);
     if (a.path === "sqlite:config" && call.name === "write") {
@@ -371,6 +373,10 @@ export class Tools {
           );
       return { value: await this.engine.saveConfig(next) };
     }
+    if (["write", "edit", "bash"].includes(call.name) && this.session.employeeId && this.session.taskId) {
+      const employee = this.engine.employeeFor(this.session);
+      if (!await employee.claimWorkspace(this.session, this.session.scene === "coding" || call.name !== "bash")) return { value: { status: "queued", reason: employee.task(employee.state(), this.session.taskId).queueReason || "任务已暂停，本步未执行。", next: "System resumes the same task after the workspace is released; recheck current files before continuing, never replay completed operations." }, error: true, stop: true };
+    }
     if (["write", "edit"].includes(call.name)) {
       const agent = this.agent();
       if (agent)
@@ -392,6 +398,7 @@ export class Tools {
         ? await localCwdExists(this.engine.localAgents, agent, this.session.cwd, a.path, this.signal)
         : resolve(this.session.cwd, a.path);
       if (!agent) assert((await stat(path)).isDirectory(), "Existing cwd directory required");
+      if (this.session.employeeId && this.session.taskId && path !== this.session.cwd) this.engine.employeeFor(this.session).releaseWorkspace(this.session.taskId);
       this.session.cwd = path;
       this.engine.store.saveSession(this.session);
       return { value: { cwd: path } };

@@ -546,20 +546,62 @@ test("one scheduler runs different employee browsers concurrently while serializ
   } finally { employee.close(); store.close(); }
 });
 
-test("directory aliases cannot bypass the shared writer lock", async () => {
+test("one employee starts independent tasks in the same directory concurrently within the existing global capacity", async () => {
   const { store, employee, runtime } = fixture();
   const release: (() => void)[] = [];
-  runtime.run = async () => { await new Promise<void>((resolve) => release.push(resolve)); };
+  runtime.run = async () => { await new Promise<void>(resolve => release.push(resolve)); };
+  try {
+    for (let index = 0; index < 4; index++) await task(employee, "independent task " + index);
+    employee.closed = false;
+    await employee.drain();
+    assert.equal(employee.busy.size, 3);
+    assert.equal(release.length, 3);
+    assert.equal(employee.state().tasks.filter(task => task.status === "queued").length, 1);
+    assert.equal(new Set(employee.state().tasks.filter(task => task.workSession).map(task => task.workSession)).size, 3);
+    employee.close(); release.forEach(resolve => resolve());
+    for (let index = 0; index < 20 && employee.busy.size; index++) await sleep(5);
+  } finally { employee.close(); store.close(); }
+});
+
+test("directory aliases cannot bypass the shared lock when actual workspace writes are requested", async () => {
+  const { store, employee } = fixture();
   try {
     const a = employee.for(employee.create({ name: "A", cwd: process.cwd() }, "alice").id);
     const b = employee.for(employee.create({ name: "B", cwd: process.cwd() + "/." }, "bob").id);
-    await task(a); await task(b);
-    employee.closed = false;
-    await employee.drain();
-    assert.equal(a.busy.size + b.busy.size, 1);
-    employee.close();
-    release.forEach((resolve) => resolve());
-    for (let index = 0; index < 20 && (a.busy.size || b.busy.size); index++) await sleep(5);
+    const first = await task(a), second = await task(b);
+    for (const person of [a, b]) person.update(state => { state.tasks[0].status = "running"; });
+    const sessionA = store.newSession({ taskId: first.id, employeeId: a.employeeId, cwd: process.cwd() });
+    const sessionB = store.newSession({ taskId: second.id, employeeId: b.employeeId, cwd: process.cwd() + "/." });
+    assert.equal(await a.claimWorkspace(sessionA, true), true);
+    assert.equal(await b.claimWorkspace(sessionB, true), false);
+    assert.equal(employee.writers.size, 1);
+    assert.equal(b.state().tasks[0].status, "queued");
+    assert.match(b.state().tasks[0].queueReason, /本步未执行/);
+    assert.equal(b.state().tasks[0].recovery, undefined, "contention does not spend the recovery budget");
+    a.releaseWorkspace(first.id);
+    b.update(state => { state.tasks[0].status = "running"; delete state.tasks[0].workspaceWait; });
+    assert.equal(await b.claimWorkspace(sessionB, true), true);
+    b.releaseWorkspace(second.id);
+    assert.equal(employee.writers.size, 0);
+  } finally { employee.close(); store.close(); }
+});
+
+test("workspace leases distinguish execution devices and release transient commands without releasing a code-write phase", async () => {
+  const { store, employee } = fixture();
+  try {
+    const jobs = await Promise.all([task(employee, "client A"), task(employee, "client B"), task(employee, "client A other task")]);
+    employee.update(state => { for (const task of state.tasks) task.status = "running"; });
+    const sessions = jobs.map((job, index) => store.newSession({ taskId: job.id, employeeId: employee.employeeId, cwd: "/project", localAgent: true, clientId: index === 1 ? "b" : "a", localPlatform: "linux" }));
+    assert.equal(await employee.claimWorkspace(sessions[0]), true);
+    assert.equal(await employee.claimWorkspace(sessions[1], true), true);
+    assert.equal(await employee.claimWorkspace(sessions[2]), false);
+    assert.equal(employee.writers.size, 2);
+    employee.releaseWorkspace(jobs[0].id, true);
+    assert.equal(employee.writers.size, 1);
+    employee.releaseWorkspace(jobs[1].id, true);
+    assert.equal(employee.writers.size, 1, "coding/write leases outlive individual commands");
+    employee.releaseWorkspace(jobs[1].id);
+    assert.equal(employee.writers.size, 0);
   } finally { employee.close(); store.close(); }
 });
 

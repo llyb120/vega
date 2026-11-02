@@ -598,6 +598,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           this.store.append(key, redactMessage(m, redact));
           emit("steer", m);
         }
+        if (session.employeeId && session.taskId && session.scene === "coding" && !await this.employeeFor(session).claimWorkspace(session, true)) return;
         const skills = await loadSkills(config, this.store, session.cwd);
         const employeeState = worker?.state();
         const memories = employeeState ? "\n相关长期记忆（已保存，按当前问题召回；工具写入/更新后立即刷新）：" + JSON.stringify(recallMemory(employeeState, memoryQuery, Date.now(), false)) : "";
@@ -759,6 +760,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
                 .filter((s): s is string => !!s);
               session.model = f.model;
               session.scene = f.scene;
+              if (session.employeeId && session.taskId && f.scene === "lightweight") this.employeeFor(session).releaseWorkspace(session.taskId);
               this.store.append(
                 key,
                 redactMessage(
@@ -832,6 +834,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               }
             }
             assert(target, lastError);
+            if (mainTask && session.employeeId && a.scene === "coding" && !await this.employeeFor(session).claimWorkspace(session, true)) {
+              this.outcome(key, call, { value: { status: "queued", reason: "工作区写入占用，原任务已保存，释放后自动续做；本步未执行。" }, error: true, stop: true }, emit, redact);
+              return;
+            }
             if (target.selection === model.selection) {
               this.outcome(
                 key,
@@ -862,6 +868,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               .filter((s): s is string => !!s);
             session.model = target.selection;
             session.scene = a.scene;
+            if (mainTask && session.employeeId && a.scene === "lightweight") this.employeeFor(session).releaseWorkspace(session.taskId!);
             this.providers.reset(key);
             outcome = {
               value: {
@@ -881,6 +888,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           continue;
         }
         const outcomes = await this.batch(tools, reply.calls, model);
+        if (session.employeeId && session.taskId && session.scene !== "coding" && reply.calls.some(call => ["write", "edit", "bash"].includes(call.name))) this.employeeFor(session).releaseWorkspace(session.taskId, true);
         let stop = false;
         for (const [i, outcome] of outcomes.entries()) {
           if (!outcome.error && outcome.task) chatTasks.set(outcome.task.id, outcome.task);
@@ -936,6 +944,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         error ||= new Error(String(redact.value(cleanupError?.message || cleanupError)));
         throw error;
       } finally {
+        if (session?.employeeId && session.taskId) this.employeeFor(session).releaseWorkspace(session.taskId);
         signal?.removeEventListener("abort", abort);
         this.active.delete(key);
         this.redactors.delete(key);

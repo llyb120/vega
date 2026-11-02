@@ -19,6 +19,7 @@ async function run(action) {
   <article class="work-item" :data-task-id="task.id" tabindex="-1" :class="{ attention: ['waiting', 'approval'].includes(task.status), highlighted }" :aria-busy="busy">
     <div class="work-meta"><span class="work-status" :class="task.status"><span aria-hidden="true">●</span> {{ labels[task.status] || task.status }}</span><span v-if="task.dutyId">职责触发</span><span class="work-location">{{ task.execution?.localAgent ? '客户端 · ' + (task.execution.clientName || '已绑定设备') : '服务端' }}</span><time>{{ formatBeijing(task.createdAt) }}</time></div>
     <h3>{{ task.text }}</h3>
+    <p v-if="task.status === 'queued' && task.queueReason" class="hint" role="status">{{ task.queueReason }}</p>
     <p v-if="task.progress?.length" class="work-update">{{ task.progress.at(-1).text }}</p>
     <div v-if="task.plan?.length" class="work-progress"><progress :value="progress" max="100" :aria-label="`任务进度 ${progress}%`"></progress><span>{{ progress }}%</span></div>
     <section v-if="task.status === 'approval'" class="work-attention"><strong>需要你确认</strong><p>{{ task.approval }}</p><div v-if="!readonly" class="work-actions"><button class="primary" :disabled="busy" @click="run('approve')">批准执行</button><button :disabled="busy" @click="run('reject')">驳回</button></div></section>

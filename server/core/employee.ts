@@ -6,7 +6,8 @@ import {
 import { isAvatarPreset } from "../../shared/employee-avatars";
 import { systemPresence, type Presence } from "./presence";
 import type { Store, Session, Message } from "./store";
-import { resolve } from "node:path";
+import { resolve, posix, win32 } from "node:path";
+import { realpath } from "node:fs/promises";
 import { assert, id, clone, clip, type Obj } from "./util";
 import { Vault } from "./vault";
 export type Execution = Pick<Session, "localAgent" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
@@ -46,7 +47,12 @@ export type EmployeeState = {
   orbit: Obj[];
   links: string[];
 };
-const cwdKey = (cwd: string) => process.platform === "win32" ? resolve(cwd).toLowerCase() : resolve(cwd);
+const workspaceKey = async (session: Session) => {
+  const windows = ["win32", "windows"].includes(session.localAgent ? session.localPlatform || process.platform : process.platform);
+  let path = (windows ? win32 : posix).resolve(session.cwd);
+  if (!session.localAgent) try { path = await realpath(path); } catch {}
+  return (session.localAgent ? "client:" + session.clientId : "server") + "\0" + (windows ? path.toLowerCase() : path);
+};
 export const ended = (status: string) =>
   ["done", "failed", "stopped", "cancelled"].includes(status);
 const hhmm = (s: any) =>
@@ -251,6 +257,7 @@ export type EmployeeRuntime = {
 };
 export class Employee {
   busy = new Map<string, { computer: boolean; session: string }>();
+  writers = new Map<string, { taskId: string; hold: boolean }>();
   members = new Map<string, Employee>();
   membersLoaded = false;
   wakeAt = Infinity;
@@ -372,6 +379,34 @@ export class Employee {
       this.draining = false;
       if (this.rerun) { this.rerun = false; this.schedule(); }
     }
+  }
+  async claimWorkspace(session: Session, hold = false) {
+    if (!session.taskId || session.readOnly) return true;
+    const key = await workspaceKey(session);
+    const task = this.task(this.state(), session.taskId);
+    if (task.status !== "running") return false;
+    const writers = (this.root || this).writers, owner = writers.get(key);
+    if (owner && owner.taskId !== task.id) {
+      this.update(state => {
+        const current = this.task(state, task.id);
+        current.status = "queued";
+        current.nextCheckAt = 0;
+        current.workspaceWait = { key, hold };
+        current.queueReason = "工作区正由另一任务写入，释放后自动续做；本步未执行，续做先核对最新文件，不重放已完成操作。";
+      });
+      return false;
+    }
+    let moved = false;
+    for (const [previous, lease] of writers) if (lease.taskId === task.id && previous !== key) { writers.delete(previous); moved = true; }
+    writers.set(key, { taskId: task.id, hold: hold || !!owner?.hold });
+    if (moved) this.schedule();
+    return true;
+  }
+  releaseWorkspace(taskId: string, transientOnly = false) {
+    const writers = (this.root || this).writers;
+    let released = false;
+    for (const [key, lease] of writers) if (lease.taskId === taskId && (!transientOnly || !lease.hold)) { writers.delete(key); released = true; }
+    if (released) this.schedule();
   }
   recover(t: Task, reason: string, now = Date.now()) {
     const recovery = t.recovery ||= { attempts: 0, startedAt: now, history: [] };
@@ -1223,14 +1258,7 @@ export class Employee {
     const jobs: Task[] = [];
     const employees = (this.root || this).all();
     let slots = 3 - employees.reduce((count, employee) => count + employee.busy.size, 0);
-    const writing = new Set<string>();
-    for (const employee of employees) {
-      const tasks = employee === this ? s.tasks : employee.state().tasks;
-      for (const [key, run] of employee.busy) {
-        const task = tasks.find((task) => task.id === key);
-        if (!run.computer && task) writing.add(cwdKey(task.cwd));
-      }
-    }
+    const writers = (this.root || this).writers;
     for (const t of s.tasks) {
       if (this.busy.has(t.id) || !["queued", "deferred", "recovering"].includes(t.status))
         continue;
@@ -1241,7 +1269,7 @@ export class Employee {
       if (slots <= 0) continue;
       if (this.runtime.isRunning(t.side === "computer" ? t.computerSession : t.workSession)) { next = Math.min(next, now + 1000); continue; }
       const computer = t.side === "computer" || t.profile === "computer";
-      if (!computer && writing.has(cwdKey(t.cwd))) continue;
+      if (!computer && t.workspaceWait && writers.has(t.workspaceWait.key) && writers.get(t.workspaceWait.key)!.taskId !== t.id) continue;
       if (computer) {
         if ([...this.busy.values()].some((v) => v.computer)) continue;
         if (this.locked || !desk?.available || desk.locked) {
@@ -1275,7 +1303,11 @@ export class Employee {
       }
       this.busy.set(t.id, { computer, session: "" });
       slots--;
-      if (!computer) writing.add(cwdKey(t.cwd));
+      if (!computer && t.workspaceWait) {
+        writers.set(t.workspaceWait.key, { taskId: t.id, hold: !!t.workspaceWait.hold });
+        delete t.workspaceWait;
+      }
+      t.queueReason = "";
       t.status = "running";
       t.nextCheckAt = 0;
       jobs.push(clone(t));
@@ -1387,6 +1419,7 @@ export class Employee {
       result = e?.message || String(e);
     } finally {
       stopMonitor();
+      this.releaseWorkspace(job.id);
       this.update((s) => {
         const t = s.tasks.find((t) => t.id === job.id);
         this.busy.delete(job.id);
