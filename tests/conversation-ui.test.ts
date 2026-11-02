@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { computed, reactive, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
 import { employeeChatMessages } from "../web/src/conversation.js";
 
@@ -12,13 +12,54 @@ function mount(api: any = async () => ({ messages: [], running: false })) {
   const messages = ref<any[]>([]), running = ref(false), hasMore = ref(false);
   const history = createChatHistory({ api, path: () => "/employees/fixture/chat", messages, running, hasMore });
   const context: any = {
-    console, ref, history, messages, running, hasMore, runningFrom: ref(null), disposed: false, turn: 0, error: ref(""), transcript: ref(null), props: { employeeId: "fixture" },
-    nearBottom: () => true, scroll: async () => {}, visible: computed(() => employeeChatMessages(messages.value, running.value)), employeeChatMessages, frozen: [] as any[],
+    console, ref, computed, nextTick, history, messages, running, hasMore, runningFrom: ref(null), disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
+    props: { employeeId: "fixture", api, composer: reactive({ text: "", images: [], quote: undefined }) },
+    visible: computed(() => employeeChatMessages(messages.value, running.value)), employeeChatMessages, frozen: [] as any[],
   };
   context.easeIn = (seqs: number[]) => context.frozen.push(...seqs);
-  const methods = vm.runInNewContext("let turn = 0;" + between("async function refresh(apply", "async function upload(") + between("function handleEvent(event)", "watch(() => props.revision") + "\n({ refresh, handleEvent, finishTurn })", context);
+  const methods = vm.runInNewContext([
+    "let turn = 0;",
+    between("const draft = computed", "// While a turn runs"),
+    between("const nearBottom =", "/** Prepend one older page"),
+    between("async function refresh(apply", "async function upload("),
+    between("async function send()", "async function stop()"),
+    between("function handleEvent(event)", "watch(() => props.revision"),
+    "({ refresh, handleEvent, finishTurn, send })",
+  ].join("\n"), context);
   return { ...context, ...methods };
 }
+
+test("employee sends leave older history immediately and reveal the sent message after refresh", async () => {
+  let release!: () => void, latest = false;
+  const response = new Promise<void>((resolve) => release = resolve);
+  const state = mount(async (_path: string, method: string) => {
+    if (method === "POST") { await response; return {}; }
+    return { session: { id: "s" }, messages: [{ seq: latest ? 2 : 1, role: "user", text: "work" }], running: false };
+  });
+  await state.history.load();
+  latest = true;
+  const transcript = state.transcript.value = { scrollTop: 100, scrollHeight: 1800, clientHeight: 600 };
+  const stop = watch(state.messages, () => { transcript.scrollHeight = 2400; }, { flush: "post" });
+  state.props.composer.text = "new message";
+  const sending = state.send();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const immediateTop = transcript.scrollTop;
+  transcript.scrollTop = 100;
+  release();
+  await sending;
+  stop();
+  assert.equal(immediateTop, 1800, "scrolling does not wait for the send request");
+  assert.equal(transcript.scrollTop, 2400, "sending bypasses the near-bottom restriction after rendering");
+  assert.equal(state.props.composer.text, "");
+  assert.equal(state.busy.value, false);
+});
+
+test("incoming messages do not pull a reader away from older history", async () => {
+  const state = mount(async () => ({ session: { id: "s" }, messages: [{ seq: 1, role: "assistant", text: "reply" }], running: false }));
+  const transcript = state.transcript.value = { scrollTop: 100, scrollHeight: 1800, clientHeight: 600 };
+  await state.refresh();
+  assert.equal(transcript.scrollTop, 100);
+});
 
 test("employee chat uses conclusion bubbles and typing dots; process details remain available in execution/debug records", () => {
   assert(chat.includes('import ChatMessage from "./ChatMessage.vue"'));
@@ -128,7 +169,7 @@ test("quoted replies send only a source sequence, preserve drafts on error, and 
     if (fail) throw Error("offline");
     return new Promise((resolve) => finish = resolve);
   } };
-  const context: any = { ref, computed, props, busy: ref(false), error: ref(""), refresh: async () => {} };
+  const context: any = { ref, computed, props, busy: ref(false), error: ref(""), refresh: async () => {}, scroll: async () => {} };
   const methods = vm.runInNewContext(between("const draft = computed", "// While a turn runs") + between("async function send()", "async function stop()") + "\n({send})", { ...context, nextTick: async () => {}, input: ref(null) });
   await methods.send();
   assert.equal(props.composer.quote.seq, 7);

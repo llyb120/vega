@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 
 const source = readFileSync("web/src/App.vue", "utf8");
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end));
@@ -18,7 +18,7 @@ function mount(handler: (path: string, method: string, data: any) => any = () =>
     contextBudget: ref(null), fireState: ref(null), live: ref(""), thinking: ref(""), activeTools: ref([]), view: ref("chat"),
     canWriteCurrent: ref(true), executionUnavailable: ref(false), uploading: ref(false), error: ref(""), notice: ref(""),
     project: ref("fixture"), executionLocal: ref(false), executionClientId: ref(""),
-    sessionStorage: { setItem() {}, removeItem() {} }, closeNavigation() {}, scrollBottom: async () => {},
+    sessionStorage: { setItem() {}, removeItem() {} }, closeNavigation() {}, transcript: ref(null), nextTick,
     bootstrap: async () => {}, refreshCurrent: async () => {},
     api: async (path: string, method = "GET", data?: any) => {
       calls.push({ path, method, data });
@@ -45,12 +45,29 @@ function mount(handler: (path: string, method: string, data: any) => any = () =>
     between("async function selectSession(session)", "async function newSession()"),
     between("async function send()", "function messageKey(event)"),
     between("async function upload(event)", "async function scrollBottom()"),
+    between("async function scrollBottom()", "async function refreshCurrent()"),
     between("function resetLogin()", "async function logout()"),
     "({current, sessions, composer, draft, attachments, drafts, sending, selectSession, send, upload, resetLogin})",
   ].join("\n"), context);
   return { ...state, calls, readers, context, select: (id: string) => state.selectSession({ id }) };
 }
 const image = () => ({ mime: "image/png", data: "YQ==" });
+
+test("sending scrolls immediately before the response and stays at the bottom after refresh", async () => {
+  const response = deferred();
+  const s = mount((_path, method) => method === "POST" ? response.promise : undefined);
+  await s.select("a");
+  const transcript = s.context.transcript.value = { scrollTop: 100, scrollHeight: 1800, clientHeight: 600 };
+  s.context.refreshCurrent = async () => { transcript.scrollHeight = 2400; };
+  s.draft.value = "new message";
+  const sending = s.send();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const immediateTop = transcript.scrollTop;
+  response.resolve({});
+  await sending;
+  assert.equal(immediateTop, 1800, "scrolling does not wait for the send request");
+  assert.equal(transcript.scrollTop, 2400, "new messages remain visible after refresh");
+});
 
 test("switching and reselecting sessions restores each text/image draft without stale loads overwriting it", async () => {
   const load = deferred();

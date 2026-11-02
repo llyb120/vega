@@ -840,6 +840,7 @@ async function send() {
     account = csrfToken.value,
     request = sessionRequest;
   let session = current.value;
+  void scrollBottom();
   await attempt(async () => {
     if (!session) {
       session = await api("/sessions", "POST", {

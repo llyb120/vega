@@ -123,10 +123,12 @@ async function send() {
   if (busy.value || (!draft.value.trim() && !files.value.length)) return;
   busy.value = true; error.value = "";
   const text = draft.value, images = files.value, quote = quoted.value;
+  void scroll();
   try {
     await props.api(`/employees/${props.employeeId}/messages`, "POST", { text, images: images.map(({ mime, data }) => ({ mime, data })), ...(quote ? { quoteSeq: quote.seq } : {}) });
     if (draft.value === text && files.value === images && quoted.value === quote) { draft.value = ""; files.value = []; quoted.value = undefined; }
     await refresh();
+    await scroll();
   } catch (e) { error.value = e.message; }
   finally { busy.value = false; }
 }
