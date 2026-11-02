@@ -226,7 +226,7 @@ export class Tools {
       (scene) =>
         scene !== this.session.scene &&
         !this.sceneStack.includes(scene) &&
-        this.config.scenes?.[scene]?.some((id) => id !== this.session.model) &&
+        this.config.scenes?.[scene]?.length && this.config.scenes[scene][0] !== this.session.model &&
         (!this.session.taskId || scene !== "computer"),
     );
     const switching = defs.find((t) => t.name === "switch_scene");
@@ -286,6 +286,7 @@ export class Tools {
           (name: string) => !name.startsWith("orbit_"),
         );
       delete employee.parameters.properties.events;
+      employee.parameters.properties.profile.description = "兼容字段：新主任务始终从lightweight起步，不用profile直接选择编码模型；实际涉及编码时由原主会话switch_scene升级，已升级的同一任务续做保持场景。";
       if (this.session.taskId) {
         employee.parameters.properties.action.enum.push("complete");
         employee.parameters.properties.summary = { type: "string", minLength: 1, maxLength: 400, description: "complete交付摘要：2–4条重点，先结论，再重要变化、限制或需用户操作事项；不贴完整报告和过程，完整证据仍写text。" };

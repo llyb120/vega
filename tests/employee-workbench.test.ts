@@ -138,7 +138,7 @@ test("employee chat delegates evidence-dependent questions, follows an existing 
       const current = result.tasks.find((task: any) => task.key === "endpoint-investigation");
       return current
         ? follow("follow-up", { action: "resume", id: current.id, text: "优先核对实际请求 origin/path，保留只读范围。" })
-        : follow("investigate", { action: "add", kind: "todo", profile: "coding", key: "endpoint-investigation", text: investigation });
+        : follow("investigate", { action: "add", kind: "todo", profile: "lightweight", key: "endpoint-investigation", text: investigation });
     }
     if (result.id) {
       assert(system.includes(result.id), "the next model request sees tasks created in this turn, not a stale task index");
@@ -149,7 +149,7 @@ test("employee chat delegates evidence-dependent questions, follows an existing 
   try {
     await engine.run(chat.id, { role: "user", text: question });
     const job = employee.state().tasks.find((task) => task.key === "endpoint-investigation")!;
-    assert(job && job.profile === "coding" && job.text === investigation);
+    assert(job && job.profile === "lightweight" && job.text === investigation);
     assert.equal(employee.state().tasks.length, 2);
     await engine.run(chat.id, { role: "user", text: question });
     assert.equal(employee.state().tasks.length, 2, "a follow-up does not create a second investigation");

@@ -133,6 +133,13 @@ test("chat task links reveal the matching task and refresh stale lists without j
   assert.equal(context.employeeTab.value, "chat");
 });
 
+test("employee task creation never asks users to choose the initial model", () => {
+  assert(!source.includes("taskProfile") && !source.includes('v-model="duty.profile"'));
+  assert(source.includes("新任务先由轻量模型起步"));
+  const scenes = readFileSync("web/src/SceneSettings.vue", "utf8");
+  assert(scenes.includes("沟通与任务起步") && scenes.includes("实际进入编码工作时才升级"));
+});
+
 test("ordinary users have no history/session dispatch navigation and task approvals have explicit reject and approve actions", () => {
   const nav = between('<nav aria-label="主导航"', "</nav>");
   assert(!nav.includes("历史") && !nav.includes("新建会话"));

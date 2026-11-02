@@ -211,7 +211,6 @@ const employee = ref({
   employeeSessionVersion = ref(0),
   employeeError = ref(""),
   taskText = ref(""),
-  taskProfile = ref("lightweight"),
   memoryText = ref(""),
   memoryID = ref(""),
   importance = ref(1),
@@ -1213,7 +1212,6 @@ async function addTask() {
       action: "add",
       kind: "todo",
       text: taskText.value,
-      profile: taskProfile.value,
       cwd: employee.value.cwd,
     });
     taskText.value = "";
@@ -1793,15 +1791,12 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="employeeTab === 'browser' && selectedEmployee && !creatingEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" /></div>
           <template v-if="employeeTab === 'tasks' && !creatingEmployee"
-            ><div class="employee-section-heading"><div><h3>任务</h3><p>只看你关心的进度，需要决策时再接手。</p></div></div><form v-if="canExecute" class="inline-form employee-task-form" @submit.prevent="addTask">
+            ><div class="employee-section-heading"><div><h3>任务</h3><p>新任务先由轻量模型起步，涉及编码再在原会话升级。</p></div></div><form v-if="canExecute" class="inline-form employee-task-form" @submit.prevent="addTask">
               <input
                 v-model="taskText"
                 required
                 placeholder="交给员工：一件有明确目标的事"
-              /><select v-model="taskProfile">
-                <option value="lightweight">轻量化</option>
-                <option value="coding">编码</option></select
-              ><button class="primary">交给员工</button>
+              /><button class="primary">交给员工</button>
             </form>
             <div class="employee-task-filters" aria-label="筛选任务"><button v-for="[id, label, count] in [['active', '进行中', activeTasks.length], ['attention', '待我处理', attentionTasks.length], ['history', '已结束', historyTasks.length]]" :key="id" :class="{ selected: employeeTaskFilter === id }" :aria-pressed="employeeTaskFilter === id" @click="employeeTaskFilter = id">{{ label }} <span>{{ count }}</span></button></div>
             <div v-if="!visibleEmployeeTasks.length" class="employee-empty"><span aria-hidden="true">✓</span><h3>{{ employeeTaskFilter === 'attention' ? '没有需要你处理的事项' : employeeTaskFilter === 'history' ? '还没有结束的任务' : '暂时没有进行中的任务' }}</h3><p>在对话中交代工作，或在上方直接创建任务。</p><button v-if="employeeTaskFilter !== 'history'" @click="employeeTab = 'chat'">去交代工作</button></div>
@@ -1842,13 +1837,7 @@ onBeforeUnmount(() => {
                     <option value="times">每天固定时刻</option>
                     <option value="interval">固定间隔</option>
                     <option value="dynamic">动态安排</option>
-                  </select></label
-                ><label
-                  >初始场景<select v-model="duty.profile">
-                    <option value="lightweight">轻量化</option>
-                    <option value="coding">编码</option>
-                  </select></label
-                >
+                  </select></label>
               </div>
               <label v-if="duty.trigger === 'times'"
                 >时刻（逗号分隔）<input

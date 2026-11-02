@@ -1302,7 +1302,7 @@ export class Employee {
         task = this.task(state, job.id),
         computer = task.side === "computer",
         cfg = this.runtime.config();
-      const scene = computer ? "computer" : profile(task.profile);
+      let scene = computer ? "computer" : "lightweight";
       session = computer ? task.computerSession : task.workSession;
       if (session) {
         try {
@@ -1310,6 +1310,8 @@ export class Employee {
           assert(stored.taskId === task.id && (!stored.employeeId || stored.employeeId === this.employeeId), "Execution session belongs to another task or employee");
           stored.employeeId = this.employeeId;
           stored.ownerId ||= task.execution?.ownerId || state.ownerId || undefined;
+          stored.scene ||= scene;
+          scene = stored.scene;
           this.store.saveSession(stored);
         }
         catch {

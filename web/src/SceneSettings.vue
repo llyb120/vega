@@ -6,7 +6,7 @@ const busy = ref(false),
   defaultModel = ref(""),
   choices = ref({ lightweight: [], coding: [], computer: [] });
 const scenes = [
-  ["lightweight", "日常对话"],
+  ["lightweight", "沟通与任务起步"],
   ["coding", "编码"],
   ["computer", "浏览器操作"],
 ];
@@ -86,6 +86,8 @@ async function save() {
     <div class="scene-grid">
       <article v-for="[key, label] in scenes" :key="key" class="scene-item">
         <h3>{{ label }}</h3>
+        <p v-if="key === 'lightweight'" class="hint">新任务从这里起步；留空时使用默认模型。</p>
+        <p v-else-if="key === 'coding'" class="hint">实际进入编码工作时才升级；同一任务续做保持已选模型。</p>
         <div v-for="(selection, n) in choices[key]" :key="n" class="scene-row">
           <span class="hint">{{ n + 1 }}</span
           ><select
