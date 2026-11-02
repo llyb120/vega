@@ -1,4 +1,5 @@
 <script setup vapor>
+import Icon from "./Icon.vue";
 import { computed, ref, watch } from "vue";
 const props = defineProps({ api: Function, config: Object, models: Array });
 const emit = defineEmits(["saved", "error", "notice"]);
@@ -64,139 +65,56 @@ async function save() {
 </script>
 <template>
   <section class="card">
-    <div class="section-heading">
-      <h3>场景模型</h3>
-      <button class="primary" :disabled="busy" @click="save">保存场景</button>
-    </div>
-    <label class="default-model"
-      >默认模型<select v-model="defaultModel">
-        <option value="">请选择模型</option>
-        <option
-          v-if="defaultModel && !entries.some((m) => m.id === defaultModel)"
-          :value="defaultModel"
-        >
-          {{ defaultModel }}（暂不可用）
-        </option>
-        <option v-for="m in entries" :key="m.id" :value="m.id">
-          {{ m.name }}
-        </option>
-      </select></label
-    >
-    <p v-if="!entries.length" class="hint">先添加服务商并获取模型。</p>
+    <div class="card-head row"><div><h3>场景模型</h3><p class="hint">为不同场景排列候选模型，排在前面的优先使用。</p></div><button class="primary sm" :disabled="busy" @click="save">保存场景</button></div>
+    <label class="default-model">默认模型<select v-model="defaultModel">
+      <option value="">请选择模型</option>
+      <option v-if="defaultModel && !entries.some((m) => m.id === defaultModel)" :value="defaultModel">{{ defaultModel }}（暂不可用）</option>
+      <option v-for="m in entries" :key="m.id" :value="m.id">{{ m.name }}</option>
+    </select></label>
+    <p v-if="!entries.length" class="callout info"><Icon name="alert" :size="14" /><span>先添加服务商并获取模型。</span></p>
     <div class="scene-grid">
       <article v-for="[key, label] in scenes" :key="key" class="scene-item">
-        <h3>{{ label }}</h3>
+        <header><h4>{{ label }}</h4><span class="hint">{{ choices[key].length ? choices[key].length + ' 个模型' : '使用默认模型' }}</span></header>
         <p v-if="key === 'lightweight'" class="hint">新任务从这里起步；留空时使用默认模型。</p>
         <p v-else-if="key === 'coding'" class="hint">实际进入编码工作时才升级；后续按需求继续编码或回到轻量，原任务历史不变。</p>
-        <div v-for="(selection, n) in choices[key]" :key="n" class="scene-row">
-          <span class="hint">{{ n + 1 }}</span
-          ><select
-            v-model="choices[key][n]"
-            :aria-label="label + '模型' + (n + 1)"
-          >
-            <option value="">选择模型</option>
-            <option
-              v-if="selection && !entries.some((m) => m.id === selection)"
-              :value="selection"
-            >
-              {{ selection }}（暂不可用）
-            </option>
-            <option
-              v-for="m in entries.filter((m) => key !== 'computer' || m.images)"
-              :key="m.id"
-              :value="m.id"
-            >
-              {{ m.name }}
-            </option></select
-          ><button
-            class="icon"
-            :disabled="n === 0"
-            @click="move(key, n, -1)"
-            :aria-label="'上移' + label + '模型'"
-          >
-            ↑</button
-          ><button
-            class="icon"
-            :disabled="n === choices[key].length - 1"
-            @click="move(key, n, 1)"
-            :aria-label="'下移' + label + '模型'"
-          >
-            ↓</button
-          ><button
-            class="icon"
-            @click="choices[key].splice(n, 1)"
-            :aria-label="'移除' + label + '模型'"
-          >
-            ×
-          </button>
-        </div>
-        <button @click="choices[key].push('')">
-          ＋ {{ choices[key].length ? "备用模型" : "选择模型" }}
-        </button>
-        <p v-if="key === 'computer'" class="hint">仅显示支持图片的模型</p>
-        <p v-else-if="choices[key].length > 1" class="hint">
-          优先使用排在前面的模型
-        </p>
+        <p v-else-if="key === 'computer'" class="hint">仅显示支持图片的模型。</p>
+        <ol class="scene-rows">
+          <li v-for="(selection, n) in choices[key]" :key="n" class="scene-row">
+            <span class="scene-rank">{{ n + 1 }}</span>
+            <select v-model="choices[key][n]" :aria-label="label + '模型' + (n + 1)">
+              <option value="">选择模型</option>
+              <option v-if="selection && !entries.some((m) => m.id === selection)" :value="selection">{{ selection }}（暂不可用）</option>
+              <option v-for="m in entries.filter((m) => key !== 'computer' || m.images)" :key="m.id" :value="m.id">{{ m.name }}</option>
+            </select>
+            <span class="row-actions">
+              <button type="button" class="icon sm" :disabled="n === 0" :aria-label="'上移' + label + '模型'" @click="move(key, n, -1)"><Icon name="down" :size="14" class="flip" /></button>
+              <button type="button" class="icon sm" :disabled="n === choices[key].length - 1" :aria-label="'下移' + label + '模型'" @click="move(key, n, 1)"><Icon name="down" :size="14" /></button>
+              <button type="button" class="icon sm" :aria-label="'移除' + label + '模型'" @click="choices[key].splice(n, 1)"><Icon name="close" :size="14" /></button>
+            </span>
+          </li>
+        </ol>
+        <button type="button" class="sm ghost add-model" @click="choices[key].push('')"><Icon name="plus" :size="14" />{{ choices[key].length ? "备用模型" : "选择模型" }}</button>
       </article>
     </div>
   </section>
 </template>
 <style scoped>
-.default-model {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 18px;
-}
-.scene-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 14px;
-}
-.scene-item {
-  min-width: 0;
-  padding: 16px;
-  background: #f9fafc;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-}
-.scene-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-.scene-row select {
-  flex: 1;
-  min-width: 0;
-}
-.scene-item > p {
-  margin: 8px 0 0;
-}
-.scene-row .icon {
-  font-size: 16px;
-  padding: 5px;
-}
-.scene-item h3 {
-  margin-bottom: 10px;
-}
-@media (max-width: 760px) {
-  .scene-row {
-    display: grid;
-    grid-template-columns: 24px repeat(3, minmax(44px, 1fr));
-    gap: 8px;
-  }
-  .scene-row select {
-    grid-column: 2/-1;
-    grid-row: 1;
-    width: 100%;
-  }
-  .scene-row .icon:first-of-type {
-    grid-column: 2;
-  }
-  .scene-item {
-    padding: 12px;
-    min-width: 0;
-  }
+.default-model { display: grid; gap: 6px; max-width: 420px; margin-bottom: 14px; }
+.callout { margin-bottom: 14px; }
+.scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.scene-item { display: grid; align-content: start; gap: 8px; min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); }
+.scene-item header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.scene-item h4 { font-size: 13px; }
+.scene-rows { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.scene-row { display: flex; align-items: center; gap: 6px; }
+.scene-rank { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--surface-3); color: var(--muted); font-size: 11px; font-weight: 600; }
+.scene-row select { flex: 1; min-width: 0; background-color: var(--surface); }
+.row-actions { display: flex; flex: none; }
+.row-actions .icon { color: var(--muted); }
+.flip { transform: rotate(180deg); }
+.add-model { justify-self: start; color: var(--accent-text); }
+@media (max-width: 767px) {
+  .scene-grid { grid-template-columns: minmax(0, 1fr); }
+  .scene-item { padding: 12px; }
 }
 </style>

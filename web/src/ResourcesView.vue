@@ -1,4 +1,5 @@
 <script setup vapor>
+import PageHeader from "./PageHeader.vue";
 const clients = [
   { name: "Windows", arch: "x64", file: "vega-local-windows-amd64.exe", description: "系统托盘客户端，无控制台窗口" },
   { name: "Linux", arch: "x64", file: "vega-local-linux-amd64", description: "命令行客户端 · Intel / AMD" },
@@ -9,9 +10,7 @@ const clients = [
 </script>
 
 <template>
-  <header class="topbar">
-    <div><h2>资源</h2><p>下载与当前服务配套的本地客户端和 Chrome 扩展</p></div>
-  </header>
+  <PageHeader title="资源" subtitle="下载与当前服务配套的本地客户端和 Chrome 扩展" />
   <div class="page-scroll settings">
     <section aria-labelledby="clients-heading">
       <h3 id="clients-heading">客户端下载</h3>

@@ -5,13 +5,17 @@ import { LocalAgentPairing, canBridgeLocal, pairingStatusText } from "./local-ag
 import ConversationTimeline from "./ConversationTimeline.vue";
 import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
-import { dutyCondition, dutyContent } from "../../shared/duty-condition";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
 import EmployeeChat from "./EmployeeChat.vue";
-import EmployeeChrome from "./EmployeeChrome.vue";
-import EmployeeAvatar from "./EmployeeAvatar.vue";
-import EmployeeAvatarPicker from "./EmployeeAvatarPicker.vue";
-import EmployeeTaskCard from "./EmployeeTaskCard.vue";
+import EmployeeHeader from "./EmployeeHeader.vue";
+import EmployeeTasks from "./EmployeeTasks.vue";
+import EmployeeDuties from "./EmployeeDuties.vue";
+import EmployeeMemories from "./EmployeeMemories.vue";
+import EmployeeSettings from "./EmployeeSettings.vue";
+import WorkPanel from "./WorkPanel.vue";
+import AppSidebar from "./AppSidebar.vue";
+import PageHeader from "./PageHeader.vue";
+import Icon from "./Icon.vue";
 import DebugSessions from "./DebugSessions.vue";
 import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
@@ -20,11 +24,14 @@ import {
   nextTick,
   onBeforeUnmount,
   onMounted,
+  provide,
   ref,
   watch,
 } from "vue";
 const confirm = window.confirm.bind(window);
 const narrow = ref(false),
+  wide = ref(false),
+  workPanelHidden = ref(false),
   navigationOpen = ref(false),
   navigation = ref(null),
   menuButton = ref(null),
@@ -66,13 +73,14 @@ const mobileTitles = {
 function closeNavigation() {
   if (!navigationOpen.value) return;
   navigationOpen.value = false;
-  nextTick(() => menuButton.value?.focus());
+  nextTick(() => [...document.querySelectorAll("[data-nav-trigger]")].find((el) => el.getClientRects().length)?.focus());
 }
 async function openNavigation() {
   navigationOpen.value = true;
   await nextTick();
-  navigation.value?.querySelector("button")?.focus();
+  (navigation.value?.querySelector(".close-navigation") || navigation.value?.querySelector("button"))?.focus();
 }
+provide("openNavigation", openNavigation);
 function navigationKey(event) {
   if (!navigationOpen.value) return;
   if (event.key === "Escape") {
@@ -97,11 +105,14 @@ function navigationKey(event) {
   }
 }
 onMounted(() => {
-  const media = window.matchMedia("(max-width: 760px)"),
+  const media = window.matchMedia("(max-width: 767px)"),
+    full = window.matchMedia("(min-width: 1100px)"),
+    wideMedia = window.matchMedia("(min-width: 1280px)"),
     viewport = window.visualViewport;
   const layout = () => {
     narrow.value = media.matches;
-    if (!media.matches) closeNavigation();
+    wide.value = wideMedia.matches;
+    if (full.matches) closeNavigation();
     if (!viewport || viewport.scale === 1) {
       document.documentElement.style.setProperty(
         "--app-height",
@@ -115,11 +126,15 @@ onMounted(() => {
   };
   layout();
   media.addEventListener("change", layout);
+  full.addEventListener("change", layout);
+  wideMedia.addEventListener("change", layout);
   window.addEventListener("resize", layout);
   viewport?.addEventListener("resize", layout);
   viewport?.addEventListener("scroll", layout);
   onBeforeUnmount(() => {
     media.removeEventListener("change", layout);
+    full.removeEventListener("change", layout);
+    wideMedia.removeEventListener("change", layout);
     window.removeEventListener("resize", layout);
     viewport?.removeEventListener("resize", layout);
     viewport?.removeEventListener("scroll", layout);
@@ -152,6 +167,11 @@ const authenticated = ref(false),
   notice = ref(""),
   view = ref("employee");
 watch(view, closeNavigation);
+let noticeTimer;
+watch(notice, (text) => {
+  clearTimeout(noticeTimer);
+  if (text) noticeTimer = setTimeout(() => { if (notice.value === text) notice.value = ""; }, 6000);
+});
 const sessions = ref([]),
   current = ref(null),
   messages = ref([]),
@@ -220,7 +240,6 @@ const employee = ref({
   importance = ref(1),
   activeTaskCount = ref(null);
 const duty = ref(emptyDuty()),
-  dutySaving = ref(false),
   dutyOpen = ref(false);
 watch(selectedEmployee, () => { workRailOpen.value = false; });
 
@@ -240,8 +259,14 @@ const wsRequests = new Map(),
 function emptyDuty() {
   return {
     id: "",
-    condition: "",
     text: "",
+    note: "",
+    profile: "lightweight",
+    trigger: "manual",
+    times: "09:00",
+    everyMinutes: 60,
+    nextAt: "",
+    enabled: true,
   };
 }
 const isRunning = computed(
@@ -330,7 +355,20 @@ const historyTasks = computed(() =>
 const attentionTasks = computed(() => activeTasks.value.filter((task) => ["waiting", "approval"].includes(task.status)));
 const visibleEmployeeTasks = computed(() => employeeTaskFilter.value === "history" ? historyTasks.value : employeeTaskFilter.value === "attention" ? attentionTasks.value : activeTasks.value);
 const employeeStatus = computed(() => attentionTasks.value.length ? "需要你处理" : activeTasks.value.some((task) => task.status === "running") ? "正在工作" : "随时待命");
-const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['duties', '职责'], ['memories', '记忆']]);
+const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['duties', '职责'], ['memories', '记忆'], ...(employee.value.canManage ? [['settings', '设置']] : [])]);
+const employeeTone = computed(() => attentionTasks.value.length ? "warn" : activeTasks.value.some((task) => task.status === "running") ? "info" : "ok");
+const employeeCounts = computed(() => ({ tasks: attentionTasks.value.length || activeTasks.value.length, attention: attentionTasks.value.length, duties: employee.value.duties?.length || 0, memories: employee.value.memories?.length || 0 }));
+const workPanelVisible = computed(() => wide.value ? !workPanelHidden.value : workRailOpen.value);
+function toggleWorkPanel() {
+  if (wide.value) workPanelHidden.value = !workPanelHidden.value;
+  else workRailOpen.value = !workRailOpen.value;
+}
+function showTasks(filter = "active") {
+  employeeTaskFilter.value = filter;
+  employeeTaskFocus.value = "";
+  workRailOpen.value = false;
+  employeeTab.value = "tasks";
+}
 const employeeGroups = computed(() => [['team', '团队员工'], ['personal', isAdmin.value ? '个人员工' : '我的员工']].map(([scope, label]) => ({ scope, label, entries: employees.value.filter((employee) => employee.scope === scope) })).filter((group) => group.entries.length));
 const labels = {
   queued: "排队中",
@@ -1163,10 +1201,6 @@ async function openEmployeeTask(id) {
   employeeTaskFilter.value = ended(task.status) ? "history" : "active";
   employeeTaskFocus.value = id;
   employeeTab.value = "tasks";
-  await nextTick();
-  const card = [...document.querySelectorAll(".work-item[data-task-id]")].find((element) => element.dataset.taskId === id);
-  card?.scrollIntoView({ block: "start", behavior: "instant" });
-  card?.focus({ preventScroll: true });
 }
 async function employeeTabChanged(id) {
   employeeTab.value = id;
@@ -1201,46 +1235,40 @@ async function control(data) {
   await employeeApi("/employee/control", "POST", data);
   await loadEmployee();
 }
-async function addTask() {
-  await attempt(async () => {
+async function addTask(text) {
+  return attempt(async () => {
     await employeeAction({
       action: "add",
       kind: "todo",
-      text: taskText.value,
+      text,
       cwd: employee.value.cwd,
     });
-    taskText.value = "";
+    return true;
   });
 }
-function editDuty(d) {
-  duty.value = { id: d.id, condition: dutyCondition(d), text: dutyContent(d) };
-  dutyOpen.value = true;
-}
-async function saveDuty() {
-  if (dutySaving.value) return;
+async function saveDuty(data) {
   const employeeId = selectedEmployee.value, actor = user.value?.id;
-  dutySaving.value = true;
-  try { await attempt(async () => {
-    const d = duty.value;
-    await employeeAction({ action: d.id ? "update" : "add", kind: "duty", id: d.id || undefined, condition: d.condition, text: d.text, note: "" }).catch(error => {
+  return attempt(async () => {
+    await employeeAction(data).catch(error => {
       if (selectedEmployee.value === employeeId && user.value?.id === actor) throw error;
     });
-    if (selectedEmployee.value !== employeeId || user.value?.id !== actor || duty.value !== d) return;
-    dutyOpen.value = false;
-    duty.value = emptyDuty();
-  }); } finally { dutySaving.value = false; }
-}
-async function addMemory() {
-  await attempt(async () => {
-    await employeeAction({
-      action: "remember",
-      id: memoryID.value || undefined,
-      text: memoryText.value,
-      importance: Number(importance.value),
-    });
-    memoryText.value = "";
-    memoryID.value = "";
+    return selectedEmployee.value === employeeId && user.value?.id === actor;
   });
+}
+function removeDuty(d) {
+  return attempt(async () => {
+    if (confirm("移除此职责并取消未开始的任务？"))
+      await employeeAction({ action: "done", id: d.id });
+  });
+}
+async function saveMemory(data) {
+  return attempt(async () => {
+    await employeeAction({ action: "remember", ...data });
+    return true;
+  });
+}
+function forgetMemory(m) {
+  return attempt(() => employeeAction({ action: "forget", id: m.id }));
 }
 async function saveEmployeeSettings() {
   if (employeeSaving.value) return;
@@ -1271,740 +1299,250 @@ onBeforeUnmount(() => {
 
 <template>
   <main v-if="!authenticated" class="login">
-    <form class="login-card" @submit.prevent="login">
-      <div class="brand-mark">V</div>
-      <h1>Vega</h1>
-      <p>{{ setupRequired ? "首次使用：创建管理员账号" : "登录你的工作台" }}</p>
-      <template v-if="setupRequired"
-        ><label for="setup-token">初始化令牌</label
-        ><input
-          id="setup-token"
-          v-model="setupToken"
-          type="password"
-          required
-          minlength="16"
-          autocomplete="off"
-          placeholder="服务端日志或VEGA_TOKEN中的初始化令牌"
-        />
-        <p class="hint">
-          令牌只用于创建首个管理员，创建后不能替代账号登录。
-        </p></template
-      >
-      <label for="username">用户名</label
-      ><input
-        id="username"
-        v-model="username"
-        required
-        minlength="3"
-        maxlength="64"
-        autocomplete="username"
-        pattern="[a-zA-Z0-9][a-zA-Z0-9_.\-]{2,63}"
-        autocapitalize="none"
-        spellcheck="false"
-        placeholder="用户名"
-      />
-      <label for="password">密码</label
-      ><input
-        id="password"
-        v-model="password"
-        type="password"
-        required
-        :minlength="setupRequired ? 12 : 1"
-        maxlength="128"
-        :autocomplete="setupRequired ? 'new-password' : 'current-password'"
-        placeholder="密码（新账号至少12字符）"
-      /><button class="primary" :disabled="authBusy">
-        {{
-          authBusy ? "正在验证…" : setupRequired ? "创建管理员并登录" : "登录 →"
-        }}
-      </button>
-      <p v-if="error" class="error" role="alert">{{ error }}</p>
-    </form>
+    <aside class="login-aside" aria-hidden="true">
+      <div class="login-brand"><span class="brand-mark">V</span>Vega</div>
+      <div class="login-pitch">
+        <h1>把目标交给数字员工，<br />你只处理需要决定的事。</h1>
+        <ul>
+          <li><Icon name="chat" />用对话交代工作，员工自己拆解成任务并持续推进。</li>
+          <li><Icon name="hand" />需要审批或补充信息时，第一时间出现在你面前。</li>
+          <li><Icon name="globe" />独立的浏览器与记忆，随时可以接手查看。</li>
+        </ul>
+      </div>
+      <p class="login-foot">Vega 工作台</p>
+    </aside>
+    <div class="login-main">
+      <form class="login-card" @submit.prevent="login">
+        <header>
+          <span class="brand-mark">V</span>
+          <h2>{{ setupRequired ? "创建管理员账号" : "登录 Vega" }}</h2>
+          <p>{{ setupRequired ? "首次使用：用初始化令牌创建第一个管理员。" : "登录你的工作台" }}</p>
+        </header>
+        <label v-if="setupRequired" for="setup-token">初始化令牌<input id="setup-token" v-model="setupToken" type="password" required minlength="16" autocomplete="off" placeholder="服务端日志或 VEGA_TOKEN 中的初始化令牌" /><span class="hint">令牌只用于创建首个管理员，创建后不能替代账号登录。</span></label>
+        <label for="username">用户名<input id="username" v-model="username" required minlength="3" maxlength="64" autocomplete="username" pattern="[a-zA-Z0-9][a-zA-Z0-9_.\-]{2,63}" autocapitalize="none" spellcheck="false" placeholder="用户名" /></label>
+        <label for="password">密码<input id="password" v-model="password" type="password" required :minlength="setupRequired ? 12 : 1" maxlength="128" :autocomplete="setupRequired ? 'new-password' : 'current-password'" :placeholder="setupRequired ? '至少 12 个字符' : '密码'" /></label>
+        <button class="primary" :disabled="authBusy"><span v-if="authBusy" class="spinner"></span>{{ authBusy ? "正在验证…" : setupRequired ? "创建管理员并登录" : "登录" }}</button>
+        <p v-if="error" class="error" role="alert">{{ error }}</p>
+      </form>
+    </div>
   </main>
   <div v-else class="shell">
-    <header class="mobile-header">
-      <button
-        ref="menuButton"
-        class="icon mobile-control"
-        aria-label="打开导航与会话"
-        aria-controls="navigation"
-        :aria-expanded="navigationOpen"
-        @click="openNavigation"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M4 7h16M4 12h16M4 17h16" />
-        </svg>
-      </button>
-      <strong>{{ view === 'employee' ? creatingEmployee ? '创建员工' : employee.name || '数字员工' : view === 'chat' ? conversationTitle : mobileTitles[view] }}</strong>
-      <span
-        v-if="view !== 'employee'"
-        class="pill"
-        :class="{ green: localConnected }"
-        role="status"
-        :title="clientStatus + ' · 新会话可选择任意在线客户端，已有会话不会自动切换'"
-      >{{ clientStatus }}</span>
-      <span
-        v-if="narrow && view === 'chat' && isRunning"
-        class="status-dot"
-        role="status"
-        aria-label="执行中"
-      ></span>
-      <select
-        v-if="narrow && view === 'chat' && stagePath.length > 1"
-        class="stage-switch"
-        aria-label="切换会话 Stage"
-        :value="current?.id"
-        @change="selectSession(stagePath.find((s) => s.id === $event.target.value))"
-      >
-        <option :value="stagePath[0].id">主对话</option>
-        <option
-          v-for="(stage, i) in stagePath.slice(1)"
-          :key="stage.id"
-          :value="stage.id"
-        >
-          Stage {{ i + 1 }}
-        </option>
-      </select>
-      <details v-if="view === 'employee' && employee.canManage && !creatingEmployee && !employeeSession" ref="employeeMenu" class="employee-mobile-menu">
-        <summary aria-label="员工更多操作">···</summary>
-        <div class="employee-mobile-actions"><small>{{ employeeStatus }}</small><button @click="employeeTabChanged('settings'); employeeMenu.open = false">员工设置</button><button :aria-expanded="employeeExecutionOpen" @click="employeeExecutionOpen = !employeeExecutionOpen; employeeMenu.open = false">新任务执行位置 · {{ employee.execution?.localAgent ? employee.execution.clientName || '客户端' : '服务端' }}</button><button class="employee-delete" :disabled="employeeDeleting" @click="employeeMenu.open = false; deleteEmployee()">删除员工</button></div>
-      </details>
-      <button
-        v-if="canExecute && view === 'chat'"
-        class="icon mobile-control"
-        aria-label="交给员工"
-        @click="openEmployee()"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </button>
-      <span v-else-if="view !== 'employee' || !employee.canManage || creatingEmployee || employeeSession" class="mobile-header-spacer" aria-hidden="true"></span>
-    </header>
-    <button
-      v-if="navigationOpen"
-      class="navigation-backdrop"
-      aria-label="关闭导航"
-      tabindex="-1"
-      @click="closeNavigation"
-    ></button>
+    <button v-if="navigationOpen" class="navigation-backdrop" aria-label="关闭导航" tabindex="-1" @click="closeNavigation"></button>
     <aside
       id="navigation"
       ref="navigation"
       :class="['sidebar', { 'mobile-open': navigationOpen }]"
-      :role="narrow ? 'dialog' : undefined"
-      :aria-modal="narrow && navigationOpen ? true : undefined"
-      aria-label="导航与会话"
+      :role="navigationOpen ? 'dialog' : undefined"
+      :aria-modal="navigationOpen ? true : undefined"
+      aria-label="导航"
       :inert="narrow && !navigationOpen"
       @keydown="navigationKey"
     >
-      <div class="brand">
-        <span class="brand-mark small">V</span><strong>Vega</strong>
-        <span class="brand-edition">工作台</span>
-        <button
-          class="icon close-navigation"
-          aria-label="关闭导航"
-          @click="closeNavigation"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m6 6 12 12M18 6 6 18" />
-          </svg>
-        </button>
-      </div>
-      <button v-if="canExecute" class="new-session" @click="creatingEmployee = true; openEmployee()">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-        <span>创建员工</span>
-      </button>
-      <div class="employee-list">
-        <template v-for="group in employeeGroups" :key="group.scope"><div class="employee-group-label"><span>{{ group.label }}</span><span>{{ group.entries.length }}</span></div>
-        <button v-for="entry in group.entries" :key="entry.id" class="session-row" :class="{ active: view === 'employee' && selectedEmployee === entry.id }" @click="chooseEmployee(entry.id)">
-          <span class="employee-nav-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="entry.id" :name="entry.name" :avatar="entry.avatar" /></span><span class="employee-nav-info"><strong class="truncate">{{ entry.name }}</strong><small>{{ entry.attentionTasks ? entry.attentionTasks + ' 项待处理' : entry.activeTasks ? entry.activeTasks + ' 项进行中' : '随时待命' }}</small></span><span v-if="entry.activeTasks" :class="['count', { attention: entry.attentionTasks }]">{{ entry.activeTasks }}</span>
-        </button></template>
-      </div>
-      <nav aria-label="主导航" @click="closeNavigation">
-        <button
-          v-if="isAdmin"
-          :class="{ selected: view === 'experiences' }"
-          @click="view = 'experiences'"
-        >
-          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="6" cy="6" r="2.5" />
-            <circle cx="18" cy="6" r="2.5" />
-            <circle cx="12" cy="18" r="2.5" />
-            <path d="m8 7 3 8.5M16 7l-3 8.5M8.5 6h7" />
-          </svg>
-          <span>经验图谱</span>
-        </button>
-        <button v-if="isAdmin" :class="{ selected: view === 'debug' }" @click="view = 'debug'"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5-6 7 6 7M16 5l6 7-6 7M14 3l-4 18" /></svg><span>调试会话</span></button>
-        <button :class="{ selected: view === 'resources' }" @click="view = 'resources'">
-          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4" />
-          </svg>
-          <span>资源</span>
-        </button>
-        <button
-          :class="{ selected: view === 'account' }"
-          @click="view = 'account'"
-        >
-          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="8" r="3.5" />
-            <path d="M4.5 20a7.5 7.5 0 0 1 15 0" />
-          </svg>
-          <span>账号</span>
-        </button>
-        <button
-          v-if="isAdmin"
-          :class="{ selected: view === 'settings' }"
-          @click="view = 'settings'"
-        >
-          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19 13.5v-3l-2-.7a7 7 0 0 0-.7-1.7l.9-1.9-2.1-2.1-1.9.9a7 7 0 0 0-1.7-.7L10.5 2h-3l-.7 2a7 7 0 0 0-1.7.7l-1.9-.9-2.1 2.1.9 1.9a7 7 0 0 0-.7 1.7l-2 .7v3l2 .7a7 7 0 0 0 .7 1.7l-.9 1.9 2.1 2.1 1.9-.9a7 7 0 0 0 1.7.7l.7 2h3l.7-2a7 7 0 0 0 1.7-.7l1.9.9 2.1-2.1-.9-1.9a7 7 0 0 0 .7-1.7Z" transform="translate(3 1) scale(.75)" />
-          </svg>
-          <span>设置</span>
-        </button>
-      </nav>
-      <div v-if="view === 'chat'" class="sidebar-heading">
-        <span>最近会话</span><span>{{ rootSessions.length }}</span>
-      </div>
-      <div v-if="view === 'chat'" class="session-list">
-        <div
-          v-for="s in rootSessions"
-          :key="s.id"
-          class="session-row"
-          :class="{ active: rootSession?.id === s.id && view === 'chat' }"
-        >
-          <button @click="attempt(() => selectSession(s))">
-            <span :class="['dot', { working: running[s.id] }]"></span
-            ><span class="truncate">{{ s.title }}</span></button
-          ><button
-            v-if="
-              !s.taskId &&
-              !running[s.id] &&
-              canExecute &&
-              s.ownerId === user.id
-            "
-            class="delete icon"
-            title="删除会话"
-            @click="removeSession(s)"
-          >
-            ×
-          </button>
-        </div>
-        <p v-if="!rootSessions.length" class="empty-small">从一个问题开始。</p>
-      </div>
-      <footer>
-        <span class="account-avatar" aria-hidden="true">{{ user?.username?.slice(0, 1).toUpperCase() }}</span>
-        <span class="account-meta"><strong>{{ user?.username }}</strong><small>{{ isAdmin ? '管理员' : '成员' }}</small></span>
-        <button class="icon" aria-label="退出登录" title="退出登录" @click="logout">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M10 5H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h5M14 8l4 4-4 4M8 12h10" />
-          </svg>
-        </button>
-      </footer>
+      <AppSidebar
+        :user="user"
+        :is-admin="isAdmin"
+        :can-execute="canExecute"
+        :groups="employeeGroups"
+        :selected-employee="selectedEmployee"
+        :view="view"
+        :creating="view === 'employee' && creatingEmployee"
+        :open="navigationOpen"
+        :client-ready="clientListReady"
+        :client-status="clientStatus"
+        :clients="onlineClients"
+        :pairing-text="localPairing ? localPairingText : ''"
+        :pairing-code="localPairing?.code"
+        :sessions="rootSessions"
+        :running="running"
+        :current-root="rootSession?.id"
+        @choose="chooseEmployee"
+        @create="creatingEmployee = true; openEmployee()"
+        @navigate="view = $event"
+        @logout="logout"
+        @close="closeNavigation"
+        @expand="openNavigation"
+        @retry-pairing="retryLocalPairing"
+        @select-session="(s) => { closeNavigation(); attempt(() => selectSession(s)); }"
+        @remove-session="removeSession"
+      />
     </aside>
     <section class="workspace" :inert="navigationOpen">
-      <div v-if="error" class="banner error" role="alert">
-        {{ error
-        }}<button class="icon" aria-label="关闭错误" @click="error = ''">
-          ×
-        </button>
-      </div>
-      <div v-if="notice" class="banner notice" role="status">
-        {{ notice
-        }}<button class="icon" aria-label="关闭提示" @click="notice = ''">
-          ×
-        </button>
-      </div>
-      <div v-if="view === 'chat' && localPairing && localPairing.code !== 'connected'" class="banner notice" role="status">
-        <span>{{ localPairingText }}</span>
-        <button type="button" @click="retryLocalPairing">重新检测</button>
-      </div>
       <template v-if="view === 'chat'">
-        <header v-if="!narrow" class="topbar chat-topbar">
-          <div>
-            <span class="topbar-eyebrow">工作台 / 对话</span>
-            <h2>
-              {{ conversationTitle }}
-              <span v-if="current?.stageSource" class="pill">Stage</span>
-            </h2>
-            <p>{{ current ? (current.cwd || project) : '随时开始一个新对话' }}</p>
-            <select
-              v-if="stagePath.length > 1"
-              class="stage-switch"
-              aria-label="切换会话 Stage"
-              :value="current?.id"
-              @change="selectSession(stagePath.find((s) => s.id === $event.target.value))"
-            >
-              <option :value="stagePath[0].id">主对话</option>
-              <option
-                v-for="(stage, i) in stagePath.slice(1)"
-                :key="stage.id"
-                :value="stage.id"
-              >
-                Stage {{ i + 1 }} · {{ stage.title }}
-              </option>
-            </select>
-          </div>
-          <div class="actions">
-            <span
-              class="pill"
-              :class="{ green: localConnected }"
-              role="status"
-              :title="clientStatus + ' · 新会话可选择任意在线客户端，已有会话不会自动切换'"
-            >{{ clientStatus }}</span>
-            <span v-if="isRunning" class="pill green"><span class="status-dot"></span>执行中</span>
-            <button v-if="canExecute" class="topbar-new" @click="openEmployee()">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-              交给员工
-            </button>
-          </div>
-        </header>
+        <PageHeader :title="conversationTitle" :subtitle="current ? (current.cwd || project) : '随时开始一个新对话'">
+          <template #title-extra><span v-if="current?.stageSource" class="pill">Stage</span><span v-if="isRunning" class="pill green"><span class="dot ok pulse"></span>执行中</span></template>
+          <select v-if="stagePath.length > 1" class="stage-switch" aria-label="切换会话 Stage" :value="current?.id" @change="selectSession(stagePath.find((s) => s.id === $event.target.value))">
+            <option :value="stagePath[0].id">主对话</option>
+            <option v-for="(stage, i) in stagePath.slice(1)" :key="stage.id" :value="stage.id">Stage {{ i + 1 }} · {{ stage.title }}</option>
+          </select>
+          <button v-if="canExecute" class="primary sm" @click="openEmployee()"><Icon name="users" :size="15" /><span class="hide-mobile">交给员工</span></button>
+        </PageHeader>
+        <div v-if="localPairing && localPairing.code !== 'connected'" class="banner notice" role="status"><span>{{ localPairingText }}</span><button type="button" class="sm" @click="retryLocalPairing">重新检测</button></div>
         <div ref="transcript" :key="current?.id ?? 'none'" class="transcript" aria-live="polite">
           <div v-if="sessionLoading" class="context-note">正在加载会话…</div>
-          <div
-            v-if="!sessionLoading && !messages.length && !live"
-            class="welcome"
-          >
-            <span class="welcome-kicker">VEGA WORKSPACE</span>
+          <div v-if="!sessionLoading && !messages.length && !live" class="welcome">
             <h1>今天想完成什么？</h1>
             <p>从一个问题开始。Vega 可以分析项目、探索网页，或把任务交给数字员工。</p>
             <div v-if="canWriteCurrent" class="suggestions">
-              <button @click="draft = '分析当前项目结构，提出最小改进方案'">
-                <span class="suggestion-index">01</span><span>分析一个项目<small>梳理结构，找到最小改进路径</small></span><span aria-hidden="true">↗</span>
-              </button>
-              <button @click="draft = '请用 Chrome 查看当前标签页'">
-                <span class="suggestion-index">02</span><span>探索网页<small>查看当前页面并提取有效信息</small></span><span aria-hidden="true">↗</span>
-              </button>
-              <button v-if="isAdmin" @click="openEmployee()">
-                <span class="suggestion-index">03</span><span>交给数字员工<small>创建可持续推进的独立任务</small></span><span aria-hidden="true">↗</span>
-              </button>
+              <button @click="draft = '分析当前项目结构，提出最小改进方案'"><Icon name="code" /><span>分析一个项目<small>梳理结构，找到最小改进路径</small></span></button>
+              <button @click="draft = '请用 Chrome 查看当前标签页'"><Icon name="globe" /><span>探索网页<small>查看当前页面并提取有效信息</small></span></button>
+              <button v-if="isAdmin" @click="openEmployee()"><Icon name="users" /><span>交给数字员工<small>创建可持续推进的独立任务</small></span></button>
             </div>
           </div>
           <div v-if="fireState" class="context-note">
-            Fire · 第 {{ fireState.attempt }} 次 ·
-            {{ fireState.role === "judge" ? "独立验收" : "执行" }} ·
-            {{ fireState.status }}
+            Fire · 第 {{ fireState.attempt }} 次 · {{ fireState.role === "judge" ? "独立验收" : "执行" }} · {{ fireState.status }}
             <p v-if="fireState.reason">{{ fireState.reason }}</p>
           </div>
           <ConversationTimeline :key="current?.id ?? 'none'" :messages="messages" :running="!!isRunning" :live="live" :thinking="thinking" :active-tools="activeTools" :model="model" />
         </div>
-        <p v-if="!canWriteCurrent" class="context-note">
-          历史会话仅供查阅；继续工作请交给员工，执行会话由员工管理。
-        </p>
+        <p v-if="!canWriteCurrent" class="context-note">历史会话仅供查阅；继续工作请交给员工，执行会话由员工管理。</p>
         <div v-if="canWriteCurrent" class="composer-wrap">
           <form class="composer" @submit.prevent="send">
-            <div v-if="attachments.length" class="attachments">
-              <button
-                v-for="(im, i) in attachments"
-                :key="i"
-                type="button"
-                @click="attachments.splice(i, 1)"
-              >
-                图片 {{ i + 1 }} ×
-              </button>
-            </div>
-            <textarea
-              v-model="draft"
-              aria-label="消息"
-              :placeholder="
-                isRunning
-                  ? '补充当前任务的约束，不会重开任务…'
-                  : '输入消息，Enter 发送…'
-              "
-              rows="2"
-              enterkeyhint="enter"
-              @keydown="messageKey"
-            ></textarea>
+            <div v-if="attachments.length" class="attachments"><button v-for="(im, i) in attachments" :key="i" type="button" @click="attachments.splice(i, 1)"><Icon name="image" :size="12" />图片 {{ i + 1 }}<Icon name="close" :size="12" /></button></div>
+            <textarea v-model="draft" aria-label="消息" :placeholder="isRunning ? '补充当前任务的约束，不会重开任务…' : '输入消息，Enter 发送…'" rows="2" enterkeyhint="enter" @keydown="messageKey"></textarea>
             <div class="composer-bottom">
-              <button
-                type="button"
-                class="attach icon"
-                aria-label="添加图片"
-                :disabled="uploading"
-                @click="imageInput.click()"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
+              <button type="button" class="attach icon" aria-label="添加图片" :disabled="uploading" @click="imageInput.click()"><Icon name="image" /></button>
+              <input ref="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple hidden @change="upload" />
+              <button type="button" class="execution-switch" role="switch" aria-label="客户端执行（关闭时在服务端执行）" :aria-checked="executionLocal" :class="{ local: executionLocal }" :title="executionHint" :disabled="executionBusy || (!executionLocal && !localConnected)" @click="toggleExecution">
+                <span :class="{ selected: !executionLocal }">服务端</span><span class="execution-track" aria-hidden="true"></span><span :class="{ selected: executionLocal }">客户端</span>
               </button>
-              <input
-                ref="imageInput"
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
-                multiple
-                hidden
-                @change="upload"
-              />
-              <button
-                type="button"
-                class="execution-switch"
-                role="switch"
-                aria-label="客户端执行（关闭时在服务端执行）"
-                :aria-checked="executionLocal"
-                :class="{ local: executionLocal }"
-                :title="executionHint"
-                :disabled="executionBusy || (!executionLocal && !localConnected)"
-                @click="toggleExecution"
-              >
-                <span :class="{ selected: !executionLocal }">服务端</span>
-                <span class="execution-track" aria-hidden="true"></span>
-                <span :class="{ selected: executionLocal }">客户端</span>
-              </button>
-              <select
-                v-if="executionLocal"
-                class="execution-client"
-                aria-label="执行客户端"
-                :value="executionClientId"
-                :disabled="executionBusy"
-                @change="changeClient"
-              >
-                <option v-if="!selectedClient" :value="executionClientId" disabled>
-                  {{ current?.clientName ? current.clientName + ' · 离线' : '请选择在线客户端' }}
-                </option>
-                <option v-for="client in onlineClients" :key="client.id" :value="client.id">
-                  {{ client.name }} · {{ client.platform }} · {{ client.id.slice(0, 6) }} · 在线
-                </option>
+              <select v-if="executionLocal" class="execution-client" aria-label="执行客户端" :value="executionClientId" :disabled="executionBusy" @change="changeClient">
+                <option v-if="!selectedClient" :value="executionClientId" disabled>{{ current?.clientName ? current.clientName + ' · 离线' : '请选择在线客户端' }}</option>
+                <option v-for="client in onlineClients" :key="client.id" :value="client.id">{{ client.name }} · {{ client.platform }} · {{ client.id.slice(0, 6) }} · 在线</option>
               </select>
-              <div v-if="!isRunning" class="context-controls"></div>
               <span class="hint">Enter 发送 · Shift + Enter 换行</span>
-              <button
-                v-if="isRunning"
-                type="button"
-                class="danger-text"
-                @click="
-                  attempt(() =>
-                    api(`/sessions/${current.id}/cancel`, 'POST', {}),
-                  )
-                "
-              >
-                停止</button
-              ><button
-                class="primary"
-                :disabled="
-                  sending || switchingExecution || uploading || executionUnavailable || (!draft.trim() && !attachments.length)
-                "
-              >
-                {{
-                  uploading
-                    ? "读取图片…"
-                    : sending
-                      ? "提交中…"
-                      : isRunning
-                        ? "补充约束"
-                        : "发送"
-                }}
-                ↑
-              </button>
+              <button v-if="isRunning" type="button" class="danger-text" @click="attempt(() => api(`/sessions/${current.id}/cancel`, 'POST', {}))"><Icon name="stop" :size="14" />停止</button>
+              <button class="primary" :disabled="sending || switchingExecution || uploading || executionUnavailable || (!draft.trim() && !attachments.length)">{{ uploading ? "读取图片…" : sending ? "提交中…" : isRunning ? "补充约束" : "发送" }}<Icon name="send" :size="14" /></button>
             </div>
           </form>
-          <p v-if="executionUnavailable" class="execution-warning" role="status">
-            所选客户端已离线或尚未选择，请选择在线客户端或切换到服务端；不会自动切换或重试操作。
-          </p>
+          <p v-if="executionUnavailable" class="execution-warning" role="status">所选客户端已离线或尚未选择，请选择在线客户端或切换到服务端；不会自动切换或重试操作。</p>
         </div>
       </template>
-      <Accounts
-        v-else-if="view === 'account'"
-        :api="api"
-        :user="user"
-        @error="error = $event"
-        @notice="notice = $event"
-        @signed-out="resetLogin"
-        @changed="attempt(bootstrap)"
-      />
+      <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
       <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" />
-      <EmployeeSessionView
-        v-else-if="view === 'employee' && employeeSession"
-        :api="api"
-        :session-id="employeeSession"
-        :revision="employeeSessionVersion"
-        @back="openEmployee()"
-      />
+      <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" />
       <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
-        <EmployeeChrome
-          v-if="employees.length && !creatingEmployee"
-          :employee="employee"
-          :status="employeeStatus"
-          :attention="attentionTasks.length > 0"
-          :tabs="employeeTabs"
-          :tab="employeeTab"
-          :active-count="activeTasks.length"
-          :execution-open="employeeExecutionOpen"
-          :deleting="employeeDeleting"
-          :busy="employeeExecutionBusy"
-          :show-work="employeeTab === 'chat'"
-          :work-open="workRailOpen"
-          :work-count="attentionTasks.length || activeTasks.length"
-          @tab="employeeTabChanged"
-          @settings="employeeTabChanged('settings')"
-          @delete="deleteEmployee"
-          @toggle-execution="employeeExecutionOpen = !employeeExecutionOpen"
-          @execution="changeEmployeeExecution"
-          @toggle-work="workRailOpen = !workRailOpen"
-        />
-        <header v-else class="employee-header employee-header-create">
-          <div class="employee-title-block">
-            <h2>{{ creatingEmployee || !employees.length ? '创建新员工' : employee.name || '加载中…' }}</h2>
-            <p class="employee-toolbar-sub">取个名字，交代他的工作方向，就可以开始了。</p>
+        <template v-if="(creatingEmployee || !employees.length)">
+          <PageHeader :title="canExecute ? '创建新员工' : '数字员工'" :subtitle="canExecute ? '取个名字，交代工作方向，就可以开始了。' : ''" :back="employees.length ? '返回' : ''" @back="creatingEmployee = false" />
+          <div class="page-scroll create-page">
+            <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭员工错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
+            <div v-if="!canExecute" class="empty-state"><Icon name="users" :size="28" /><strong>还没有团队员工</strong><span>管理员创建的团队员工会出现在这里。</span></div>
+            <form v-else class="card create-card" @submit.prevent="createEmployee">
+              <div class="create-head"><span class="create-icon" aria-hidden="true"><Icon name="users" :size="22" /></span><div><h3>你想把什么交给他？</h3><p class="hint">{{ isAdmin ? '团队员工 · 所有成员可见' : '个人员工 · 仅本人和管理员可见' }}</p></div></div>
+              <div class="form-grid">
+                <label>员工名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
+                <label>工作方向<textarea v-model="newEmployeeInstruction" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
+              </div>
+              <ul class="create-facts">
+                <li><Icon name="check" :size="14" />创建后即可接活，无需设置启用或工作时间</li>
+                <li><Icon name="check" :size="14" />独立的记忆、任务列表和浏览器会自动准备</li>
+              </ul>
+              <div class="actions end"><button v-if="employees.length" type="button" class="ghost" @click="creatingEmployee = false">取消</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '正在创建…' : '创建员工' }}</button></div>
+            </form>
           </div>
-        </header>
-        <div class="employee-content" :class="{ 'is-chat': employeeTab === 'chat' && !creatingEmployee && employees.length, 'is-browser': employeeTab === 'browser' && !creatingEmployee }">
-          <p v-if="employeeError" class="banner error" role="alert">
-            {{ employeeError
-            }}<button
-              class="icon"
-              aria-label="关闭员工错误"
-              @click="employeeError = ''"
-            >
-              ×
-            </button>
-          </p>
-          <div v-if="!employees.length && !canExecute" class="employee-empty"><h3>还没有团队员工</h3><p>管理员创建的团队员工会出现在这里。</p></div>
-          <form v-if="(creatingEmployee || !employees.length) && canExecute" class="employee-create card form-grid" @submit.prevent="createEmployee">
-            <span class="employee-eyebrow">{{ isAdmin ? '团队员工 · 所有成员可见' : '个人员工 · 仅本人和管理员可见' }}</span><h3>你想把什么交给他？</h3>
-            <label>员工名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
-            <label>工作方向<textarea v-model="newEmployeeInstruction" rows="4" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
-            <p class="hint">创建后即可接活。独立记忆、任务和浏览器会自动准备，无需设置启用或工作时间。</p>
-            <div class="actions"><button v-if="employees.length" type="button" @click="creatingEmployee = false">取消</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '正在创建…' : '创建员工' }}</button></div>
-          </form>
-          <EmployeeAvatarPicker v-if="employeeTab === 'settings' && employee.canManage && employees.length && !creatingEmployee" :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" @change="selectedEmployee === $event.employeeId && (employee.avatar = $event.avatar)" />
-          <form v-if="employeeTab === 'settings' && employee.canManage && employees.length && !creatingEmployee" class="employee-settings-form card form-grid" @submit.prevent="saveEmployeeSettings">
-            <div><h3>员工资料</h3><p class="hint">保存后，新任务会使用更新的工作原则和目录。</p></div>
-            <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
-            <label>工作原则<textarea v-model="employee.instruction" maxlength="8000"></textarea></label>
-            <label>工作目录<input v-model="employee.cwd" required /></label>
-            <div class="actions"><button type="button" @click="employeeTab = 'chat'">返回对话</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '保存中…' : '保存修改' }}</button></div>
-          </form>
-          <div v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee && !creatingEmployee" class="employee-chat-layout" :class="{ 'work-open': workRailOpen }">
-            <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" @task="openEmployeeTask" />
-            <aside v-if="workRailOpen" class="employee-work-summary" aria-label="当前工作"><div class="summary-heading"><h3>当前工作</h3><button class="link" @click="employeeTab = 'tasks'">全部任务 ↗</button></div><button v-if="attentionTasks.length" class="attention-shortcut" @click="employeeTaskFilter = 'attention'; employeeTab = 'tasks'"><strong>{{ attentionTasks.length }} 项需要你处理</strong><span>补充信息或审批后继续 →</span></button><div v-if="!activeTasks.length" class="summary-empty"><span aria-hidden="true">✓</span><strong>手头很清爽</strong><p>交代一个目标，我会在这里更新进度。</p></div><button v-for="task in activeTasks.slice(0, 5)" :key="task.id" class="summary-task" @click="employeeTaskFilter = ['waiting', 'approval'].includes(task.status) ? 'attention' : 'active'; employeeTab = 'tasks'"><span :class="['summary-task-status', task.status]">{{ labels[task.status] }}</span><strong>{{ task.text }}</strong><span v-if="task.progress?.length">{{ task.progress.at(-1).text }}</span></button></aside>
+        </template>
+        <template v-else>
+          <EmployeeHeader
+            :employee="employee"
+            :status="employeeStatus"
+            :tone="employeeTone"
+            :tabs="employeeTabs"
+            :tab="employeeTab"
+            :counts="employeeCounts"
+            :deleting="employeeDeleting"
+            :busy="employeeExecutionBusy"
+            :show-work="employeeTab === 'chat'"
+            :work-open="workPanelVisible"
+            :work-count="attentionTasks.length || activeTasks.length"
+            @tab="employeeTabChanged"
+            @delete="deleteEmployee"
+            @execution="changeEmployeeExecution"
+            @toggle-work="toggleWorkPanel"
+            @menu="openNavigation"
+          />
+          <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭员工错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
+          <div v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee" class="employee-chat-layout" :class="{ 'panel-inline': wide && workPanelVisible }">
+            <div class="chat-main">
+              <button v-if="attentionTasks.length && !workPanelVisible" type="button" class="attention-strip" @click="attentionTasks.length === 1 ? openEmployeeTask(attentionTasks[0].id) : showTasks('attention')">
+                <Icon name="hand" :size="16" /><span><strong>{{ attentionTasks.length }} 项需要你处理</strong><span class="truncate">{{ attentionTasks[0].text }}</span></span><Icon name="right" :size="16" />
+              </button>
+              <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" @task="openEmployeeTask" />
+            </div>
+            <button v-if="workPanelVisible && !wide" type="button" class="panel-backdrop" aria-label="关闭当前工作" tabindex="-1" @click="workRailOpen = false"></button>
+            <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
           </div>
-          <div v-if="employeeTab === 'browser' && selectedEmployee && !creatingEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" /></div>
-          <template v-if="employeeTab === 'tasks' && !creatingEmployee"
-            ><details class="employee-section-tip"><summary>任务说明</summary><p>新任务先由轻量模型起步，涉及编码再在原会话升级。</p></details><form v-if="canExecute" class="inline-form employee-task-form" @submit.prevent="addTask">
-              <input
-                v-model="taskText"
-                required
-                placeholder="交给员工：一件有明确目标的事"
-              /><button class="primary">交给员工</button>
-            </form>
-            <div class="employee-task-filters" aria-label="筛选任务"><button v-for="[id, label, count] in [['active', '进行中', activeTasks.length], ['attention', '待我处理', attentionTasks.length], ['history', '已结束', historyTasks.length]]" :key="id" :class="{ selected: employeeTaskFilter === id }" :aria-pressed="employeeTaskFilter === id" @click="employeeTaskFilter = id">{{ label }} <span>{{ count }}</span></button></div>
-            <div v-if="!visibleEmployeeTasks.length" class="employee-empty"><span aria-hidden="true">✓</span><h3>{{ employeeTaskFilter === 'attention' ? '没有需要你处理的事项' : employeeTaskFilter === 'history' ? '还没有结束的任务' : '暂时没有进行中的任务' }}</h3><p>在对话中交代工作，或在上方直接创建任务。</p><button v-if="employeeTaskFilter !== 'history'" @click="employeeTab = 'chat'">去交代工作</button></div>
-            <EmployeeTaskCard v-for="task in visibleEmployeeTasks" :key="selectedEmployee + task.id" :task="task" :highlighted="employeeTaskFocus === task.id" :readonly="!canExecute" :act="(action, text) => employeeTaskAction(task, action, text)" @inspect="openEmployee($event)" /></template
-          >
-          <template v-if="employeeTab === 'duties' && !creatingEmployee"
-            ><div class="section-heading">
-              <h3>职责模板</h3>
-              <button
-                v-if="employee.canManage"
-                class="primary"
-                @click="
-                  duty = emptyDuty();
-                  dutyOpen = true;
-                "
-              >
-                ＋ 新增职责
-              </button>
-            </div>
-            <form v-if="dutyOpen && employee.canManage" class="card form-grid duty-editor" @submit.prevent="saveDuty">
-              <label>触发条件<textarea v-model="duty.condition" rows="2" maxlength="2000" required :disabled="dutySaving" placeholder="例如：每天上午9点；每30分钟检查一次；按交代的任务需要"></textarea></label>
-              <label>职责内容<textarea v-model="duty.text" rows="5" maxlength="8000" required :disabled="dutySaving" placeholder="说明要做什么、处理范围和交付要求"></textarea></label>
-              <p class="hint">保存时自动识别触发方式，时间按北京时间；无法自动执行的条件会明确提示。</p>
-              <div class="actions"><button class="primary" :disabled="dutySaving">{{ dutySaving ? '正在保存…' : '保存职责' }}</button><button type="button" :disabled="dutySaving" @click="dutyOpen = false">取消</button></div>
-            </form>
-            <div
-              v-if="!employee.duties?.length && !dutyOpen"
-              class="empty-card"
-            >
-              把重复的工作写成职责，只在真正触发时开工。
-            </div>
-            <article
-              v-for="d in employee.duties || []"
-              :key="d.id"
-              class="card"
-            >
-              <div class="card-top">
-                <span class="pill duty-condition">{{ dutyCondition(d) }}</span><span class="hint">{{ d.enabled ? "启用" : "停用" }}</span>
-              </div>
-              <p class="employee-duty-content">{{ dutyContent(d) }}</p>
-              <div class="card-actions">
-                <button v-if="employee.canManage" @click="editDuty(d)">编辑</button><button v-if="employee.canManage" class="link" @click="attempt(() => employeeAction({ action: 'update', id: d.id, enabled: !d.enabled }))">{{ d.enabled ? '停用' : '启用' }}</button>
-                <button
-                  v-if="employee.canManage"
-                  class="link"
-                  @click="
-                    attempt(async () => {
-                      if (confirm('移除此职责并取消未开始的任务？'))
-                        await employeeAction({ action: 'done', id: d.id });
-                    })
-                  "
-                >
-                  移除
-                </button>
-              </div>
-            </article></template
-          >
-          <template v-if="employeeTab === 'memories' && !creatingEmployee"
-            ><form v-if="employee.canManage" class="inline-form" @submit.prevent="addMemory">
-              <input
-                v-model="memoryText"
-                required
-                maxlength="200"
-                placeholder="一条稳定、可跨任务复用的事实"
-              /><select v-model="importance">
-                <option :value="1">普通</option>
-                <option :value="2">重要</option>
-                <option :value="3">长期记住</option></select
-              ><button class="primary">{{ memoryID ? "更新" : "记住" }}</button
-              ><button
-                v-if="memoryID"
-                type="button"
-                @click="
-                  memoryID = '';
-                  memoryText = '';
-                "
-              >
-                取消
-              </button>
-            </form>
-            <article
-              v-for="m in employee.memories || []"
-              :key="m.id"
-              class="card"
-            >
-              <p>{{ m.text }}</p>
-              <div class="card-actions">
-                <span class="hint"
-                  >{{ ["", "普通", "重要", "长期记住"][m.importance] }} · 强度
-                  {{ m.strength }}</span
-                ><button
-                  v-if="employee.canManage"
-                  @click="
-                    memoryID = m.id;
-                    memoryText = m.text;
-                    importance = m.importance;
-                  "
-                >
-                  编辑</button
-                ><button
-                  v-if="employee.canManage"
-                  class="link"
-                  @click="
-                    attempt(() =>
-                      employeeAction({ action: 'forget', id: m.id }),
-                    )
-                  "
-                >
-                  忘记
-                </button>
-              </div>
-            </article></template
-          >
-
-        </div>
+          <div v-if="employeeTab === 'browser' && selectedEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" /></div>
+          <EmployeeTasks
+            v-if="employeeTab === 'tasks'"
+            :key="selectedEmployee"
+            :active="activeTasks"
+            :attention="attentionTasks"
+            :history="historyTasks"
+            :filter="employeeTaskFilter"
+            :focus="employeeTaskFocus"
+            :readonly="!canExecute"
+            :can-create="canExecute"
+            :act="employeeTaskAction"
+            :add="addTask"
+            @filter="employeeTaskFilter = $event"
+            @select="employeeTaskFocus = $event"
+            @inspect="openEmployee($event)"
+            @chat="employeeTab = 'chat'"
+          />
+          <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
+          <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" /></div>
+          <EmployeeSettings
+            v-if="employeeTab === 'settings' && employee.canManage"
+            :employee="employee"
+            :api="api"
+            :saving="employeeSaving"
+            :deleting="employeeDeleting"
+            :busy="employeeExecutionBusy"
+            @save="saveEmployeeSettings"
+            @delete="deleteEmployee"
+            @execution="changeEmployeeExecution"
+            @avatar="selectedEmployee === $event.employeeId && (employee.avatar = $event.avatar)"
+            @cancel="employeeTab = 'chat'"
+          />
+        </template>
       </section>
       <ResourcesView v-else-if="view === 'resources'" />
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" />
-      <ExperiencesView
-        v-else-if="view === 'experiences' && isAdmin"
-        :api="api"
-      />
-      <SettingsView
-        v-else-if="view === 'settings' && isAdmin"
-        :api="api"
-        :config="config"
-        :user-id="user.id"
-        :models="catalogModels"
-        @saved="config = $event"
-        @error="error = $event"
-        @notice="notice = $event"
-      />
+      <ExperiencesView v-else-if="view === 'experiences' && isAdmin" :api="api" />
+      <SettingsView v-else-if="view === 'settings' && isAdmin" :api="api" :config="config" :user-id="user.id" :models="catalogModels" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
     </section>
+    <div class="toasts" aria-live="polite">
+      <div v-if="error" class="toast error" role="alert"><Icon name="alert" :size="16" /><span>{{ error }}</span><button type="button" class="icon" aria-label="关闭错误" @click="error = ''"><Icon name="close" :size="14" /></button></div>
+      <div v-if="notice" class="toast notice" role="status"><Icon name="check" :size="16" /><span>{{ notice }}</span><button type="button" class="icon" aria-label="关闭提示" @click="notice = ''"><Icon name="close" :size="14" /></button></div>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.employee-group-label { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin: 12px 8px 6px; }
-.employee-list { flex: 1; min-height: 44px; overflow-y: auto; padding: 0 8px; }
-.employee-list > button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 48px; margin: 2px 0; padding: 8px; text-align: left; border: 1px solid transparent; background: transparent; border-radius: 10px; }
-.employee-list > button.active { color: var(--accent); background: var(--surface); border-color: var(--border); box-shadow: var(--sh-xs); }
-.employee-nav-avatar { display: grid; place-items: center; flex: none; width: 30px; height: 32px; border-radius: 8px; font-weight: 650; background: var(--accent-soft); color: var(--accent); }
-.employee-nav-info { display: grid; gap: 2px; flex: 1; min-width: 0; }
-.employee-nav-info strong { font-weight: 600; font-size: 13px; }
-.employee-nav-info small { color: var(--muted); font-size: 10px; }
-.employee-list .count.attention { color: var(--amber); background: var(--amber-soft); }
-.employee-workspace { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
-.employee-header-create { display: flex; align-items: center; width: 100%; min-height: 44px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
-.employee-header-create h2 { margin: 0; font-size: 15px; }
-.employee-toolbar-sub { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
-.employee-eyebrow { font-size: 11px; color: var(--muted); }
-.employee-content { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; padding: 16px 20px; background: var(--surface-sunken); scrollbar-width: thin; }
-.employee-content > * { max-width: 1040px; margin-left: auto; margin-right: auto; }
-.employee-content.is-chat, .employee-content.is-browser { padding: 0; overflow: hidden; display: flex; flex-direction: column; background: var(--surface); }
-.employee-content > .banner { flex: none; margin: 12px 24px; }
-.employee-content > .employee-chat-layout { max-width: none; margin: 0; }
-.employee-chat-layout { display: grid; grid-template-columns: minmax(0, 1fr); position: relative; flex: 1; min-height: 0; }
-.employee-chat-layout.work-open { grid-template-columns: minmax(0, 1fr) 260px; }
-.employee-work-summary { overflow-y: auto; padding: 12px 14px; border-left: 1px solid var(--border); background: var(--surface-sunken); scrollbar-width: thin; }
-.summary-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.summary-heading h3 { margin: 0; font-size: 12px; }
-.summary-heading button { font-size: 11px; padding: 4px; }
-.summary-empty { padding: 16px 4px; text-align: center; color: var(--text-secondary); }
-.summary-empty > span { display: block; margin-bottom: 8px; color: var(--green); font-size: 18px; }
-.summary-empty strong { font-size: 12px; }
-.summary-empty p { font-size: 11px; line-height: 1.6; color: var(--muted); margin: 0; }
-.attention-shortcut, .summary-task { display: grid; gap: 8px; text-align: left; width: 100%; margin-top: 14px; padding: 14px; background: var(--surface); font-size: 12px; line-height: 1.65; white-space: normal; overflow-wrap: anywhere; border-radius: 10px; }
-.summary-task strong { font-size: 12px; font-weight: 550; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.summary-task > span:last-child { font-size: 11px; color: var(--muted); }
-.summary-task-status { color: var(--accent); font-size: 10px; }
-.attention-shortcut { background: var(--amber-soft); color: var(--amber); border-color: oklch(0.89 0.06 75); }
-.attention-shortcut span { font-size: 11px; }
-.employee-browser { flex: 1; min-height: 0; width: 100%; max-width: none; display: flex; flex-direction: column; }
-.duty-condition { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
-.employee-duty-content { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.75; }
-.employee-section-tip { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
-.employee-section-tip summary { cursor: pointer; padding: 10px 12px; font-size: 12px; font-weight: 600; color: var(--text-secondary); list-style: none; }
-.employee-section-tip summary::-webkit-details-marker { display: none; }
-.employee-section-tip p { margin: 0; padding: 0 12px 12px; font-size: 12px; color: var(--muted); line-height: 1.6; }
-.employee-task-form { background: var(--surface); padding: 10px; border: 1px solid var(--border); border-radius: 10px; }
-.employee-task-form input { min-width: 140px; }
-.employee-task-filters { display: flex; gap: 6px; margin-bottom: 18px; overflow-x: auto; }
-.employee-task-filters button { background: transparent; border: 1px solid transparent; font-size: 12px; padding: 8px 12px; white-space: nowrap; }
-.employee-task-filters button.selected { background: var(--surface); border-color: var(--border); color: var(--accent); box-shadow: var(--sh-xs); }
-.employee-task-filters span { margin-left: 7px; color: var(--muted); font-size: 11px; }
-.employee-create { max-width: 640px; margin-top: 24px; padding: 32px; }
-.employee-create h3 { margin: 0; font-size: 24px; letter-spacing: -.03em; }
-.employee-create .actions, .employee-settings-form .actions { justify-content: flex-end; }
-.employee-settings-form { max-width: 720px; padding: 28px; }
-.employee-settings-form h3 { margin: 0; font-size: 18px; }
-.employee-settings-form fieldset { min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
-.employee-settings-form fieldset label { display: flex; gap: 8px; padding: 7px 0; align-items: center; font-size: 12px; }
-.employee-empty { padding: 28px 16px; text-align: center; }
-.employee-empty > span { display: block; color: var(--green); font-size: 22px; }
-.employee-empty h3 { margin: 10px 0 8px; font-size: 15px; }
-.employee-empty p { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
-@media (max-width: 1180px) {
-  .employee-chat-layout.work-open { grid-template-columns: minmax(0, 1fr); }
-  .employee-work-summary { display: none; }
-  .employee-chat-layout.work-open .employee-work-summary { display: block; position: absolute; top: 0; right: 0; bottom: 0; width: min(280px, 88vw); z-index: 6; box-shadow: var(--sh-lg); }
-}
-@media (max-width: 700px) {
-  .employee-content { padding: 12px; }
-  .employee-create, .employee-settings-form { padding: 18px 14px; margin-top: 0; }
-  .employee-create h3 { font-size: 18px; }
-  .employee-task-filters button { min-height: 44px; padding: 8px 10px; }
-}
-@media (max-width: 760px) {
-  .employee-work-summary { display: none !important; }
-  .employee-mobile-menu { position: relative; flex: none; margin-left: auto; }
-  .employee-mobile-menu summary { display: grid; place-items: center; width: 44px; min-height: 44px; list-style: none; font-size: 24px; cursor: pointer; border-radius: 8px; }
-  .employee-mobile-menu summary::-webkit-details-marker { display: none; }
-  .employee-mobile-menu[open] summary { background: var(--surface-sunken); }
-  .employee-mobile-actions { position: absolute; right: 0; top: calc(100% + 6px); width: min(280px, calc(100vw - 28px)); max-height: 70dvh; overflow-y: auto; z-index: 30; padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--sh-lg); }
-  .employee-mobile-actions small { display: block; color: var(--muted); padding: 10px 12px; }
-  .employee-mobile-actions button { width: 100%; text-align: left; white-space: normal; min-height: 44px; border-color: transparent; background: transparent; font-size: 13px; line-height: 1.5; padding: 10px 12px; }
-  .employee-mobile-actions button:hover { background: var(--surface-sunken); }
+.employee-workspace { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.employee-workspace > .banner { flex: none; }
+.employee-workspace > .page-scroll { padding: 20px 24px; }
+.employee-chat-layout { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
+.chat-main { position: relative; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.attention-strip { display: flex; align-items: center; justify-content: flex-start; gap: 10px; flex: none; width: calc(100% - 24px); max-width: 796px; height: auto; min-height: 44px; margin: 10px auto 0; padding: 8px 12px; border: 1px solid var(--warn-border); border-radius: var(--r-lg); background: var(--warn-soft); color: var(--warn); text-align: left; }
+.attention-strip:hover:not(:disabled) { border-color: var(--warn); background: var(--warn-soft); }
+.attention-strip > span { display: grid; flex: 1; min-width: 0; gap: 1px; }
+.attention-strip strong { font-size: 13px; }
+.attention-strip span span { color: var(--text-2); font-size: 12px; font-weight: 400; }
+.panel-backdrop { position: absolute; inset: 0; z-index: 19; border: 0; border-radius: 0; background: rgb(15 20 30 / 22%); animation: fade-in .15s ease; }
+.panel-backdrop:hover:not(:disabled) { background: rgb(15 20 30 / 22%); }
+.employee-browser { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.create-page { display: grid; align-content: start; justify-items: center; }
+.create-card { display: grid; gap: 18px; width: 100%; max-width: 600px; margin-top: 8px; padding: 24px; box-shadow: var(--sh-sm); }
+.create-head { display: flex; align-items: center; gap: 12px; }
+.create-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); }
+.create-head h3 { font-size: 18px; }
+.create-facts { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; color: var(--text-2); font-size: 12px; }
+.create-facts li { display: flex; align-items: center; gap: 8px; }
+.create-facts .icon-svg { color: var(--ok); }
+.create-page .empty-state { width: 100%; max-width: 600px; }
+@media (max-width: 767px) {
+  .employee-workspace > .page-scroll { padding: 12px; }
+  .create-card { padding: 16px; margin-top: 0; }
+  .attention-strip { width: calc(100% - 16px); margin-top: 8px; }
 }
 </style>

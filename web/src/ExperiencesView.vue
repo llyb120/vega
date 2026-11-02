@@ -1,12 +1,19 @@
 <script setup vapor>
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import PageHeader from "./PageHeader.vue";
+import Icon from "./Icon.vue";
 const props = defineProps({ api: Function });
 const busy = ref(false),
   error = ref(""),
   routes = ref([]),
   scope = ref(""),
   query = ref(""),
-  selected = ref("");
+  selected = ref(""),
+  detailOpen = ref(false);
+function choose(id) {
+  selected.value = id;
+  detailOpen.value = true;
+}
 const scopes = computed(() =>
     [...new Set(routes.value.map((r) => r.scope))].sort(),
   ),
@@ -36,221 +43,99 @@ async function refresh() {
     busy.value = false;
   }
 }
+const stacked = ref(false);
+const stackedMedia = window.matchMedia("(max-width: 1099px)");
+const syncStacked = () => (stacked.value = stackedMedia.matches);
+syncStacked();
+stackedMedia.addEventListener("change", syncStacked);
+onBeforeUnmount(() => stackedMedia.removeEventListener("change", syncStacked));
 onMounted(() => void refresh());
 </script>
 <template>
-  <header class="topbar">
-    <h2>经验图谱</h2>
-    <button :disabled="busy" @click="refresh">刷新</button>
-  </header>
-  <div class="experience-page">
-    <p v-if="error" class="error" role="alert">{{ error }}</p>
-    <div class="experience-filters">
-      <select v-model="scope" aria-label="经验网站">
-        <option value="">全部网站</option>
-        <option v-for="site in scopes" :key="site">{{ site }}</option></select
-      ><input v-model="query" placeholder="搜索经验" aria-label="搜索经验" />
-    </div>
-    <div v-if="!visible.length" class="empty-card">
-      {{ busy ? "加载中…" : "暂无经验" }}
-    </div>
-    <div v-else class="experience-layout">
-      <aside class="experience-list">
-        <button
-          v-for="r in visible"
-          :key="r.id"
-          :class="{ selected: current?.id === r.id }"
-          @click="selected = r.id"
-        >
-          <strong>{{ r.task }}</strong
-          ><small>{{ r.scope }}</small>
+  <PageHeader :title="stacked && detailOpen && current ? current.task : '经验图谱'" :subtitle="stacked && detailOpen && current ? current.scope : '员工在网站上验证成功的操作路线'" :back="stacked && detailOpen ? '列表' : ''" @back="detailOpen = false">
+    <button type="button" class="sm" :disabled="busy" title="刷新" @click="refresh"><Icon name="refresh" :size="14" /><span class="hide-mobile">刷新</span></button>
+  </PageHeader>
+  <div class="experience-layout" :class="{ 'detail-open': detailOpen }">
+    <aside class="experience-list-pane" aria-label="经验列表">
+      <div class="experience-filters">
+        <select v-model="scope" aria-label="经验网站"><option value="">全部网站</option><option v-for="site in scopes" :key="site">{{ site }}</option></select>
+        <label class="search"><Icon name="search" :size="14" /><input v-model="query" placeholder="搜索经验" aria-label="搜索经验" /></label>
+      </div>
+      <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span></p>
+      <div class="experience-list">
+        <p v-if="!visible.length" class="empty-state">{{ busy ? "加载中…" : "暂无经验" }}</p>
+        <button v-for="r in visible" :key="r.id" type="button" :class="{ selected: current?.id === r.id && (!stacked || !!selected) }" :aria-current="current?.id === r.id ? 'true' : undefined" @click="choose(r.id)">
+          <span class="route-icon" aria-hidden="true"><Icon name="graph" :size="16" /></span>
+          <span class="route-text"><strong>{{ r.task }}</strong><small>{{ r.scope }} · {{ r.steps?.length || 0 }} 步 · 成功 {{ r.successes }} 次</small></span>
+          <Icon name="right" :size="14" class="route-chevron" />
         </button>
-      </aside>
-      <section v-if="current" class="experience-detail card">
-        <div class="section-heading">
-          <h3>{{ current.task }}</h3>
-          <span class="pill green">成功 {{ current.successes }} 次</span>
-        </div>
-        <p class="hint">{{ current.scope }}</p>
-        <div class="experience-flow">
-          <div v-if="current.conditions?.length" class="flow-node entry">
-            <small>开始</small>
-            <p v-for="text in current.conditions" :key="text">{{ text }}</p>
-          </div>
-          <template v-for="(text, n) in current.steps" :key="n"
-            ><span class="flow-arrow" aria-hidden="true">↓</span>
-            <div class="flow-node">
-              <span class="step-number">{{ n + 1 }}</span
-              >{{ text }}
-            </div></template
-          ><template v-if="current.checks?.length"
-            ><span class="flow-arrow" aria-hidden="true">↓</span>
-            <div class="flow-node complete">
-              <small>完成</small>
-              <p v-for="text in current.checks" :key="text">{{ text }}</p>
-            </div></template
-          >
-        </div>
-        <div v-if="current.pitfalls?.length" class="experience-cautions">
-          <h3>注意事项</h3>
-          <p v-for="text in current.pitfalls" :key="text">{{ text }}</p>
-        </div>
-      </section>
-    </div>
+      </div>
+    </aside>
+    <section class="experience-detail" aria-label="经验详情">
+      <template v-if="current">
+        <header class="detail-head">
+          <div><h3>{{ current.task }}</h3><p><Icon name="globe" :size="13" />{{ current.scope }}</p></div>
+          <span class="badge ok"><Icon name="check" :size="12" />成功 {{ current.successes }} 次</span>
+        </header>
+        <ol class="route-flow">
+          <li v-if="current.conditions?.length" class="flow-node entry"><span class="flow-marker"><Icon name="play" :size="12" /></span><div><small>开始条件</small><p v-for="text in current.conditions" :key="text">{{ text }}</p></div></li>
+          <li v-for="(text, n) in current.steps" :key="n" class="flow-node"><span class="flow-marker">{{ n + 1 }}</span><div><p>{{ text }}</p></div></li>
+          <li v-if="current.checks?.length" class="flow-node complete"><span class="flow-marker"><Icon name="check" :size="12" /></span><div><small>完成标志</small><p v-for="text in current.checks" :key="text">{{ text }}</p></div></li>
+        </ol>
+        <div v-if="current.pitfalls?.length" class="callout experience-cautions"><Icon name="alert" :size="16" /><div><strong>注意事项</strong><p v-for="text in current.pitfalls" :key="text">{{ text }}</p></div></div>
+      </template>
+      <div v-else class="detail-empty"><Icon name="graph" :size="32" /><strong>{{ busy ? '加载中…' : '暂无经验' }}</strong><span>员工完成网页任务后，验证过的路线会沉淀在这里。</span></div>
+    </section>
   </div>
 </template>
 <style scoped>
-.experience-page {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 30px 40px;
-  scrollbar-width: thin;
-  scrollbar-color: #d5d8e1 transparent;
+.experience-layout { display: grid; grid-template-columns: minmax(300px, 360px) minmax(0, 1fr); flex: 1; min-height: 0; }
+.experience-list-pane { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: var(--bg); }
+.experience-filters { display: flex; gap: 6px; flex: none; padding: 12px; }
+.experience-filters select { flex: 0 1 130px; min-width: 0; }
+.search { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; }
+.search .icon-svg { position: absolute; left: 9px; color: var(--muted); pointer-events: none; }
+.search input { width: 100%; padding-left: 28px; }
+.experience-list-pane > .banner { flex: none; }
+.experience-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px 16px; scrollbar-width: thin; }
+.experience-list button { display: flex; align-items: center; gap: 10px; width: 100%; height: auto; margin-bottom: 2px; padding: 10px; border: 1px solid transparent; border-radius: var(--r-md); background: transparent; font-weight: 400; text-align: left; white-space: normal; }
+.experience-list button:hover:not(:disabled) { background: var(--surface); border-color: var(--border); }
+.experience-list button.selected { background: var(--surface); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.route-icon { display: grid; place-items: center; flex: none; width: 30px; height: 30px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); }
+.route-text { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.route-text strong { color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.45; overflow-wrap: anywhere; }
+.route-text small { color: var(--muted); font-size: 11px; }
+.route-chevron { display: none; color: var(--faint); }
+.experience-detail { min-width: 0; min-height: 0; overflow-y: auto; padding: 24px 32px 40px; background: var(--surface); scrollbar-width: thin; }
+.detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; max-width: 720px; margin-bottom: 20px; }
+.detail-head h3 { font-size: 18px; line-height: 1.4; }
+.detail-head p { display: flex; align-items: center; gap: 4px; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.detail-head .badge { flex: none; gap: 4px; }
+.route-flow { position: relative; display: grid; gap: 0; max-width: 720px; margin: 0; padding: 0; list-style: none; }
+.flow-node { position: relative; display: flex; gap: 14px; padding-bottom: 14px; }
+.flow-node:not(:last-child)::before { content: ""; position: absolute; left: 13px; top: 28px; bottom: 0; width: 2px; background: var(--border); }
+.flow-marker { position: relative; z-index: 1; display: grid; place-items: center; flex: none; width: 28px; height: 28px; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--surface); color: var(--text-2); font-size: 12px; font-weight: 600; }
+.flow-node > div { flex: 1; min-width: 0; padding: 4px 0 0; line-height: 1.7; overflow-wrap: anywhere; }
+.flow-node small { display: block; margin-bottom: 2px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.flow-node.entry .flow-marker { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
+.flow-node.entry > div, .flow-node.complete > div { padding: 8px 12px; border-radius: var(--r-md); }
+.flow-node.entry > div { background: var(--accent-softer); }
+.flow-node.complete .flow-marker { border-color: transparent; background: var(--ok-soft); color: var(--ok); }
+.flow-node.complete > div { background: var(--ok-soft); }
+.experience-cautions { max-width: 720px; margin-top: 12px; }
+.experience-cautions p { margin-top: 2px; }
+.detail-empty { display: grid; justify-items: center; gap: 6px; padding: 80px 20px; color: var(--muted); font-size: 12px; text-align: center; }
+.detail-empty strong { color: var(--text); font-size: 14px; }
+.detail-empty .icon-svg { color: var(--faint); }
+@media (max-width: 1099px) {
+  .experience-layout { grid-template-columns: minmax(0, 1fr); }
+  .experience-list-pane { border-right: 0; }
+  .experience-layout:not(.detail-open) .experience-detail, .experience-layout.detail-open .experience-list-pane { display: none; }
+  .route-chevron { display: block; }
 }
-.experience-filters {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 22px;
-}
-.experience-filters select {
-  max-width: 50%;
-}
-.experience-filters input {
-  flex: 1;
-}
-.experience-layout {
-  display: grid;
-  grid-template-columns: 250px minmax(0, 1fr);
-  align-items: start;
-  gap: 22px;
-}
-.experience-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.experience-list button {
-  text-align: left;
-  color: #5c6272;
-  padding: 15px;
-  border-radius: 12px;
-}
-.experience-list strong,
-.experience-list small {
-  display: block;
-  overflow-wrap: anywhere;
-}
-.experience-list .selected {
-  border-color: #d9d9f5;
-  background: var(--accent-soft);
-  color: var(--accent);
-  box-shadow: 0 3px 10px #5b5bd60a;
-}
-.experience-detail {
-  margin: 0;
-}
-.experience-flow {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 14px;
-}
-.flow-node {
-  width: min(100%, 540px);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 15px 18px;
-  line-height: 1.8;
-  background: #f8f9fb;
-  overflow-wrap: anywhere;
-}
-.flow-node p {
-  margin: 0;
-}
-.flow-node small {
-  display: block;
-  margin-bottom: 5px;
-}
-.flow-node.complete {
-  border-color: #d8f0e3;
-  background: #edf8f2;
-}
-.flow-node.entry {
-  border-color: #dfdff6;
-  background: #f4f4fc;
-}
-.flow-arrow {
-  font-size: 24px;
-  color: #b1b4c3;
-  padding: 6px;
-}
-.step-number {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: #e8e8fb;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
-  margin-right: 10px;
-}
-.experience-cautions {
-  margin-top: 20px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-@media (max-width: 800px) {
-  .experience-page {
-    padding: 18px 14px max(24px, env(safe-area-inset-bottom, 0px));
-  }
-  .experience-layout {
-    grid-template-columns: 1fr;
-    gap: 16px;
-  }
-  .experience-list {
-    flex-direction: row;
-    overflow: auto;
-    max-width: 100%;
-    margin: 0 -14px;
-    padding: 0 14px 4px;
-    scrollbar-width: none;
-  }
-  .experience-list::-webkit-scrollbar {
-    display: none;
-  }
-  .experience-list button {
-    min-width: 190px;
-  }
-  .experience-flow {
-    padding: 4px 0;
-  }
-  .flow-node {
-    padding: 13px 14px;
-  }
-  .experience-filters {
-    flex-wrap: wrap;
-    gap: 10px;
-  }
-  .experience-filters select {
-    max-width: 100%;
-    width: 100%;
-  }
-  .experience-filters input {
-    width: 100%;
-  }
-  .experience-detail {
-    min-width: 0;
-  }
-  .experience-list button {
-    max-width: 240px;
-    flex-shrink: 0;
-  }
-  .experience-detail .section-heading {
-    flex-wrap: wrap;
-  }
+@media (max-width: 767px) {
+  .experience-detail { padding: 16px 14px 32px; }
+  .detail-head { flex-direction: column; gap: 8px; }
+  .detail-head h3 { font-size: 16px; }
 }
 </style>

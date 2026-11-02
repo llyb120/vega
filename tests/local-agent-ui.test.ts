@@ -5,9 +5,11 @@ import vm from "node:vm";
 import { LocalAgentPairing, canBridgeLocal, pairingStatusText } from "../web/src/local-agent.js";
 
 test("desktop and mobile indicators describe all online clients rather than the current device", () => {
-  const source = readFileSync("web/src/App.vue", "utf8");
+  const app = readFileSync("web/src/App.vue", "utf8");
+  assert.match(app, /:client-status="clientStatus"/, "the sidebar indicator renders App's clientStatus for every layout");
+  const source = readFileSync("web/src/AppSidebar.vue", "utf8");
   const indicators = [...source.matchAll(/<span\b([^>]*:title="([^"]*clientStatus[^"\n]*)"[^>]*)>([^<]*)<\/span>/g)];
-  assert.equal(indicators.length, 2);
+  assert.equal(indicators.length, 1);
   for (const [, attributes, title, text] of indicators) {
     if (attributes.includes('v-if="view')) assert.match(attributes, /v-if="view !== 'employee'"/, "mobile employee chat omits the redundant connection indicator");
     else assert.doesNotMatch(attributes, /v-if=/);

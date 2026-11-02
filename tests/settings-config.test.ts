@@ -34,6 +34,20 @@ test("each MCP JSON keeps its complete config and stored secrets", async () => {
   assert.equal(JSON.parse(scope.mcp.value.local).command, "node");
 });
 
+test("redesigned settings retain the full MCP editor and global vault editing controls", () => {
+  assert.match(settings, /<PageHeader title="系统设置"/);
+  assert.match(settings, /v-model="mcp\[key\]"[^>]*:aria-label="key \+ ' JSON配置'"/);
+  assert(!settings.includes("mcpURL") && !settings.includes('v-model="server.url"'));
+  assert.match(settings, /@click="editVault\(item\)"/);
+  assert.match(settings, /@click="newVault"/);
+  assert.match(settings, /v-model="vaultForm.content" :required="!vaultForm.id"/);
+  assert.match(settings, /vaultForm.id \? '保存修改' : '新增并加密保存'/);
+  const employeeSettings = readFileSync("web/src/EmployeeSettings.vue", "utf8");
+  const app = readFileSync("web/src/App.vue", "utf8");
+  assert(!employeeSettings.includes("vaultIds") && !employeeSettings.includes("vaultEntries"));
+  assert(!app.includes("vaultIds") && !app.includes("vaultEntries"));
+});
+
 test("MCP JSON validation rejects malformed transports and options", () => {
   for (const value of [null, [], "text", { url: "file:///secret" }, { command: "" }, { command: "node", url: "https://example.com" }, { command: "node", args: "script" }, { url: "https://example.com", headers: [] }, { command: "node", env: { TOKEN: 12 } }, { command: "node", enabled: "yes" }]) assert.throws(() => validateMcpServer(value, "service"));
   assert.doesNotThrow(() => validateMcpServer({ command: "node", args: [], env: {}, enabled: false }, "service"));

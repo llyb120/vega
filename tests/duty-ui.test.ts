@@ -5,22 +5,36 @@ import vm from "node:vm";
 import { ref } from "vue";
 import { dutyCondition, dutyContent } from "../shared/duty-condition";
 
-const source = readFileSync("web/src/App.vue", "utf8");
+const app = readFileSync("web/src/App.vue", "utf8");
+const source = readFileSync("web/src/EmployeeDuties.vue", "utf8");
 const between = (start: string, end: string) => { const offset = source.indexOf(start); return source.slice(offset, source.indexOf(end, offset)); };
 function mount() {
   const calls: any[] = [], error = ref("");
-  const context: any = { ref, dutyCondition, dutyContent, selectedEmployee: ref("ea"), user: ref({ id: "admin" }), duty: ref({}), dutySaving: ref(false), dutyOpen: ref(false), employeeAction: async (input: any) => { calls.push(input); }, attempt: async (fn: any) => { try { await fn(); } catch (failure: any) { error.value = failure.message; } } };
-  const methods = vm.runInNewContext(between("function emptyDuty()", "const isRunning") + between("function editDuty(d)", "async function addMemory()") + "\n({ emptyDuty, editDuty, saveDuty })", context);
+  const context: any = { ref, dutyCondition, dutyContent, selectedEmployee: ref("ea"), user: ref({ id: "admin" }), employeeAction: async (input: any) => { calls.push(input); }, attempt: async (fn: any) => { try { return await fn(); } catch (failure: any) { error.value = failure.message; } } };
+  const save = vm.runInNewContext("(" + app.slice(app.indexOf("async function saveDuty("), app.indexOf("function removeDuty(")) + ")", context);
+  context.props = { canManage: true, save };
+  const methods = vm.runInNewContext(between("const open =", "</script>") + "\n({ emptyDuty: empty, editDuty: edit, saveDuty: submit, duty, dutySaving: saving, dutyOpen: open })", context);
+  Object.assign(context, methods);
   return { calls, error, context, ...methods };
 }
 
 test("the responsibility editor has exactly trigger condition and responsibility content, with no extra scheduling controls", () => {
-  const form = between('<form v-if="dutyOpen', "</form>");
+  const form = between('<form v-if="open && canManage"', "</form>");
   assert.equal((form.match(/<textarea\b/g) || []).length, 2);
   assert(!/<input\b|<select\b/.test(form));
   assert(form.indexOf("触发条件") < form.indexOf("职责内容"));
   assert(!form.includes("duty.note") && !form.includes("duty.enabled") && !form.includes("duty.profile"));
   assert(source.includes("dutyCondition(d)") && source.includes("dutyContent(d)"));
+  assert.match(app, /<EmployeeDuties :key="selectedEmployee"[^>]*:save="saveDuty"/);
+  assert.match(source, /save\(\{ action: 'update', id: d.id, enabled: !d.enabled \}\)/);
+});
+
+test("a read-only responsibility editor cannot submit changes", async () => {
+  const state = mount();
+  state.editDuty({ text: "只读职责", manual: true });
+  state.context.props.canManage = false;
+  await state.saveDuty();
+  assert.equal(state.calls.length, 0);
 });
 
 test("legacy supplemental requirements stay editable in the single content box and saving does not reset enabled state or expose schedule fields", async () => {

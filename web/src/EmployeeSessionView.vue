@@ -1,6 +1,8 @@
 <script setup vapor>
 import { onBeforeUnmount, ref, watch } from "vue";
 import ConversationTimeline from "./ConversationTimeline.vue";
+import PageHeader from "./PageHeader.vue";
+import Icon from "./Icon.vue";
 const props = defineProps({
   api: Function,
   sessionId: String,
@@ -47,28 +49,20 @@ watch(
 onBeforeUnmount(() => version++);
 </script>
 <template>
-  <header class="topbar">
-      <button class="link" @click="emit('back')">← {{ debug ? '返回调试会话' : '返回数字员工' }}</button>
-      <h2>{{ session?.title || "员工会话记录" }}</h2>
-    <div class="actions">
-      <button v-if="debug" :aria-pressed="raw" @click="raw = !raw">{{ raw ? '整理视图' : '原始消息' }}</button>
-      <span :class="['pill', running ? 'green' : '']">{{
-        running ? "执行中" : "执行记录"
-      }}</span
-      ><button :disabled="busy" @click="refresh">刷新记录</button>
-    </div>
-  </header>
+  <PageHeader :title="session?.title || '员工会话记录'" :subtitle="debug ? '调试会话' : '只读执行记录'" :back="debug ? '调试会话' : '返回员工'" @back="emit('back')">
+    <template #title-extra><span :class="['badge', running ? 'info' : '']"><span v-if="running" class="dot info pulse"></span>{{ running ? "执行中" : "执行记录" }}</span></template>
+    <button v-if="debug" type="button" class="sm" :aria-pressed="raw" @click="raw = !raw"><Icon name="code" :size="14" /><span class="hide-mobile">{{ raw ? '整理视图' : '原始消息' }}</span></button>
+    <button type="button" class="sm" :disabled="busy" title="刷新记录" @click="refresh"><Icon name="refresh" :size="14" /><span class="hide-mobile">刷新记录</span></button>
+  </PageHeader>
   <section
     class="transcript employee-session"
     aria-label="员工会话记录"
     :aria-busy="busy"
   >
-    <p class="context-note">
-      只读执行记录；补充、审批或续做请返回对应员工，不能在这里输入或重放操作。
-    </p>
+    <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；补充、审批或续做请返回对应员工，不能在这里输入或重放操作。</span></p>
     <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>员工 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>模型 / 场景</dt><dd>{{ session.model || '默认' }} / {{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
-    <p v-if="error" class="error" role="alert">{{ error }}</p>
-    <p v-if="busy && !messages.length" role="status">正在加载记录…</p>
+    <p v-if="error" class="banner error" role="alert">{{ error }}</p>
+    <p v-if="busy && !messages.length" class="context-note" role="status"><span class="spinner"></span>正在加载记录…</p>
     <ConversationTimeline v-if="!raw" :key="sessionId" :messages="messages" :running="running" />
     <template v-else><article
       v-for="(message, i) in messages"
@@ -124,8 +118,10 @@ onBeforeUnmount(() => version++);
   </section>
 </template>
 <style scoped>
-.debug-metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-sunken); font-size: 12px; }
+.employee-session { background: var(--surface); }
+.session-note { max-width: 820px; margin: 0 auto 12px; }
+.debug-metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; max-width: 820px; margin: 0 auto 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); font-size: 12px; }
 .debug-metadata dt { color: var(--muted); }
-.debug-metadata dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+.debug-metadata dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); }
 @media (max-width: 600px) { .debug-metadata { grid-template-columns: 1fr; gap: 5px; } }
 </style>

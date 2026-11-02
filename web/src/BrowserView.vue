@@ -1,4 +1,5 @@
 <script setup vapor>
+import Icon from "./Icon.vue";
 import { computed, ref, onMounted, onBeforeUnmount } from "vue";
 const props = defineProps({ api: Function, employeeId: String });
 const status = ref(null),
@@ -748,618 +749,213 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <header class="topbar">
-    <div>
-      <h2>浏览器</h2>
-    </div>
-    <div class="actions">
-      <span :class="['pill', status?.connected ? 'green' : '']">{{
-        status?.connected ? (status.browser || "浏览器") + " 已连接" : "未连接"
-      }}</span
-      ><button :disabled="busy" @click="refresh">刷新标签页</button>
-      <button v-if="employeeId" :disabled="busy" @click="stopBrowser">停止实例</button>
-    </div>
-  </header>
-  <section class="browser-view" :aria-busy="busy">
-    <p v-if="error" class="error" role="alert">{{ error }}</p>
-    <p v-if="info" class="notice remote-notice" role="status">{{ info }}</p>
-    <div
-      v-if="tabs.length"
-      class="browser-tabstrip"
-      role="tablist"
-      aria-label="浏览器标签页"
-    >
-      <button
-        v-for="tab in tabs"
-        :key="tab.tag"
-        type="button"
-        role="tab"
-        :aria-selected="selected === tab.tag"
-        aria-controls="browser-screenshot-panel"
-        :tabindex="selected === tab.tag ? 0 : -1"
-        :class="['browser-tab', { selected: selected === tab.tag }]"
-        :title="
-          viewable(tab)
-            ? (tab.title || '未命名标签页') + '\n' + tab.url
-            : '此浏览器页面不可截图：' + tab.url
-        "
-        :disabled="busy || !viewable(tab)"
-        @click="capture(tab)"
-        @keydown="keyboard"
-      >
-        <span class="browser-tab-mark" aria-hidden="true">▣</span
-        ><span class="browser-tab-title">{{
-          tab.title || siteName(tab.url)
-        }}</span
-        ><small v-if="tab.incognito">无痕</small
-        ><small v-if="!viewable(tab)">不可查看</small>
-      </button>
-    </div>
-    <div
-      id="browser-screenshot-panel"
-      class="browser-panel"
-      role="tabpanel"
-      aria-label="所选标签页截图"
-    >
+  <section class="browser-view" :class="{ standalone: !employeeId }" :aria-busy="busy">
+    <header class="browser-toolbar">
+      <h2 v-if="!employeeId" class="browser-heading">浏览器</h2>
+      <div v-if="tabs.length" class="browser-tabstrip" role="tablist" aria-label="浏览器标签页">
+        <button
+          v-for="tab in tabs"
+          :key="tab.tag"
+          type="button"
+          role="tab"
+          :aria-selected="selected === tab.tag"
+          aria-controls="browser-screenshot-panel"
+          :tabindex="selected === tab.tag ? 0 : -1"
+          :class="['browser-tab', { selected: selected === tab.tag }]"
+          :title="viewable(tab) ? (tab.title || '未命名标签页') + '\n' + tab.url : '此浏览器页面不可截图：' + tab.url"
+          :disabled="busy || !viewable(tab)"
+          @click="capture(tab)"
+          @keydown="keyboard"
+        >
+          <Icon name="globe" :size="14" /><span class="browser-tab-title">{{ tab.title || siteName(tab.url) }}</span><small v-if="tab.incognito">无痕</small><small v-if="!viewable(tab)">不可查看</small>
+        </button>
+      </div>
+      <span v-else class="browser-tabstrip-empty">{{ status?.connected ? '没有标签页' : '' }}</span>
+      <div class="browser-status">
+        <span :class="['conn', status?.connected ? 'ok' : '']" :title="status?.connected ? (status.browser || '浏览器') + ' 已连接' : '未连接'"><span :class="['dot', status?.connected ? 'ok' : '']" aria-hidden="true"></span><span class="conn-label">{{ status?.connected ? (status.browser || "浏览器") + " 已连接" : "未连接" }}</span></span>
+        <button type="button" class="sm" :disabled="busy" title="刷新标签页" @click="refresh"><Icon name="refresh" :size="14" /><span class="btn-label">刷新标签页</span></button>
+        <button v-if="employeeId" type="button" class="sm ghost" :disabled="busy" title="停止实例" @click="stopBrowser"><Icon name="stop" :size="13" /><span class="btn-label">停止实例</span></button>
+      </div>
+    </header>
+    <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span></p>
+    <p v-if="info" class="banner notice remote-notice" role="status"><span>{{ info }}</span></p>
+    <div id="browser-screenshot-panel" class="browser-panel" role="tabpanel" aria-label="所选标签页截图">
       <div v-if="selected" class="browser-address">
-        <div>
-          <strong>{{
-            screenshot?.title ||
-            tabs.find((t) => t.tag === selected)?.title ||
-            siteName(pageURL)
-          }}</strong>
+        <div class="address-text">
+          <strong class="truncate">{{ screenshot?.title || tabs.find((t) => t.tag === selected)?.title || siteName(pageURL) }}</strong>
           <details :key="selected" class="browser-url">
-            <summary :title="pageURL">
-              {{ siteName(pageURL) }} · 查看地址
-            </summary>
+            <summary :title="pageURL"><Icon name="lock" :size="11" />{{ siteName(pageURL) }}<span class="url-more">· 查看地址</span></summary>
             <p>{{ pageURL }}</p>
           </details>
         </div>
-        <div class="actions">
-          <button
-            :class="{ primary: operating }"
-            :disabled="busy || (!operating && (liveState !== 'view' || !imageReady))"
-            @click="operating ? releaseControl() : requestControl()"
-          >
-            {{ operating ? '退出操作' : '开始操作' }}
-          </button>
-          <button v-if="screenshot" :disabled="operating" @click="resetView" title="恢复原始缩放和位置（快捷键 0）">
-            还原视图 · {{ Math.round(zoom * 100) }}%
-          </button>
-          <span :class="['pill', liveState === 'offline' ? '' : 'green']">{{
-            stateLabel
-          }}</span>
-          <a
-            v-if="!!screenshot"
-            :href="screenshot.image.url"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="button-link"
-            >查看大图 ↗</a
-          >
-          <button
-            :disabled="busy"
-            @click="capture(tabs.find((t) => t.tag === selected))"
-          >
-            刷新截图
-          </button>
+        <div class="address-actions">
+          <span :class="['badge', liveState === 'offline' ? '' : liveState === 'control' ? 'info' : 'ok']">{{ stateLabel }}</span>
+          <button v-if="screenshot" type="button" class="sm ghost zoom-reset" :disabled="operating" title="恢复原始缩放和位置（快捷键 0）" @click="resetView"><Icon name="maximize" :size="14" /><span>{{ Math.round(zoom * 100) }}%</span></button>
+          <a v-if="!!screenshot" :href="screenshot.image.url" target="_blank" rel="noopener noreferrer" class="button-link icon-link" title="查看大图" aria-label="查看大图"><Icon name="external" :size="15" /></a>
+          <button type="button" class="icon sm" :disabled="busy" title="刷新截图" aria-label="刷新截图" @click="capture(tabs.find((t) => t.tag === selected))"><Icon name="refresh" :size="15" /></button>
+          <button type="button" class="sm" :class="operating ? 'primary' : ''" :disabled="busy || (!operating && (liveState !== 'view' || !imageReady))" @click="operating ? releaseControl() : requestControl()"><Icon :name="operating ? 'close' : 'hand'" :size="14" />{{ operating ? '退出操作' : '开始操作' }}</button>
         </div>
       </div>
-      <div class="remote-controls">
-        <div class="remote-toolbar">
-          <button :disabled="inputDisabled" @click="scrollRemote(-600)">
-            网页上滚</button
-          ><button :disabled="inputDisabled" @click="scrollRemote(600)">
-            网页下滚
-          </button>
-        </div>
-        <form @submit.prevent="sendText" class="remote-text">
-          <label>
-            辅助输入
-            <textarea
-              v-model="text"
-              rows="1"
-              maxlength="16000"
-              aria-label="远程输入文字"
-              autocomplete="off"
-              autocapitalize="none"
-              spellcheck="false"
-              :disabled="!remote"
-              :placeholder="screenshot?.editable ? '点此打开手机键盘，输入后点“发送文字”' : '先点击画面中的网页输入框，再在此输入'"
-            ></textarea>
-          </label>
-          <button :disabled="inputDisabled || !screenshot?.editable || !text">发送文字</button>
-          <button type="button" :disabled="inputDisabled" aria-label="远程按键 回车" @click="control({ action: 'press', key: 'Enter' })">回车</button>
-        </form>
-        <p class="hint remote-text-hint" role="status">
-          先点选网页输入框，再用辅助输入；发送文字仅输入、不提交，提交请点“回车”。
-        </p>
-        <details class="remote-input">
-          <summary>更多按键与网址</summary>
-          <div class="remote-keys">
-            <button
-              v-for="[key, label] in keys"
-              :key="key"
-              :disabled="inputDisabled"
-              :aria-label="'远程按键 ' + label"
-              @click="control({ action: 'press', key })"
-            >
-              {{ label }}
-            </button>
-          </div>
-          <div class="remote-keys">
-            <button
-              :disabled="inputDisabled"
-              @click="control({ action: 'back' })"
-            >
-              网页后退</button
-            ><button
-              :disabled="inputDisabled"
-              @click="control({ action: 'forward' })"
-            >
-              网页前进</button
-            ><button
-              :disabled="inputDisabled"
-              @click="control({ action: 'reload' })"
-            >
-              重载网页
-            </button>
-          </div>
-          <form
-            class="remote-url"
-            @submit.prevent="control({ action: 'goto', url: address })"
+      <div class="browser-stage">
+        <div v-if="busy" class="browser-placeholder" role="status"><span class="spinner"></span>正在读取浏览器…</div>
+        <figure v-else-if="!!screenshot" class="browser-capture">
+          <div
+            class="browser-image"
+            role="region"
+            :class="{ 'remote-active': remote }"
+            :tabindex="liveState === 'offline' ? -1 : 0"
+            aria-label="浏览器画面：查看时双指缩放、单指拖动，操作时短按点击、长按后拖动网页"
+            @keydown="imageKey"
+            @click="clickImage"
+            @pointerdown="pointerDown"
+            @pointermove="pointerMove"
+            @pointerup="pointerUp"
+            @pointercancel="pointerCancel"
+            @lostpointercapture="pointerCancel"
+            @touchstart.prevent="touchStart"
+            @touchmove.prevent="touchMove"
+            @touchend.prevent="touchEnd"
+            @touchcancel.prevent="touchCancel"
+            @wheel.prevent="wheelImage"
+            @contextmenu.prevent.stop="contextImage"
+            @dragstart.prevent
           >
-            <input
-              v-model="address"
-              type="url"
-              required
-              aria-label="远程网页地址"
-              :disabled="!remote"
-              placeholder="https://example.com"
-              autocapitalize="none"
-              spellcheck="false"
-            /><button :disabled="inputDisabled">前往</button>
+            <img
+              :src="screenshot.image.url"
+              :width="screenshot.image.width"
+              :height="screenshot.image.height"
+              :alt="'标签页当前截图：' + screenshot.title"
+              draggable="false"
+              :style="{ transform: `translate(${panX}px, ${panY}px) scale(${zoom})` }"
+              @load="loadedImage"
+              @error="failedImage"
+            />
+          </div>
+          <figcaption>
+            <span :class="['dot', remote ? 'info pulse' : 'ok']" aria-hidden="true"></span>实时画面 · {{ new Date(screenshot.capturedAt).toLocaleTimeString() }}{{ remote ? ' · 操作模式' : ' · 查看模式' }}<span class="caption-tip" :style="{ visibility: operating ? 'hidden' : 'visible' }"> · 双指缩放、单指拖动；鼠标滚轮缩放</span>
+          </figcaption>
+        </figure>
+        <div v-else-if="!status?.connected && !error" class="browser-placeholder">
+          <Icon name="globe" :size="32" />
+          <strong>{{ employeeId ? '员工浏览器未启动' : '浏览器扩展尚未连接' }}</strong>
+          <p v-if="employeeId">点击“刷新标签页”自动启动该员工的独立浏览器。登录数据会保留，无需手动安装扩展。</p>
+          <p v-else>Windows：在本机 Chrome 加载项目 extensions/nova-chrome。Docker：等待容器 Chromium 和扩展自动连接，然后刷新标签页。</p>
+          <button type="button" class="primary sm" :disabled="busy" @click="refresh"><Icon name="refresh" :size="14" />刷新标签页</button>
+        </div>
+        <div v-else-if="!selected && !error" class="browser-placeholder">
+          <Icon name="layers" :size="32" />
+          <strong>{{ tabs.length ? "当前没有可截图的标签页" : "当前没有标签页" }}</strong>
+          <p>请在服务端浏览器打开 HTTP(S) 网页，再刷新标签页列表。</p>
+        </div>
+        <div v-else-if="error" class="browser-placeholder">未显示旧截图，请刷新标签页或重新选择。</div>
+      </div>
+      <div v-if="selected && !operating" class="remote-idle hint"><Icon name="hand" :size="14" />点「开始操作」后，可以直接点击、拖动、滚动网页，并使用辅助输入与按键。</div>
+      <div v-if="selected && operating" class="remote-controls">
+        <div class="remote-row">
+          <div class="remote-toolbar">
+            <button type="button" class="sm" :disabled="inputDisabled" title="网页上滚" @click="scrollRemote(-600)"><Icon name="down" :size="14" class="flip" /><span>网页上滚</span></button>
+            <button type="button" class="sm" :disabled="inputDisabled" title="网页下滚" @click="scrollRemote(600)"><Icon name="down" :size="14" /><span>网页下滚</span></button>
+          </div>
+          <form class="remote-text" @submit.prevent="sendText">
+            <textarea v-model="text" rows="1" maxlength="16000" aria-label="远程输入文字" autocomplete="off" autocapitalize="none" spellcheck="false" :disabled="!remote" :placeholder="screenshot?.editable ? '辅助输入：输入后点“发送文字”' : '先点击画面中的网页输入框，再在此输入'"></textarea>
+            <button class="sm" :disabled="inputDisabled || !screenshot?.editable || !text">发送文字</button>
+            <button type="button" class="sm" :disabled="inputDisabled" aria-label="远程按键 回车" @click="control({ action: 'press', key: 'Enter' })">回车</button>
           </form>
-        </details>
-        <p class="hint remote-mode-hint">
-          点击、滚轮和鼠标拖动会直接同步到网页；触屏短按点击，按住约半秒再移动可像鼠标按住拖动。松手后等待“同步中…”结束再开始下一次；翻页请用上滚/下滚。查看模式支持双指缩放和单指拖动。
-        </p>
-      </div>
-      <div v-if="busy" class="browser-placeholder" role="status">
-        <span class="spinner"></span>正在读取浏览器…
-      </div>
-      <figure v-else-if="!!screenshot" class="browser-capture">
-        <figcaption>
-          实时画面 · {{ new Date(screenshot.capturedAt).toLocaleTimeString() }}{{
-            remote ? ' · 操作模式' : ' · 查看模式'
-          }}
-          <span :style="{ visibility: operating ? 'hidden' : 'visible' }"> · 双指缩放、单指拖动；鼠标滚轮缩放</span>
-        </figcaption>
-        <div
-          class="browser-image"
-          role="region"
-          :class="{ 'remote-active': remote }"
-          :tabindex="liveState === 'offline' ? -1 : 0"
-          aria-label="浏览器画面：查看时双指缩放、单指拖动，操作时短按点击、长按后拖动网页"
-          @keydown="imageKey"
-          @click="clickImage"
-          @pointerdown="pointerDown"
-          @pointermove="pointerMove"
-          @pointerup="pointerUp"
-          @pointercancel="pointerCancel"
-          @lostpointercapture="pointerCancel"
-          @touchstart.prevent="touchStart"
-          @touchmove.prevent="touchMove"
-          @touchend.prevent="touchEnd"
-          @touchcancel.prevent="touchCancel"
-          @wheel.prevent="wheelImage"
-          @contextmenu.prevent.stop="contextImage"
-          @dragstart.prevent
-        >
-          <img
-            :src="screenshot.image.url"
-            :width="screenshot.image.width"
-            :height="screenshot.image.height"
-            :alt="'标签页当前截图：' + screenshot.title"
-            draggable="false"
-            :style="{ transform: `translate(${panX}px, ${panY}px) scale(${zoom})` }"
-            @load="loadedImage"
-            @error="failedImage"
-          />
         </div>
-      </figure>
-      <div v-else-if="!status?.connected && !error" class="browser-placeholder">
-        <strong>{{ employeeId ? '员工浏览器未启动' : '浏览器扩展尚未连接' }}</strong>
-        <p v-if="employeeId">点击“刷新标签页”自动启动该员工的独立浏览器。登录数据会保留，无需手动安装扩展。</p>
-        <p v-else>
-          Windows：在本机 Chrome 加载项目
-          extensions/nova-chrome。Docker：等待容器 Chromium
-          和扩展自动连接，然后刷新标签页。
-        </p>
-      </div>
-      <div v-else-if="!selected && !error" class="browser-placeholder">
-        <strong>{{
-          tabs.length ? "当前没有可截图的标签页" : "当前没有标签页"
-        }}</strong>
-        <p>请在服务端浏览器打开 HTTP(S) 网页，再刷新标签页列表。</p>
-      </div>
-      <div v-else-if="error" class="browser-placeholder">
-        未显示旧截图，请刷新标签页或重新选择。
+        <details class="remote-input">
+          <summary><Icon name="keyboard" :size="14" />更多按键与网址</summary>
+          <div class="remote-more">
+            <div class="remote-keys">
+              <button v-for="[key, label] in keys" :key="key" type="button" class="sm" :disabled="inputDisabled" :aria-label="'远程按键 ' + label" @click="control({ action: 'press', key })">{{ label }}</button>
+            </div>
+            <div class="remote-keys">
+              <button type="button" class="sm" :disabled="inputDisabled" @click="control({ action: 'back' })">网页后退</button><button type="button" class="sm" :disabled="inputDisabled" @click="control({ action: 'forward' })">网页前进</button><button type="button" class="sm" :disabled="inputDisabled" @click="control({ action: 'reload' })">重载网页</button>
+            </div>
+            <form class="remote-url" @submit.prevent="control({ action: 'goto', url: address })">
+              <input v-model="address" type="url" required aria-label="远程网页地址" :disabled="!remote" placeholder="https://example.com" autocapitalize="none" spellcheck="false" /><button class="sm" :disabled="inputDisabled">前往</button>
+            </form>
+          </div>
+        </details>
+        <p class="hint remote-text-hint" role="status">先点选网页输入框，再用辅助输入；发送文字仅输入、不提交，提交请点“回车”。</p>
+        <p class="hint remote-mode-hint">点击、滚轮和鼠标拖动会直接同步到网页；触屏短按点击，按住约半秒再移动可像鼠标按住拖动。松手后等待“同步中…”结束再开始下一次；翻页请用上滚/下滚。</p>
       </div>
     </div>
   </section>
 </template>
 
 <style scoped>
-.remote-controls {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface, #fff);
+.browser-view { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--bg); }
+.browser-toolbar { display: flex; align-items: center; gap: 8px; flex: none; min-height: 44px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.browser-heading { flex: none; margin-right: 8px; font-size: 15px; }
+.browser-tabstrip { display: flex; flex: 1; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.browser-tabstrip::-webkit-scrollbar { display: none; }
+.browser-tabstrip-empty { flex: 1; color: var(--muted); font-size: 12px; }
+.browser-tab { flex: none; gap: 6px; max-width: 220px; min-height: 30px; padding: 0 10px; border-color: transparent; border-radius: var(--r-md); background: transparent; color: var(--text-2); font-weight: 400; font-size: 12px; }
+.browser-tab:hover:not(:disabled) { background: var(--surface-2); }
+.browser-tab.selected { border-color: var(--border); background: var(--surface-2); color: var(--text); font-weight: 500; }
+.browser-tab .icon-svg { flex: none; color: var(--muted); }
+.browser-tab.selected .icon-svg { color: var(--accent); }
+.browser-tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-tab small { flex: none; padding: 0 4px; border-radius: 4px; background: var(--surface-3); color: var(--muted); font-size: 10px; }
+.browser-status { display: flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
+.conn { display: inline-flex; align-items: center; gap: 6px; padding: 0 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.conn.ok { color: var(--ok); }
+.browser-view > .banner { flex: none; }
+.browser-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.browser-address { display: flex; align-items: center; gap: 12px; flex: none; min-height: 48px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.address-text { display: grid; flex: 1; min-width: 0; }
+.address-text strong { font-size: 13px; font-weight: 600; }
+.browser-url summary { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; color: var(--muted); font-size: 11px; cursor: pointer; list-style: none; }
+.browser-url summary::-webkit-details-marker { display: none; }
+.browser-url summary:hover { color: var(--accent-text); }
+.browser-url p { margin: 4px 0 2px; padding: 6px 8px; border-radius: var(--r-sm); background: var(--surface-2); color: var(--text-2); font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; user-select: all; }
+.address-actions { display: flex; align-items: center; gap: 4px; flex: none; }
+.icon-link { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: var(--r-md); color: var(--text-2); }
+.icon-link:hover { background: var(--surface-3); }
+.browser-stage { position: relative; display: flex; flex: 1; min-height: 0; }
+.browser-capture { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; margin: 0; }
+.browser-image { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #e9ebf0; touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; cursor: grab; }
+.browser-image:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.browser-image img { position: absolute; inset: 12px; display: block; max-width: calc(100% - 24px); max-height: calc(100% - 24px); width: auto; height: auto; margin: auto; border-radius: 6px; background: #fff; box-shadow: 0 1px 2px rgb(16 24 40 / 8%), 0 8px 24px rgb(16 24 40 / 10%); -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; transform-origin: 0 0; pointer-events: none; -webkit-user-drag: none; }
+.browser-image:active { cursor: grabbing; }
+.browser-image.remote-active { cursor: crosshair; box-shadow: inset 0 0 0 2px var(--accent); }
+.browser-capture figcaption { display: flex; align-items: center; gap: 6px; flex: none; padding: 5px 12px; border-top: 1px solid var(--border); background: var(--surface); color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; }
+.browser-placeholder { display: grid; align-content: center; justify-items: center; gap: 8px; flex: 1; padding: 32px 20px; color: var(--muted); text-align: center; font-size: 13px; }
+.browser-placeholder strong { color: var(--text); font-size: 15px; }
+.browser-placeholder p { max-width: 420px; line-height: 1.6; }
+.browser-placeholder .icon-svg { color: var(--faint); }
+.remote-idle { display: flex; align-items: center; gap: 6px; flex: none; padding: 8px 12px; border-top: 1px solid var(--border); background: var(--surface); }
+.remote-controls { display: grid; gap: 6px; flex: none; padding: 8px 12px max(8px, env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); background: var(--surface); }
+.remote-row { display: flex; align-items: center; gap: 8px; }
+.remote-toolbar { display: flex; gap: 4px; flex: none; }
+.flip { transform: rotate(180deg); }
+.remote-text { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
+.remote-text textarea { flex: 1; min-width: 0; min-height: 30px; height: 30px; padding: 5px 8px; resize: none; font-size: 13px; }
+.remote-input summary { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; cursor: pointer; list-style: none; }
+.remote-input summary::-webkit-details-marker { display: none; }
+.remote-more { display: grid; gap: 6px; margin-top: 6px; }
+.remote-keys { display: flex; flex-wrap: wrap; gap: 4px; }
+.remote-url { display: flex; gap: 4px; }
+.remote-url input { flex: 1; min-width: 0; height: 30px; }
+.remote-text-hint, .remote-mode-hint { font-size: 11px; }
+@media (max-width: 767px) {
+  .browser-toolbar { padding: 4px 8px; gap: 4px; }
+  .browser-heading { display: none; }
+  .browser-tab { max-width: 160px; }
+  .conn-label, .btn-label { display: none; }
+  .browser-status { margin-left: auto; }
+  .browser-status button { width: 36px; padding: 0; }
+  .browser-address { gap: 6px; padding: 6px 8px; }
+  .address-actions .badge, .url-more, .address-actions .ghost span { display: none; }
+  .browser-image img { inset: 6px 6px auto; max-width: calc(100% - 12px); max-height: calc(100% - 12px); }
+  .caption-tip, .remote-mode-hint { display: none; }
+  .remote-controls { padding: 6px 8px max(6px, env(safe-area-inset-bottom, 0px)); }
+  .remote-row { flex-wrap: wrap; }
+  .remote-toolbar span { display: none; }
+  .remote-text { flex: 1 1 100%; order: -1; }
+  .remote-text textarea { height: 36px; font-size: 16px; }
 }
-.remote-toolbar,
-.remote-keys,
-.remote-text,
-.remote-url {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-.remote-input {
-  margin-top: 8px;
-}
-.remote-input summary {
-  min-height: 44px;
-  padding: 10px 0;
-}
-.remote-input .hint {
-  margin: 4px 0 10px;
-}
-.remote-text {
-  align-items: flex-end;
-  margin-top: 8px;
-}
-.remote-text label {
-  flex: 1 1 180px;
-  min-width: 0;
-  font-size: 12px;
-}
-.remote-text textarea {
-  display: block;
-  width: 100%;
-  min-width: 0;
-  min-height: 44px;
-  margin-top: 3px;
-}
-.remote-text-hint {
-  margin: 5px 0 0;
-  font-size: 11px;
-}
-.remote-keys {
-  margin: 10px 0;
-}
-.remote-url input {
-  flex: 1;
-  min-width: 0;
-  width: 100%;
-}
-.remote-mode-hint {
-  margin: 6px 0 0;
-}
-.remote-notice {
-  padding: 10px 12px;
-  margin: 0 0 12px;
-  border-radius: 8px;
-}
-.remote-active {
-  cursor: crosshair;
-}
-@media (max-width: 760px) {
-  .remote-controls button,
-  .remote-controls button,
-  .browser-address button,
-  .browser-address .button-link,
-  .browser-tab {
-    min-height: 44px;
-  }
-  .remote-controls {
-    padding: 8px 10px;
-  }
-  .remote-toolbar {
-    gap: 6px;
-  }
-  .remote-toolbar button {
-    padding: 8px;
-    font-size: 13px;
-  }
-  .remote-mode-hint {
-    font-size: 11px;
-  }
-  .remote-keys button {
-    flex: 1 0 44px;
-  }
-}
-.browser-view {
-  flex: 1 1 0;
-  min-height: 0;
-  min-width: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior-y: contain;
-  -webkit-overflow-scrolling: touch;
-  padding: 22px 32px 32px;
-  scrollbar-width: thin;
-  scrollbar-color: #d5d8e1 transparent;
-}
-.browser-tabstrip {
-  display: flex;
-  flex-shrink: 0;
-  overflow-x: auto;
-  overscroll-behavior-y: auto;
-  margin-bottom: 16px;
-  gap: 6px;
-  padding: 4px 2px 8px;
-  border-bottom: 1px solid var(--border);
-}
-.browser-tab {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 150px;
-  max-width: 250px;
-  flex-shrink: 0;
-  padding: 11px 14px;
-  border-radius: 10px 10px 0 0;
-  text-align: left;
-  color: #656b7b;
-  background: #f5f6f9;
-  border-color: transparent;
-}
-.browser-tab.selected {
-  background: var(--accent-soft);
-  border-color: #d9d9f5;
-  color: var(--accent);
-  box-shadow: inset 0 -2px var(--accent);
-}
-.browser-tab-title {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  flex: 1;
-}
-.browser-tab small {
-  white-space: nowrap;
-  font-size: 10px;
-  color: #858b9a;
-}
-.browser-tab-mark {
-  color: var(--accent);
-}
-.browser-tab:focus-visible {
-  outline: 2px solid #8585e5;
-  outline-offset: 1px;
-}
-.browser-panel {
-  border: 1px solid #e3e5ed;
-  border-radius: 16px;
-  background: #fff;
-  box-shadow: 0 5px 20px #30334b08;
-  overflow: hidden;
-}
-.browser-address {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px 20px;
-  background: #f8f9fb;
-  border-bottom: 1px solid var(--border);
-}
-.browser-address > div {
-  min-width: 0;
-}
-.browser-address > div:first-child {
-  flex: 1;
-  max-width: 100%;
-}
-.browser-address > .actions {
-  flex-shrink: 0;
-}
-.browser-address strong {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #363b4a;
-}
-.browser-url {
-  margin-top: 4px;
-  min-width: 0;
-}
-.browser-url summary {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-}
-.browser-url p {
-  font-size: 12px;
-  margin: 5px 0 0;
-  color: #777e8e;
-  overflow-wrap: anywhere;
-  max-height: 96px;
-  overflow-y: auto;
-  overscroll-behavior-y: auto;
-}
-.browser-address button {
-  flex-shrink: 0;
-}
-.browser-placeholder {
-  min-height: 280px;
-  padding: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 12px;
-  text-align: center;
-  color: #777e8e;
-}
-.browser-placeholder p {
-  max-width: 650px;
-  line-height: 1.8;
-  margin: 0;
-}
-.browser-capture {
-  margin: 0;
-}
-.browser-capture figcaption {
-  padding: 11px 18px;
-  font-size: 11px;
-  color: #7b8190;
-  background: #fafbfc;
-  border-bottom: 1px solid var(--border);
-}
-.browser-image {
-  padding: 18px;
-  background: #f0f1f5;
-  overflow: hidden;
-  touch-action: none;
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-  cursor: grab;
-}
-.browser-image:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-.browser-image img {
-  display: block;
-  width: 100%;
-  height: auto;
-  max-width: 1568px;
-  margin: 0 auto;
-  border-radius: 8px;
-  box-shadow: 0 2px 10px #30334b0a;
-  background: #fff;
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-  transform-origin: 0 0;
-  pointer-events: none;
-  -webkit-user-drag: none;
-}
-.browser-image:active {
-  cursor: grabbing;
-}
-.browser-image.remote-active {
-  cursor: crosshair;
-}
-@media (max-width: 760px) {
-  .browser-view {
-    padding: 14px 12px max(22px, env(safe-area-inset-bottom, 0px));
-  }
-  .browser-tabstrip {
-    margin: 0 -12px 14px;
-    padding: 0 12px 8px;
-    border-bottom: 0;
-    scrollbar-width: none;
-  }
-  .browser-tabstrip::-webkit-scrollbar {
-    display: none;
-  }
-  .browser-tab {
-    min-width: 145px;
-    max-width: 190px;
-    padding: 10px 12px;
-    border-radius: 11px;
-  }
-  .browser-tab.selected {
-    box-shadow: none;
-  }
-  .browser-address > div:first-child {
-    width: 100%;
-  }
-  .browser-address {
-    padding: 14px;
-    gap: 12px;
-    align-items: flex-start;
-    flex-direction: column;
-  }
-  .browser-address > .actions {
-    width: 100%;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .browser-address > .actions button {
-    flex: 0 0 auto;
-  }
-  .browser-address > .actions .button-link,
-  .browser-address > .actions .pill {
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .browser-placeholder {
-    min-height: 200px;
-    padding: 24px 18px;
-  }
-  .browser-image {
-    padding: 6px;
-  }
-  .topbar {
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-}
-@media (max-width: 760px), (max-height: 520px) and (max-width: 1024px) {
-  .browser-view {
-    padding: 8px 12px 16px;
-  }
-  .browser-tabstrip {
-    margin-bottom: 6px;
-    padding-bottom: 4px;
-  }
-  .browser-address {
-    padding: 6px 10px;
-    gap: 6px;
-  }
-  .remote-controls {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 10px;
-  }
-  .remote-text,
-  .remote-text-hint {
-    flex-basis: 100%;
-  }
-  .remote-text label {
-    flex-basis: 120px;
-  }
-  .remote-text button {
-    padding: 8px;
-  }
-  .remote-input {
-    margin-top: 0;
-    flex: 1;
-  }
-  .remote-input[open] {
-    flex-basis: 100%;
-  }
-  .remote-mode-hint {
-    display: none;
-  }
-  .browser-capture figcaption {
-    padding: 6px 10px;
-  }
-  .browser-image {
-    padding: 6px;
-  }
+@media (max-height: 560px) and (max-width: 1024px) {
+  .remote-text-hint, .remote-mode-hint, .browser-capture figcaption { display: none; }
 }
 </style>

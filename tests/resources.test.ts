@@ -12,7 +12,7 @@ const resources = readFileSync("web/src/ResourcesView.vue", "utf8");
 const app = readFileSync("web/src/App.vue", "utf8");
 
 test("Docker builds exactly the client platforms offered by Resources before bundling the frontend", () => {
-  const script = resources.match(/<script setup vapor>([\s\S]*?)<\/script>/)![1];
+  const script = resources.match(/const clients = \[[\s\S]*?\];/)![0];
   const clients = vm.runInNewContext(script + "\nclients") as { name: string; arch: string; file: string }[];
   const targets = docker.match(/for target in ([^;]+); do/)![1].trim().split(/\s+/);
   const expected = [
@@ -72,9 +72,13 @@ test("Resources offers a Chrome extension ZIP containing only the current runtim
 test("Resources is available in desktop and mobile navigation with same-origin downloadable clients", () => {
   assert.match(app, /import ResourcesView from "\.\/ResourcesView\.vue"/);
   assert.match(app, /resources: "资源"/);
-  const button = app.match(/<button[^>]*@click="view = 'resources'"[^>]*>[\s\S]*?<\/button>/)![0];
+  const sidebar = readFileSync("web/src/AppSidebar.vue", "utf8");
+  const button = sidebar.match(/<button[^>]*@click="emit\('navigate', 'resources'\)"[^>]*>[\s\S]*?<\/button>/)![0];
   assert.doesNotMatch(button, /v-if=/, "downloads are not admin-only");
-  assert.match(button, /<span>资源<\/span>/);
+  assert(sidebar.indexOf(button) < sidebar.indexOf('<template v-if="isAdmin">'));
+  assert.match(button, /<span class="nav-label">资源<\/span>/);
+  assert.match(resources, /<PageHeader title="资源"/);
+  assert.match(readFileSync("web/src/PageHeader.vue", "utf8"), /aria-label="打开导航"/);
   assert.match(app, /<ResourcesView v-else-if="view === 'resources'" \/>/);
   assert.match(resources, /:href="'\/clients\/' \+ client\.file" :download="client\.file"/);
   assert.match(resources, /:aria-label="'下载 '/);
