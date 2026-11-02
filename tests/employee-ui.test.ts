@@ -6,6 +6,79 @@ import { ref } from "vue";
 const source = readFileSync("web/src/App.vue", "utf8");
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end));
 
+function employeeWorkspace(url = "https://vega.test/", list = [{ id: "ea", activeTasks: 0 }, { id: "eb", activeTasks: 0 }]) {
+  const calls: string[] = [], navigation: string[] = [], location = { href: url };
+  const window = { location, history: {
+    pushState: (_state: any, _title: string, next: string) => { location.href = next; navigation.push("push"); },
+    replaceState: (_state: any, _title: string, next: string) => { location.href = next; navigation.push("replace"); },
+  } };
+  const context: any = {
+    URL, window, user: ref({ id: "alice" }), selectedEmployee: ref(""), employees: ref([]), activeTaskCount: ref(0), employee: ref({}),
+    employeeSession: ref(""), employeeEvent: ref(null), employeeTab: ref("chat"), employeeExecutionOpen: ref(false),
+    employeeTaskFilter: ref("active"), dutyOpen: ref(false), memoryID: ref(""), taskText: ref(""), employeeError: ref(""),
+    employeeComposers: ref({}), creatingEmployee: ref(false), view: ref("employee"), closeNavigation() {},
+    api: async (path: string) => { calls.push(path); return path === "/employees" ? list : { id: path.split("/").at(-1) }; },
+  };
+  const methods = vm.runInNewContext(between("function employeeLocationChanged()", "function employeeApi(") + between("async function chooseEmployee(", "async function createEmployee(") + "\n({ loadEmployee, chooseEmployee, employeeLocationChanged })", context);
+  context.refreshEmployee = methods.loadEmployee;
+  return { ...context, ...methods, calls, navigation, location };
+}
+
+test("employee URLs distinguish workspaces and survive refresh or opening a shared link", async () => {
+  const first = employeeWorkspace("https://vega.test/?keep=1#anchor");
+  await first.loadEmployee();
+  assert.equal(new URL(first.location.href).searchParams.get("employee"), "ea");
+  await first.chooseEmployee("eb");
+  assert.equal(first.location.href, "https://vega.test/?keep=1&employee=eb#anchor");
+  assert.deepEqual(first.navigation, ["replace", "push"]);
+  const refreshed = employeeWorkspace(first.location.href);
+  await refreshed.loadEmployee();
+  assert.equal(refreshed.selectedEmployee.value, "eb");
+  assert.equal(refreshed.employee.value.id, "eb");
+  assert.deepEqual(refreshed.calls, ["/employees", "/employees/eb"]);
+  assert.equal(refreshed.navigation.length, 0, "loading an existing link does not add redundant history entries");
+});
+
+test("an inaccessible or deleted employee URL falls back only after checking the visible list", async () => {
+  const state = employeeWorkspace("https://vega.test/?employee=hidden", [{ id: "ea", activeTasks: 0 }]);
+  await state.loadEmployee();
+  assert.equal(state.selectedEmployee.value, "ea");
+  assert.equal(new URL(state.location.href).searchParams.get("employee"), "ea");
+  assert(!state.calls.includes("/employees/hidden"), "URL IDs are not authorization to read another employee");
+  const empty = employeeWorkspace("https://vega.test/?employee=hidden&keep=1", []);
+  await empty.loadEmployee();
+  assert.equal(empty.selectedEmployee.value, "");
+  assert.equal(empty.location.href, "https://vega.test/?keep=1");
+  assert.deepEqual(empty.calls, ["/employees"]);
+});
+
+test("browser back and forward restore the employee from the URL without adding history", async () => {
+  const state = employeeWorkspace("https://vega.test/?employee=ea");
+  await state.loadEmployee();
+  await state.chooseEmployee("eb");
+  state.location.href = "https://vega.test/?employee=ea";
+  await state.employeeLocationChanged();
+  assert.equal(state.selectedEmployee.value, "ea");
+  assert.equal(state.employee.value.id, "ea");
+  state.location.href = "https://vega.test/?employee=eb";
+  await state.employeeLocationChanged();
+  assert.equal(state.employee.value.id, "eb");
+  assert.deepEqual(state.navigation, ["push"]);
+  assert(source.includes('window.addEventListener("popstate", employeeLocationChanged)'));
+  assert(source.includes('window.removeEventListener("popstate", employeeLocationChanged)'));
+});
+
+test("an employee link remains intact through login and is resolved after authentication", async () => {
+  const state = employeeWorkspace("https://vega.test/?employee=eb");
+  state.user.value = null;
+  await state.loadEmployee();
+  assert.equal(state.calls.length, 0);
+  assert.equal(state.location.href, "https://vega.test/?employee=eb");
+  state.user.value = { id: "bob" };
+  await state.loadEmployee();
+  assert.equal(state.employee.value.id, "eb");
+});
+
 test("employee deletion requires confirmation, removes only its own draft and chooses a remaining employee", async () => {
   const calls: any[] = [], context: any = {
     employee: ref({ id: "ea", name: "Delete" }), selectedEmployee: ref("ea"), employeeDeleting: ref(false),

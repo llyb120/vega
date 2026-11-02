@@ -671,14 +671,15 @@ async function logout() {
     resetLogin();
   }
 }
-onMounted(
-  () =>
-    void attempt(async () => {
-      const result = await api("/auth/me");
-      setupRequired.value = result.setupRequired;
-      if (result.user) await enter(result);
-    }),
-);
+onMounted(() => {
+  window.addEventListener("popstate", employeeLocationChanged);
+  void attempt(async () => {
+    const result = await api("/auth/me");
+    setupRequired.value = result.setupRequired;
+    if (result.user) await enter(result);
+  });
+});
+onBeforeUnmount(() => window.removeEventListener("popstate", employeeLocationChanged));
 async function selectSession(session) {
   if (session.taskId) {
     openEmployee(session.id);
@@ -1044,6 +1045,15 @@ async function handleEvent(event) {
       break;
   }
 }
+function employeeLocationChanged() {
+  if (user.value) return chooseEmployee(new URL(window.location.href).searchParams.get("employee") || "");
+}
+function setEmployeeURL(id, replace = false) {
+  const url = new URL(window.location.href);
+  if (id) url.searchParams.set("employee", id);
+  else url.searchParams.delete("employee");
+  if (url.href !== window.location.href) window.history[replace ? "replaceState" : "pushState"](null, "", url.href);
+}
 async function loadEmployee() {
   if (!user.value) return;
   const owner = user.value.id;
@@ -1051,8 +1061,10 @@ async function loadEmployee() {
   if (user.value?.id !== owner) return;
   employees.value = list;
   activeTaskCount.value = list.reduce((count, employee) => count + employee.activeTasks, 0);
-  if (!list.some((entry) => entry.id === selectedEmployee.value)) selectedEmployee.value = list[0]?.id || "";
-  const id = selectedEmployee.value;
+  const requested = selectedEmployee.value || new URL(window.location.href).searchParams.get("employee");
+  const id = list.find((entry) => entry.id === requested)?.id || list[0]?.id || "";
+  selectedEmployee.value = id;
+  setEmployeeURL(id, true);
   if (!id) {
     employee.value = { duties: [], tasks: [], memories: [], runs: [] };
     employeeSession.value = "";
@@ -1073,6 +1085,7 @@ function employeeBrowserApi(path, method = "GET", data) {
 }
 async function chooseEmployee(id) {
   selectedEmployee.value = id;
+  setEmployeeURL(id);
   employeeSession.value = "";
   employeeEvent.value = null;
   employeeTab.value = "chat";
