@@ -1,0 +1,48 @@
+<script setup vapor>
+const clients = [
+  { name: "Windows", arch: "x64", file: "vega-local-windows-amd64.exe", description: "系统托盘客户端，无控制台窗口" },
+  { name: "Linux", arch: "x64", file: "vega-local-linux-amd64", description: "命令行客户端 · Intel / AMD" },
+  { name: "Linux", arch: "ARM64", file: "vega-local-linux-arm64", description: "命令行客户端 · ARM 64 位" },
+  { name: "macOS", arch: "Apple Silicon", file: "vega-local-darwin-arm64", description: "命令行客户端 · M 系列芯片" },
+  { name: "macOS", arch: "Intel", file: "vega-local-darwin-amd64", description: "命令行客户端 · Intel 芯片" },
+];
+</script>
+
+<template>
+  <header class="topbar">
+    <div><h2>资源</h2><p>下载与当前服务配套的本地执行客户端</p></div>
+  </header>
+  <div class="page-scroll settings">
+    <section aria-labelledby="clients-heading">
+      <h3 id="clients-heading">客户端下载</h3>
+      <p class="hint">在需要执行任务的电脑上运行客户端，即可使用该电脑的文件、终端和浏览器。手机和平板通过网页选择已授权的在线电脑，无需安装客户端。</p>
+      <div class="resource-grid">
+        <article v-for="client in clients" :key="client.file" class="card">
+          <div class="section-heading"><h3>{{ client.name }}</h3><span class="pill">{{ client.arch }}</span></div>
+          <p class="hint">{{ client.description }}</p>
+          <a class="client-download" :href="'/clients/' + client.file" :download="client.file" :aria-label="'下载 ' + client.name + ' ' + client.arch + ' 客户端'">下载客户端 ↓</a>
+        </article>
+      </div>
+    </section>
+    <section class="card" aria-labelledby="client-start-heading">
+      <h3 id="client-start-heading">开始使用</h3>
+      <ol>
+        <li>选择与电脑系统及芯片匹配的版本。Windows 双击运行后在系统托盘查看状态；Linux / macOS 在终端为下载的文件执行 <code>chmod +x 文件名</code>，再用 <code>./文件名</code> 启动并保持进程运行。</li>
+        <li>在同一台电脑上打开本站并登录，允许浏览器访问本地网络，确认客户端弹出的站点授权。授权后可关闭网页，客户端会独立保持连接。</li>
+        <li>回到工作台，在员工或会话的执行位置选择“客户端”及对应电脑，即可从电脑或手机提交任务。</li>
+      </ol>
+      <p class="hint">升级前先退出旧客户端，再启动新版本。下载的是未签名的可执行文件，Windows / macOS 可能提示安全拦截，请仅在确认本站与文件可信后按系统提示批准运行。</p>
+      <p class="hint">仅授权可信站点：客户端可执行命令和读写本机文件。远程访问建议使用 HTTPS；HTTP 会明文传输登录信息、设备凭据和命令。</p>
+    </section>
+  </div>
+</template>
+
+<style scoped>
+.resource-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 16px; margin: 20px 0; }
+.resource-grid .card { margin: 0; }
+.resource-grid h3 { margin: 0; }
+.client-download { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 8px 16px; border-radius: 8px; background: var(--accent); color: white; text-decoration: none; }
+.client-download:hover { opacity: .88; }
+li { margin: 12px 0; line-height: 1.8; }
+code { overflow-wrap: anywhere; }
+</style>

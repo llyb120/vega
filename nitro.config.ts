@@ -14,6 +14,9 @@ export default defineNitroConfig({
   ],
   externals: { external: ["node:sqlite", "sharp"] },
   routeRules: {
+    "/clients/**": {
+      headers: { "Content-Disposition": "attachment", "Cache-Control": "no-cache" },
+    },
     "/**": {
       headers: {
         "X-Content-Type-Options": "nosniff",

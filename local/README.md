@@ -28,6 +28,10 @@ Reverse proxies must forward WebSocket Upgrade/Connection and the Authorization 
 
 ## Build
 
+Docker builds all five clients from the same source as the server: Windows x64 (tray), Linux x64/ARM64 and macOS Intel/Apple Silicon (headless). After deploying the image, sign in and open **资源 → 客户端下载**; files are served by that deployment at `/clients/`, not fetched from an external release. The Go toolchain is only in the build stage, not the runtime image.
+
+For non-Docker deployments, build the matching binaries below and place them in `web/public/clients/` **before** `npm run build`, using the filenames `vega-local-windows-amd64.exe`, `vega-local-linux-amd64`, `vega-local-linux-arm64`, `vega-local-darwin-amd64` and `vega-local-darwin-arm64`. A plain frontend/server build does not compile the clients.
+
 Windows (system tray only, no console window):
 
 ```powershell

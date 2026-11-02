@@ -1,4 +1,18 @@
 # syntax=docker/dockerfile:1
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS clients
+WORKDIR /src
+COPY local/go.mod local/go.sum ./
+RUN go mod download
+COPY local/*.go local/icon.ico ./
+RUN set -eu; mkdir -p /out; \
+    for target in windows/amd64 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+        os="${target%/*}"; arch="${target#*/}"; \
+        flags="-s -w"; suffix=""; \
+        if [ "$os" = windows ]; then flags="$flags -H=windowsgui"; suffix=".exe"; fi; \
+        CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="$flags" \
+            -o "/out/vega-local-$os-$arch$suffix" .; \
+    done
+
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -8,6 +22,7 @@ COPY server ./server
 COPY shared ./shared
 COPY web ./web
 COPY extensions/nova-chrome ./extensions/nova-chrome
+COPY --from=clients /out ./web/public/clients
 RUN npm run build
 
 FROM node:24-bookworm-slim AS runtime

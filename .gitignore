@@ -4,6 +4,7 @@ node_modules/
 .nitro/
 .tmp/
 web/dist/
+web/public/clients/
 *.db
 *.db-wal
 *.db-shm

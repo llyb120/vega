@@ -1,5 +1,6 @@
 <script setup vapor>
 import SettingsView from "./SettingsView.vue";
+import ResourcesView from "./ResourcesView.vue";
 import { LocalAgentPairing, canBridgeLocal, pairingStatusText } from "./local-agent";
 import ConversationTimeline from "./ConversationTimeline.vue";
 import ExperiencesView from "./ExperiencesView.vue";
@@ -59,6 +60,7 @@ const mobileTitles = {
   browser: "浏览器",
   experiences: "经验图谱",
   account: "账号",
+  resources: "资源",
   settings: "设置",
 };
 function closeNavigation() {
@@ -1443,6 +1445,12 @@ onBeforeUnmount(() => {
           <span>经验图谱</span>
         </button>
         <button v-if="isAdmin" :class="{ selected: view === 'debug' }" @click="view = 'debug'"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5-6 7 6 7M16 5l6 7-6 7M14 3l-4 18" /></svg><span>调试会话</span></button>
+        <button :class="{ selected: view === 'resources' }" @click="view = 'resources'">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4" />
+          </svg>
+          <span>资源</span>
+        </button>
         <button
           :class="{ selected: view === 'account' }"
           @click="view = 'account'"
@@ -1905,6 +1913,7 @@ onBeforeUnmount(() => {
 
         </div>
       </section>
+      <ResourcesView v-else-if="view === 'resources'" />
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" />
       <ExperiencesView
         v-else-if="view === 'experiences' && isAdmin"

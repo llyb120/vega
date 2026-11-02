@@ -17,6 +17,12 @@
 !extensions/nova-chrome/**
 !docker/
 !docker/**
+!local/
+!local/*.go
+!local/go.mod
+!local/go.sum
+!local/icon.ico
+web/public/clients/
 **/node_modules
 **/dist
 **/.env

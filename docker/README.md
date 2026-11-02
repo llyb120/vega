@@ -38,6 +38,12 @@ docker inspect --format '{{.State.Health.Status}}' vega
 - `tini` 管理子进程；Nitro 或 Chromium 退出时容器会退出，Docker 重启策略可重新启动；SIGTERM 会关闭二者，不让孤儿浏览器留在后台。
 - 不挂宿主机 X11/Wayland socket，不挂 Docker socket，不使用 `--privileged`。
 
+## 客户端下载
+
+镜像构建会在独立 Go 阶段交叉编译 Windows x64、Linux x64/ARM64、macOS Intel/Apple Silicon 五个客户端，并在前端构建前放入 `web/public/clients/`，最终随 Nitro 静态资源发布。登录后打开主导航「资源」即可下载；文件来自当前部署，与镜像内服务使用同一份源码，不依赖 GitHub Release，也不复制宿主机已编译的客户端。Windows 保留系统托盘和无控制台窗口，Linux/macOS 为命令行版本。Go 编译器不会进入运行镜像。
+
+升级客户端前先退出旧进程。Linux/macOS 下载后需 `chmod +x 文件名` 再执行 `./文件名`；文件未签名，Windows/macOS 可能要求用户确认来源。首次在同一台电脑打开网站登录并确认本地站点授权，之后保持客户端运行即可。
+
 ## 数据和权限
 
 | 路径 | 内容 |
@@ -81,4 +87,4 @@ docker inspect --format '{{.State.Health.Status}}' vega
 
 重新构建镜像、保留数据卷后替换容器即可；扩展随镜像更新，下一次启动仍自动加载。镜像在 Linux 中执行 `npm ci` 和构建，不复制本机 `.output`/`node_modules`，避免把 Windows 的 `sharp` 二进制带进 Linux；`.dockerignore` 只允许构建输入，排除数据库和密钥。
 
-无头镜像不附带 VNC/noVNC 桌面，也不能操作系统原生对话框。人工需要可视浏览器时应另行部署受控桌面，不能把这个镜像当作宿主浏览器的自动安装器。构建/启动需要能访问 npm 和 Debian 软件源；Linux Chromium 的实际扩展加载与沙箱兼容性仍须在目标 Docker 环境验收。
+无头镜像不附带 VNC/noVNC 桌面，也不能操作系统原生对话框。人工需要可视浏览器时应另行部署受控桌面，不能把这个镜像当作宿主浏览器的自动安装器。构建/启动需要能访问 npm、Go 模块代理和 Debian 软件源；Linux Chromium 的实际扩展加载与沙箱兼容性仍须在目标 Docker 环境验收。

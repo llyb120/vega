@@ -52,7 +52,7 @@ SQLite 图片授权会自动升级到版本 4，并修复旧分叉历史的图�
 
 ## Linux / Docker 自动安装扩展
 
-项目根目录的 `Dockerfile` 会在Linux内构建Nitro和原生依赖，并运行同容器的专用无头Chromium。启动参数自动加载现有扩展，等待配对后报告就绪；无需手工打开扩展管理页，只发布8080，不暴露CDP/回环桥接端口。SQLite、浏览器登录态与工作目录通过卷持久化。
+项目根目录的 `Dockerfile` 会在Linux内构建Nitro和原生依赖，并在独立Go阶段编译Windows x64、Linux x64/ARM64、macOS Intel/Apple Silicon客户端；部署后从主导航「资源」直接下载当前镜像配套版本，无需另跑Go构建或访问外部Release。镜像同时运行同容器的专用无头Chromium。启动参数自动加载现有扩展，等待配对后报告就绪；无需手工打开扩展管理页，只发布8080，不暴露CDP/回环桥接端口。SQLite、浏览器登录态与工作目录通过卷持久化。
 
 ```sh
 docker build --pull -t vega:local .
