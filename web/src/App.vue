@@ -6,6 +6,7 @@ import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
 import EmployeeChat from "./EmployeeChat.vue";
+import EmployeeChrome from "./EmployeeChrome.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import EmployeeAvatarPicker from "./EmployeeAvatarPicker.vue";
 import EmployeeTaskCard from "./EmployeeTaskCard.vue";
@@ -197,6 +198,7 @@ const employee = ref({
   employeeDeleting = ref(false),
   employeeExecutionBusy = ref(false),
   employeeExecutionOpen = ref(false),
+  workRailOpen = ref(false),
   employeeMenu = ref(null),
   debugRevision = ref(0),
   employees = ref([]),
@@ -217,6 +219,7 @@ const employee = ref({
   activeTaskCount = ref(null);
 const duty = ref(emptyDuty()),
   dutyOpen = ref(false);
+watch(selectedEmployee, () => { workRailOpen.value = false; });
 
 let eventsSocket,
   eventsReady = false,
@@ -1748,15 +1751,33 @@ onBeforeUnmount(() => {
         @back="openEmployee()"
       />
       <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
-        <header class="employee-header">
-          <div class="employee-identity"><span class="employee-avatar" aria-hidden="true"><span v-if="creatingEmployee">+</span><EmployeeAvatar v-else :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" /></span><div><span class="employee-eyebrow">{{ employee.scope === 'team' ? '团队数字员工' : '个人数字员工' }}</span><h2>{{ creatingEmployee || !employees.length ? '创建新员工' : employee.name || '加载中…' }}</h2><p>{{ creatingEmployee || !employees.length ? '取个名字，交代他的工作方向，就可以开始了。' : employee.instruction || '把目标交给我，任务由我安排。' }}</p></div></div>
-          <div v-if="employees.length && !creatingEmployee" class="employee-header-actions"><span class="employee-status" :class="{ attention: attentionTasks.length }"><span aria-hidden="true">●</span> {{ employeeStatus }}</span><button v-if="employee.canManage" @click="employeeTabChanged('settings')" :aria-pressed="employeeTab === 'settings'" title="编辑员工资料">员工设置</button><button v-if="employee.canManage" class="employee-delete" :disabled="employeeDeleting" @click="deleteEmployee">{{ employeeDeleting ? '正在删除…' : '删除员工' }}</button></div>
+        <EmployeeChrome
+          v-if="employees.length && !creatingEmployee"
+          :employee="employee"
+          :status="employeeStatus"
+          :attention="attentionTasks.length > 0"
+          :tabs="employeeTabs"
+          :tab="employeeTab"
+          :active-count="activeTasks.length"
+          :execution-open="employeeExecutionOpen"
+          :deleting="employeeDeleting"
+          :busy="employeeExecutionBusy"
+          :show-work="employeeTab === 'chat'"
+          :work-open="workRailOpen"
+          :work-count="attentionTasks.length || activeTasks.length"
+          @tab="employeeTabChanged"
+          @settings="employeeTabChanged('settings')"
+          @delete="deleteEmployee"
+          @toggle-execution="employeeExecutionOpen = !employeeExecutionOpen"
+          @execution="changeEmployeeExecution"
+          @toggle-work="workRailOpen = !workRailOpen"
+        />
+        <header v-else class="employee-header employee-header-create">
+          <div class="employee-title-block">
+            <h2>{{ creatingEmployee || !employees.length ? '创建新员工' : employee.name || '加载中…' }}</h2>
+            <p class="employee-toolbar-sub">取个名字，交代他的工作方向，就可以开始了。</p>
+          </div>
         </header>
-        <nav v-if="employees.length && !creatingEmployee" class="employee-tabs" aria-label="员工工作空间">
-          <button v-for="[id, label] in employeeTabs" :key="id" :aria-current="employeeTab === id ? 'page' : undefined" :class="{ selected: employeeTab === id }" @click="employeeTabChanged(id)">{{ label }}<span v-if="id === 'tasks' && activeTasks.length" class="tab-count">{{ activeTasks.length }}</span></button>
-          <span v-if="employeeTab === 'settings'" class="employee-settings-label">员工设置</span>
-        </nav>
-        <div v-if="employees.length && !creatingEmployee" class="employee-execution-bar" :class="{ 'mobile-open': employeeExecutionOpen }"><span>新任务执行于</span><button v-if="employee.canManage" type="button" class="execution-switch" role="switch" aria-label="客户端执行（仅影响新任务）" :aria-checked="!!employee.execution?.localAgent" :disabled="employeeExecutionBusy || (!employee.execution?.localAgent && !employee.executionClients?.length)" @click="changeEmployeeExecution(!employee.execution?.localAgent)"><span :class="{ selected: !employee.execution?.localAgent }">服务端</span><span class="execution-track" aria-hidden="true"></span><span :class="{ selected: employee.execution?.localAgent }">客户端</span></button><span v-else class="execution-readonly">{{ employee.execution?.localAgent ? employee.execution.clientName || '客户端' : '服务端' }}</span><select v-if="employee.canManage && employee.execution?.localAgent" aria-label="员工执行客户端" :value="employee.execution.clientId" :disabled="employeeExecutionBusy" @change="changeEmployeeExecution(true, $event.target.value)"><option v-if="!employee.executionClients?.some((client) => client.id === employee.execution.clientId)" :value="employee.execution.clientId" disabled>{{ employee.execution.clientName }} · 离线</option><option v-for="client in employee.executionClients || []" :key="client.id" :value="client.id">{{ client.name }} · {{ client.platform }}</option></select><small>{{ employeeExecutionBusy ? '正在验证执行环境…' : employee.canManage && !employee.executionClients?.length && !employee.execution?.localAgent ? '无在线客户端，连接后可切换；只影响新任务' : '只影响之后的新任务，已有任务不变' }}</small></div>
         <div class="employee-content" :class="{ 'is-chat': employeeTab === 'chat' && !creatingEmployee && employees.length, 'is-browser': employeeTab === 'browser' && !creatingEmployee }">
           <p v-if="employeeError" class="banner error" role="alert">
             {{ employeeError
@@ -1785,13 +1806,13 @@ onBeforeUnmount(() => {
             <fieldset v-if="isAdmin && vaultEntries.length"><legend>允许使用的密码本条目</legend><label v-for="entry in vaultEntries" :key="entry.id"><input v-model="employee.vaultIds" type="checkbox" :value="entry.id" /> {{ entry.name }} · {{ entry.condition }}</label></fieldset>
             <div class="actions"><button type="button" @click="employeeTab = 'chat'">返回对话</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '保存中…' : '保存修改' }}</button></div>
           </form>
-          <div v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee && !creatingEmployee" class="employee-chat-layout">
+          <div v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee && !creatingEmployee" class="employee-chat-layout" :class="{ 'work-open': workRailOpen }">
             <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" @task="openEmployeeTask" />
-            <aside class="employee-work-summary" aria-label="当前工作"><div class="summary-heading"><h3>当前工作</h3><button class="link" @click="employeeTab = 'tasks'">全部任务 ↗</button></div><button v-if="attentionTasks.length" class="attention-shortcut" @click="employeeTaskFilter = 'attention'; employeeTab = 'tasks'"><strong>{{ attentionTasks.length }} 项需要你处理</strong><span>补充信息或审批后继续 →</span></button><div v-if="!activeTasks.length" class="summary-empty"><span aria-hidden="true">✓</span><strong>手头很清爽</strong><p>交代一个目标，我会在这里更新进度。</p></div><button v-for="task in activeTasks.slice(0, 5)" :key="task.id" class="summary-task" @click="employeeTaskFilter = ['waiting', 'approval'].includes(task.status) ? 'attention' : 'active'; employeeTab = 'tasks'"><span :class="['summary-task-status', task.status]">{{ labels[task.status] }}</span><strong>{{ task.text }}</strong><span v-if="task.progress?.length">{{ task.progress.at(-1).text }}</span></button></aside>
+            <aside v-if="workRailOpen" class="employee-work-summary" aria-label="当前工作"><div class="summary-heading"><h3>当前工作</h3><button class="link" @click="employeeTab = 'tasks'">全部任务 ↗</button></div><button v-if="attentionTasks.length" class="attention-shortcut" @click="employeeTaskFilter = 'attention'; employeeTab = 'tasks'"><strong>{{ attentionTasks.length }} 项需要你处理</strong><span>补充信息或审批后继续 →</span></button><div v-if="!activeTasks.length" class="summary-empty"><span aria-hidden="true">✓</span><strong>手头很清爽</strong><p>交代一个目标，我会在这里更新进度。</p></div><button v-for="task in activeTasks.slice(0, 5)" :key="task.id" class="summary-task" @click="employeeTaskFilter = ['waiting', 'approval'].includes(task.status) ? 'attention' : 'active'; employeeTab = 'tasks'"><span :class="['summary-task-status', task.status]">{{ labels[task.status] }}</span><strong>{{ task.text }}</strong><span v-if="task.progress?.length">{{ task.progress.at(-1).text }}</span></button></aside>
           </div>
           <div v-if="employeeTab === 'browser' && selectedEmployee && !creatingEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" /></div>
           <template v-if="employeeTab === 'tasks' && !creatingEmployee"
-            ><div class="employee-section-heading"><div><h3>任务</h3><p>新任务先由轻量模型起步，涉及编码再在原会话升级。</p></div></div><form v-if="canExecute" class="inline-form employee-task-form" @submit.prevent="addTask">
+            ><details class="employee-section-tip"><summary>任务说明</summary><p>新任务先由轻量模型起步，涉及编码再在原会话升级。</p></details><form v-if="canExecute" class="inline-form employee-task-form" @submit.prevent="addTask">
               <input
                 v-model="taskText"
                 required
@@ -1986,55 +2007,35 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.employee-group-label { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin: 24px 8px 10px; }
-.employee-execution-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; flex: none; min-width: 0; padding: 11px 32px; border-bottom: 1px solid var(--border); background: var(--surface); }
-.employee-execution-bar > span { color: var(--text-secondary); font-size: 11px; }
-.employee-execution-bar .execution-switch { min-height: 32px; }
-.employee-execution-bar small { color: var(--muted); font-size: 10px; }
-.employee-execution-bar select { max-width: 220px; min-height: 34px; padding: 5px 9px; font-size: 12px; }
-.employee-list { flex: 1; min-height: 44px; overflow-y: auto; padding: 0 12px; }
-.employee-list > button { display: flex; align-items: center; gap: 11px; width: 100%; min-height: 64px; margin: 5px 0; padding: 10px; text-align: left; border: 1px solid transparent; background: transparent; border-radius: 12px; }
+.employee-group-label { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin: 12px 8px 6px; }
+.employee-list { flex: 1; min-height: 44px; overflow-y: auto; padding: 0 8px; }
+.employee-list > button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 48px; margin: 2px 0; padding: 8px; text-align: left; border: 1px solid transparent; background: transparent; border-radius: 10px; }
 .employee-list > button.active { color: var(--accent); background: var(--surface); border-color: var(--border); box-shadow: var(--sh-xs); }
-.employee-nav-avatar, .employee-avatar { display: grid; place-items: center; flex: none; font-weight: 650; background: var(--accent-soft); color: var(--accent); }
-.employee-nav-avatar { width: 34px; height: 36px; border-radius: 10px; }
-.employee-nav-info { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.employee-nav-avatar { display: grid; place-items: center; flex: none; width: 30px; height: 32px; border-radius: 8px; font-weight: 650; background: var(--accent-soft); color: var(--accent); }
+.employee-nav-info { display: grid; gap: 2px; flex: 1; min-width: 0; }
 .employee-nav-info strong { font-weight: 600; font-size: 13px; }
-.employee-nav-info small { color: var(--muted); font-size: 11px; }
+.employee-nav-info small { color: var(--muted); font-size: 10px; }
 .employee-list .count.attention { color: var(--amber); background: var(--amber-soft); }
 .employee-workspace { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
-.employee-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 23px 32px 18px; background: var(--surface); }
-.employee-identity { display: flex; align-items: center; gap: 15px; min-width: 0; }
-.employee-identity > div { min-width: 0; }
-.employee-avatar { width: 48px; height: 50px; border-radius: 15px; font-size: 21px; }
-.employee-eyebrow { font-size: 10px; letter-spacing: .08em; color: var(--muted); }
-.employee-header h2 { margin: 4px 0; font-size: 21px; letter-spacing: -.025em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.employee-header p { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 520px; }
-.employee-header-actions { display: flex; align-items: center; gap: 10px; flex: none; }
-.employee-header-actions button { font-size: 12px; min-height: 36px; }
-.employee-status { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; color: var(--green); font-size: 12px; white-space: nowrap; }
-.employee-status > span { font-size: 7px; }
-.employee-status.attention { color: var(--amber); }
-.employee-delete { color: var(--red); border-color: transparent; background: transparent; }
-.employee-delete:hover { background: var(--red-soft); border-color: transparent; }
-.employee-tabs { display: flex; align-items: center; flex: none; padding: 0 32px; gap: 24px; border-bottom: 1px solid var(--border); background: var(--surface); overflow-x: auto; }
-.employee-tabs button { display: flex; align-items: center; gap: 7px; min-height: 48px; padding: 8px 4px; border: 0; border-radius: 0; background: transparent; color: var(--text-secondary); font-size: 13px; white-space: nowrap; }
-.employee-tabs button.selected { color: var(--accent); box-shadow: inset 0 -2px var(--accent); font-weight: 650; }
-.tab-count { font-size: 10px; color: var(--muted); padding: 2px 5px; border-radius: 5px; background: var(--surface-sunken); }
-.employee-settings-label { color: var(--muted); font-size: 12px; margin-left: auto; white-space: nowrap; }
-.employee-content { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; padding: 28px 32px; background: var(--surface-sunken); scrollbar-width: thin; }
+.employee-header-create { display: flex; align-items: center; width: 100%; min-height: 44px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.employee-header-create h2 { margin: 0; font-size: 15px; }
+.employee-toolbar-sub { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+.employee-eyebrow { font-size: 11px; color: var(--muted); }
+.employee-content { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; padding: 16px 20px; background: var(--surface-sunken); scrollbar-width: thin; }
 .employee-content > * { max-width: 1040px; margin-left: auto; margin-right: auto; }
 .employee-content.is-chat, .employee-content.is-browser { padding: 0; overflow: hidden; display: flex; flex-direction: column; background: var(--surface); }
 .employee-content > .banner { flex: none; margin: 12px 24px; }
 .employee-content > .employee-chat-layout { max-width: none; margin: 0; }
-.employee-chat-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; flex: 1; min-height: 0; }
-.employee-work-summary { overflow-y: auto; padding: 26px 20px; border-left: 1px solid var(--border); background: var(--surface-sunken); scrollbar-width: thin; }
+.employee-chat-layout { display: grid; grid-template-columns: minmax(0, 1fr); position: relative; flex: 1; min-height: 0; }
+.employee-chat-layout.work-open { grid-template-columns: minmax(0, 1fr) 260px; }
+.employee-work-summary { overflow-y: auto; padding: 12px 14px; border-left: 1px solid var(--border); background: var(--surface-sunken); scrollbar-width: thin; }
 .summary-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.summary-heading h3 { margin: 0; font-size: 13px; }
+.summary-heading h3 { margin: 0; font-size: 12px; }
 .summary-heading button { font-size: 11px; padding: 4px; }
-.summary-empty { padding: 42px 8px; text-align: center; color: var(--text-secondary); }
-.summary-empty > span { display: block; margin-bottom: 15px; color: var(--green); font-size: 25px; }
-.summary-empty strong { font-size: 13px; }
-.summary-empty p { font-size: 12px; line-height: 1.75; color: var(--muted); }
+.summary-empty { padding: 16px 4px; text-align: center; color: var(--text-secondary); }
+.summary-empty > span { display: block; margin-bottom: 8px; color: var(--green); font-size: 18px; }
+.summary-empty strong { font-size: 12px; }
+.summary-empty p { font-size: 11px; line-height: 1.6; color: var(--muted); margin: 0; }
 .attention-shortcut, .summary-task { display: grid; gap: 8px; text-align: left; width: 100%; margin-top: 14px; padding: 14px; background: var(--surface); font-size: 12px; line-height: 1.65; white-space: normal; overflow-wrap: anywhere; border-radius: 10px; }
 .summary-task strong { font-size: 12px; font-weight: 550; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .summary-task > span:last-child { font-size: 11px; color: var(--muted); }
@@ -2042,10 +2043,11 @@ onBeforeUnmount(() => {
 .attention-shortcut { background: var(--amber-soft); color: var(--amber); border-color: oklch(0.89 0.06 75); }
 .attention-shortcut span { font-size: 11px; }
 .employee-browser { flex: 1; min-height: 0; width: 100%; max-width: none; display: flex; flex-direction: column; }
-.employee-section-heading { margin-bottom: 20px; }
-.employee-section-heading h3 { margin: 0 0 7px; font-size: 20px; }
-.employee-section-heading p { color: var(--muted); font-size: 13px; margin: 0; }
-.employee-task-form { background: var(--surface); padding: 12px; border: 1px solid var(--border); border-radius: 12px; }
+.employee-section-tip { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.employee-section-tip summary { cursor: pointer; padding: 10px 12px; font-size: 12px; font-weight: 600; color: var(--text-secondary); list-style: none; }
+.employee-section-tip summary::-webkit-details-marker { display: none; }
+.employee-section-tip p { margin: 0; padding: 0 12px 12px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.employee-task-form { background: var(--surface); padding: 10px; border: 1px solid var(--border); border-radius: 10px; }
 .employee-task-form input { min-width: 140px; }
 .employee-task-filters { display: flex; gap: 6px; margin-bottom: 18px; overflow-x: auto; }
 .employee-task-filters button { background: transparent; border: 1px solid transparent; font-size: 12px; padding: 8px 12px; white-space: nowrap; }
@@ -2058,39 +2060,23 @@ onBeforeUnmount(() => {
 .employee-settings-form h3 { margin: 0; font-size: 18px; }
 .employee-settings-form fieldset { min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
 .employee-settings-form fieldset label { display: flex; gap: 8px; padding: 7px 0; align-items: center; font-size: 12px; }
-.employee-empty { padding: 56px 20px; text-align: center; }
-.employee-empty > span { display: block; color: var(--green); font-size: 30px; }
-.employee-empty h3 { margin: 18px 0 10px; font-size: 16px; }
-.employee-empty p { font-size: 13px; color: var(--muted); margin-bottom: 20px; }
-@media (max-width: 1180px) { .employee-chat-layout { grid-template-columns: minmax(0, 1fr); } .employee-work-summary { display: none; } .employee-header p { max-width: 320px; } }
+.employee-empty { padding: 28px 16px; text-align: center; }
+.employee-empty > span { display: block; color: var(--green); font-size: 22px; }
+.employee-empty h3 { margin: 10px 0 8px; font-size: 15px; }
+.employee-empty p { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+@media (max-width: 1180px) {
+  .employee-chat-layout.work-open { grid-template-columns: minmax(0, 1fr); }
+  .employee-work-summary { display: none; }
+  .employee-chat-layout.work-open .employee-work-summary { display: block; position: absolute; top: 0; right: 0; bottom: 0; width: min(280px, 88vw); z-index: 6; box-shadow: var(--sh-lg); }
+}
 @media (max-width: 700px) {
-  .employee-execution-bar { padding: 10px 16px; gap: 8px; }
-  .employee-execution-bar .execution-switch { min-height: 40px; }
-  .employee-execution-bar small { flex-basis: 100%; font-size: 10px; }
-  .employee-execution-bar select { max-width: 100%; }
-  .employee-header { padding: 16px 16px 12px; flex-wrap: wrap; gap: 12px; }
-  .employee-identity { gap: 10px; }
-  .employee-avatar { width: 40px; height: 42px; border-radius: 12px; font-size: 18px; }
-  .employee-header h2 { font-size: 18px; }
-  .employee-header p { max-width: calc(100vw - 96px); }
-  .employee-eyebrow { display: none; }
-  .employee-header-actions { width: 100%; gap: 6px; }
-  .employee-header-actions button { min-height: 44px; }
-  .employee-status { margin-right: auto; padding-left: 0; font-size: 11px; }
-  .employee-tabs { padding: 0 16px; gap: 18px; }
-  .employee-content { padding: 18px 14px; }
-  .employee-create, .employee-settings-form { padding: 22px 18px; margin-top: 0; }
-  .employee-create h3 { font-size: 21px; }
+  .employee-content { padding: 12px; }
+  .employee-create, .employee-settings-form { padding: 18px 14px; margin-top: 0; }
+  .employee-create h3 { font-size: 18px; }
   .employee-task-filters button { min-height: 44px; padding: 8px 10px; }
 }
 @media (max-width: 760px) {
-  .employee-header { display: none; }
-  .employee-tabs { padding: 0 14px; gap: 22px; }
-  .employee-tabs button { min-height: 44px; }
-  .employee-execution-bar { display: none; padding: 10px 14px; }
-  .employee-execution-bar.mobile-open { display: flex; }
-  .employee-execution-bar .execution-switch { min-height: 44px; }
-  .employee-execution-bar select { font-size: 16px; }
+  .employee-work-summary { display: none !important; }
   .employee-mobile-menu { position: relative; flex: none; margin-left: auto; }
   .employee-mobile-menu summary { display: grid; place-items: center; width: 44px; min-height: 44px; list-style: none; font-size: 24px; cursor: pointer; border-radius: 8px; }
   .employee-mobile-menu summary::-webkit-details-marker { display: none; }
