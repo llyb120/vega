@@ -202,12 +202,10 @@ test("removed Orbit is not exposed to the website or scheduler; prior data is re
 test("UI keeps all pages Vapor, settings last, separate experiences, no whole-page bounce and no directory/config JSON inputs", () => {
   const app = readFileSync("web/src/App.vue", "utf8"),
     css = readFileSync("web/src/style.css", "utf8"),
-    nav = app.slice(app.indexOf("<nav "), app.indexOf("</nav>"));
-  assert(
-    nav.indexOf("view = 'experiences'") <
-      nav.lastIndexOf("view = 'settings'") ||
-      nav.indexOf("view='experiences'") < nav.lastIndexOf("view='settings'"),
-  );
+    sidebar = readFileSync("web/src/AppSidebar.vue", "utf8"),
+    nav = sidebar.slice(sidebar.indexOf("const adminNav ="), sidebar.indexOf("\n", sidebar.indexOf("const adminNav =")));
+  assert(nav.indexOf('"experiences"') >= 0 && nav.indexOf('"experiences"') < nav.lastIndexOf('"settings"'));
+  assert(nav.trimEnd().endsWith('"settings"]];') || /\["settings", [^\]]*\]\];$/.test(nav.trim()), "settings stays last");
   assert(!app.includes("星轨"));
   assert(!app.includes("员工工作目录"));
   assert(!app.includes("模型配置 JSON"));

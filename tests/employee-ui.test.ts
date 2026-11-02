@@ -134,19 +134,25 @@ test("chat task links reveal the matching task and refresh stale lists without j
 });
 
 test("employee task creation never asks users to choose the initial model", () => {
-  assert(!source.includes("taskProfile") && !source.includes('v-model="duty.profile"'));
-  assert(source.includes("新任务先由轻量模型起步"));
+  const workspace = source + ["EmployeeTasks", "EmployeeDuties", "TaskDetail", "WorkPanel"].map((file) => readFileSync(`web/src/${file}.vue`, "utf8")).join("\n");
+  assert(!workspace.includes("taskProfile") && !workspace.includes('v-model="duty.profile"'));
+  assert(readFileSync("web/src/EmployeeTasks.vue", "utf8").includes("新任务先由轻量模型起步"));
   const scenes = readFileSync("web/src/SceneSettings.vue", "utf8");
   assert(scenes.includes("沟通与任务起步") && scenes.includes("实际进入编码工作时才升级"));
 });
 
 test("ordinary users have no history/session dispatch navigation and task approvals have explicit reject and approve actions", () => {
-  const nav = between('<nav aria-label="主导航"', "</nav>");
-  assert(!nav.includes("历史") && !nav.includes("新建会话"));
-  assert(nav.includes('v-if="isAdmin"') && nav.includes("调试会话"));
-  assert(!source.includes('v-model="employee.enabled"'));
-  assert(!source.includes('v-model="employee.workStart"'));
-  const task = readFileSync("web/src/EmployeeTaskCard.vue", "utf8");
-  assert(task.includes("run('approve')") && task.includes("run('reject')"));
-  assert(task.includes("task.execution?.localAgent"));
+  const sidebar = readFileSync("web/src/AppSidebar.vue", "utf8");
+  const nav = sidebar.slice(sidebar.indexOf('aria-label="主导航"'), sidebar.indexOf("</nav>"));
+  const adminNav = sidebar.slice(sidebar.indexOf("const adminNav ="), sidebar.indexOf("\n", sidebar.indexOf("const adminNav =")));
+  assert(!nav.includes("历史") && !nav.includes("新建会话") && !adminNav.includes("历史"));
+  assert(nav.includes('v-if="isAdmin"') && adminNav.includes("调试会话"));
+  const settings = readFileSync("web/src/EmployeeSettings.vue", "utf8");
+  assert(!source.includes('v-model="employee.enabled"') && !settings.includes('v-model="employee.enabled"'));
+  assert(!source.includes('v-model="employee.workStart"') && !settings.includes('v-model="employee.workStart"'));
+  for (const file of ["TaskDetail", "WorkPanel"]) {
+    const task = readFileSync(`web/src/${file}.vue`, "utf8");
+    assert(task.includes("'approve')") && task.includes("'reject')"));
+  }
+  assert(readFileSync("web/src/TaskDetail.vue", "utf8").includes("task.execution?.localAgent"));
 });
