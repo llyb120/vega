@@ -81,6 +81,146 @@ test("even a coding-profile task starts lightweight, upgrades in the same work s
   } finally { await engine.close(); store.close(); }
 });
 
+test("an employee task can return to lightweight for ordinary work and later upgrade again without changing sessions or repeating work", async () => {
+  const { store, engine, employee, add, segment } = fixture();
+  const selected: string[] = []; let phase = 0;
+  engine.providers.chat = async (model, system, _messages, definitions) => {
+    selected.push(model.selection);
+    assert(system.includes("不是任务级永久锁定") && system.includes("可按后续需求回到lightweight"));
+    if (phase++ === 0) return call("code", "switch_scene", { scene: "coding", message: "先实现并验证编码部分" });
+    if (phase === 2) return call("pause", "employee", { action: "defer", text: "代码已验证，原作业job-123已提交，只检查原作业", nextCheckInMinutes: 1 });
+    if (phase === 3) {
+      assert.equal(model.selection, "p/code");
+      assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("lightweight"));
+      return call("light", "switch_scene", { scene: "lightweight", message: "编码部分完成，后续只查询原作业job-123并协调反馈，不改代码、不重提作业" });
+    }
+    if (phase === 4) {
+      assert.equal(model.selection, "p/light");
+      return call("wait", "employee", { action: "defer", text: "原作业已查询，仍在运行，下次只查该作业", nextCheckInMinutes: 1 });
+    }
+    if (phase === 5) {
+      assert.equal(model.selection, "p/light");
+      assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("coding"));
+      return call("code-again", "switch_scene", { scene: "coding", message: "按最新授权再修改一处代码并验证，不重放原提交" });
+    }
+    return phase === 6 ? verified() : completed();
+  };
+  try {
+    let job = await segment(await add("实现代码后查询外部作业并反馈"));
+    const session = job.workSession;
+    assert.equal(store.session(session).scene, "coding");
+    await employee.control({ action: "resume", id: job.id, text: "代码已完成，接下来只查询原作业状态" });
+    job = await segment(job);
+    assert.equal(store.session(session).scene, "lightweight");
+    await employee.control({ action: "resume", id: job.id, text: "现在再修改一处代码并验证" });
+    job = await segment(job);
+    assert.equal(job.status, "done");
+    assert.equal(job.workSession, session);
+    assert.equal(store.sessions().length, 1);
+    assert.deepEqual(selected, ["p/light", "p/code", "p/code", "p/light", "p/light", "p/code", "p/code"]);
+    assert.deepEqual(employee.state().runs.map(run => run.scene), ["lightweight", "coding", "lightweight"]);
+  } finally { await engine.close(); store.close(); }
+});
+
+test("explicitly returning to a retained lightweight caller preserves its pending work without a second automatic return", async () => {
+  const { store, engine, add, segment } = fixture();
+  let requests = 0;
+  engine.providers.chat = async (model, _system, messages, definitions) => {
+    if (requests++ === 0) return call("code", "switch_scene", { scene: "coding", message: "完成编码验证", resume: "只查询原作业job-retained并协调反馈" });
+    if (requests === 2) {
+      assert.equal(model.selection, "p/code");
+      assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("lightweight"));
+      return call("return", "switch_scene", { scene: "lightweight", message: "编码已完成，转为普通查询与协调" });
+    }
+    assert.equal(model.selection, "p/light");
+    const outcome = messages.findLast(message => message.role === "tool" && message.name === "switch_scene")!;
+    assert(outcome.text!.includes("job-retained") && outcome.text!.includes("不是新授权"));
+    assert(requests <= 4, "explicit return cannot also replay the old automatic continuation");
+    return requests === 3 ? verified() : completed();
+  };
+  try {
+    const job = await segment(await add("编码并检查既有作业"));
+    assert.equal(job.status, "done");
+    assert.equal(store.session(job.workSession).scene, "lightweight");
+    assert.equal(store.sessions().length, 1);
+    assert.equal(requests, 4);
+  } finally { await engine.close(); store.close(); }
+});
+
+test("a read-only employee task can return to the default lightweight model without gaining write tools", async () => {
+  const { store, engine, employee, add, segment } = fixture();
+  const config = engine.config(); config.model = "p/light"; config.scenes!.lightweight = []; store.put("config", config);
+  try {
+    const job = await add("只读代码分析后查询状态");
+    const session = store.newSession({ employeeId: employee.employeeId, taskId: job.id, model: "p/code", scene: "coding", readOnly: true });
+    employee.update(state => { state.tasks[0].workSession = session.id; });
+    let requests = 0;
+    engine.providers.chat = async (model, _system, _messages, definitions) => {
+      assert(requests < 3, "read-only selection test cannot loop on an unavailable state-changing tool");
+      assert(!definitions.some(tool => ["write", "edit", "bash"].includes(tool.name)));
+      if (requests++ === 0) {
+        assert.equal(model.selection, "p/code");
+        assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("lightweight"));
+        return call("light", "switch_scene", { scene: "lightweight", message: "只读分析完成，后续普通查询，不改文件" });
+      }
+      assert.equal(model.selection, "p/light");
+      return { role: "assistant", text: "只读查询已完成。" };
+    };
+    const result = await segment(job);
+    assert.equal(result.status, "recovering", "read-only analysis cannot bypass the verified-completion contract");
+    assert.equal(store.session(session.id).scene, "lightweight");
+    assert.equal(store.session(session.id).readOnly, true);
+    assert.equal(store.sessions().length, 1);
+  } finally { await engine.close(); store.close(); }
+});
+
+test("explicit caller work still resumes in order across coding and lightweight transitions", async () => {
+  const { store, engine, add, segment } = fixture();
+  const selected: string[] = []; let requests = 0;
+  engine.providers.chat = async (model, _system, messages) => {
+    selected.push(model.selection);
+    if (requests++ === 0) return call("code", "switch_scene", { scene: "coding", message: "完成代码工作", resume: "最后核对原作业状态A" });
+    if (requests === 2) return call("light-block", "switch_scene", { scene: "lightweight", message: "先做普通协调", resume: "回到代码验证B" });
+    if (requests === 3) return { role: "assistant", text: "普通协调完成。" };
+    if (requests === 4) {
+      assert(messages.at(-1)!.text!.includes("回到代码验证B"));
+      return { role: "assistant", text: "代码验证已完成。" };
+    }
+    if (requests === 5) {
+      assert(messages.at(-1)!.text!.includes("最后核对原作业状态A"));
+      return verified();
+    }
+    assert(requests === 6);
+    return completed();
+  };
+  try {
+    const job = await segment(await add("编码与协调分段完成"));
+    assert.equal(job.status, "done");
+    assert.deepEqual(selected, ["p/light", "p/code", "p/light", "p/code", "p/light", "p/light"]);
+    assert.equal(store.sessions().length, 1);
+  } finally { await engine.close(); store.close(); }
+});
+
+test("ordinary manual sessions and isolated computer task sessions cannot use the employee-only lightweight transition", async () => {
+  const { store, engine, employee, add } = fixture();
+  try {
+    for (const computer of [false, true]) {
+      const task = computer ? await add("browser-only work") : undefined;
+      const session = store.newSession({ scene: computer ? "computer" : "coding", model: computer ? "p/vision" : "p/code", ...(task ? { taskId: task.id, employeeId: employee.employeeId } : {}) });
+      let requests = 0;
+      engine.providers.chat = async (model, _system, messages, definitions) => {
+        assert.equal(model.selection, computer ? "p/vision" : "p/code");
+        assert(!definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("lightweight"));
+        if (requests++ === 0) return call("invalid-return", "switch_scene", { scene: "lightweight", message: "try disallowed transition" });
+        assert(messages.findLast(message => message.role === "tool")!.error);
+        return { role: "assistant", text: "transition rejected without side effects" };
+      };
+      await engine.run(session.id, { role: "user", text: "stay within this session's permissions" });
+      assert.equal(store.session(session.id).scene, computer ? "computer" : "coding");
+    }
+  } finally { await engine.close(); store.close(); }
+});
+
 test("employee communication reselects the configured lightweight model instead of keeping a stale coding selection", async () => {
   const { store, engine, employee } = fixture();
   try {

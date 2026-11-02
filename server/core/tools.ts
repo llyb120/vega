@@ -161,7 +161,7 @@ export class Tools {
         ),
         schema(
           "switch_scene",
-          "Switch within SAME session/shared history. Call alone. coding for development; computer for Chrome. resume only for concrete caller work, not repeating a summary. Employee browser operations MUST use employee relay instead.",
+          "Switch within SAME session/shared history. Call alone. coding for development; computer for Chrome. Employee main tasks may use lightweight for subsequent non-coding work and upgrade again if needed. resume only for concrete caller work, not repeating a summary. Employee browser operations MUST use employee relay instead.",
           {
             scene: {
               type: "string",
@@ -222,26 +222,24 @@ export class Tools {
           parameters: chromeDefinition.inputSchema,
         });
     }
-    const scenes = ["coding", "computer"].filter(
-      (scene) =>
-        scene !== this.session.scene &&
-        !this.sceneStack.includes(scene) &&
-        this.config.scenes?.[scene]?.length && this.config.scenes[scene][0] !== this.session.model &&
-        (!this.session.taskId || scene !== "computer"),
-    );
+    const mainTask = !!this.session.taskId && this.session.scene !== "computer";
+    const scenes = (mainTask ? ["lightweight", "coding"] : ["coding", "computer"]).filter((scene) => {
+      const ids = scene === "lightweight" && !this.config.scenes?.lightweight?.length ? [this.config.model] : this.config.scenes?.[scene];
+      return scene !== this.session.scene && (mainTask || !this.sceneStack.includes(scene)) && ids?.length && ids[0] !== this.session.model && (!this.session.taskId || scene !== "computer");
+    });
     const switching = defs.find((t) => t.name === "switch_scene");
     if (switching) {
       if (!scenes.length) defs.splice(defs.indexOf(switching), 1);
       else switching.parameters.properties.scene.enum = scenes;
     }
 
-    if (this.session.readOnly && scenes.includes("coding"))
+    if (this.session.readOnly && scenes.some(scene => scene === "coding" || (mainTask && scene === "lightweight")))
       defs.push(
         schema(
           "switch_scene",
-          "Use coding for read-only code analysis within this same session; permissions remain read-only.",
+          "Select the model needed for the actual work in this same session; all permissions remain read-only.",
           {
-            scene: { type: "string", enum: ["coding"] },
+            scene: { type: "string", enum: scenes.filter(scene => scene === "coding" || (mainTask && scene === "lightweight")) },
             message: string,
             resume: string,
           },
@@ -286,7 +284,7 @@ export class Tools {
           (name: string) => !name.startsWith("orbit_"),
         );
       delete employee.parameters.properties.events;
-      employee.parameters.properties.profile.description = "兼容字段：新主任务始终从lightweight起步，不用profile直接选择编码模型；实际涉及编码时由原主会话switch_scene升级，已升级的同一任务续做保持场景。";
+      employee.parameters.properties.profile.description = "兼容字段：新主任务始终从lightweight起步，不用profile直接选择编码模型；实际涉及编码时由原主会话switch_scene升级，续做保留现场，但可按后续需求回轻量或再次升级。";
       if (this.session.taskId) {
         employee.parameters.properties.action.enum.push("complete");
         employee.parameters.properties.summary = { type: "string", minLength: 1, maxLength: 400, description: "complete交付摘要：2–4条重点，先结论，再重要变化、限制或需用户操作事项；不贴完整报告和过程，完整证据仍写text。" };

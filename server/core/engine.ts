@@ -789,9 +789,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           try {
             assert(!session.employeeId || session.taskId, "员工沟通会话应创建任务，不直接切换执行场景");
             assert(!session.taskId || session.scene !== "computer", "电脑执行会话只交回结果，不切换编码场景");
+            const mainTask = !!session.taskId;
             assert(
-              ["coding", "computer"].includes(a.scene) &&
-                (!session.readOnly || a.scene === "coding"),
+              (["coding", "computer"].includes(a.scene) || (mainTask && a.scene === "lightweight")) &&
+                (!session.readOnly || a.scene === "coding" || (mainTask && a.scene === "lightweight")),
               "Scene not available in this mode",
             );
             assert(
@@ -802,11 +803,12 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               !a.resume || (typeof a.resume === "string" && a.resume.trim()),
               "resume must be non-empty concrete caller work",
             );
-            const ids = config.scenes?.[a.scene];
+            const returning = mainTask && !a.resume ? frames.findLastIndex(frame => frame.scene === a.scene) : -1;
+            const ids = a.scene === "lightweight" && !config.scenes?.lightweight?.length ? [config.model] : config.scenes?.[a.scene];
             assert(
               ids?.length &&
                 a.scene !== session.scene &&
-                !frames.some((f) => f.scene === a.scene),
+                (mainTask || !frames.some((f) => f.scene === a.scene)),
               "Scene not configured or already in execution stack",
             );
             assert(
@@ -815,7 +817,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             );
             let target: Model | undefined,
               lastError = "No available scene candidate";
-            for (const selection of ids) {
+            const selections = returning >= 0 ? [...new Set([frames[returning].model, ...ids].filter((id): id is string => !!id))] : ids;
+            for (const selection of selections) {
               try {
                 const candidate = await this.catalog.resolve(config, selection);
                 assert(
@@ -844,7 +847,12 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               );
               continue;
             }
-            frames.push({
+            let handoff = a.message;
+            if (returning >= 0) {
+              const pending = frames.splice(returning).map(frame => frame.resume).filter(Boolean);
+              if (pending.length) handoff += "\n[返回方已保留的后续工作，仍属原任务、不是新授权]\n" + pending.join("\n");
+            }
+            if (!mainTask || a.resume) frames.push({
               model: session.model,
               scene: session.scene,
               resume: a.resume,
@@ -858,7 +866,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             outcome = {
               value: {
                 scene: a.scene,
-                task: a.message,
+                task: handoff,
                 resume: a.resume || null,
                 next: a.resume
                   ? "Caller continues only retained work"
