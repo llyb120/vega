@@ -1,7 +1,6 @@
 <script setup vapor>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import ChatMessage from "./ChatMessage.vue";
-import EmployeeAvatar from "./EmployeeAvatar.vue";
 import { employeeChatMessages } from "./conversation";
 const props = defineProps({ api: Function, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean });
 const emit = defineEmits(["task"]);
@@ -108,7 +107,7 @@ onBeforeUnmount(() => { disposed = true; request++; });
   <section class="employee-chat">
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <div ref="transcript" class="employee-transcript" aria-live="polite">
-      <div v-if="!messages.length" class="employee-welcome"><span class="welcome-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" /></span><span class="welcome-label">你的数字搭档已就位</span><h3>今天，想交给我什么？</h3><p>直接告诉我目标。我会安排任务、跟进结果，<br />需要你决定时再回来。</p><div v-if="!readonly" class="welcome-prompts"><button @click="draft = '帮我处理一项工作：'; input?.focus()"><span aria-hidden="true">↗</span> 交代新工作</button><button @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><span aria-hidden="true">☷</span> 看看工作进度</button></div></div>
+      <div v-if="!messages.length" class="employee-welcome"><h3>今天，想交给我什么？</h3><p>直接告诉我目标。我会安排任务、跟进结果，需要你决定时再回来。</p><div v-if="!readonly" class="welcome-prompts"><button type="button" @click="draft = '帮我处理一项工作：'; input?.focus()"><span aria-hidden="true">↗</span> 交代新工作</button><button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><span aria-hidden="true">☷</span> 看看工作进度</button></div></div>
       <ChatMessage v-for="message in visible" :key="message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" />
       <div v-if="running" class="employee-typing" role="status" aria-label="正在输入中"><span>{{ name }}</span><div>正在输入中<span class="typing-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></div></div>
     </div>
@@ -137,26 +136,24 @@ onBeforeUnmount(() => { disposed = true; request++; });
 .composer-quote span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
 .composer-quote .icon { flex: none; min-width: 44px; min-height: 44px; }
 .readonly-note { color: var(--muted); text-align: center; padding: 16px; font-size: 12px; }
-.employee-chat { display: flex; flex-direction: column; min-height: 0; min-width: 0; height: 100%; padding: 0 28px 22px; }
-.employee-transcript { overflow-y: auto; flex: 1; min-height: 0; padding: 26px max(4px, calc((100% - 800px) / 2)); scrollbar-width: thin; }
-.employee-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100%; padding: 28px 0; text-align: center; }
-.welcome-avatar { display: grid; place-items: center; width: 58px; height: 62px; margin-bottom: 20px; border-radius: 19px; background: var(--accent-soft); color: var(--accent); font-size: 25px; font-weight: 650; }
-.welcome-label { color: var(--muted); font-size: 11px; letter-spacing: .03em; }
-.employee-welcome h3 { font-size: clamp(22px, 2.2vw, 30px); letter-spacing: -.04em; margin: 12px 0; font-weight: 600; }
-.employee-welcome p { font-size: 13px; color: var(--text-secondary); line-height: 1.9; margin: 0; }
-.welcome-prompts { display: flex; gap: 10px; margin-top: 26px; flex-wrap: wrap; justify-content: center; }
-.welcome-prompts button { background: var(--surface); font-size: 12px; border-radius: 10px; min-height: 42px; }
-.welcome-prompts span { color: var(--accent); margin-right: 6px; }
-.employee-composer { flex: none; width: 100%; max-width: 840px; align-self: center; margin: 0; padding: 14px 16px 10px; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--surface); box-shadow: var(--sh-sm); }
+.employee-chat { display: flex; flex-direction: column; min-height: 0; min-width: 0; height: 100%; padding: 0 16px 12px; }
+.employee-transcript { overflow-y: auto; flex: 1; min-height: 0; padding: 12px max(4px, calc((100% - 800px) / 2)); scrollbar-width: thin; }
+.employee-welcome { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; min-height: 0; padding: 8px 0 16px; text-align: left; max-width: 520px; }
+.employee-welcome h3 { font-size: 18px; letter-spacing: -.03em; margin: 0 0 8px; font-weight: 650; }
+.employee-welcome p { font-size: 13px; color: var(--text-secondary); line-height: 1.65; margin: 0; }
+.welcome-prompts { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.welcome-prompts button { background: var(--surface); font-size: 12px; border-radius: 8px; min-height: 40px; padding: 8px 12px; }
+.welcome-prompts span { color: var(--accent); margin-right: 4px; }
+.employee-composer { flex: none; width: 100%; max-width: 840px; align-self: center; margin: 0; padding: 10px 12px 8px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface); box-shadow: var(--sh-xs); }
 .employee-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
-.employee-composer textarea { width: 100%; min-height: 62px; max-height: 180px; resize: vertical; border: 0; box-shadow: none; background: transparent; padding: 5px 2px; line-height: 1.7; }
+.employee-composer textarea { width: 100%; min-height: 40px; max-height: 160px; resize: vertical; border: 0; box-shadow: none; background: transparent; padding: 4px 2px; line-height: 1.6; }
 .employee-composer textarea:focus { box-shadow: none; }
 .composer-tools { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
 .composer-tools button { min-height: 36px; font-size: 12px; }
 .attach-button { background: transparent; border-color: transparent; color: var(--text-secondary); padding-left: 0; }
 .composer-hint { color: var(--muted); font-size: 10px; flex: 1; text-align: right; }
 .composer-tools .primary { margin-left: auto; min-width: 72px; }
-@media (max-width: 700px) { .employee-chat { padding: 0 14px 14px; } .employee-transcript { padding: 18px 0; } .employee-welcome { padding: 20px 0; } .welcome-avatar { width: 46px; height: 48px; margin-bottom: 12px; font-size: 21px; } .employee-welcome h3 { font-size: 23px; } .welcome-prompts { margin-top: 18px; } .composer-hint { display: none; } .composer-tools button { min-height: 44px; } .employee-composer textarea { font-size: 16px; } }
+@media (max-width: 700px) { .employee-chat { padding: 0 12px 10px; } .employee-transcript { padding: 8px 0; } .employee-welcome h3 { font-size: 17px; } .welcome-prompts { margin-top: 10px; } .composer-hint { display: none; } .composer-tools button { min-height: 44px; } .employee-composer textarea { font-size: 16px; } }
 @media (max-width: 760px) {
   .employee-chat { padding: 0 12px max(8px, env(safe-area-inset-bottom, 0px)); }
   .employee-composer { padding: 8px 12px 6px; border-radius: 12px; box-shadow: none; }
@@ -165,5 +162,5 @@ onBeforeUnmount(() => { disposed = true; request++; });
   .composer-tools button { min-height: 44px; }
   .composer-hint { display: none; }
 }
-@media (max-height: 600px) { .employee-welcome { min-height: 160px; padding: 10px 0; } .welcome-avatar, .welcome-label, .welcome-prompts { display: none; } }
+@media (max-height: 600px) { .employee-welcome { padding: 4px 0 8px; } .employee-welcome p { display: none; } .welcome-prompts { margin-top: 8px; } }
 </style>
