@@ -169,7 +169,7 @@ onMounted(() => void run(async () => {
         <button :disabled="busy" @click="newVault">新增凭据</button>
       </div>
       <p class="hint">
-        可分别保存多条账号、密码或密钥，每条有独立的使用条件；凭据加密保存，只有管理员能修改。
+        密码本全局共享，不归属员工，无需逐员工授权。可保存多条账号、密码或密钥，每条有独立的使用条件；凭据加密保存，只有管理员能修改。
       </p>
       <p v-if="vaultForm.id" class="hint">正在编辑「{{ vaultForm.name }}」，凭据留空保留原内容。</p>
       <form class="form-grid" @submit.prevent="saveVault">

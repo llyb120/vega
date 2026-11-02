@@ -31,7 +31,6 @@ export type EmployeeState = {
   execution?: Execution;
   executionCwds?: Record<string, string>;
   chatSession?: string;
-  vaultIds: string[];
   enabled: boolean;
   public: boolean;
   workStart: string;
@@ -436,7 +435,6 @@ export class Employee {
       name: "默认员工",
       instruction: "",
       ownerId: "",
-      vaultIds: [],
       enabled: true,
       public: false,
       workStart: "00:00",
@@ -463,7 +461,7 @@ export class Employee {
     // Legacy availability fields no longer gate employees; only duty schedules determine when work is due.
     state.enabled = true;
     state.workStart = state.workEnd = "00:00";
-    Object.assign(state, { id: this.employeeId, name: state.name || fallback.name, instruction: state.instruction || "", ownerId: state.ownerId || "", vaultIds: (state.vaultIds || []).filter((key) => this.store.object("vault", key)) });
+    Object.assign(state, { id: this.employeeId, name: state.name || fallback.name, instruction: state.instruction || "", ownerId: state.ownerId || "" });
     // Retain legacy data but do not fire removed Orbit subscriptions.
     for (const duty of state.duties)
       if (duty.events?.some((name: string) => name.startsWith("orbit."))) {
@@ -608,9 +606,8 @@ export class Employee {
       !["vault_request", "vault_send"].includes(action)
     ) {
       if (action === "vault_list")
-        return { value: { entries: this.vault.list().filter((entry) => initial.vaultIds.includes(entry.id) && (!entry.tempFor || entry.tempFor === caller)) } };
+        return { value: { entries: this.vault.list().filter((entry) => !entry.tempFor || entry.tempFor === caller) } };
       if (action === "vault_get") {
-        assert(initial.vaultIds.includes(a.id), "Credential is not granted to this employee");
         const value = this.vault.get(a.id, a.text, caller);
         return {
           value: {
@@ -915,7 +912,6 @@ export class Employee {
               t.replyTo && t.vaultPk,
               "Not a remote credential support task",
             );
-            assert(initial.vaultIds.includes(a.id), "Credential is not granted to this employee");
             const sealed = this.vault.sealFor(a.id, t.replyTo.id, t.vaultPk);
             pendingSend = {
               to: t.replyTo.token,
@@ -1039,10 +1035,6 @@ export class Employee {
             assert(typeof a[key] === "string" && a[key].length <= max && (key === "instruction" || a[key].trim()), "Invalid employee " + key);
             s[key] = a[key].trim();
           }
-        if ("vaultIds" in a) {
-          assert(Array.isArray(a.vaultIds) && a.vaultIds.every((key: string) => this.vault.list().some((entry) => entry.id === key)), "Invalid credential grants");
-          s.vaultIds = [...new Set<string>(a.vaultIds)];
-        }
         return { ok: true };
       }
       if (a.action === "fire") {
@@ -1597,7 +1589,6 @@ export class Employee {
           clip(task.text, 40),
           data.sealed,
         );
-        this.update((state) => { if (!state.vaultIds.includes(entry.id)) state.vaultIds.push(entry.id); });
         answer = `对方已加密发来「${entry.name}」，临时条目 ${entry.id}；使用 vault_get，任务结束自动删除。`;
       }
       await this.control({ action: "answer", id: task.id, text: answer }, from);

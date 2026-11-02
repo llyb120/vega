@@ -211,7 +211,6 @@ const employee = ref({
   creatingEmployee = ref(false),
   newEmployeeName = ref(""),
   newEmployeeInstruction = ref(""),
-  vaultEntries = ref([]),
   employeeSession = ref(""),
   employeeSessionVersion = ref(0),
   employeeError = ref(""),
@@ -650,7 +649,6 @@ function resetLogin() {
   creatingEmployee.value = false;
   newEmployeeName.value = "";
   newEmployeeInstruction.value = "";
-  vaultEntries.value = [];
   employee.value = { duties: [], tasks: [], memories: [], runs: [] };
   taskText.value = "";
   memoryText.value = "";
@@ -1172,10 +1170,6 @@ async function openEmployeeTask(id) {
 }
 async function employeeTabChanged(id) {
   employeeTab.value = id;
-  if (id === "settings" && isAdmin.value) {
-    try { vaultEntries.value = (await api("/vault")).entries; }
-    catch (error) { employeeError.value = error.message; }
-  }
 }
 function openEmployee(session = "") {
   employeeSession.value = session;
@@ -1258,7 +1252,6 @@ async function saveEmployeeSettings() {
       name: employee.value.name,
       instruction: employee.value.instruction,
       cwd: employee.value.cwd,
-      ...(isAdmin.value ? { vaultIds: employee.value.vaultIds || [] } : {}),
     });
     toast("员工设置已保存");
     const updated = await api(`/employees/${id}`);
@@ -1782,7 +1775,6 @@ onBeforeUnmount(() => {
             <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
             <label>工作原则<textarea v-model="employee.instruction" maxlength="8000"></textarea></label>
             <label>工作目录<input v-model="employee.cwd" required /></label>
-            <fieldset v-if="isAdmin && vaultEntries.length"><legend>允许使用的密码本条目</legend><label v-for="entry in vaultEntries" :key="entry.id"><input v-model="employee.vaultIds" type="checkbox" :value="entry.id" /> {{ entry.name }} · {{ entry.condition }}</label></fieldset>
             <div class="actions"><button type="button" @click="employeeTab = 'chat'">返回对话</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '保存中…' : '保存修改' }}</button></div>
           </form>
           <div v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee && !creatingEmployee" class="employee-chat-layout" :class="{ 'work-open': workRailOpen }">

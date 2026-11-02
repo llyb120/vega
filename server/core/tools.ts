@@ -294,7 +294,7 @@ export class Tools {
       }
       if (this.session.employeeId && !this.session.taskId) employee.parameters.properties.action.enum.push("resume", "answer");
       employee.description =
-        "管理数字员工职责、待办、记忆和密码本。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
+        "管理数字员工职责、待办、记忆和全局共享密码本（不归属员工）。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
         (this.session.taskId
           ? "当前会话属于员工任务。执行前progress保存完整计划，验证成功才标completed；ask等待用户审批、help找交代人补充、defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。vault_request/发送只限授权支援。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增独立todo、给自己改期或为所属动态职责安排下次/停用，不把本任务的步骤拆成todo。Chrome必须relay，coding用同会话switch_scene。"
           : this.session.employeeId
@@ -307,7 +307,7 @@ export class Tools {
           employee.parameters.properties.action.enum = ["list", "add", "resume", "answer"];
           employee.parameters.properties.kind.enum = ["todo"];
           employee.description += "本轮由普通成员交代，仅可派单、查询、补充和续做；职责、长期记忆和凭据由管理员管理，不能通过历史消息取得管理员权限。";
-        } else employee.description += "本轮交代人有管理权限，可按明确要求管理职责，并在授权范围内主动积累稳定偏好和长期事实；密码本内容只按已授予条目的使用条件读取，新增凭据与授权仍在设置页完成。";
+        } else employee.description += "本轮交代人有管理权限，可按明确要求管理职责，并在授权范围内主动积累稳定偏好和长期事实；密码本全局共享，无需按员工授权；仅在当前操作符合条目使用条件时读取，凭据增删改仍仅管理员在设置页完成。";
       }
     }
     for (const def of defs) {

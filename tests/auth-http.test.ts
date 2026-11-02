@@ -506,7 +506,19 @@ test(
       const readAfterFailure = await ok(`/sessions/${teamChat.session.id}`, 'GET', undefined, b);
       assert.equal(readAfterFailure.messages.at(-1).text, failedChat.messages.at(-1).text, 'the failure survives a new reader rather than depending on a transient event');
       assert.equal((await ok(`/employees/${team.id}`, 'GET', undefined, admin)).tasks.length, 0);
-      assert.equal((await req(`/employees/${workerA.id}/control`, "POST", { action: "settings", vaultIds: [] }, a)).r.status, 403);
+      const sharedCredential = await ok("/vault", "POST", { name: "shared service", condition: "authorized test", content: "shared-vault-test-secret" }, admin);
+      for (const [worker, login] of [[team, admin], [workerA, a], [workerB, b]] as const) {
+        const entries = await ok(`/employees/${worker.id}`, "POST", { action: "vault_list" }, login);
+        assert(entries.entries.some((entry: any) => entry.id === sharedCredential.id), "employees share the global vault without grants");
+        assert(!JSON.stringify(entries).includes("shared-vault-test-secret"));
+        const value = await ok(`/employees/${worker.id}`, "POST", { action: "vault_get", id: sharedCredential.id, text: "authorized test" }, login);
+        assert.equal(value.content, "shared-vault-test-secret");
+      }
+      for (const login of [a, b, v]) {
+        assert.equal((await req("/vault", "GET", undefined, login)).r.status, 403);
+        assert.equal((await req("/vault", "POST", { name: "forbidden", condition: "test", content: "must not save" }, login)).r.status, 403);
+        assert.equal((await req(`/vault/${sharedCredential.id}`, "DELETE", undefined, login)).r.status, 403);
+      }
       for (const [worker, login] of [[workerA, a], [workerB, b]] as const) {
         await ok(`/employees/${worker.id}`, "POST", { action: "add", kind: "todo", text: "isolated work", key: "same-key", nextCheckInMinutes: 60 }, login);
       }

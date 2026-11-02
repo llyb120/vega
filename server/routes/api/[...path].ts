@@ -233,7 +233,6 @@ export default defineEventHandler(async (event) => {
       }
       if (path[2] === "control" && method === "POST") {
         if (["settings", "fire"].includes(a.action)) check(employee.manageable(user), 403, "只有员工管理者可以修改设置或触发职责");
-        if (a.vaultIds !== undefined) check(user.role === "admin", 403, "Only administrators grant credentials");
         return employee.control(a);
       }
       if (path[2] === "transcript" && method === "POST") return employee.transcript(a.threadId);
