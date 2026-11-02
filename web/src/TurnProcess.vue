@@ -52,3 +52,51 @@ const tokenTitle = computed(() => {
     <slot></slot>
   </div>
 </template>
+<style scoped>
+.turn-fold {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2) var(--space-4);
+  margin: var(--space-4) 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  font-size: 0.8125rem;
+  color: var(--text-tertiary);
+  text-align: left;
+  cursor: pointer;
+  transition: all var(--duration-base) var(--ease-out);
+  min-height: 40px;
+}
+
+.turn-fold:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+  border-color: var(--border-medium);
+}
+
+.turn-fold-chevron {
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.turn-process {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.turn-process.folded {
+  margin: var(--space-3) 0;
+}
+
+@media (max-width: 768px) {
+  .turn-fold {
+    min-height: 44px;
+    font-size: 0.875rem;
+  }
+}
+</style>

@@ -68,3 +68,193 @@ const icon = (item) => icons[toolKind(item.name)];
     </div>
   </section>
 </template>
+<style scoped>
+.tool-steps {
+  margin: var(--space-4) 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.tool-steps-summary {
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  background: transparent;
+  border: none;
+  text-align: left;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--duration-base) var(--ease-out);
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.tool-steps-summary:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+}
+
+.steps-summary-line,
+.steps-live-preview {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.steps-summary-text {
+  flex: 1;
+  font-weight: 500;
+}
+
+.steps-chevron,
+.steps-live-chevron {
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.steps-live-lines {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.steps-live-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--accent);
+  font-size: 0.875rem;
+}
+
+.tool-steps-body {
+  border-top: 1px solid var(--border-light);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.tool-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+}
+
+.tool-step.active {
+  border-color: var(--accent);
+  background: var(--accent-light);
+}
+
+.tool-step.failed {
+  border-color: var(--error-500);
+  background: var(--error-50);
+}
+
+.step-icon {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+  font-size: 0.875rem;
+  flex-shrink: 0;
+}
+
+.tool-step.active .step-icon {
+  background: var(--accent-medium);
+  color: var(--accent);
+}
+
+.step-name {
+  flex: 1;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.step-failed {
+  color: var(--error-500);
+  font-weight: 600;
+}
+
+.step-chevron {
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+
+details.tool-step summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+details.tool-step[open] {
+  padding-bottom: var(--space-3);
+}
+
+details.tool-step pre {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  background: var(--bg-sunken);
+  border-radius: var(--radius-md);
+  font-size: 0.8125rem;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
+details.tool-step img {
+  max-width: 100%;
+  margin-top: var(--space-3);
+  border-radius: var(--radius-md);
+}
+
+.tool-thought {
+  padding: var(--space-3);
+  background: var(--info-50);
+  border: 1px solid var(--info-500);
+  border-radius: var(--radius-md);
+}
+
+.tool-thought summary {
+  font-weight: 600;
+  color: var(--info-600);
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.875rem;
+}
+
+.tool-thought pre {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  background: var(--bg-primary);
+  border-radius: var(--radius-md);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
+@media (max-width: 768px) {
+  .tool-steps-summary {
+    font-size: 0.9375rem;
+  }
+
+  .step-name {
+    font-size: 0.9375rem;
+  }
+}
+</style>
