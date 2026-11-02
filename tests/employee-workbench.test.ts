@@ -236,6 +236,10 @@ test("generic recovery diagnoses in the original task/session, requires verified
     assert.equal(current.status, "recovering");
     assert.equal(current.recovery.attempts, 1);
     assert.equal(current.checkpoint, "external job-123 was already submitted");
+    const failure = store.messages(current.workSession).at(-1)!;
+    assert.equal(failure.role, "assistant");
+    assert.equal(failure.error, true);
+    assert.match(failure.text!, /本轮未完成[\s\S]*unknown environment failure/);
     const originalSession = current.workSession;
     let recoveryPrompt = "";
     runtime.run = async (_session, prompt) => { recoveryPrompt = prompt; };
@@ -249,6 +253,7 @@ test("generic recovery diagnoses in the original task/session, requires verified
     current = await segment(employee, current);
     assert.equal(current.status, "waiting");
     assert.equal(current.recovery.attempts, 4);
+    assert.match(store.messages(current.workSession).at(-1)!.text!, /自动恢复已达上限/);
     const reopened = new Employee(store, employee.vault, runtime);
     assert.equal(reopened.state().tasks[0].recovery.attempts, 4);
     await employee.control({ action: "answer", id: job.id, text: "environment fixed, continue" });
@@ -262,6 +267,37 @@ test("generic recovery diagnoses in the original task/session, requires verified
     assert.equal(current.workSession, originalSession);
     assert.equal(store.sessions().length, 1);
   } finally { employee.close(); store.close(); }
+});
+
+test("computer execution keeps a real final answer once and never treats tool narration as its result", async () => {
+  for (const toolOnly of [false, true]) {
+    const { store, employee, runtime } = fixture();
+    try {
+      const job = await task(employee);
+      employee.update(state => { state.tasks[0].side = "computer"; });
+      runtime.run = async (session, prompt, _signal, input) => {
+        store.append(session, { role: "user", text: prompt, taskInput: input });
+        store.append(session, toolOnly
+          ? { role: "assistant", text: "正在检查网页。", calls: [{ id: "inspect", name: "chrome", arguments: { operation: "inspect" } }] }
+          : { role: "assistant", text: "已核实网页结果，没有再次提交。" });
+        if (toolOnly) store.append(session, { role: "tool", name: "chrome", callId: "inspect", text: "inspection failed", error: true });
+      };
+      const current = await segment(employee, employee.task(employee.state(), job.id));
+      const messages = store.messages(current.computerSession), conclusion = messages.at(-1)!;
+      assert.equal(conclusion.role, "assistant");
+      assert(!conclusion.calls?.length);
+      if (toolOnly) {
+        assert.equal(current.status, "recovering");
+        assert.match(conclusion.text!, /本轮未完成[\s\S]*未验证交付/);
+        assert(!current.answer);
+      } else {
+        assert.equal(current.status, "queued");
+        assert.equal(current.side, "work");
+        assert.equal(conclusion.text, "已核实网页结果，没有再次提交。");
+        assert.equal(messages.filter(message => message.role === "assistant").length, 1);
+      }
+    } finally { employee.close(); store.close(); }
+  }
 });
 
 test("consecutive interruptions resume with only new supplements and the current checkpoint, durably in the same session", async () => {

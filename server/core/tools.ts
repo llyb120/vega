@@ -291,7 +291,7 @@ export class Tools {
       employee.parameters.properties.profile.description = "兼容字段：新主任务始终从lightweight起步，不用profile直接选择编码模型；实际涉及编码时由原主会话switch_scene升级，续做保留现场，但可按后续需求回轻量或再次升级。";
       if (this.session.taskId) {
         employee.parameters.properties.action.enum.push("complete");
-        employee.parameters.properties.summary = { type: "string", minLength: 1, maxLength: 400, description: "complete交付摘要：2–4条重点，先结论，再重要变化、限制或需用户操作事项；不贴完整报告和过程，完整证据仍写text。" };
+        employee.parameters.properties.summary = { type: "string", minLength: 1, maxLength: 400, description: "complete交付摘要：1–400字符（中英文、标点、空格与换行均计数），建议100–200字符；2–4条重点，先结论，再重要变化、限制或需用户操作事项；完整证据写text。长度报错后先精简summary，不要原样重试或直接截断。" };
       }
       if (this.session.employeeId && !this.session.taskId) employee.parameters.properties.action.enum.push("resume", "answer");
       employee.description =

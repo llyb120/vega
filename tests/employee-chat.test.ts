@@ -59,6 +59,10 @@ test("task delivery quotes its originating chat message, carries a task link and
     job = employee.state().tasks[0];
     assert.equal(job.status, "done");
     assert.equal(job.result, full.trim());
+    const conclusion = store.messages(job.workSession).at(-1)!;
+    assert.equal(conclusion.role, "assistant");
+    assert.equal(conclusion.text, "**结论**：地址已确认。\n- 未修改配置或重试请求。");
+    assert(!conclusion.calls?.length);
     const delivery = store.messages(chat.id).at(-1)!;
     assert.equal(delivery.delivery, true);
     assert.equal(delivery.quote?.seq, 1);
@@ -67,6 +71,84 @@ test("task delivery quotes its originating chat message, carries a task link and
     assert.match(delivery.text!, /地址已确认/);
     assert(!delivery.text!.includes("Trace details") && delivery.text!.length < 100);
   } finally { await engine.close(); store.close(); }
+});
+
+test("complete feedback identifies missing evidence, unverified steps and stale plan revisions without completing the task", async () => {
+  const { store, engine, employee } = fixture();
+  const verified = [{ content: "verify result", status: "completed" }];
+  try {
+    const created = await employee.execute("", { action: "add", kind: "todo", text: "Verify result" });
+    employee.busy.set(created.value.id, { computer: false, session: "" });
+    const cases = [
+      { text: " ", plan: verified, planRevision: 2, revision: 2, error: /text=空/ },
+      { text: "actual evidence", plan: [], planRevision: 2, revision: 2, error: /plan=0步/ },
+      { text: "actual evidence", plan: ["in_progress", "blocked", "failed", "completed"].map(status => ({ content: "verify result", status })), planRevision: 2, revision: 2, error: /未验证步骤=1:in_progress、2:blocked、3:failed/ },
+      { text: "actual evidence", plan: verified, planRevision: 1, revision: 2, error: /planRevision=1，revision=2/ },
+    ];
+    for (const scenario of cases) {
+      employee.update(state => { Object.assign(state.tasks[0], { status: "running", plan: scenario.plan, planRevision: scenario.planRevision, revision: scenario.revision }); });
+      const before = structuredClone(employee.state().tasks[0]);
+      await assert.rejects(employee.execute(created.value.id, { action: "complete", text: scenario.text, summary: "Verified outcome" }), { message: scenario.error });
+      assert.deepEqual(employee.state().tasks[0], before);
+    }
+    await employee.execute(created.value.id, { action: "progress", text: "latest result verified", plan: verified });
+    const completed = await employee.execute(created.value.id, { action: "complete", text: "actual verified evidence", summary: "Verified outcome" });
+    assert.equal(completed.stop, true);
+    assert.equal(employee.state().tasks[0].completion, "actual verified evidence");
+    assert.equal(employee.state().tasks[0].planRevision, 2);
+  } finally { await engine.close(); store.close(); }
+});
+
+test("complete summary feedback reports character counts and preserves the previous result until a valid correction", async () => {
+  const { store, engine, employee } = fixture();
+  const boundary = "字".repeat(200) + "😀".repeat(200);
+  try {
+    const created = await employee.execute("", { action: "add", kind: "todo", text: "Verify result" });
+    employee.update(state => { Object.assign(state.tasks[0], { status: "running", plan: [{ content: "verify", status: "completed" }], summary: "previous summary", completion: "previous evidence" }); });
+    employee.busy.set(created.value.id, { computer: false, session: "" });
+    const before = structuredClone(employee.state().tasks[0]);
+    for (const { summary, length } of [{ summary: "", length: 0 }, { summary: " \n\t", length: 3 }, { summary: boundary + "。", length: 401 }, { summary: boundary + " ", length: 401 }, { summary: 42, length: 0 }]) {
+      await assert.rejects(employee.execute(created.value.id, { action: "complete", text: "new verified evidence", summary }), {
+        message: new RegExp(`Delivery summary requires 1–400 characters; received ${length}.*请先填写或精简summary`),
+      });
+      assert.deepEqual(employee.state().tasks[0], before);
+    }
+    const completed = await employee.execute(created.value.id, { action: "complete", text: "new verified evidence", summary: boundary });
+    assert.equal(completed.stop, true);
+    assert.equal(employee.state().tasks[0].summary, boundary);
+    assert.equal(employee.state().tasks[0].completion, "new verified evidence");
+  } finally { await engine.close(); store.close(); }
+});
+
+test("scheduled execution records persist conclusions for stopping task tools without another model request", async () => {
+  const cases = [
+    { arguments: { action: "complete", text: "已核验完整证据，未修改配置。", summary: "已确认实际地址，未修改配置。" }, status: "done", conclusion: /已确认实际地址，未修改配置/ },
+    { arguments: { action: "ask", text: "是否批准发布？" }, status: "approval", conclusion: /等待你确认：是否批准发布/ },
+    { arguments: { action: "help", text: "请提供目标环境。" }, status: "waiting", conclusion: /需要你处理：请提供目标环境/ },
+    { arguments: { action: "defer", text: "导出作业export-123已提交，只检查原作业。", nextCheckInMinutes: 5 }, status: "deferred", conclusion: /已挂起[\s\S]*export-123/ },
+    { arguments: { action: "relay", scene: "computer", text: "在已打开的网页检查结果，不重新提交。" }, status: "queued", conclusion: /已交接电脑会话[\s\S]*主任务尚未完成/ },
+  ];
+  for (const scenario of cases) {
+    const { store, engine, employee } = fixture();
+    let requests = 0;
+    engine.providers.chat = async () => {
+      assert.equal(++requests, 1, "stopping a task must not request an extra model turn just to generate its conclusion");
+      return { role: "assistant", calls: [{ id: "stop", name: "employee", arguments: scenario.arguments }] };
+    };
+    try {
+      const created = await employee.execute("", { action: "add", kind: "todo", text: "Verify an existing result" });
+      employee.update(state => { Object.assign(state.tasks[0], { status: "running", plan: [{ content: "verify result", status: "completed" }] }); });
+      employee.busy.set(created.value.id, { computer: false, session: "" });
+      await employee.run(employee.state().tasks[0]);
+      const job = employee.state().tasks[0], messages = store.messages(job.workSession), conclusion = messages.at(-1)!;
+      assert.equal(job.status, scenario.status);
+      assert.equal(requests, 1);
+      assert.equal(conclusion.role, "assistant");
+      assert(!conclusion.calls?.length);
+      assert.match(conclusion.text!, scenario.conclusion);
+      assert.equal(messages.filter(message => message.role === "assistant" && !message.calls?.length).length, 1);
+    } finally { await engine.close(); store.close(); }
+  }
 });
 
 test("quotes are resolved from the same conversation and the model gets the actual source rather than a forged or truncated preview", async () => {

@@ -799,12 +799,22 @@ export class Employee {
             t.supplementPending = false;
             return { ok: false, supplement: t.answer, next: "Apply the user's latest supplement, update and verify the plan before completing." };
           }
-          assert(content && t.plan?.length && t.plan.every((step: Obj) => step.status === "completed") && (t.planRevision || 0) === (t.revision || 0), "Complete requires a fully verified plan for the latest requirements and result evidence in text");
-          if (a.summary !== undefined) assert(typeof a.summary === "string" && a.summary.trim() && [...a.summary].length <= 400, "Delivery summary requires 1–400 characters");
+          const pending = (t.plan || []).flatMap((step: Obj, index: number) => step.status === "completed" ? [] : [`${index + 1}:${step.status}`]);
+          assert(
+            content && t.plan?.length && !pending.length && (t.planRevision || 0) === (t.revision || 0),
+            `Complete requires a fully verified plan for the latest requirements and result evidence in text. 尚未交付：text=${content ? "非空" : "空"}，plan=${t.plan?.length || 0}步，未验证步骤=${pending.join("、") || "无"}，planRevision=${t.planRevision || 0}，revision=${t.revision || 0}。请补齐text中的实际结果与验证证据；未验证步骤继续执行，真实验证后再用progress提交对应最新要求的完整plan。不要仅为通过校验把步骤标completed，也不要原样重试。`,
+          );
+          if (a.summary !== undefined) {
+            const length = typeof a.summary === "string" ? [...a.summary].length : 0;
+            assert(
+              typeof a.summary === "string" && a.summary.trim() && length <= 400,
+              `Delivery summary requires 1–400 characters; received ${length} (type: ${typeof a.summary}). 尚未交付：summary须为非空、非全空白的字符串，中英文、标点、空格与换行均计数。请先填写或精简summary（建议100–200字符），只保留结果、重要限制与需用户处理事项；完整证据放text，不要原样重试或直接截断。`,
+            );
+          }
           t.summary = a.summary?.trim() || "";
           t.completion = content;
           stop = true;
-          return { ok: true, next: "Task verified; report the result and end this turn." };
+          return { ok: true, next: "Task verified; the scheduler saves and delivers the conclusion. End this turn now." };
         }
         case "ask":
         case "help":
@@ -1323,6 +1333,7 @@ export class Employee {
   async run(job: Task) {
     let session = "",
       result = "",
+      lastReply: Message | undefined,
       error: any;
     let stopMonitor = () => {};
     try {
@@ -1406,10 +1417,11 @@ export class Employee {
       const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用progress登记完整计划；续做保留已验证步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划，验证成功才标completed。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；缺信息找交代人，不等待轮询。${computer ? "你在隔离的电脑/Chrome会话，只做交接内容。完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       await this.runtime.run(session, prompt, AbortSignal.timeout(15 * 60000), input);
-      const rows = this.store.messages(session);
-      result =
-        [...rows].reverse().find((m) => m.role === "assistant" && m.text && m.seq! > after)
-          ?.text || "";
+      const last = this.store.messages(session).at(-1);
+      if (last?.role === "assistant" && !last.calls?.length && last.seq! > after) {
+        lastReply = last;
+        result = last.text || "";
+      }
     } catch (e: any) {
       error = e;
       result = e?.message || String(e);
@@ -1472,6 +1484,19 @@ export class Employee {
         }
       });
       const state = this.state(), task = state.tasks.find((t) => t.id === job.id);
+      if (session && task) {
+        const conclusion = task.status === "done" ? task.summary || task.result || "已完成，详情见任务。"
+          : task.status === "approval" ? "等待你确认：" + task.approval
+          : task.status === "waiting" ? "需要你处理：" + task.waiting
+          : task.status === "deferred" ? "已挂起，等待外部结果；到期继续原任务。\n\n" + task.checkpoint
+          : task.status === "recovering" ? "本轮未完成，将在原会话恢复。\n\n原因：" + task.recovery?.reason
+          : task.status === "queued" && task.side === "computer" ? "已交接电脑会话，等待执行结果；主任务尚未完成。"
+          : result || task.checkpoint || "本轮已结束，任务尚未验证交付。";
+        if (lastReply?.text !== conclusion) {
+          this.store.append(session, { role: "assistant", text: conclusion, error: !!error || task.status === "recovering" });
+          this.runtime.emit("employee_changed", { employeeId: this.employeeId });
+        }
+      }
       if (state.chatSession && task && ["done", "waiting", "approval"].includes(task.status)) {
         const full = task.status === "done" ? task.summary || task.result || "已完成，详情见任务。" : task.waiting || task.approval || "需要你处理。";
         const excerpt = [...String(full)].slice(0, 400).join("");
