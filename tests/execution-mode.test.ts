@@ -11,6 +11,7 @@ import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Tools } from "../server/core/tools";
 import { sessionPrompt } from "../server/core/prompt";
+import { resolveModel } from "../server/core/config";
 import { LocalAgentUnavailable } from "../server/core/local-agent";
 
 const client = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Office PC", cwd: "C:\\client-only", platform: "windows" };
@@ -21,6 +22,38 @@ function fixture(t: TestContext) {
   t.after(async () => { await engine.close(); store.close(); });
   return { engine, store };
 }
+
+test("client hints follow only the bound device and owner, refresh live and never change cwd", async (t) => {
+  const { engine, store } = fixture(t);
+  const config = { model: "fixture/model", provider: { fixture: { baseURL: "https://unused.test", models: { model: {} } } } };
+  store.put("config", config);
+  engine.catalog.resolve = async () => resolveModel(config);
+  const officeHint = "项目目录：D:\\code\\office\n辅助提示，不是切换工作目录。", homeHint = "Home-only hint", bobHint = "Bob-only hint";
+  engine.localAgents.connect("alice", { ...client, supplement: officeHint });
+  engine.localAgents.connect("alice", { ...client, clientId: "e".repeat(32), instance: "b".repeat(32), supplement: homeHint });
+  engine.localAgents.connect("bob", { ...client, supplement: bobHint });
+  let system = "";
+  engine.providers.chat = async (_model, prompt) => { system = prompt; return { role: "assistant", text: "done" }; };
+  const office = store.newSession({ cwd: client.cwd, ownerId: "alice", clientId: client.clientId, localAgent: true });
+  for (const [session, expected] of [
+    [office, officeHint],
+    [store.newSession({ cwd: client.cwd, ownerId: "alice", clientId: "e".repeat(32), localAgent: true }), homeHint],
+    [store.newSession({ cwd: client.cwd, ownerId: "bob", clientId: client.clientId, localAgent: true, scene: "computer" }), bobHint],
+    [store.newSession({ cwd: process.cwd(), ownerId: "alice", clientId: client.clientId }), ""],
+  ] as const) {
+    await engine.run(session.id, { role: "user", text: "Describe the current environment" });
+    for (const hint of [officeHint, homeHint, bobHint]) assert.equal(system.includes(JSON.stringify(hint)), hint === expected);
+    assert.equal(store.session(session.id).cwd, session.cwd);
+    if (expected) assert.match(system, /不自动切换工作目录/);
+  }
+  engine.localAgents.connect("alice", { ...client, supplement: "Updated local hint" });
+  await engine.run(office.id, { role: "user", text: "Use the updated hint" });
+  assert(system.includes("Updated local hint") && !system.includes(JSON.stringify(officeHint)));
+  engine.localAgents.connect("alice", { ...client, supplement: "" });
+  await engine.run(office.id, { role: "user", text: "The hint was cleared" });
+  assert(!system.includes("[所选客户端补充内容]"));
+  assert(!(await sessionPrompt({ ...office, localAgent: false }, config, store, officeHint)).includes(JSON.stringify(officeHint)));
+});
 
 test("client update idleness covers entire local turns, employee sessions and Fire chains", (t) => {
   const { engine, store } = fixture(t);

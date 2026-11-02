@@ -199,6 +199,12 @@ func (a *Agent) prepareUpdate(ctx context.Context, connections []*directConnecti
 		a.updating = false
 		a.mu.Unlock()
 	}
+	a.mu.Lock()
+	editing := a.editing
+	a.mu.Unlock()
+	if editing {
+		return undo, false
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	for _, connection := range connections {
@@ -225,7 +231,7 @@ func (a *Agent) prepareUpdate(ctx context.Context, connections []*directConnecti
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if ctx.Err() != nil || len(a.direct) != len(connections) || len(connections) == 0 {
+	if a.editing || ctx.Err() != nil || len(a.direct) != len(connections) || len(connections) == 0 {
 		return undo, false
 	}
 	for i, connection := range connections {
@@ -307,7 +313,7 @@ func (a *Agent) autoUpdate(ctx context.Context, quit func()) {
 			}
 			connections = a.updateConnections()
 			a.mu.Lock()
-			ready := true
+			ready := !a.editing
 			trusted = false
 			for _, connection := range connections {
 				ready = ready && connection.status.Code == "connected" && connection.autoUpdate

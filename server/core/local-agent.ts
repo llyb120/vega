@@ -19,6 +19,7 @@ export type Agent = {
   instance: string;
   cwd: string;
   platform: string;
+  supplement?: string;
   pending: Map<string, Pending>;
   browserLeases: Set<string>;
   onlineUntil: number;
@@ -35,6 +36,7 @@ export function validateClient(a: Obj) {
   assert(a.name === undefined || (typeof a.name === "string" && a.name.trim().length > 0 && a.name.length <= 128 && !/[\x00-\x1f]/.test(a.name)), "Invalid client name");
   assert(typeof a.cwd === "string" && a.cwd.length > 0 && a.cwd.length <= 4096 && !a.cwd.includes("\0"), "Invalid agent cwd");
   assert(["windows", "linux", "darwin"].includes(a.platform), "Invalid agent platform");
+  assert(a.supplement === undefined || (typeof a.supplement === "string" && Buffer.byteLength(a.supplement) <= 8192 && !a.supplement.includes("\0")), "Invalid client supplement");
   return clientId;
 }
 
@@ -95,6 +97,7 @@ export class LocalAgents {
       this.agents.set(userId + ":" + clientId, agent);
       this.emit({ type: "clients_changed", targetUser: userId });
     }
+    agent.supplement = a.supplement || "";
     const recovering = agent.reconnecting, previous = agent.transport;
     if (transport) agent.transport = transport;
     agent.reconnecting = false;

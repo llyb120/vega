@@ -21,6 +21,7 @@ import (
 
 type Config struct {
 	ClientID       string             `json:"clientId"`
+	Supplement     string             `json:"supplement,omitempty"`
 	TrustedOrigins []string           `json:"trustedOrigins"`
 	Servers        []ServerCredential `json:"servers,omitempty"`
 }
@@ -40,6 +41,9 @@ func newAgent() (*Agent, error) {
 		err = json.Unmarshal(data, &a.config)
 	}
 	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err = validateSupplement(a.config.Supplement); err != nil {
 		return nil, err
 	}
 	if a.config.ClientID == "" {

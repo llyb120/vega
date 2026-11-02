@@ -617,7 +617,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const memories = employeeState ? "\n相关长期记忆（已保存，按当前问题召回；工具写入/更新后立即刷新）：" + JSON.stringify(recallMemory(employeeState, memoryQuery, Date.now(), false)) : "";
         const taskIndex = employeeState ? "\n当前任务索引（详情和证据用employee list核对）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: task.text, status: task.status }))) : "";
         const system =
-          stable + memories + taskIndex + "\n" + (await sessionPrompt(session, config, this.store));
+          stable + memories + taskIndex + "\n" + (await sessionPrompt(session, config, this.store, session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : ""));
         let model = await this.catalog.resolve(config, session.model);
         await this.compact(tools, model, system);
         const expandedInputs = new Map<number, string>();

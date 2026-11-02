@@ -46,6 +46,42 @@ test("device pairing is one-use, hashed, scoped and persists without a website l
   restarted.closeAll();
 });
 
+test("client supplements update through heartbeats without replacing jobs, leases or device identity", async (t) => {
+  const f = await fixture(t), paired = f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
+  const socket = f.peer(paired.deviceToken);
+  f.sockets.open(socket);
+  f.sockets.message(socket, JSON.stringify({ type: "hello", ...details, supplement: "项目目录：D:\\code\\old" }));
+  const agent = f.hub.active(f.login.principal.user.id, details.clientId)!;
+  assert.equal(agent.supplement, "项目目录：D:\\code\\old");
+  assert(!JSON.stringify(f.hub.list(f.login.principal.user.id)).includes("项目目录"));
+  agent.browserLeases.add("existing-lease");
+  const pending = f.hub.request(agent, "file", { op: "read" }, new AbortController().signal), job = socket.messages.at(-1);
+  f.sockets.message(socket, JSON.stringify({ type: "ping", clientId: "e".repeat(32), supplement: "项目目录：D:\\code\\new\n仅作路径提示" }));
+  assert.equal(agent, f.hub.active(f.login.principal.user.id, details.clientId));
+  assert.equal(agent.clientId, details.clientId);
+  assert.equal(agent.supplement, "项目目录：D:\\code\\new\n仅作路径提示");
+  assert.equal(agent.pending.size, 1);
+  assert(agent.browserLeases.has("existing-lease"));
+  f.sockets.message(socket, JSON.stringify({ type: "ping" }));
+  assert.match(agent.supplement!, /new/);
+  f.sockets.message(socket, JSON.stringify({ type: "result", id: job.id, result: { ok: true } }));
+  assert.deepEqual(await pending, { ok: true });
+  f.sockets.message(socket, JSON.stringify({ type: "ping", supplement: "" }));
+  assert.equal(agent.supplement, "");
+  assert.equal(socket.closed.length, 0);
+});
+
+test("client supplements reject oversized, non-text and NUL input on hello and heartbeat", async (t) => {
+  for (const phase of ["hello", "ping"]) for (const supplement of [null, 42, "x".repeat(8193), "中".repeat(3000), "bad\0text"]) {
+    const f = await fixture(t), paired = f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId }), socket = f.peer(paired.deviceToken);
+    f.sockets.open(socket);
+    if (phase === "ping") f.sockets.message(socket, JSON.stringify({ type: "hello", ...details }));
+    f.sockets.message(socket, JSON.stringify({ ...details, type: phase, supplement }));
+    assert.equal(socket.closed.length, 1, phase);
+    assert.equal(f.hub.active(f.login.principal.user.id, details.clientId), undefined);
+  }
+});
+
 test("automatic update drains only idle clients and queues new work across a same-instance restart", async (t) => {
   const f = await fixture(t), paired = f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
   const hello = { type: "hello", ...details, version: "0.3.0", autoUpdate: true, resume: true };

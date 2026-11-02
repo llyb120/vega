@@ -81,7 +81,7 @@ export class ClientSockets {
           close: () => this.close(socket.id),
         };
         this.hub.connect(grant.userId, value, connection.transport);
-        connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, resume: value.resume === true, autoUpdate: value.autoUpdate === true && value.resume === true && !!value.version };
+        connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, supplement: value.supplement, resume: value.resume === true, autoUpdate: value.autoUpdate === true && value.resume === true && !!value.version };
         const agent = this.hub.active(grant.userId, grant.clientId)!;
         accepted = true;
         socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy: this.clientInUse(grant.clientId) } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) }));
@@ -99,6 +99,10 @@ export class ClientSockets {
         accepted = true;
         socket.send(JSON.stringify({ type: idle ? "update_ready" : "update_busy" }));
       } else if (value.type === "ping") {
+        if ("supplement" in value) {
+          validateClient({ ...connection.details, supplement: value.supplement });
+          connection.details.supplement = value.supplement;
+        }
         if (!connection.updating) this.hub.connect(grant.userId, connection.details);
         accepted = true;
         socket.send(JSON.stringify({ type: "pong", ...(connection.details.autoUpdate ? { busy: this.clientInUse(grant.clientId) } : {}) }));

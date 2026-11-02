@@ -133,6 +133,7 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	delete(a.resumeInstances, key)
 	ctx, cancel := context.WithCancel(parent)
 	connection := &directConnection{origin: saved.Origin, token: token, instance: instance, jobs: newJobRunner(ctx, true), cancel: cancel, status: connectionStatus{Code: "backend_connecting"}, changed: make(chan struct{})}
+	connection.jobs.supplement = a.config.Supplement
 	a.direct[key] = connection
 	go func() {
 		defer func() { cancel(); connection.jobs.close() }()
@@ -212,10 +213,10 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 		name = "牵牛星 " + runtime.GOOS
 	}
 	a.mu.Lock()
-	clientID := a.config.ClientID
+	clientID, supplement := a.config.ClientID, a.config.Supplement
 	a.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true, false
 	}
@@ -267,6 +268,7 @@ type jobRunner struct {
 	tasks        map[string]*localJob
 	resumable    bool
 	sessionBusy  bool
+	supplement   string
 	lastActivity time.Time
 	updateReady  chan bool
 	recovery     *time.Timer
@@ -367,7 +369,7 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 			case <-ticker.C:
 				runner.mu.Lock()
 				if runner.conn == conn {
-					runner.write(map[string]string{"type": "ping"})
+					runner.write(map[string]string{"type": "ping", "supplement": runner.supplement})
 				}
 				runner.mu.Unlock()
 			}

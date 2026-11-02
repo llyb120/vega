@@ -39,6 +39,7 @@ type Agent struct {
 	direct          map[string]*directConnection
 	resumeInstances map[string]string
 	updating        bool
+	editing         bool
 	context         context.Context
 }
 
@@ -86,7 +87,12 @@ func main() {
 		os.Exit(0)
 	}
 	go a.autoUpdate(ctx, quit)
-	systrayRun(configure, quit)
+	supplement := func() {
+		if err := a.editSupplement(promptSupplement); err != nil {
+			reportSupplementError(err)
+		}
+	}
+	systrayRun(configure, supplement, quit)
 }
 
 type job struct {

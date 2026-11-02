@@ -1,6 +1,6 @@
 //go:build windows && !linux
 
-// Windows tray: connection status, trusted-site permissions and Quit.
+// Windows tray: connection status, trusted-site permissions, client hints and Quit.
 package main
 
 import (
@@ -14,7 +14,7 @@ import (
 //go:embed icon.ico
 var iconData []byte
 
-func systrayRun(configure, onQuit func()) {
+func systrayRun(configure, supplement, onQuit func()) {
 	systray.Run(func() {
 		systray.SetIcon(iconData)
 		systray.SetTitle("牵牛星")
@@ -23,12 +23,15 @@ func systrayRun(configure, onQuit func()) {
 		systray.SetTooltip(connectionTooltip(trayState.connected))
 		trayState.Unlock()
 		mConfigure := systray.AddMenuItem("连接授权", "查看或撤销已信任的 Vega 站点")
+		mSupplement := systray.AddMenuItem("补充内容", "编辑本机项目目录等辅助提示")
 		mQuit := systray.AddMenuItem("退出", "Stop local agent")
 		go func() {
 			for {
 				select {
 				case <-mConfigure.ClickedCh:
 					configure()
+				case <-mSupplement.ClickedCh:
+					supplement()
 				case <-mQuit.ClickedCh:
 					onQuit()
 					return

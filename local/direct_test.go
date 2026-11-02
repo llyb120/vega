@@ -40,6 +40,7 @@ func receive[T any](t *testing.T, channel <-chan T) T {
 }
 func TestNativeClientContinuesAfterPairingPageClosesAndReconnectsAfterRestart(t *testing.T) {
 	clientID, token := strings.Repeat("c", 32), strings.Repeat("t", 43)
+	const supplement = "本机项目目录：D:\\code\\示例"
 	accepted := make(chan *backendPeer, 4)
 	results := make(chan map[string]any, 4)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +63,7 @@ func TestNativeClientContinuesAfterPairingPageClosesAndReconnectsAfterRestart(t 
 		}
 		defer conn.Close()
 		var hello map[string]any
-		if conn.ReadJSON(&hello) != nil || hello["type"] != "hello" || hello["clientId"] != clientID || hello["version"] != clientVersion || hello["autoUpdate"] != true {
+		if conn.ReadJSON(&hello) != nil || hello["type"] != "hello" || hello["clientId"] != clientID || hello["version"] != clientVersion || hello["autoUpdate"] != true || hello["supplement"] != supplement {
 			return
 		}
 		peer := &backendPeer{conn: conn}
@@ -82,7 +83,7 @@ func TestNativeClientContinuesAfterPairingPageClosesAndReconnectsAfterRestart(t 
 	}))
 	defer backend.Close()
 	path := filepath.Join(t.TempDir(), "trusted-sites.json")
-	agent := &Agent{configPath: path, config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: path, config: Config{ClientID: clientID, Supplement: supplement, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent.startConnections(ctx)

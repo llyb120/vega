@@ -20,6 +20,8 @@ Browser interaction is **extension-only**. Like Nova, the client listens on the 
 
 ## Device credentials and revocation
 
+On Windows, right-click the tray icon and choose **补充内容** to edit this client's auxiliary prompt in a native multiline input dialog. Save persists it locally and updates paired backends without restarting or interrupting jobs; Cancel keeps the previous value, and saving an empty input clears it. Only sessions bound to this client receive the hints; listing project directories does not switch their working directory or grant permission. The content is shared with this client's authorized Vega sites, so do not enter passwords or keys. The limit is 8192 UTF-8 bytes; other platforms currently have no tray UI.
+
 The per-user config directory contains `vega-local/trusted-sites.json`: the stable device ID, trusted origins and paired credentials. Windows protects tokens with current-user DPAPI; Unix stores them in a mode-0600 file under the user's config directory. The server stores only token hashes, bound to one account/device; these tokens cannot log into the website or call general APIs. No website password or login cookie is stored by the client.
 
 Windows tray → **连接授权** can revoke a trusted site: it removes its local credentials and stops its native connections. Account password/role changes and disabling access revoke the backend's device credentials too. A logged-in user can revoke one of their own devices with `POST /api/local-agent/revoke` and `{clientId}` (normal cookie/CSRF protection). Revoked clients require a fresh website handshake; repeated authorization while a healthy token exists reuses it without interrupting work. Website logout and the 7-day website cookie expiry do not revoke an independently authorized device.
