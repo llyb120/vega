@@ -303,16 +303,19 @@ export class Employee {
     const s = this.state();
     return user.role === "admin" || (user.role === "operator" && s.scope !== "team" && s.ownerId === user.id);
   }
-  create(a: Obj, ownerId: string, scope: "team" | "personal" = "personal") {
+  create(a: Obj, ownerId: string, scope: "team" | "personal" = "personal", avatarImage?: Buffer) {
     assert(typeof a.name === "string" && a.name.trim() && a.name.length <= 80, "Employee name requires 1–80 characters");
     assert(a.avatar === undefined || isAvatarPreset(a.avatar), "Invalid employee avatar");
     assert(a.instruction === undefined || (typeof a.instruction === "string" && a.instruction.length <= 8000), "Invalid employee instruction");
     assert(a.cwd === undefined || (typeof a.cwd === "string" && a.cwd.length <= 4096), "Invalid cwd");
     assert(this.all().length < 50, "Employee capacity reached");
     const key = id("e"), employee = new Employee(this.store, this.vault, this.runtime, key, this.root || this);
-    const s = employee.state();
-    Object.assign(s, { name: a.name.trim(), avatar: a.avatar || "", instruction: a.instruction || "", ownerId, scope, cwd: a.cwd || process.cwd(), enabled: true, workStart: "00:00", workEnd: "00:00" });
-    employee.save(s);
+    const s = this.store.transaction(() => {
+      const state = employee.state();
+      Object.assign(state, { name: a.name.trim(), avatar: avatarImage ? this.store.blob("image/webp", avatarImage) : a.avatar || "", instruction: a.instruction || "", ownerId, scope, cwd: a.cwd || process.cwd(), enabled: true, workStart: "00:00", workEnd: "00:00" });
+      employee.save(state);
+      return state;
+    });
     (this.root || this).members.set(key, employee);
     employee.emitChanged(s);
     return s;

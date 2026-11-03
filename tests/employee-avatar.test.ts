@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import sharp from "sharp";
 import { ZODIAC_AVATARS, BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS, isAvatarPreset, employeeAvatarURL, parseBotAvatar, defaultBotAvatar, botAvatarPreset } from "../shared/employee-avatars";
 import { BOT_SHAPE_GEOMETRY, BOT_POSES, LOOK_POSES, MESSAGE_POSE, projectFace, shade, nextPose, holdDuration, blinkPlan } from "../web/src/bot-avatar.js";
-import { updateEmployeeAvatar } from "../server/core/employee-avatar";
+import { prepareEmployeeAvatarImage, updateEmployeeAvatar } from "../server/core/employee-avatar";
 import { Employee, type EmployeeRuntime } from "../server/core/employee";
 import { Store } from "../server/core/store";
 import { Vault } from "../server/core/vault";
@@ -104,6 +104,29 @@ test("custom avatar uploads are normalized, metadata-free and stored separately 
     assert.equal(metadata.exif, undefined); assert.equal(metadata.orientation, undefined);
     assert(!JSON.stringify(employee.state()).includes(input.toString("base64")));
     assert.equal(root.state().avatar, undefined, "another employee's avatar is unchanged");
+  } finally { root.close(); store.close(); }
+});
+
+test("creation saves the selected preset or normalized upload with the employee, never a caller-supplied blob ID", async () => {
+  const { store, root } = fixture();
+  try {
+    const preset = root.create({ name: "Preset", avatar: "bot:cloud:teal" }, "owner");
+    assert.equal(preset.avatar, "bot:cloud:teal");
+    const raw = await sharp({ create: { width: 200, height: 80, channels: 4, background: "#6699dd" } }).withMetadata().png().toBuffer();
+    const image = await prepareEmployeeAvatarImage({ mime: "image/png", data: raw.toString("base64") });
+    const created = root.create({ name: "Uploaded", avatar: "" }, "owner", "personal", image);
+    assert.match(created.avatar!, /^blob-[a-f\d]{32}$/);
+    const metadata = await sharp(store.blobData(created.avatar!)!.data).metadata();
+    assert.equal(metadata.width, 512); assert.equal(metadata.height, 512); assert.equal(metadata.exif, undefined);
+    assert.equal(new Employee(store, root.vault, root.runtime).for(created.id).state().avatar, created.avatar);
+    assert(!JSON.stringify(created).includes(raw.toString("base64")));
+    const before = root.all().length, blobs = (store.db.prepare("SELECT COUNT(*) count FROM blobs").get() as any).count;
+    assert.throws(() => root.create({ name: "", avatar: "" }, "owner", "personal", image), /name/);
+    assert.throws(() => root.create({ name: "Invalid", avatar: created.avatar }, "owner"), /avatar/);
+    await assert.rejects(prepareEmployeeAvatarImage({ mime: "image/svg+xml", data: "YQ==" }));
+    await assert.rejects(prepareEmployeeAvatarImage(null as any));
+    assert.equal(root.all().length, before);
+    assert.equal((store.db.prepare("SELECT COUNT(*) count FROM blobs").get() as any).count, blobs);
   } finally { root.close(); store.close(); }
 });
 
