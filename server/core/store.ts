@@ -240,6 +240,17 @@ export class Store {
     for (const s of this.sessionFamily(key))
       this.db.prepare("DELETE FROM sessions WHERE id=?").run(s.id);
   }
+  /** Keep the session row; drop messages, folds, blob grants and context ledger. */
+  clearSessionHistory(key: string) {
+    this.session(key);
+    this.transaction(() => {
+      this.db.prepare("DELETE FROM messages WHERE session=?").run(key);
+      this.db.prepare("DELETE FROM folds WHERE session=?").run(key);
+      this.db.prepare("DELETE FROM blob_access WHERE session=?").run(key);
+      this.remove("context-state", key);
+      this.db.prepare("UPDATE sessions SET updated=? WHERE id=?").run(Date.now(), key);
+    });
+  }
   message(key: string, seq: number): Message | undefined {
     const row = this.db.prepare("SELECT data FROM messages WHERE session=? AND seq=?").get(key, seq) as { data: string } | undefined;
     return row ? { ...JSON.parse(row.data), seq } : undefined;

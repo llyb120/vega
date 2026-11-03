@@ -372,3 +372,40 @@ test("answer appends a quoted user message in chat without duplicating identical
     assert.equal(store.messages(chat.id).filter((message) => message.role === "user" && message.text === "123456").length, 1);
   } finally { await engine.close(); store.close(); }
 });
+
+test("clearEmployeeChat drops chat messages and folds but keeps the session and tasks", async () => {
+  const { store, engine, employee, chat } = fixture();
+  try {
+    store.append(chat.id, { role: "user", text: "hello" });
+    store.append(chat.id, { role: "assistant", text: "hi" });
+    store.db.prepare("INSERT INTO folds VALUES(?,?,?)").run(chat.id, "fold-1", JSON.stringify({ summary: "old" }));
+    store.save("context-state", chat.id, { ledger: ["x"] });
+    employee.update((state) => {
+      state.tasks.push({ id: "task-keep", text: "keep me", status: "done", createdAt: Date.now(), profile: "coding", cwd: state.cwd, owner: { token: "", name: "owner" } });
+    });
+    const events: any[] = [];
+    engine.events.on("event", (event) => events.push(event));
+    assert.deepEqual(engine.clearEmployeeChat(employee.employeeId), { ok: true, cleared: true });
+    assert.equal(store.messages(chat.id).length, 0);
+    assert.equal(store.db.prepare("SELECT count(*) n FROM folds WHERE session=?").get(chat.id).n, 0);
+    assert.equal(store.object("context-state", chat.id), undefined);
+    assert.ok(store.session(chat.id));
+    assert.equal(employee.state().chatSession, chat.id);
+    assert.equal(employee.state().tasks.some((task) => task.id === "task-keep"), true);
+    assert.ok(events.some((event) => event.type === "compacted" && event.session === chat.id && event.data?.cleared));
+    assert.ok(events.some((event) => event.type === "employee_changed" && event.data?.employeeId === employee.employeeId));
+    assert.deepEqual(engine.clearEmployeeChat(employee.employeeId), { ok: true, cleared: true });
+  } finally { await engine.close(); store.close(); }
+});
+
+test("clearEmployeeChat refuses while the chat turn is still running", async () => {
+  const { store, engine, employee, chat } = fixture();
+  try {
+    engine.active.set(chat.id, { control: new AbortController(), steer: [] } as any);
+    assert.throws(() => engine.clearEmployeeChat(employee.employeeId), /先停止/);
+  } finally {
+    engine.active.delete(chat.id);
+    await engine.close();
+    store.close();
+  }
+});

@@ -825,3 +825,55 @@ test("user can settle partial delivery with cancelled steps after recovery budge
   } finally { employee.close(); store.close(); }
 });
 
+
+
+test("employee task turns no longer impose a 15-minute AbortSignal timeout", async () => {
+  const { store, employee, runtime } = fixture();
+  try {
+    const job = await task(employee);
+    let signal: AbortSignal | undefined = AbortSignal.timeout(1);
+    runtime.run = async (_session, _prompt, passed) => { signal = passed; };
+    await segment(employee, job);
+    assert.equal(signal, undefined);
+  } finally { employee.close(); store.close(); }
+});
+
+test("progress cannot mark verification-code blockers as completed without help", async () => {
+  const { store, employee } = fixture();
+  try {
+    const job = await task(employee, "login and verify");
+    employee.update((s) => { s.tasks.find((t) => t.id === job.id)!.status = "running"; });
+    employee.busy.set(job.id, { computer: false, session: "work" });
+    await assert.rejects(
+      employee.execute(job.id, {
+        action: "progress",
+        text: "skipped login",
+        plan: [{
+          content: "Databrain 登录页已到邮箱访问码步骤，无法获取邮件验证码（受阻），按授权改为按需求截图取证",
+          status: "completed",
+        }],
+      }),
+      /验证码|访问码|help/,
+    );
+  } finally { employee.close(); store.close(); }
+});
+
+
+test("engine preserves TimeoutError text when message is getter-only", () => {
+  // Mirrors Engine.run catch: never assign into getter-only Error.message (DOMException TimeoutError).
+  const timeout: any = new Error("The operation was aborted due to timeout");
+  timeout.name = "TimeoutError";
+  Object.defineProperty(timeout, "message", {
+    get() { return "The operation was aborted due to timeout"; },
+    set() { throw TypeError("Cannot set property message of which has only a getter"); },
+    enumerable: true,
+    configurable: true,
+  });
+  const redact = { value: (value: string) => value };
+  const raw = timeout instanceof Error ? timeout : new Error(String(timeout));
+  const safe = String(redact.value(raw.message || String(raw)));
+  const error = raw.message === safe ? raw : Object.assign(new Error(safe), { name: raw.name, cause: raw });
+  assert.equal(error, raw);
+  assert.match(String(error.message), /timeout|aborted/i);
+  assert.throws(() => { error.message = "x"; }, /Cannot set property message/);
+});

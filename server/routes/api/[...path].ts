@@ -198,6 +198,12 @@ export default defineEventHandler(async (event) => {
         });
         return { ok: true };
       }
+      if (path[2] === "chat" && path[3] === "clear" && method === "POST") {
+        check(employee.manageable(user), 403, "只有牛马管理者可以清空聊天记录");
+        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认清空该牛马的聊天记录");
+        check(!(state.chatSession && engine.active.has(state.chatSession)), 409, "对话仍在进行，请先停止后再清空聊天记录");
+        return engine.clearEmployeeChat(employee.employeeId);
+      }
       if (path[2] === "chat" && method === "GET") {
         const session = employee.chat(user.id);
         return { session, ...chatHistory(store, session.id, getRequestURL(event).searchParams), running: engine.active.has(session.id) };

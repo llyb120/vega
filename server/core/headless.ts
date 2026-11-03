@@ -34,7 +34,7 @@ export function headlessArguments(profile: string, extension: string) {
     "--headless=new",
     "--no-first-run",
     "--no-default-browser-check",
-    "--window-size=1440,900",
+    "--window-size=1920,1200",
     "--password-store=basic",
     "--remote-debugging-port=0",
     `--user-data-dir=${profile}`,

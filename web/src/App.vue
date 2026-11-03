@@ -220,7 +220,7 @@ const employee = ref({
   employeeTaskFilter = ref("active"),
   employeeTaskFocus = ref(""),
   employeeSaving = ref(false),
-  employeeDeleting = ref(false),
+  employeeDeleting = ref(false), employeeClearing = ref(false),
   employeeExecutionBusy = ref(false),
   employeeExecutionOpen = ref(false),
   workRailOpen = ref(false),
@@ -1232,6 +1232,20 @@ async function deleteEmployee() {
   } catch (error) { employeeError.value = error.message; }
   finally { employeeDeleting.value = false; }
 }
+async function clearEmployeeChat() {
+  if (employeeClearing.value || employeeDeleting.value || !employee.value.id) return;
+  const id = employee.value.id, name = employee.value.name, owner = user.value.id;
+  if (!confirm(`清空「${name}」的全部聊天记录？\n\n对话消息将永久删除，任务、职责和记忆不受影响。此操作不可撤销。`)) return;
+  employeeClearing.value = true;
+  try {
+    await api(`/employees/${id}/chat/clear?confirmed=true`, "POST");
+    await clearChatCache(owner, id);
+    employeeSessionVersion.value++;
+    employeeEvent.value = null;
+    toast(`已清空「${name}」的聊天记录`);
+  } catch (error) { employeeError.value = error.message; }
+  finally { employeeClearing.value = false; }
+}
 async function employeeTaskAction(task, action, text) {
   return attempt(async () => {
     if (action === "remove" && !confirm("永久删除此任务记录？")) return;
@@ -1554,9 +1568,11 @@ onBeforeUnmount(() => {
             :api="api"
             :saving="employeeSaving"
             :deleting="employeeDeleting"
+            :clearing="employeeClearing"
             :busy="employeeExecutionBusy"
             @save="saveEmployeeSettings"
             @delete="deleteEmployee"
+            @clear-chat="clearEmployeeChat"
             @execution="changeEmployeeExecution"
             @avatar="selectedEmployee === $event.employeeId && (employee.avatar = $event.avatar)"
             @cancel="employeeTab = 'chat'"

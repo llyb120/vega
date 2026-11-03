@@ -26,6 +26,63 @@ type Observation = {
   fullPage: boolean;
   screenshot: boolean;
 };
+
+/** Models like terra often fill every schema field with empty placeholders; treat those as omitted. */
+export function usableChromeRef(ref: unknown) {
+  return typeof ref === "string" && ref.trim() ? ref.trim() : undefined;
+}
+export function usableChromeRegion(region: unknown) {
+  if (!region || typeof region !== "object" || Array.isArray(region)) return undefined;
+  const keys = Object.keys(region as object);
+  if (!keys.length) return undefined;
+  const { x, y, width, height } = region as Obj;
+  if (![x, y, width, height].every((value) => Number.isFinite(value))) return undefined;
+  if ((x as number) < 0 || (y as number) < 0 || (width as number) <= 0 || (height as number) <= 0) return undefined;
+  return { x, y, width, height };
+}
+function isPlaceholderChromeAction(action: unknown) {
+  if (!action || typeof action !== "object" || Array.isArray(action)) return false;
+  const a = action as Obj;
+  return a.action === "wait"
+    && !a.ms && !a.duration_ms
+    && !usableChromeRef(a.ref)
+    && !a.selector && !a.text
+    && !a.x && !a.y && !a.to_x && !a.to_y
+    && !a.delta && !a.delta_x
+    && !(Array.isArray(a.files) && a.files.length);
+}
+export function sanitizeChromeArgs(a: Obj): Obj {
+  const out: Obj = { ...a };
+  for (const key of ["tabTag", "url", "snapshotId", "query", "expression", "downloadId", "ref", "imageId"] as const) {
+    if (out[key] == null || out[key] === "") delete out[key];
+  }
+  const region = usableChromeRegion(out.region);
+  if (region) out.region = region;
+  else delete out.region;
+  const ref = usableChromeRef(out.ref);
+  if (ref) out.ref = ref;
+  else delete out.ref;
+  if (out.action && typeof out.action === "object") {
+    const action: Obj = { ...(out.action as Obj) };
+    if (!usableChromeRef(action.ref)) delete action.ref;
+    out.action = action;
+  }
+  if (Array.isArray(out.actions)) {
+    out.actions = out.actions.map((item: any) => {
+      if (!item || typeof item !== "object") return item;
+      const action: Obj = { ...item };
+      if (!usableChromeRef(action.ref)) delete action.ref;
+      return action;
+    });
+  }
+  if (isPlaceholderChromeAction(out.action) && !(Array.isArray(out.actions) && out.actions.length)) delete out.action;
+  if (Array.isArray(out.actions) && !out.actions.length) delete out.actions;
+  if (out.operation && out.operation !== "devtools") delete out.devtools;
+  if (out.operation && !String(out.operation).startsWith("experience_")) delete out.experience;
+  if (out.operation && out.operation !== "run") delete out.plan;
+  return out;
+}
+
 export class Chrome {
   gate = new Mutex();
   tabGates = new Map<string, Mutex>();
@@ -200,13 +257,12 @@ export class Chrome {
       page = o.pages[0],
       vp = page.viewport;
     const dpr = vp.devicePixelRatio || 1;
-    let region = a.region;
-    if (region && !Object.keys(region).length) region = undefined;
-    assert(!region || !a.ref, "Use region or ref, not both");
+    let region = usableChromeRegion(a.region);
+    const captureRef = usableChromeRef(a.ref);
+    assert(!region || !captureRef, "Use region or ref, not both");
     assert(a.maxEdge === undefined || (Number.isInteger(a.maxEdge) && (a.maxEdge === 0 || (a.maxEdge >= 320 && a.maxEdge <= 3840))), "maxEdge must be 0 or 320–3840");
-    if (region) assert(["x", "y", "width", "height"].every((k) => Number.isFinite(region[k]) && (k === "x" || k === "y" ? region[k] >= 0 : region[k] > 0)), "Invalid screenshot region");
     if (a.expandScroll) assert((a.frame ?? 0) === 0, "expandScroll requires frame 0");
-    if (a.ref && !a.expandScroll) region = (await this.point(o, a.frame || 0, a.ref, "capture")).rect;
+    if (captureRef && !a.expandScroll) region = (await this.point(o, a.frame || 0, captureRef, "capture")).rect;
     let full = !region && (a.fullPage === true || !!a.expandScroll);
     let expanded: Obj | undefined, fullPageFallback: string | undefined, layout = false, resized = false;
     try {
@@ -218,7 +274,7 @@ export class Chrome {
         let over = await this.evaluate(
             tag,
             o.frames[0],
-            `__novaWebview.innerScrollOverflow(${JSON.stringify(a.ref || null)})`,
+            `__novaWebview.innerScrollOverflow(${JSON.stringify(captureRef || null)})`,
           ),
           height = vp.height;
         for (let i = 0; i < 3 && over > 1; i++) {
@@ -449,7 +505,11 @@ export class Chrome {
       mode === "screenshot" ||
       a.feedback === "screenshot" ||
       (!["none", "inspect"].includes(a.feedback) && a.visual !== "none");
-    assert(mode === "screenshot" || (!a.ref && !a.region), "inspect does not accept region/ref; use screenshot");
+    const inspectRef = usableChromeRef(a.ref), inspectRegion = usableChromeRegion(a.region);
+    a = { ...a, ...(inspectRef ? { ref: inspectRef } : {}), ...(inspectRegion ? { region: inspectRegion } : {}) };
+    if (!inspectRef) delete a.ref;
+    if (!inspectRegion) delete a.region;
+    assert(mode === "screenshot" || (!inspectRef && !inspectRegion), "inspect does not accept region/ref; use screenshot");
     let shot: Obj = {};
     if (capture) {
       try { shot = await this.capture(o, mode === "screenshot" ? a : { ...a, fullPage: false, expandScroll: false }, prior); }
@@ -1072,6 +1132,7 @@ export class Chrome {
     parent?: AbortSignal,
     credentials: CredentialBinding[] = [],
   ): Promise<any> {
+    args = sanitizeChromeArgs(args);
     if (args.operation === "stop") {
       this.cancelled.get(owner)?.abort();
       return { stopped: true };

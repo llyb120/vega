@@ -364,3 +364,56 @@ test("failed optional screenshots preserve DOM while explicit screenshots report
   assert(r.pages[0].items.length); assert.equal(r.screenshotError, "capture failed"); assert.equal(f.chrome.observations.get("owner:tab")!.screenshot, false);
   await assert.rejects(f.chrome.feedback("owner", "tab", {}, "screenshot"), /capture failed/);
 });
+
+
+test("terra-style placeholder region/ref are omitted so inspect and tabs can proceed", async (t) => {
+  const { sanitizeChromeArgs, usableChromeRegion } = await import("../server/core/chrome");
+  assert.equal(usableChromeRegion({ x: 0, y: 0, width: 0, height: 0 }), undefined);
+  assert.deepEqual(usableChromeRegion({ x: 1, y: 2, width: 10, height: 20 }), { x: 1, y: 2, width: 10, height: 20 });
+  const cleaned = sanitizeChromeArgs({
+    operation: "inspect",
+    tabTag: "C2-tab",
+    url: "",
+    ref: "",
+    region: { x: 0, y: 0, width: 0, height: 0 },
+    feedback: "none",
+    observe: "none",
+    action: { action: "wait", button: "left", click_count: 1, delta: 0, delta_x: 0, duration_ms: 0, files: [], frame: 0, key: "Enter", ms: 0, ref: null, selector: "", text: "", to_x: 0, to_y: 0, x: 0, y: 0 },
+    actions: [],
+    devtools: { clear: false, kind: "all", level: "", limit: 0, query: "", requestId: "" },
+    experience: { task: "", steps: [] },
+    plan: { task: "", steps: [] },
+  });
+  assert.deepEqual(cleaned, { operation: "inspect", tabTag: "C2-tab", feedback: "none", observe: "none" });
+
+  const f = fixture(t);
+  f.tabs.splice(0, f.tabs.length, { tag: "only", active: true, controllable: true, loading: false });
+  const tabs = await f.chrome.execute("owner", ".", {
+    operation: "tabs",
+    tabTag: "",
+    url: "",
+    ref: "",
+    region: { x: 0, y: 0, width: 0, height: 0 },
+    feedback: "none",
+    visual: "none",
+    action: { action: "wait", button: "left", click_count: 1, ms: 0, x: 0, y: 0 },
+    actions: [],
+  });
+  assert.equal(tabs.tabTag, "only");
+  assert.ok(tabs.snapshotId);
+
+  f.chrome.capture = async (o) => ({ screenshot: true, images: [], fullPage: false });
+  const shot = await f.chrome.execute("owner", ".", {
+    operation: "screenshot",
+    tabTag: "only",
+    region: { x: 0, y: 0, width: 0, height: 0 },
+    ref: "",
+  });
+  assert.equal(shot.tabTag, "only");
+  assert.equal(shot.screenshot, true);
+
+  await assert.rejects(
+    f.chrome.feedback("owner", "only", { region: { x: 0, y: 0, width: 40, height: 40 } }, "inspect"),
+    /inspect does not accept region\/ref/,
+  );
+});
