@@ -192,9 +192,15 @@ function provider() {
   if (!source.value) {
     row.api = apiType.value;
     row.options.baseURL = baseURL.value.trim();
-    row.options.apiKey = apiKey.value;
+    // Keep masked keys at their saved path so mergeSecrets can restore them.
+    if (draft.value.apiKey && !draft.value.options?.apiKey) {
+      row.apiKey = apiKey.value;
+      delete row.options.apiKey;
+    } else {
+      row.options.apiKey = apiKey.value;
+      delete row.apiKey;
+    }
     delete row.baseURL;
-    delete row.apiKey;
     delete row.headers;
   } else {
     delete row.api;

@@ -9,11 +9,57 @@ import { Store } from "../server/core/store";
 
 const settings = readFileSync("web/src/SettingsView.vue", "utf8");
 const capabilities = readFileSync("web/src/EmployeeCapabilities.vue", "utf8");
+const providers = readFileSync("web/src/ProviderSettings.vue", "utf8");
 function settingsFunction(name: string, scope: any) {
-  const source = (["saveMcp", "addMcp"].includes(name) ? capabilities : settings).match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
+  const source = (["provider", "discover"].includes(name) ? providers : ["saveMcp", "addMcp"].includes(name) ? capabilities : settings).match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
   assert(source, name);
   return runInNewContext(`(${source})`, scope);
 }
+
+test("model discovery uses the draft key or retains the unchanged saved key in either config format", async () => {
+  for (const stored of [
+    {},
+    { apiKey: "saved-legacy-key" },
+    { options: { apiKey: "saved-options-key" } },
+    { apiKey: "legacy-key", options: { apiKey: "preferred-options-key" } },
+  ]) {
+    const original = structuredClone(stored);
+    const masked = maskedConfig({ model: "", provider: { p: stored } }).provider.p;
+    const requests: string[] = [];
+    const scope: any = {
+      draft: { value: masked }, id: { value: "p" }, name: { value: "Provider" },
+      preset: { value: "openai-compatible" }, apiType: { value: "openai-completions" },
+      baseURL: { value: "https://provider.example/v1" }, source: { value: undefined },
+      apiKey: { value: masked.options?.apiKey || masked.apiKey || "" },
+      modelMap: { value: {} }, options: { value: "{}" }, headers: { value: "{}" },
+      copy: structuredClone, run: async (fn: any) => fn(), emit() {},
+      props: { api: async (path: string, method: string, body: any) => {
+        assert.equal(path, "/providers/discover", "discovery must not save the provider");
+        assert.equal(method, "POST");
+        assert.equal(body.id, "p");
+        const raw = structuredClone(body.provider);
+        mergeSecrets(raw, stored);
+        requests.push(raw.options?.apiKey || raw.apiKey || "");
+        return { models: { fixture: { name: "Fixture" } } };
+      } },
+    };
+    scope.provider = settingsFunction("provider", scope);
+    const discover = settingsFunction("discover", scope);
+    const unchanged = scope.apiKey.value;
+    await discover();
+    assert.equal(requests.at(-1), stored.options?.apiKey || stored.apiKey || "");
+    assert.equal(scope.apiKey.value, unchanged, "saved secrets must remain masked in the editor");
+    const saved = { provider: { p: scope.provider() } };
+    mergeSecrets(saved, { provider: { p: stored } });
+    assert.equal(saved.provider.p.options?.apiKey || saved.provider.p.apiKey || "", requests.at(-1));
+    for (const key of ["unsaved-current-key", ""]) {
+      scope.apiKey.value = key;
+      await discover();
+      assert.equal(requests.at(-1), key, "an edited or cleared key must not fall back to the saved key");
+    }
+    assert.deepEqual(stored, original, "discovery must leave the persisted config unchanged");
+  }
+});
 
 test("each MCP JSON keeps its complete config and stored secrets", async () => {
   const original = { model: "", provider: {}, mcp: { remote: { url: "https://example.com/mcp", headers: { Authorization: "Bearer secret" } }, local: { command: "node", args: ["service.mjs"], env: { TOKEN: "secret" }, cwd: "C:\\project", enabled: false } } };
