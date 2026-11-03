@@ -54,7 +54,7 @@ function easeIn(seqs) { entering.value = Object.fromEntries(seqs.map((seq) => [s
 async function onRemember(message) {
   if (!props.remember || !message?.text) return;
   const claim = String(message.displayText || message.text).replace(/\s+/g, " ").trim();
-  const short = [...claim].slice(0, 120).join("");
+  const short = [...claim].slice(0, 200).join("");
   await props.remember({ claim: short, memoryKind: "preference", memoryScene: "chat", source: "ui" });
 }
 function quoteMessage(message) {

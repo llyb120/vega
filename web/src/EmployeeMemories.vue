@@ -118,7 +118,7 @@ function pct(v) { return Math.round((Number(v) || 0) * 100); }
       </div>
 
       <form v-if="canManage" class="memory-form" :class="{ editing: id }" @submit.prevent="submit">
-        <input v-model="claim" required maxlength="120" :placeholder="id ? '修改这条主张' : '一条稳定、可跨任务复用的主张（≤120字）'" aria-label="记忆主张" />
+        <input v-model="claim" required maxlength="200" :placeholder="id ? '修改这条主张' : '一条稳定、可跨任务复用的主张（≤200字）'" aria-label="记忆主张" />
         <select v-model="kind" aria-label="类型"><option v-for="[value, label] in kinds" :key="value" :value="value">{{ label }}</option></select>
         <select v-model="scene" aria-label="场景"><option value="any">任意场景</option><option value="chat">沟通</option><option value="coding">编码</option><option value="computer">电脑</option></select>
         <input v-model="scope" maxlength="200" placeholder="作用域 global / 路径 / 站点" aria-label="作用域" />

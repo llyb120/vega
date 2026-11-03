@@ -170,7 +170,7 @@ test("employee memory tools propose/search/resolve and refresh prompt in the sam
 
 test("memory_propose rejects bad lengths without mutating store", async () => {
   const { store, engine, employee } = fixture();
-  const boundary = "字".repeat(60) + "项".repeat(60);
+  const boundary = "字".repeat(100) + "项".repeat(100);
   try {
     await employee.execute("", { action: "memory_propose", claim: "字", source: "ui" });
     const saved = await employee.execute("", { action: "memory_propose", claim: ` \n${boundary}\t`, source: "ui", memoryKind: "preference" });
