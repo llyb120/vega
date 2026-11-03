@@ -250,7 +250,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
             <button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><Icon name="tasks" :size="15" />看看工作进度</button>
           </div>
         </div>
-        <ChatMessage v-for="message in displayed" :key="message.clientMessageId || message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :enter-from="entering[message.seq]" :task-status="taskStatus" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" />
+        <ChatMessage v-for="message in displayed" :key="message.clientMessageId || message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :enter-from="entering[message.seq]" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" />
         <article v-if="running" class="chat-message assistant chat-typing" role="status" aria-label="正在输入中">
           <span class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" animate @pose="typingPose = $event" /></span>
           <div class="chat-content">

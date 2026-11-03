@@ -5,6 +5,9 @@ const escape = (value) =>
 
 const TOKEN = new RegExp(MARK + "(\\d+)" + MARK, "g");
 function imageURL(value) {
+  // Prefer strict 32-hex archive ids (bare blob-… or prefixed); keep prefixed non-hex ids for fixtures/legacy.
+  const hex = /^(?:\/api\/blobs\/|sqlite:blob\/)?(blob-[a-f\d]{32})$/i.exec(value);
+  if (hex) return "/api/blobs/" + hex[1];
   const archived = /^(?:\/api\/blobs\/|sqlite:blob\/)(blob-[\w-]+)$/.exec(value);
   if (archived) return "/api/blobs/" + archived[1];
   if (/^data:image\/(?:png|jpeg|gif|webp|bmp|avif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value))
@@ -36,7 +39,7 @@ export function renderInline(text) {
     )
     // Older task reports printed archive URLs instead of Markdown images.
     .replace(
-      /(^|[\s：:])((?:\/api\/blobs\/|sqlite:blob\/)blob-[a-f\d]{32})(?=$|[\s，。；！？、]|[.,;!?](?=\s|$))/g,
+      /(^|[\s：:])((?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32})(?=$|[\s，。；！？、]|[.,;!?](?=\s|$))/gi,
       (_, prefix, url) => prefix + protect(`<img src="${escape(imageURL(url))}" alt="存档图片" loading="lazy" decoding="async" referrerpolicy="no-referrer">`, url),
     );
   const html = escape(source)

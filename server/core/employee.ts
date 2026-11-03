@@ -1024,6 +1024,30 @@ export class Employee {
         run.notes.push({ at: Date.now(), kind, who, text: clip(text, 4000) });
     }
   }
+  /** Latest help/approval delivery bubble for this task in the employee chat, if any. */
+  latestTaskDelivery(chatSession: string | undefined, taskId: string) {
+    if (!chatSession) return;
+    for (const message of this.store.messages(chatSession).slice().reverse()) {
+      if (!message.delivery || message.role !== "assistant") continue;
+      if (message.tasks?.some((task) => task.id === taskId)) return message;
+    }
+  }
+  /** Record the user's task-detail reply as a quoted chat bubble (deduped). */
+  appendChatReply(chatSession: string | undefined, delivery: Message | undefined, text: string) {
+    if (!chatSession || !delivery?.seq || !String(text || "").trim()) return;
+    const trimmed = text.trim();
+    const existing = this.store.messages(chatSession).find((message) =>
+      message.role === "user" &&
+      message.quote?.seq === delivery.seq &&
+      (message.displayText || message.text) === trimmed
+    );
+    if (existing) return existing;
+    return this.store.append(chatSession, {
+      role: "user",
+      text: trimmed,
+      quote: this.store.quote(chatSession, delivery.seq),
+    });
+  }
   latestShot(t: Task) {
     const rows = this.store.messages(
       t.side === "computer" ? t.computerSession : t.workSession,
@@ -1037,6 +1061,7 @@ export class Employee {
   }
   async control(a: Obj, owner: Owner = { token: "", name: "" }) {
     let reply: any;
+    let chatReply: { text: string; taskId: string } | undefined;
     const value = this.update((s) => {
       if (a.action === "settings") {
         assert(!owner.token, "Only host user can change employee settings");
@@ -1126,6 +1151,7 @@ export class Employee {
           t.status = "queued";
           t.nextCheckAt = 0;
           this.note(s, t, "answer", owner.name || "用户", a.text);
+          chatReply = { text: a.text.trim(), taskId: t.id };
           if (t.replyTo) {
             reply = { ...t.replyTo, text: a.text };
             t.replyTo = null;
@@ -1141,6 +1167,7 @@ export class Employee {
             t.status = "queued";
             t.nextCheckAt = 0;
             this.note(s, t, "approve", owner.name || "用户", t.answer);
+            chatReply = { text: "已批准执行", taskId: t.id };
           } else {
             t.status = "cancelled";
             t.result = "审批被驳回";
@@ -1205,6 +1232,12 @@ export class Employee {
       const current = this.task(this.state(), a.id);
       const executionStopped = stopped() && ended(current.status);
       return { ...value, id: task.id, status: !executionStopped && current.status === "stopped" ? "stopping" : current.status, executionStopped, next: executionStopped ? "任务执行已结束；已提交的外部作业或已发生的操作不代表已撤销，不能承诺回滚" : "停止请求已发出，但当前尚不能确认执行已结束；不能宣称已经停止，也不要循环查询" };
+    }
+    if (chatReply) {
+      const state = this.state();
+      const delivery = this.latestTaskDelivery(state.chatSession, chatReply.taskId);
+      if (this.appendChatReply(state.chatSession, delivery, chatReply.text))
+        this.runtime.emit("employee_changed", { employeeId: this.employeeId });
     }
     if (reply)
       await this.runtime.send(reply.token, "starlink.reply", {
@@ -1448,7 +1481,7 @@ export class Employee {
       const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason })}\n先检查现场与历史回执，诊断根因并改变无效方法，最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用help等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用progress登记完整计划；续做保留已验证步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划，验证成功才标completed。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才help，低风险执行细节自行决定，不等待轮询。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
+      const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用progress登记完整计划；续做保留已验证步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划，验证成功才标completed。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才help，低风险执行细节自行决定，不等待轮询。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；连续失败≥2 次应 help 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       await this.runtime.run(session, prompt, AbortSignal.timeout(15 * 60000), input);
       const last = this.store.messages(session).at(-1);
@@ -1532,10 +1565,16 @@ export class Employee {
         }
       }
       if (state.chatSession && task && ["done", "waiting", "approval"].includes(task.status)) {
-        const full = task.status === "done" ? task.summary || task.result || "已完成，详情见任务。" : task.waiting || task.approval || "需要你处理。";
-        const excerpt = [...String(full)].slice(0, 400).join("");
+        // Chat stays brief for done (full evidence lives on task.result / TaskDetail / export).
+        // waiting/approval keep the full prompt so the user can answer from the bubble.
+        const heading = task.status === "done" ? "已交付" : "需要你处理";
+        const full = task.status === "done"
+          ? task.summary || task.result || "已完成，详情见任务。"
+          : task.waiting || task.approval || "需要你处理。";
+        const chars = [...String(full)];
+        const body = task.status === "done" && chars.length > 400 ? chars.slice(0, 400).join("") + "…" : String(full);
         const quote = task.chatSource?.session === state.chatSession && this.store.message(state.chatSession, task.chatSource.seq) ? this.store.quote(state.chatSession, task.chatSource.seq) : undefined;
-        const message: Message = { role: "assistant", text: `**${task.status === "done" ? "已交付" : "需要你处理"}**\n\n${excerpt}${[...String(full)].length > 400 ? "…" : ""}`, quote, delivery: true, tasks: [{ id: task.id, title: task.text.slice(0, 80), status: task.status }] };
+        const message: Message = { role: "assistant", text: "**" + heading + "**\n\n" + body, quote, delivery: true, tasks: [{ id: task.id, title: task.text.slice(0, 80), status: task.status }] };
         this.store.append(state.chatSession, message);
         this.runtime.emit("employee_changed", { employeeId: this.employeeId });
       }

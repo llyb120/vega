@@ -378,6 +378,7 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
 .markdown-table th, .markdown-table td { min-width: 80px; max-width: 40ch; padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
 .markdown-table tr:last-child td { border-bottom: 0; }
 .markdown-table th { background: var(--surface-2); color: var(--text-2); font-weight: 600; font-size: 12px; }
+.markdown-body img { display: block; max-width: 100%; height: auto; margin: 6px 0; border-radius: var(--r-md); }
 .code-block { margin: 8px 0 10px; overflow: hidden; border-radius: var(--r-md); background: #1b1f2a; }
 .code-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 6px 4px 12px; background: #242936; color: #98a0b8; font: 11px var(--mono); }
 .code-copy { min-height: 22px; padding: 0 8px; border: 1px solid #3a4152; border-radius: 5px; background: transparent; color: #c4cadb; font-size: 11px; }
