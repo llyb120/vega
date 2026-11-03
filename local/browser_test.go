@@ -143,7 +143,7 @@ func TestBrowserBridgeAuthenticatedExtensionRoundtripAndCancellation(t *testing.
 	go func() { result <- b.execute(connection, ctx, browserJob("tabs", browserSession)) }()
 	queued := <-queue
 	stop()
-	if r := <-result; !strings.Contains(r["error"].(string), "may have executed") {
+	if r := <-result; !strings.Contains(r["error"].(string), "not executed") {
 		t.Fatal(r)
 	}
 	b.mu.Lock()
@@ -151,6 +151,21 @@ func TestBrowserBridgeAuthenticatedExtensionRoundtripAndCancellation(t *testing.
 	b.mu.Unlock()
 	if pending || len(queue) != 0 {
 		t.Fatal("cancelled operation retained for replay")
+	}
+	previous := browserPickupWait
+	browserPickupWait = 50 * time.Millisecond
+	defer func() { browserPickupWait = previous }()
+	go func() { result <- b.execute(connection, connection, browserJob("tabs", browserSession)) }()
+	unpicked := <-queue
+	r := <-result
+	if r["status"] != "unavailable" || !strings.Contains(r["error"].(string), "未执行") {
+		t.Fatal("unpicked command was not reported as safe to retry", r)
+	}
+	b.mu.Lock()
+	_, pending = b.pending[unpicked.ID]
+	b.mu.Unlock()
+	if pending {
+		t.Fatal("unpicked operation retained for late replay")
 	}
 }
 func TestBrowserPrimaryMatchesNovaAndKeepsAnActiveLeasePinned(t *testing.T) {

@@ -141,7 +141,8 @@ export class LocalAgents {
     const id = randomUUID();
     return new Promise<Obj>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined, sent = false, settled = false, recovered = false;
-      let remaining = op === "exec" ? (args.timeout + 15) * 1000 : 30000, deadline = 0;
+      // Browser ops may wait up to 30s for a suspended Nova worker to take them, then run up to 10s.
+      let remaining = op === "exec" ? (args.timeout + 15) * 1000 : op === "browser" ? 50000 : 30000, deadline = 0;
       const finish = (error?: Error, value?: Obj) => {
         if (settled) return;
         settled = true;

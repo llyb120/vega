@@ -16,7 +16,7 @@ import (
 )
 
 const extensionOrigin = "chrome-extension://mdicifjlbgnkkdkcbfdnebeghhlamjbm"
-const extensionVersion = "0.1.15"
+const extensionVersion = "0.1.16"
 
 var extensionClientID = regexp.MustCompile(`(?i)^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 var localChrome = newBrowserBridge()
@@ -33,7 +33,16 @@ type browserCommand struct {
 	client     string
 	generation uint64
 	reply      chan browserReply
+	// budget runs from the moment the extension takes the command; pickupBy bounds waiting for a poller.
+	budget   time.Duration
+	pickupBy time.Time
+	picked   chan struct{}
 }
+
+// Chrome suspends an idle MV3 worker after ~30s and the reconnect alarm wakes it within ~30s more,
+// so a command may wait that long for a poller. Until it is taken it has certainly not executed.
+var browserPickupWait = 30 * time.Second
+
 type browserPeer struct {
 	lastAt  time.Time
 	browser string
@@ -206,18 +215,43 @@ func (b *browserBridge) execute(connection, ctx context.Context, j job) map[stri
 	if req.Operation == "cdp" || req.Operation == "devtools" {
 		timeout = 10 * time.Second
 	}
-	command := &browserCommand{ID: j.ID, Operation: req.Operation, Args: req.Args, ExpiresAt: time.Now().Add(timeout).UnixMilli(), client: b.leaseClient, generation: b.generation, reply: make(chan browserReply, 1)}
+	command := &browserCommand{ID: j.ID, Operation: req.Operation, Args: req.Args, ExpiresAt: time.Now().Add(browserPickupWait + timeout).UnixMilli(), client: b.leaseClient, generation: b.generation, reply: make(chan browserReply, 1), budget: timeout, pickupBy: time.Now().Add(browserPickupWait), picked: make(chan struct{})}
 	b.pending[j.ID] = command
 	queue := b.queue(command.client)
 	b.mu.Unlock()
 	defer func() { b.mu.Lock(); delete(b.pending, j.ID); b.mu.Unlock() }()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	select {
 	case queue <- command:
 	default:
 		return failure("Local browser queue is full; input not sent")
 	}
+	pickup := time.NewTimer(browserPickupWait)
+	defer pickup.Stop()
+	// Withdraw an untaken command under the lock so a poll cannot hand it out after we report "not executed".
+	withdraw := func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		select {
+		case <-command.picked:
+			return false
+		default:
+			delete(b.pending, j.ID)
+			return true
+		}
+	}
+	select {
+	case <-command.picked:
+	case <-ctx.Done():
+		if withdraw() {
+			return failure("Browser operation cancelled before Chrome took it; not executed")
+		}
+	case <-pickup.C:
+		if withdraw() {
+			return map[string]any{"status": "unavailable", "error": "本地 Chrome 扩展未取走命令（Nova 扩展后台可能被 Chrome 挂起或已断开），本步未执行，可以直接重试；持续出现请在 chrome://extensions 确认 Nova Chrome 已启用"}
+		}
+	}
+	timer := time.NewTimer(timeout + time.Second)
+	defer timer.Stop()
 	select {
 	case response := <-command.reply:
 		if response.Error != "" {
@@ -287,7 +321,11 @@ func (b *browserBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			select {
 			case command := <-queue:
 				b.mu.Lock()
-				valid := b.pending[command.ID] == command && b.connection != nil && command.generation == b.generation && command.client == body.ClientID && command.ExpiresAt > time.Now().UnixMilli()
+				valid := b.pending[command.ID] == command && b.connection != nil && command.generation == b.generation && command.client == body.ClientID && time.Now().Before(command.pickupBy)
+				if valid {
+					command.ExpiresAt = time.Now().Add(command.budget).UnixMilli()
+					close(command.picked)
+				}
 				b.mu.Unlock()
 				if valid {
 					_ = json.NewEncoder(w).Encode(map[string]any{"command": command, "version": extensionVersion})
