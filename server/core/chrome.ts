@@ -1193,10 +1193,10 @@ export class Chrome {
         signal,
       );
       tag = result.tabTag || tag;
-      if (op === "close_tab") {
-        this.observations.delete(owner + ":" + tag);
-        return result;
-      }
+      if (["close_tab", "goto", "back", "forward", "reload"].includes(op))
+        for (const [key, observation] of this.observations)
+          if (observation.tabTag === tag) this.observations.delete(key);
+      if (op === "close_tab") return result;
       if (a.observe === "none") return result;
       if (tag) {
         let loading = true;

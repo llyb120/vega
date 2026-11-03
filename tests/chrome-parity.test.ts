@@ -36,6 +36,39 @@ function fixture(t: TestContext) {
   return { store, chrome, sent, calls, page, tabs, observe, act, run };
 }
 
+test("navigation invalidates all owners of its tab even without feedback", async (t) => {
+  for (const operation of ["goto", "back", "forward", "reload", "close_tab"]) {
+    for (const observe of ["none", "inspect"]) {
+      const f = fixture(t), old = await f.observe();
+      f.chrome.observations.set("other:tab", old);
+      f.chrome.observations.set("owner:unrelated", { ...old, tabTag: "unrelated" });
+      const result = await f.chrome.execute("owner", ".", { operation, tabTag: "tab", url: "https://example.test/next", observe, visual: "none" });
+      assert(!f.chrome.observations.has("other:tab"), operation);
+      assert(f.chrome.observations.has("owner:unrelated"), operation);
+      if (observe === "none" || operation === "close_tab") {
+        assert(!f.chrome.observations.has("owner:tab"), operation);
+        await assert.rejects(f.act({ action: { action: "press", key: "Enter" } }), /no observation/);
+        assert.equal(f.sent.length, 0);
+      } else {
+        assert.notEqual(result.snapshotId, old.id);
+        assert.equal(f.chrome.observations.get("owner:tab")!.id, result.snapshotId);
+      }
+      assert.equal(f.calls.filter(call => call.operation === operation).length, 1);
+    }
+  }
+});
+
+test("selecting a tab preserves other owners, and failed navigation does not discard observations", async (t) => {
+  const f = fixture(t), old = await f.observe();
+  f.chrome.observations.set("other:tab", old);
+  await f.chrome.execute("owner", ".", { operation: "select_tab", tabTag: "tab", observe: "none" });
+  assert.equal(f.chrome.observations.get("other:tab"), old);
+  f.chrome.bridge.request = async () => { throw Error("navigation rejected"); };
+  await assert.rejects(f.chrome.execute("owner", ".", { operation: "goto", tabTag: "tab", url: "https://example.test/next" }), /navigation rejected/);
+  assert.equal(f.chrome.observations.get("owner:tab"), old);
+  assert.equal(f.chrome.observations.get("other:tab"), old);
+});
+
 test("whole-batch preflight rejects unknown refs, uploads and screenshot bounds before any input", async (t) => {
   const f = fixture(t); const o = await f.observe();
   f.chrome.workspaceFile = async () => { throw Error("Only regular workspace files"); };
