@@ -1,4 +1,6 @@
 import { normalizeAction } from "./browser-actions";
+import { validatePlan, literalMet, runCandidates, bindStep, chains, runState, type Candidate } from "./browser-run";
+import { assertCredentialInput, credentialOrigins, vaultSite, type CredentialBinding } from "./credentials";
 import sharp from "sharp";
 import type { Store } from "./store";
 import { ChromeBridge } from "./chrome-bridge";
@@ -62,24 +64,26 @@ export class Chrome {
     frame: Frame,
     expression: string,
     signal?: AbortSignal,
+    timeout?: number,
   ) {
-    const r = await this.cdp(
-      tag,
-      "Runtime.evaluate",
-      {
-        expression,
-        contextId: frame.context,
-        returnByValue: true,
-        awaitPromise: true,
-      },
-      frame.session,
-      signal,
-    );
-    assert(
-      !r.exceptionDetails,
-      r.exceptionDetails?.exception?.description || "Page evaluation failed",
-    );
-    return r.result?.value;
+    const control = new AbortController();
+    const active = signal ? AbortSignal.any([signal, control.signal]) : control.signal;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const request = this.cdp(tag, "Runtime.evaluate", {
+        expression, contextId: frame.context, returnByValue: true, awaitPromise: true,
+        ...(timeout === undefined ? {} : { timeout }),
+      }, frame.session, active);
+      const r = timeout === undefined ? await request : await Promise.race([
+        request,
+        new Promise<never>((_, reject) => { timer = setTimeout(() => {
+          reject(Error("脚本等待5秒超时，可能已部分执行且异步脚本可能仍在运行；先观察确认，不要重放"));
+          control.abort();
+        }, timeout); }),
+      ]);
+      assert(!r.exceptionDetails, r.exceptionDetails?.exception?.description || r.exceptionDetails?.text || "Page evaluation failed");
+      return r.result?.value;
+    } finally { clearTimeout(timer); }
   }
   async observe(
     tag: string,
@@ -197,23 +201,20 @@ export class Chrome {
       vp = page.viewport;
     const dpr = vp.devicePixelRatio || 1;
     let region = a.region;
+    if (region && !Object.keys(region).length) region = undefined;
     assert(!region || !a.ref, "Use region or ref, not both");
-    if (a.ref) {
-      const frame = o.frames[a.frame || 0];
-      assert(frame, "Unknown frame");
-      region = await this.evaluate(
-        tag,
-        frame,
-        `__novaWebview.documentRect(${JSON.stringify(a.ref)})`,
-      );
-      if (!a.fullPage) {
-        region.x -= vp.scrollX;
-        region.y -= vp.scrollY;
-      }
-    }
-    let expanded: any;
+    assert(a.maxEdge === undefined || (Number.isInteger(a.maxEdge) && (a.maxEdge === 0 || (a.maxEdge >= 320 && a.maxEdge <= 3840))), "maxEdge must be 0 or 320–3840");
+    if (region) assert(["x", "y", "width", "height"].every((k) => Number.isFinite(region[k]) && (k === "x" || k === "y" ? region[k] >= 0 : region[k] > 0)), "Invalid screenshot region");
+    if (a.expandScroll) assert((a.frame ?? 0) === 0, "expandScroll requires frame 0");
+    if (a.ref && !a.expandScroll) region = (await this.point(o, a.frame || 0, a.ref, "capture")).rect;
+    let full = !region && (a.fullPage === true || !!a.expandScroll);
+    let expanded: Obj | undefined, fullPageFallback: string | undefined, layout = false, resized = false;
     try {
-      if (a.expandScroll) {
+      if (full) {
+        layout = true;
+        await this.evaluate(tag, o.frames[0], "__novaWebview.captureLayout(true)");
+      }
+      if (a.expandScroll && full) {
         let over = await this.evaluate(
             tag,
             o.frames[0],
@@ -223,6 +224,7 @@ export class Chrome {
         for (let i = 0; i < 3 && over > 1; i++) {
           const next = Math.min(16383 / dpr, height + over);
           if (next <= height) break;
+          resized = true;
           await this.cdp(tag, "Emulation.setDeviceMetricsOverride", {
             width: vp.width,
             height: Math.floor(next),
@@ -239,11 +241,16 @@ export class Chrome {
             o.frames[0],
             `__novaWebview.innerScrollOverflow(${JSON.stringify(a.ref || null)})`,
           );
-          if (after >= over - 1) break;
+          if (after >= over - 1) {
+            if (height === vp.height) await this.cdp(tag, "Emulation.clearDeviceMetricsOverride");
+            else await this.cdp(tag, "Emulation.setDeviceMetricsOverride", { width: vp.width, height: Math.floor(height), deviceScaleFactor: 0, mobile: false });
+            await this.evaluate(tag, o.frames[0], "__novaWebview.settle(300,1500)");
+            break;
+          }
           height = next;
           over = after;
         }
-        expanded = { complete: over <= 1, height };
+        expanded = { complete: over <= 1, height, viewportHeight: height };
         if (a.ref)
           region = await this.evaluate(
             tag,
@@ -251,37 +258,36 @@ export class Chrome {
             `__novaWebview.documentRect(${JSON.stringify(a.ref)})`,
           );
       }
-      const full = a.fullPage === true || !!a.expandScroll;
+      const metrics = full ? await this.cdp(tag, "Page.getLayoutMetrics") : {};
+      const documentSize = metrics.cssContentSize || metrics.contentSize || page.documentSize || {};
+      let left = region?.x ?? 0, top = region?.y ?? 0;
+      let width = region?.width ?? (full ? documentSize.width : vp.width);
+      let totalHeight = region?.height ?? (full ? documentSize.height : vp.height);
+      if (full && Math.max(width, totalHeight) * dpr > 16383) {
+        assert(!a.ref, "目标区域超出截图安全上限，请改用分页或读 DOM");
+        fullPageFallback = `文档 ${width}x${totalHeight} CSS像素超出整页截图安全上限，已改为视口截图`;
+        if (resized) await this.cdp(tag, "Emulation.clearDeviceMetricsOverride");
+        await this.evaluate(tag, o.frames[0], "__novaWebview.captureLayout(false)");
+        full = false; expanded = undefined; left = 0; top = 0; width = vp.width; totalHeight = vp.height;
+      }
+      if (!full) {
+        assert(left < vp.width && top < vp.height && left + width > 0 && top + totalHeight > 0, "region is outside the viewport");
+        width = Math.min(left + width, vp.width) - Math.max(0, left);
+        totalHeight = Math.min(top + totalHeight, vp.height) - Math.max(0, top);
+        left = Math.max(0, left) + (vp.scrollX || 0); top = Math.max(0, top) + (vp.scrollY || 0);
+      }
+      assert([width, totalHeight].every((v) => Number.isFinite(v) && v > 0), "Empty screenshot region");
       o.fullPage = full;
       o.screenshot = true;
-      const documentSize = a.expandScroll
-        ? (await this.cdp(tag, "Page.getLayoutMetrics")).cssContentSize ||
-          page.documentSize ||
-          {}
-        : page.documentSize || {};
-      const width =
-          region?.width || (full ? documentSize.width : vp.width) || vp.width,
-        totalHeight =
-          region?.height ||
-          (full ? documentSize.height : vp.height) ||
-          vp.height;
-      assert(width > 0 && totalHeight > 0, "Empty screenshot region");
-      const tileHeight =
-        full && !a.expandScroll
-          ? Math.min(1600, Math.floor(16383 / dpr))
-          : Math.min(totalHeight, Math.floor(16383 / dpr));
-      const tiles = Math.ceil(totalHeight / tileHeight),
-        offset = a.tileOffset || 0;
-      assert(
-        Number.isInteger(offset) && offset >= 0 && offset < tiles,
-        "Invalid tileOffset",
-      );
-      const maxTiles = a.expandScroll ? 1 : Math.min(2, tiles - offset);
+      const tileWidth = full ? Math.max(1, Math.floor(2048 / Math.max(1, dpr))) : width;
+      const tileHeight = full ? Math.max(1, Math.floor(4096 / Math.max(1, dpr))) : totalHeight;
+      const columns = Math.ceil(width / tileWidth), tiles = columns * Math.ceil(totalHeight / tileHeight), offset = full ? a.tileOffset ?? 0 : 0;
+      assert(Number.isInteger(offset) && offset >= 0 && offset < tiles, "Invalid tileOffset");
+      const maxTiles = Math.min(4, tiles - offset);
       for (let i = offset; i < offset + maxTiles; i++) {
-        const x = region?.x || (full ? 0 : vp.scrollX || 0),
-          y = (region?.y || (full ? 0 : vp.scrollY || 0)) + i * tileHeight,
-          h = Math.min(tileHeight, totalHeight - i * tileHeight),
-          clipRect = { x, y, width, height: h, scale: 1 };
+        const dx = (i % columns) * tileWidth, dy = Math.floor(i / columns) * tileHeight;
+        const x = left + dx, y = top + dy, w = Math.min(tileWidth, width - dx), h = Math.min(tileHeight, totalHeight - dy),
+          clipRect = { x, y, width: w, height: h, scale: 1 };
         const shot = await this.cdp(tag, "Page.captureScreenshot", {
           format: "webp",
           quality: 100,
@@ -293,8 +299,10 @@ export class Chrome {
         let image = sharp(bytes, { limitInputPixels: 64000000 });
         const metadata = await image.metadata();
         assert(metadata.width && metadata.height, "Invalid screenshot");
-        const edge = Math.min(a.maxEdge || 1600, 1568),
-          scale = Math.min(
+        const requestedEdge = a.maxEdge ?? (a.expandScroll ? 0 : 1600);
+        const original = a.expandScroll && requestedEdge === 0;
+        const edge = Math.min(requestedEdge || 1568, 1568),
+          scale = original ? 1 : Math.min(
             1,
             edge / Math.max(metadata.width, metadata.height),
             Math.sqrt(1150000 / (metadata.width * metadata.height)),
@@ -311,17 +319,18 @@ export class Chrome {
         let imageID = o.id + "-" + o.images.length,
           unchanged = false,
           blobID = blob;
+        const imageX = full ? x : x - (vp.scrollX || 0), imageY = full ? y : y - (vp.scrollY || 0);
         const previous = prior?.images.find(
           (v) =>
-            v.x === x &&
-            v.y === y &&
-            v.width === width &&
+            v.x === imageX &&
+            v.y === imageY &&
+            v.width === w &&
             v.height === h &&
             v.pixelWidth === info.width &&
             v.pixelHeight === info.height,
         );
         if (
-          previous &&
+          !a.expandScroll && previous &&
           Date.now() - (prior?.captured || 0) <= 180000 &&
           prior?.pages[0].document === page.document &&
           prior?.pages[0].stamp === page.stamp
@@ -348,13 +357,14 @@ export class Chrome {
           blobId: blobID,
           path: `sqlite:blob/${blobID}`,
           url: `/api/blobs/${blobID}`,
-          x,
-          y,
-          width,
+          x: imageX,
+          y: imageY,
+          width: w,
           height: h,
           pixelWidth: info.width,
           pixelHeight: info.height,
-          frameStream: `${tag}:${full ? "document" : "viewport"}`,
+          tile: full ? i : undefined,
+          frameStream: `${tag}:${full ? "document:" + i : "viewport"}`,
           unchanged,
           readOnlyImage: !!a.expandScroll,
         });
@@ -362,20 +372,20 @@ export class Chrome {
       return {
         fullPage: full,
         scrollExpanded: expanded,
+        fullPageFallback,
+        documentSize: full ? { width, height: totalHeight } : undefined,
         totalTiles: tiles,
+        screenshotComplete: offset === 0 && offset + maxTiles === tiles,
         nextTile: offset + maxTiles < tiles ? offset + maxTiles : undefined,
       };
     } finally {
-      if (a.expandScroll) {
-        await this.cdp(tag, "Emulation.clearDeviceMetricsOverride").catch(
-          () => {},
-        );
-        await this.evaluate(
-          tag,
-          o.frames[0],
-          "__novaWebview.settle(200,1000)",
-        ).catch(() => {});
+      const errors: string[] = [];
+      if (resized) await this.cdp(tag, "Emulation.clearDeviceMetricsOverride").catch((e) => errors.push(e.message));
+      if (layout) {
+        await this.cdp(tag, "Page.captureScreenshot", { format: "webp", quality: 100, captureBeyondViewport: false }).catch((e) => errors.push(e.message));
+        await this.evaluate(tag, o.frames[0], "__novaWebview.captureLayout(false)").catch((e) => errors.push(e.message));
       }
+      if (errors.length) throw Error("截图后恢复页面布局失败，请重新观察：" + errors.join("; "));
     }
   }
   summarize(o: Observation, a: Obj) {
@@ -437,7 +447,16 @@ export class Chrome {
       mode === "screenshot" ||
       a.feedback === "screenshot" ||
       (!["none", "inspect"].includes(a.feedback) && a.visual !== "none");
-    const shot = capture ? await this.capture(o, a, prior) : {};
+    assert(mode === "screenshot" || (!a.ref && !a.region), "inspect does not accept region/ref; use screenshot");
+    let shot: Obj = {};
+    if (capture) {
+      try { shot = await this.capture(o, mode === "screenshot" ? a : { ...a, fullPage: false, expandScroll: false }, prior); }
+      catch (error: any) {
+        if (mode === "screenshot" || a.feedback === "screenshot") throw error;
+        o.screenshot = false; o.images = [];
+        shot = { screenshotError: error.message };
+      }
+    }
     this.observations.set(key, o);
     for (const image of o.images) {
       if (owner.startsWith("browser-view:")) this.store.grantBlobUser(image.blobId, owner.slice("browser-view:".length));
@@ -666,6 +685,46 @@ export class Chrome {
     }
     return true;
   }
+  private async credentialInput(tag: string, frame: Frame | undefined, text: unknown, credentials: CredentialBinding[], signal: AbortSignal) {
+    const origins = credentialOrigins(text, credentials);
+    if (!origins.length) return;
+    assert(frame, "Unknown credential input frame");
+    const url = await this.evaluate(tag, frame, "location.href", signal);
+    const site = vaultSite(url);
+    assert(origins.every((allowed) => allowed.has(site)), "凭据尚未针对当前页面核对或已切换认证页面，已阻止这次凭据写入；请先观察实际页面（含 SSO / 子框架）再重新 get 核对使用条件，无需补网站配置，不要跨系统试用账号。");
+  }
+  private async preflight(o: Observation, actions: Obj[], top: Obj, cwd: string) {
+    for (const action of actions) {
+      if (["click", "fill", "scroll"].includes(action.action) && action.ref) {
+        const frame = o.pages.findIndex((p) => p.items?.some((v: Obj) => v.ref === action.ref));
+        assert(frame >= 0, "ref not found in observed frames; never fabricate refs");
+        action.frame = frame;
+      } else if (action.action === "scroll") assert(action.frame === 0, "子框架滚动需要明确 ref");
+      if (action.action === "upload") {
+        assert(o.frames[action.frame], "upload.frame is not in the observation");
+        action.files = await Promise.all(action.files.map((path: string) => this.workspaceFile(cwd, path)));
+      }
+      if (["click_at", "move", "drag", "scroll_at"].includes(action.action)) {
+        assert(o.screenshot, "Coordinate actions require an observed screenshot");
+        const image = top.imageId ? o.images.find((i) => i.imageId === top.imageId) : o.images.length === 1 ? o.images[0] : undefined;
+        assert(image && !image.readOnlyImage, "Use matching actionable imageId");
+        if (action.action === "drag") assert(!o.fullPage, "Drag requires viewport screenshot");
+        for (const [x, y] of action.action === "drag" ? [[action.x, action.y], [action.to_x, action.to_y]] : [[action.x, action.y]])
+          assert(x < image.pixelWidth && y < image.pixelHeight, "Coordinates outside image");
+      }
+    }
+  }
+  private async waitForLoad(tag: string, ms: number, signal: AbortSignal) {
+    const deadline = Date.now() + ms;
+    if (ms > 0) await sleep(Math.min(120, ms), signal);
+    do {
+      const { tabs } = await this.bridge.request("tabs", {}, signal);
+      const tab = tabs.find((v: Obj) => v.tag === tag);
+      if (!tab || !tab.loading) return;
+      if (Date.now() >= deadline) return;
+      await sleep(Math.min(200, deadline - Date.now()), signal);
+    } while (Date.now() < deadline);
+  }
   async action(
     o: Observation,
     a: Obj,
@@ -673,6 +732,7 @@ export class Chrome {
     cwd: string,
     progress: Obj,
     signal: AbortSignal,
+    credentials: CredentialBinding[] = [],
   ) {
     signal.throwIfAborted();
     const tag = o.tabTag,
@@ -689,7 +749,9 @@ export class Chrome {
       frameIndex = actual;
     }
     const frame = o.frames[frameIndex];
-    const changed = () => (progress.attempted = true);
+    if (kind === "fill") await this.credentialInput(tag, frame, a.text, credentials, signal);
+    if (kind === "type") assertCredentialInput(a.text);
+    const changed = () => { signal.throwIfAborted(); progress.attempted = true; };
     if (kind === "wait") {
       assert(
         Number.isInteger(a.ms) && a.ms >= 0 && a.ms <= 2000,
@@ -745,6 +807,8 @@ export class Chrome {
           "Iframe moved after hover; no click sent",
         );
       }
+      progress.domPreflight = false;
+      signal.throwIfAborted();
       await this.mouse(tag, p, a.button || "left", a.click_count || 1);
       progress.focus = p.editable
         ? { frame: frameIndex, identity: p.identity }
@@ -768,8 +832,11 @@ export class Chrome {
           );
         };
         await requireFocus();
+        signal.throwIfAborted();
         await this.key(tag, "Control+A");
         await requireFocus();
+        await this.credentialInput(tag, frame, a.text, credentials, signal);
+        signal.throwIfAborted();
         await this.cdp(tag, "Input.insertText", { text: a.text });
         const actual = await this.evaluate(
           tag,
@@ -846,6 +913,7 @@ export class Chrome {
             now.identity === expected &&
             (await this.frameFocused(o, i))
           ) {
+            await this.credentialInput(tag, f, a.text, credentials, signal);
             verified = true;
             break;
           }
@@ -1000,6 +1068,7 @@ export class Chrome {
     cwd: string,
     args: Obj,
     parent?: AbortSignal,
+    credentials: CredentialBinding[] = [],
   ): Promise<any> {
     if (args.operation === "stop") {
       this.cancelled.get(owner)?.abort();
@@ -1021,7 +1090,7 @@ export class Chrome {
         ...(parent ? [parent] : []),
       ]);
       try {
-        return await this.inner(owner, cwd, { ...args, ...(target ? { tabTag: target } : {}) }, signal);
+        return await this.inner(owner, cwd, { ...args, ...(target ? { tabTag: target } : {}) }, signal, credentials);
       } finally {
         if (this.cancelled.get(owner) === control) this.cancelled.delete(owner);
       }
@@ -1032,6 +1101,7 @@ export class Chrome {
     cwd: string,
     a: Obj,
     signal: AbortSignal,
+    credentials: CredentialBinding[] = [],
   ): Promise<any> {
     let op =
         a.operation ||
@@ -1077,7 +1147,7 @@ export class Chrome {
       );
     }
     if (op === "run")
-      return this.run(owner, cwd, { ...a, tabTag: tag }, signal);
+      return this.run(owner, cwd, { ...a, tabTag: tag }, signal, credentials);
     if (["status", "connect"].includes(op)) {
       await this.bridge.start();
       return this.bridge.status();
@@ -1161,29 +1231,18 @@ export class Chrome {
       o,
       "Inspect this tab first; no observation is bound to this session",
     );
-    if (op === "evaluate") {
-      assert(
-        typeof a.expression === "string" && a.expression,
-        "expression required",
-      );
-      const frame = o.frames[a.frame || 0];
-      assert(frame, "Unknown frame");
-      const page = o.pages[a.frame || 0];
-      const result = await this.evaluate(
-        tag,
-        frame,
-        `__novaWebview.evaluate(${JSON.stringify(a.expression)},${JSON.stringify(page.document)},${JSON.stringify(page.url)})`,
-        signal,
-      );
-      if (a.feedback === "none") return result;
-      return {
-        ...result,
-        ...(await this.feedback(owner, tag, a, "inspect", signal)),
-      };
+    const script = op === "evaluate";
+    assert(script || op === "act", "Unknown Chrome operation");
+    if (script) {
+      assert(typeof a.expression === "string" && a.expression.trim() && a.expression.length <= 65536, "expression required, at most 64K characters");
+      assert(Number.isInteger(a.frame ?? 0) && o.frames[a.frame ?? 0], "Unknown frame");
+      await this.credentialInput(tag, o.frames[a.frame ?? 0], a.expression, credentials, signal);
     }
-    assert(op === "act", "Unknown Chrome operation");
-    let actions: Obj[];
+    let actions: Obj[] = [];
+    const settleMs = a.settleMs ?? 1500;
     try {
+      assert(Number.isInteger(settleMs) && settleMs >= 0 && settleMs <= 4000, "settleMs must be 0–4000");
+      if (!script) {
       assert(!(a.action && a.actions), "Use action or actions, not both");
       const raw = a.actions || [a.action];
       assert(
@@ -1197,6 +1256,9 @@ export class Chrome {
             : v,
         ),
       );
+      for (const action of actions) if (["fill", "type"].includes(action.action)) assertCredentialInput(action.text);
+      await this.preflight(o, actions, a, cwd);
+      }
     } catch (e: any) {
       return {
         status: "not_executed",
@@ -1214,33 +1276,38 @@ export class Chrome {
       domPreflight: false,
     };
     const before = (await this.bridge.request("tabs", {}, signal)).tabs;
-    let error: string | undefined;
-    for (const action of actions) {
+    let error: string | undefined, value: unknown, opened: Obj[] = [], tabDiscoveryError: string | undefined;
+    const discover = async () => {
+      const { tabs } = await this.bridge.request("tabs", {}, signal);
+      const found = tabs.filter((t: Obj) => t.openerTag === tag && !before.some((b: Obj) => b.tag === t.tag));
+      if (found.length) opened = found;
+    };
+    if (script) {
       try {
-        await this.action(o, action, a, cwd, progress, signal);
-        progress.completed++;
-        await this.evaluate(
-          tag,
-          o.frames[0],
-          `__novaWebview.settle(250,${Math.min(a.settleMs || 1000, 5000)})`,
-          signal,
-        );
-      } catch (e: any) {
-        error = e.message;
-        break;
-      }
+        const index = a.frame ?? 0, page = o.pages[index];
+        progress.attempted = true;
+        const outcome = await this.evaluate(tag, o.frames[index],
+          `__novaWebview.evaluate(${JSON.stringify(a.expression)},${JSON.stringify(page.document)},${JSON.stringify(page.url)})`, signal, 5000);
+        if (outcome?.status === "executed") { progress.completed = 1; value = outcome.value; }
+        else {
+          progress.attempted = outcome?.status !== "not_executed";
+          error = outcome?.reason || "脚本结果未知，请观察确认，不要重放";
+        }
+      } catch (e: any) { error = e.message; }
     }
-    const after = (
-      await this.bridge.request("tabs", {}, signal).catch(() => ({ tabs: [] }))
-    ).tabs;
-    const opened = after.filter(
-      (t: Obj) => !before.some((b: Obj) => b.tag === t.tag),
-    );
-    let observedTag = tag;
-    const active = opened.filter(
-      (t: Obj) => t.active && t.controllable && t.openerTag === tag,
-    );
-    if (active.length === 1) observedTag = active[0].tag;
+    for (const [index, action] of actions.entries()) {
+      try {
+        await this.action(o, action, a, cwd, progress, signal, credentials);
+        progress.completed++;
+        if (index + 1 < actions.length) {
+          await discover();
+          if (opened.length) { error = "动作已打开新标签页或窗口，余下动作未执行"; break; }
+        }
+      } catch (e: any) { error = e.message; break; }
+    }
+    if (progress.attempted) await discover().catch((e) => { tabDiscoveryError = e.message; });
+    const child = opened.length === 1 && opened[0].active && opened[0].controllable && opened[0].allowed !== false ? opened[0].tag : undefined;
+    const observedTag = child || tag;
     const result: Obj = {
       status: error
         ? progress.attempted
@@ -1252,7 +1319,10 @@ export class Chrome {
       reason: error,
       basedOnSnapshotId: o.id,
       openedTabs: opened,
-      sourceTabTag: observedTag !== tag ? tag : undefined,
+      sourceTabTag: opened.length ? tag : undefined,
+      tabTag: tag,
+      tabDiscoveryError,
+      ...(script && progress.completed ? { value } : {}),
       scrollFeedback: progress.scrollFeedback,
       clipboard: progress.clipboard,
       verification: "unverified",
@@ -1265,15 +1335,18 @@ export class Chrome {
       result.canReobserve = !!progress.domPreflight && progress.completed === 0;
       result.next = "先重新观察确认状态；不要重放可能已经执行的动作";
     }
-    try {
-      Object.assign(
-        result,
-        await this.feedback(owner, observedTag, a, "inspect", signal),
-      );
-    } catch (e: any) {
-      result.observationError = e.message;
+    if ((!script || a.feedback !== "none") && (!opened.length || child)) {
+      try {
+        if (settleMs > 0 && (opened.length || script || actions.some((v) => ["click", "click_at", "press"].includes(v.action)))) {
+          await this.waitForLoad(observedTag, settleMs, signal);
+          if (observedTag === tag) await this.evaluate(tag, o.frames[0], `__novaWebview.settle(250,${Math.min(settleMs, 1000)})`, signal).catch(() => {});
+        }
+        const feedback: Obj = { ...a, fullPage: false };
+        for (const key of ["ref", "frame", "region", "expandScroll", "tileOffset"]) delete feedback[key];
+        Object.assign(result, await this.feedback(owner, observedTag, feedback, "inspect", signal));
+      } catch (e: any) { result.observationError = e.message; }
     }
-    if (!error && result.pages?.length)
+    if (!script && !error && result.pages?.length)
       this.experiences.record(
         owner,
         o.pages[0].url,
@@ -1291,191 +1364,129 @@ export class Chrome {
       );
     return result;
   }
-  async run(owner: string, cwd: string, a: Obj, signal: AbortSignal) {
+  async run(owner: string, cwd: string, a: Obj, parent: AbortSignal, credentials: CredentialBinding[] = []) {
     const plan = a.plan;
-    assert(
-      plan &&
-        typeof plan.task === "string" &&
-        Array.isArray(plan.steps) &&
-        plan.steps.length >= 1 &&
-        plan.steps.length <= 24,
-      "run requires task and 1–24 steps",
-    );
-    let tag = a.tabTag,
-      current = this.observations.get(owner + ":" + tag);
-    if (!current) {
-      await this.feedback(owner, tag, { visual: "none" }, "inspect", signal);
-      current = this.observations.get(owner + ":" + tag);
-    }
-    const history: any[] = [];
-    assert(
-      Number.isInteger(plan.maxActions ?? 32) &&
-        (plan.maxActions ?? 32) >= 1 &&
-        (plan.maxActions ?? 32) <= 64,
-      "maxActions must be 1–64",
-    );
-    let completed = 0,
-      reason = "",
-      result: any;
-    const max = plan.maxActions || 32;
-    for (const [i, step] of plan.steps.entries()) {
-      if (completed >= max) {
-        reason = "maxActions reached";
-        break;
-      }
-      const o = this.observations.get(owner + ":" + tag)!;
-      const visible = o.pages
-          .map((p) => p.visibleText || p.text || p.fullText || "")
-          .join("\n"),
-        matchesText = (s: string) =>
-          s
-            .split("|")
-            .some((v) => visible.toLowerCase().includes(v.toLowerCase()));
-      if (step.when && !matchesText(step.when)) {
-        reason = "when condition not satisfied";
-        break;
-      }
-      let action: Obj;
-      const needle = step.name || step.target || "";
-      const candidates = o.pages
-        .flatMap((p, index) =>
-          p.items.map((item: Obj) => ({ ...item, frame: index })),
-        )
-        .filter(
-          (item: Obj) =>
-            (!step.role || item.role === step.role || item.tag === step.role) &&
-            (!step.within || item.region?.includes(step.within)) &&
-            (step.name
-              ? item.name === step.name
-              : (item.name + " " + item.region + " " + item.fieldContext)
-                  .toLowerCase()
-                  .includes(String(needle).toLowerCase())) &&
-            !item.disabled,
-        );
-      if (step.action === "press") action = { action: "press", key: step.key };
-      else if (step.action === "scroll")
-        action = {
-          action: "scroll",
-          frame: 0,
-          delta:
-            step.direction === "up"
-              ? -600
-              : ["left", "right"].includes(step.direction)
-                ? 0
-                : 600,
-          delta_x:
-            step.direction === "left"
-              ? -600
-              : step.direction === "right"
-                ? 600
-                : 0,
-        };
-      else if (candidates.length === 1)
-        action = {
-          action: step.action,
-          frame: candidates[0].frame,
-          ref: candidates[0].ref,
-          text:
-            step.text ??
-            plan.inputs?.find(
-              (input: Obj) =>
-                (!input.role || input.role === candidates[0].role) &&
-                input.name === candidates[0].name &&
-                (!input.fieldContext ||
-                  candidates[0].fieldContext?.startsWith(input.fieldContext)),
-            )?.text,
-        };
-      else {
-        if (step.optional && !candidates.length) {
-          history.push({ step: i + 1, skipped: true });
-          completed++;
-          continue;
+    validatePlan(plan);
+    for (const input of [...plan.steps, ...(plan.inputs || [])]) assertCredentialInput(input.text);
+    const signal = AbortSignal.any([parent, AbortSignal.timeout(180000)]);
+    let tag = a.tabTag, result: Obj = {}, completed = 0, executed = 0, reason = "", preflightRetries = 0;
+    const history: Obj[] = [], checks: Obj[] = [], used = new Set<string>(), stateActions = new Map<string, number>();
+    let baseline: Set<string> | undefined;
+    const observation = () => this.observations.get(owner + ":" + tag);
+    const refresh = async () => {
+      signal.throwIfAborted();
+      Object.assign(result, await this.feedback(owner, tag, { visual: "none", scope: "viewport" }, "inspect", signal));
+      delete result.observationError;
+    };
+    if (!observation()) await refresh();
+    const initialURL = new URL(observation()!.pages[0].url);
+    assert(["http:", "https:"].includes(initialURL.protocol), "run only supports HTTP(S) pages");
+    const home = initialURL.origin;
+    const pages = () => {
+      signal.throwIfAborted();
+      const current = observation();
+      assert(current, "Missing run observation");
+      assert(new URL(current.pages[0].url).origin === home, "页面跨站，需主模型重新确认授权；后续步骤未执行");
+      return current.pages;
+    };
+    const verify = async (expect: string, step: number, ms: number) => {
+      const started = Date.now();
+      for (;;) {
+        const current = pages(), met = !current.some((p) => p.loading) && literalMet(current, expect);
+        if (met || Date.now() - started >= ms) {
+          checks.push({ step: step + 1, expect, met, ms: Date.now() - started });
+          return met;
         }
-        reason = candidates.length ? "Ambiguous target" : "Target not found";
-        break;
+        await sleep(250, signal); await refresh();
       }
-      result = await this.inner(
-        owner,
-        cwd,
-        {
-          operation: "act",
-          tabTag: tag,
-          snapshotId: o.id,
-          action,
-          visual: "none",
-        },
-        signal,
-      );
-      history.push({
-        step: i + 1,
-        action: { ...action, text: action.text ? "[redacted]" : undefined },
-        status: result.status,
-        completedActions: result.completedActions,
-      });
-      if (result.completedActions === 1) {
-        completed++;
-        tag = result.tabTag || tag;
+    };
+    const perform = async (batch: Candidate[], state: string, reveal = false) => {
+      assert(executed + batch.length <= (plan.maxActions ?? 32), "maxActions reached");
+      const count = (stateActions.get(state) || 0) + 1;
+      assert(count <= 3, "同一页面状态已多次操作仍未推进，交回主模型");
+      assert(batch.every((c) => !used.has(state + c.key)), "同一页面状态的动作不会重放，请重新规划");
+      stateActions.set(state, count);
+      for (const c of batch) used.add(state + c.key);
+      baseline = new Set(runCandidates(pages()).map((c) => c.loose));
+      result = await this.inner(owner, cwd, { operation: "act", tabTag: tag, snapshotId: observation()!.id,
+        actions: batch.map((c) => c.action), feedback: "inspect", visual: "none", scope: "viewport" }, signal, credentials);
+      const done = Math.min(result.completedActions || 0, batch.length);
+      executed += done;
+      history.push({ step: completed + 1, reveal, actions: batch.map((c) => ({ ...c.action, ...(c.action.text !== undefined ? { text: "[redacted]" } : {}) })),
+        status: result.status, completedActions: done, reason: result.reason });
+      if (!reveal) completed += done;
+      tag = result.tabTag || tag;
+      assert(!result.openedTabs?.length, "操作打开新标签页，已停止后续步骤；按 openedTabs 确认目标，不重放已执行步骤");
+      if (result.failedAtPreflight && preflightRetries++ < 3 && (done > 0 || result.canReobserve)) {
+        // A DOM preflight failure sent no press/type for the failed step; completed steps stay consumed.
+        for (const c of batch.slice(done)) used.delete(state + c.key);
+        if (!done) stateActions.set(state, count - 1);
+        await refresh(); return false;
       }
-      if (result.status !== "executed") {
-        reason = result.reason || "Action uncertain";
-        break;
+      assert(result.status === "executed", result.reason || "Action uncertain; do not replay");
+      if (result.observationError || !result.snapshotId) await refresh();
+      pages();
+      preflightRetries = 0;
+      return true;
+    };
+    try {
+      let started = Date.now(), repeats = 0, revealed = 0, whenChecked = -1, loadingSince: number | undefined;
+      while (completed < plan.steps.length) {
+        const index = completed, step = plan.steps[index];
+        assert(executed < (plan.maxActions ?? 32), "maxActions reached");
+        if (whenChecked !== index) {
+          if (step.when) assert(await verify(step.when, index, 3000), "when condition not satisfied; this step was not executed");
+          whenChecked = index;
+        }
+        const current = pages();
+        if (current.some((p) => p.loading)) {
+          loadingSince ??= Date.now();
+          if (Date.now() - loadingSince < 4000) { await sleep(250, signal); await refresh(); continue; }
+        } else loadingSince = undefined;
+        const state = runState(current), all = runCandidates(current).map((c) => ({ ...c, fresh: !!baseline && !baseline.has(c.loose) }));
+        const available = all.filter((c) => !used.has(state + c.key));
+        const bound = bindStep(step, plan.inputs || [], available);
+        assert(!bound.ambiguous, "Ambiguous target; specify name/within/role");
+        if (!bound.candidate) {
+          if (Date.now() - started < 3000) { await sleep(250, signal); await refresh(); continue; }
+          const down = available.find((c) => c.action.action === "scroll" && !c.action.ref && c.action.delta > 0);
+          if (revealed < 2 && step.action !== "scroll" && down) { revealed++; await perform([down], state, true); continue; }
+          if (step.optional) { history.push({ step: index + 1, skipped: true }); completed++; started = Date.now(); revealed = 0; repeats = 0; continue; }
+          throw Error("Target not found; replan against the latest observation");
+        }
+        const batch = [bound.candidate];
+        while (batch.length < 8 && index + batch.length < plan.steps.length && executed + batch.length < (plan.maxActions ?? 32)) {
+          const next = plan.steps[index + batch.length];
+          if (!chains(plan.steps[index + batch.length - 1], batch.at(-1)!, next)) break;
+          const candidate = bindStep(next, plan.inputs || [], available).candidate;
+          if (!candidate || (candidate.action.ref && batch.some((b) => b.action.ref === candidate.action.ref))) break;
+          batch.push(candidate);
+        }
+        if (!await perform(batch, state)) continue;
+        const last = index + batch.length - 1, finalStep = plan.steps[last], expect = finalStep.expect || finalStep.expectedText;
+        if (expect && !await verify(expect, last, 6000)) {
+          if (repeats < (finalStep.repeat || 0)) { repeats++; completed = last; started = Date.now(); revealed = 0; continue; }
+          throw Error("Expected page evidence not found; completed input was not repeated");
+        }
+        repeats = 0; revealed = 0; started = Date.now();
       }
-      const next = this.observations.get(owner + ":" + tag);
-      const text =
-        next?.pages
-          .map((p) => p.visibleText || p.text || p.fullText || "")
-          .join("\n") || "";
-      if (
-        (step.expect || step.expectedText) &&
-        !(step.expect || step.expectedText)
-          .split("|")
-          .some((v: string) => text.includes(v))
-      ) {
-        reason = "Expected page evidence not found; input was not repeated";
-        break;
-      }
+      if (plan.expectedText) assert(await verify(plan.expectedText, completed, 6000), "Final expectedText not satisfied");
+    } catch (error: any) { reason = error.message; }
+    // Use normal feedback so the final image keeps the same access grants and observation ownership.
+    if (observation() && !result.openedTabs?.length && !["none", "inspect"].includes(a.feedback) && a.visual !== "none" && !signal.aborted) {
+      try { Object.assign(result, await this.feedback(owner, tag, { ...a, fullPage: false }, "inspect", signal)); }
+      catch (error: any) { result.observationError = error.message; }
     }
-    const latest = this.observations.get(owner + ":" + tag),
-      text =
-        latest?.pages.map((p) => p.fullText || p.text || "").join("\n") || "",
-      done =
-        completed === plan.steps.length &&
-        (!plan.expectedText ||
-          plan.expectedText.split("|").some((v: string) => text.includes(v)));
-    if (
-      latest &&
-      !["none", "inspect"].includes(a.feedback) &&
-      a.visual !== "none"
-    ) {
-      latest.id = id();
-      latest.images = [];
-      await this.capture(latest, a);
-      this.store.save("browser-observation", latest.id, {
-        ...latest,
-        frames: undefined,
-      });
-    }
+    const latest = result.openedTabs?.length && !result.snapshotId ? undefined : observation();
+    const done = !reason && completed === plan.steps.length;
     return {
-      ...result,
-      snapshotId: latest?.id,
-      pages: latest ? this.summarize(latest, a) : [],
-      images: latest?.images || [],
-      documentPath: latest
-        ? "sqlite:browser-observation/" + latest.id
-        : undefined,
-      tabTag: tag,
+      ...result, snapshotId: latest?.id, pages: latest ? this.summarize(latest, a) : [], images: latest?.images || [],
+      documentPath: latest ? "sqlite:browser-observation/" + latest.id : undefined, tabTag: tag,
       altairRun: {
-        status: done ? "completed" : "needs_review",
-        history,
-        guided: {
-          completedSteps: completed,
-          totalSteps: plan.steps.length,
-          remainingSteps: plan.steps.slice(completed),
-          next: reason,
-        },
-        verification: done ? "subgoal_verified" : "unverified",
-        notice:
-          "run validates page evidence only; it is not user authorization or proof of business success.",
+        status: done ? "completed" : "needs_review", history, checks, executedActions: executed,
+        guided: { completedSteps: completed, totalSteps: plan.steps.length, remainingSteps: plan.steps.slice(completed), next: reason },
+        verification: done && plan.expectedText ? "subgoal_verified" : "unverified",
+        notice: "run validates page evidence only; it is not user authorization or proof of business success.",
       },
     };
   }

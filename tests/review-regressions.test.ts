@@ -51,7 +51,7 @@ test("forked image grants survive deletion of the source and preview grants stay
   const preview = store.blob("image/png", Buffer.from("preview"));
   const chrome = new Chrome(store, {} as any, "");
   chrome.observe = async () => ({ id: "preview", tabTag: "C1", frames: [], pages: [{ url: "https://example.test" }], images: [], captured: Date.now() } as any);
-  chrome.capture = async (o) => { o.images = [{ blobId: preview }]; return { fullPage: false, scrollExpanded: undefined, totalTiles: 1, nextTile: undefined }; };
+  chrome.capture = async (o) => { o.images = [{ blobId: preview }]; return { fullPage: false, scrollExpanded: undefined, fullPageFallback: undefined, documentSize: undefined, screenshotComplete: true, totalTiles: 1, nextTile: undefined }; };
   await chrome.feedback("browser-view:alice", "C1", {}, "screenshot");
   assert.equal(auth.canBlob(alice, preview), true);
   assert.equal(auth.canBlob(bob, preview), false);
