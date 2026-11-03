@@ -85,7 +85,7 @@ test("unsupported events, malformed rules and invalid dates never save a duty or
       { mode: "unsupported", reason: "没有外部事件源，请写明检查频率" },
       { mode: "daily", times: ["99:00"] }, { mode: "daily", times: [] },
       { mode: "interval", everyMinutes: 0 }, { mode: "interval", everyMinutes: 10081 },
-      { mode: "dynamic", nextAt: beijingDateTime(Date.now() - 60000) }, { mode: "unknown" },
+      { mode: "dynamic", nextAt: beijingDateTime(Date.now() - 30 * 60000) }, { mode: "unknown" },
     ]) {
       engine.providers.chat = async () => rule(value);
       await assert.rejects(save({ action: "add", kind: "duty", condition: "当外部事件发生时执行", text: "work" }));

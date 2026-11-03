@@ -115,10 +115,10 @@ export function requestedTime(a: Obj, now = Date.now()) {
       .match(/\d+/g)!
       .map(Number);
     const at = beijingTimestamp(year, month - 1, day, hour, minute);
-    assert(
-      at > now && beijingDateTime(at) === a.nextAt,
-      "nextAt must be a valid future Beijing time",
-    );
+    assert(beijingDateTime(at) === a.nextAt, "nextAt must be a valid Beijing time");
+    // Minute-granular times just passed (model wrote "now" or the call took a while) mean "as soon as possible".
+    if (at <= now && now - at <= 10 * 60000) return now + 1000;
+    assert(at > now, `nextAt must be a future Beijing time (now ${beijingDateTime(now)}); to run immediately omit nextAt and nextCheckInMinutes`);
     return at;
   }
   if (a.nextCheckInMinutes !== undefined) {
@@ -126,7 +126,7 @@ export function requestedTime(a: Obj, now = Date.now()) {
       Number.isInteger(a.nextCheckInMinutes) &&
         a.nextCheckInMinutes >= 1 &&
         a.nextCheckInMinutes <= 10080,
-      "nextCheckInMinutes must be 1–10080",
+      "nextCheckInMinutes must be 1–10080; omit it (and nextAt) when no reschedule is needed",
     );
     return now + a.nextCheckInMinutes * 60000;
   }

@@ -33,7 +33,7 @@ const local = computed(() => !!props.employee.execution?.localAgent);
         <section class="card danger-zone">
           <div class="card-head"><h3>危险操作</h3><p class="hint">清空聊天只影响本牛马的对话记录；删除会连同职责、记忆、任务和浏览器登录一并清除。项目文件和共享密码本不会删除。</p></div>
           <div class="danger-actions">
-            <button type="button" class="ghost danger-soft" :disabled="clearing || deleting" @click="emit('clear-chat')"><Icon name="trash" :size="15" />{{ clearing ? '正在清空…' : '清空聊天记录' }}</button>
+            <button type="button" class="danger" :disabled="clearing || deleting" @click="emit('clear-chat')"><Icon name="trash" :size="15" />{{ clearing ? '正在清空…' : '清空聊天记录' }}</button>
             <button type="button" class="danger" :disabled="deleting || clearing" @click="emit('delete')"><Icon name="trash" :size="15" />{{ deleting ? '正在删除…' : '永久删除牛马' }}</button>
           </div>
         </section>
@@ -61,6 +61,5 @@ const local = computed(() => !!props.employee.execution?.localAgent);
 .danger-zone { border-color: var(--danger-border); }
 .danger-zone h3 { color: var(--danger); }
 .danger-actions { display: grid; gap: 8px; }
-.danger-soft { justify-content: flex-start; border-color: var(--danger-border); color: var(--danger); }
 @media (max-width: 1023px) { .settings-grid { grid-template-columns: minmax(0, 1fr); } }
 </style>

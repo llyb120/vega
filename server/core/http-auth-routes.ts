@@ -16,7 +16,10 @@ export async function bodyJSON(event: H3Event, max: number) {
   let bytes = chunks[0]?.length || 0;
   check(bytes <= max, 413, "Request body too large");
   // shortcut: Nitro localFetch exposes body directly; remove when mock requests support async iteration.
-  if (direct == null)
+  // Body-less requests (e.g. realtime-channel POSTs without data) carry neither length nor chunked encoding;
+  // Nitro's mock request cannot be async-iterated, so treat them as an empty JSON object instead of a 500.
+  const bodyless = direct == null && !length && !event.node.req.headers["transfer-encoding"];
+  if (direct == null && !bodyless)
     for await (const c of event.node.req) {
       bytes += c.length;
       check(bytes <= max, 413, "Request body too large");
