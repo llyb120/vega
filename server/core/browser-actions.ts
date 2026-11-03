@@ -45,9 +45,19 @@ export function normalizeAction(raw: Obj) {
     delete a.frame;
     delete a.ref;
   }
+  // Models often fill every field of the action schema with defaults ("", 0, [], false); those are not intent.
+  const placeholder = (v: unknown) =>
+    v == null || v === "" || v === 0 || v === false ||
+    (Array.isArray(v) && !v.length) ||
+    (typeof v === "object" && !Array.isArray(v) && Object.values(v as Obj).every((x) => x == null || x === "" || x === 0));
+  for (const k of Object.keys(a))
+    if (k !== "action" && !allowed[kind].includes(k) && placeholder(a[k])) delete a[k];
+  for (const k of ["frame", "button", "click_count", "duration_ms"])
+    if (a[k] === "" || a[k] === null || (k !== "frame" && a[k] === 0)) delete a[k];
+  const unexpected = Object.keys(a).filter((k) => k !== "action" && !allowed[kind].includes(k));
   assert(
-    Object.keys(a).every((k) => k === "action" || allowed[kind].includes(k)),
-    "Unexpected Chrome action field",
+    !unexpected.length,
+    `Unexpected Chrome action field for ${kind}: ${unexpected.join(", ")} (allowed: ${allowed[kind].join(", ") || "none"}; omit unused fields)`,
   );
   if (["click", "fill", "scroll", "upload"].includes(kind)) {
     a.frame ??= 0;
