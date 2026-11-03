@@ -4,10 +4,29 @@ import Icon from "./Icon.vue";
 import MessageText from "./MessageText.vue";
 import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
-const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean });
+const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function });
 const emit = defineEmits(["inspect", "back"]);
-const busy = ref(false), answer = ref("");
+const busy = ref(false), answer = ref(""), settleSelected = ref([]), settling = ref(false);
+const suggestions = computed(() => props.task.memorySuggestions || []);
 watch(() => props.task.id, () => { answer.value = ""; });
+watch(suggestions, (rows) => { settleSelected.value = rows.map((item) => item.id); }, { immediate: true });
+function toggleSettle(id) {
+  settleSelected.value = settleSelected.value.includes(id) ? settleSelected.value.filter((x) => x !== id) : [...settleSelected.value, id];
+}
+async function settleMemories() {
+  if (!props.saveMemory || settling.value || !settleSelected.value.length) return;
+  settling.value = true;
+  try {
+    for (const item of suggestions.value.filter((row) => settleSelected.value.includes(row.id))) {
+      await props.saveMemory({
+        id: item.id,
+        claim: item.claim,
+        memoryKind: item.kind,
+        source: "ui",
+      });
+    }
+  } finally { settling.value = false; }
+}
 const ended = computed(() => isEnded(props.task.status));
 const resumable = computed(() => ["failed", "stopped", "cancelled"].includes(props.task.status));
 const progress = computed(() => planProgress(props.task.plan));
@@ -62,6 +81,21 @@ async function run(action) {
     <section v-if="task.result" class="detail-section">
       <h3>{{ task.status === 'failed' ? '失败原因' : '结果' }}</h3>
       <div class="result-box" :class="{ failed: task.status === 'failed' }"><MessageText :text="task.result" /></div>
+    </section>
+
+    <section v-if="!readonly && task.status === 'done' && suggestions.length && saveMemory" class="detail-section settle">
+      <h3>沉淀为记忆</h3>
+      <p class="detail-note">勾选跨任务仍有用的稳定主张，确认后写入记忆库。</p>
+      <ul class="settle-list">
+        <li v-for="item in suggestions" :key="item.id">
+          <label><input type="checkbox" :checked="settleSelected.includes(item.id)" @change="toggleSettle(item.id)" />
+            <span class="settle-kind">{{ item.kind }}</span>
+            <span>{{ item.claim }}</span>
+            <em v-if="item.status === 'draft'">待确认</em>
+          </label>
+        </li>
+      </ul>
+      <div class="actions"><button type="button" class="primary sm" :disabled="settling || !settleSelected.length" @click="settleMemories">写入所选记忆</button></div>
     </section>
 
     <section v-if="task.recovery?.attempts || task.checkpoint" class="detail-section meta-list">
@@ -124,4 +158,8 @@ async function run(action) {
   .detail-foot .spacer { display: none; }
   .detail-foot .hint { flex-basis: 100%; }
 }
+.settle-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.settle-list label { display: flex; gap: 8px; align-items: flex-start; line-height: 1.5; }
+.settle-kind { flex: none; color: var(--muted); font-size: 12px; }
+.settle em { color: var(--warn); font-style: normal; font-size: 12px; }
 </style>
