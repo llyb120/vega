@@ -16,7 +16,7 @@ import (
 )
 
 const extensionOrigin = "chrome-extension://mdicifjlbgnkkdkcbfdnebeghhlamjbm"
-const extensionVersion = "0.1.14"
+const extensionVersion = "0.1.15"
 
 var extensionClientID = regexp.MustCompile(`(?i)^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 var localChrome = newBrowserBridge()
