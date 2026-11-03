@@ -21,7 +21,7 @@ function preview() {
   state.remote = { get value() { return state.operating.value && state.liveState.value === "control"; } };
   const functions = source.slice(source.indexOf("function resetInput()"), source.indexOf("function disconnect()")) +
     source.slice(source.indexOf("function resetView()"), source.indexOf("function loadedImage()")) +
-    source.slice(source.indexOf("function flushInput()"), source.indexOf("function failedImage()"));
+    source.slice(source.indexOf("function flushInput()"), source.indexOf("function failedImage"));
   const handlers = vm.runInNewContext(functions + "\n({resetInput,resetView,zoomView,requestControl,releaseControl,control,flushInput,inputResult,clickImage,contextImage,pointerDown,pointerMove,pointerUp,pointerCancel,touchStart,touchMove,touchEnd,touchCancel,wheelImage,imageKey,sendText})", state);
   const image = { getBoundingClientRect: () => ({ left: 100 + state.panX.value, top: 50 + state.panY.value, width: 300 * state.zoom.value, height: 200 * state.zoom.value }) };
   const target = { querySelector: () => image, setPointerCapture: () => {} };

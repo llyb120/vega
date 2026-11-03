@@ -59,6 +59,17 @@ export const protocols = [
   "codebuddy",
   "devin",
 ];
+
+export const SCENE_KEYS = ["lightweight", "coding", "computer"] as const;
+export function sceneModels(config: Config, scene: string): string[] {
+  const ids = config.scenes?.[scene];
+  return Array.isArray(ids) ? ids.map(String).map((id) => id.trim()).filter(Boolean) : [];
+}
+export function requireSceneModel(config: Config, scene: string): string {
+  const id = sceneModels(config, scene)[0];
+  assert(id, `场景「${scene}」未配置模型，请在设置里为该场景选择模型后再运行（不再使用默认模型回退）`);
+  return id;
+}
 export function resolveModel(config: Config, selection = config.model): Model {
   assert(
     typeof selection === "string" && selection.includes("/"),
@@ -135,7 +146,7 @@ export function resolveModel(config: Config, selection = config.model): Model {
   };
 }
 export function validateConfig(c: Config) {
-  resolveModel(c);
+  if (c.model) resolveModel(c);
   assert(
     !c.contextMode || ["auto", "acp"].includes(c.contextMode),
     "contextMode must be auto or acp",

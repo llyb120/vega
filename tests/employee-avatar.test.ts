@@ -10,7 +10,7 @@ import { Vault } from "../server/core/vault";
 
 function fixture() {
   const store = new Store(":memory:");
-  const runtime: EmployeeRuntime = { run: async () => {}, cancel() {}, isRunning: () => false, emit() {}, send: async () => ({}), config: () => ({ model: "fixture/model" }) };
+  const runtime: EmployeeRuntime = { run: async () => {}, cancel() {}, isRunning: () => false, emit() {}, send: async () => ({}), config: () => ({ scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] }, model: "fixture/model" }) };
   const root = new Employee(store, new Vault(store), runtime); root.closed = true;
   const employee = root.for(root.create({ name: "Avatar employee", avatar: "zodiac:aries" }, "owner").id);
   return { store, root, employee };

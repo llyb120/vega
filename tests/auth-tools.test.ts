@@ -20,6 +20,7 @@ test("website login and role revocation never filter internal tools or interrupt
     );
   engine.employee.closed = true;
   const cfg: any = {
+    scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
     model: "p/m",
     contextMode: "acp",
     provider: {

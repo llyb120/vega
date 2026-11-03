@@ -85,9 +85,9 @@ test("local navigation invalidates other sessions on the same client without sha
 test("employee relay keeps its task-bound local Chrome for new and legacy computer sessions", async (t) => {
   for (const legacy of [false, true]) await t.test(legacy ? "legacy session" : "new session", async (t) => {
     const { engine, store, calls } = fixture(t), employee = engine.employee;
-    const config = { model: "fixture/model", provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true } } } } };
+    const config = { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true, modalities: { input: ["text", "image"] } } } } } };
     store.put("config", config);
-    engine.catalog.resolve = async () => resolveModel(config);
+    engine.catalog.resolve = async (_c, selection) => resolveModel(config, selection || config.scenes.lightweight[0]);
     const execution = { localAgent: true, clientId: client.clientId, clientName: client.name, localPlatform: client.platform, ownerId: "alice" };
     employee.update((state) => { state.cwd = client.cwd; state.execution = execution; });
     const added = await employee.execute("", { action: "add", kind: "todo", text: "Use the existing local Chrome tab" });
@@ -104,7 +104,7 @@ test("employee relay keeps its task-bound local Chrome for new and legacy comput
     assert.equal(employee.task(employee.state(), id).side, "computer");
     let previous = "";
     if (legacy) {
-      previous = store.newSession({ ...execution, localAgent: false, cwd: process.cwd(), taskId: id, employeeId: employee.employeeId, scene: "computer", model: config.model }).id;
+      previous = store.newSession({ ...execution, localAgent: false, cwd: process.cwd(), taskId: id, employeeId: employee.employeeId, scene: "computer", model: "fixture/model" }).id;
       store.append(previous, { role: "user", text: "Previous server browser handoff" });
       store.append(previous, { role: "assistant", text: "Previously observed a server tab; do not replay submissions" });
     }
@@ -202,9 +202,9 @@ test("server sessions keep their server browser even when clients are online", a
 test("native browser leases survive model/tool roundtrips and release on completion, failure or cancellation", async (t) => {
   for (const mode of ["finish", "failure", "cancel"]) await t.test(mode, async (t) => {
     const { engine, store, session, calls } = fixture(t);
-    const config = { model: "fixture/model", provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true } } } } };
+    const config = { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true, modalities: { input: ["text", "image"] } } } } } };
     store.put("config", config);
-    engine.catalog.resolve = async () => resolveModel(config);
+    engine.catalog.resolve = async (_c, selection) => resolveModel(config, selection || config.scenes.lightweight[0]);
     const next = store.newSession({ localAgent: true, clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
     let turns = 0;
     engine.providers.chat = async () => {

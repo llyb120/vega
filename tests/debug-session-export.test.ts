@@ -13,6 +13,10 @@ function mount(api: (path: string) => Promise<any>, debug = true, failure = "") 
       "\n({ refresh, exportSession, record, messages, raw, busy, error })",
     {
       ref, Blob,
+      CHAT_PAGE_SIZE: 60,
+      mergeMessages: (a, b) => [...a, ...b],
+      nextTick: async () => {},
+      encodeURIComponent,
       defineProps: () => props, defineEmits: () => () => {},
       watch: () => {}, onBeforeUnmount: () => {},
       document: {
@@ -42,7 +46,7 @@ function mount(api: (path: string) => Promise<any>, debug = true, failure = "") 
 }
 
 const fixture = () => ({
-  session: { id: "session-fixture", title: "调试 / 会话", employeeId: "employee-fixture", taskId: "task-fixture", cwd: "D:/work", model: "provider/model", scene: "computer" },
+  session: { scenes: { lightweight: ["provider/model"], coding: ["provider/model"], computer: ["provider/model"] }, id: "session-fixture", title: "调试 / 会话", employeeId: "employee-fixture", taskId: "task-fixture", cwd: "D:/work", model: "provider/model", scene: "computer" },
   messages: [
     ...Array.from({ length: 120 }, (_, i) => ({ seq: i + 1, role: i % 2 ? "assistant" : "user", text: "消息 " + i })),
     { seq: 121, role: "assistant", text: "原始输入", displayText: "整理视图", thinking: "思考过程", calls: [{ id: "call-fixture", name: "read", arguments: { path: "D:/work/file" } }], usage: { input: 100, output: 20 } },
@@ -58,8 +62,8 @@ test("debug export saves the entire loaded session as readable JSON, regardless 
   const state = mount(async (path) => { paths.push(path); return payload; });
   await state.refresh();
   state.raw.value = false;
-  state.exportSession();
-  assert.deepEqual(paths, ["/sessions/session-fixture"]);
+  await state.exportSession();
+  assert.deepEqual(paths, ["/sessions/session-fixture?limit=60", "/sessions/session-fixture"]);
   assert.equal(state.blobs.length, 1);
   assert.equal(state.blobs[0].type, "application/json;charset=utf-8");
   const json = await state.blobs[0].text(), exported = JSON.parse(json);
@@ -78,14 +82,14 @@ test("debug export saves the entire loaded session as readable JSON, regardless 
 
 test("export is debug-only and disabled until a complete record is loaded", async () => {
   const state = mount(async () => fixture());
-  state.exportSession();
+  await state.exportSession();
   assert.equal(state.blobs.length, 0);
   await state.refresh();
   state.busy.value = true;
-  state.exportSession();
+  await state.exportSession();
   state.busy.value = false;
   state.props.debug = false;
-  state.exportSession();
+  await state.exportSession();
   assert.equal(state.blobs.length, 0);
   assert.match(source, /<button v-if="debug"[^>]*:disabled="busy \|\| !record"[^>]*aria-label="导出会话（JSON）"[^>]*@click="exportSession"/);
   assert(source.includes("分享前请脱敏；图片仅保留引用"));
@@ -98,7 +102,7 @@ test("switching to a session that fails to load cannot export the previous sessi
   state.props.sessionId = "other-session";
   fail = true;
   await state.refresh();
-  state.exportSession();
+  await state.exportSession();
   assert.equal(state.record.value, null);
   assert.equal(state.blobs.length, 0);
   assert.equal(state.error.value, "not found");
@@ -108,7 +112,7 @@ test("empty conversations can still export their metadata", async () => {
   const payload = { ...fixture(), messages: [], folds: [], running: false };
   const state = mount(async () => payload);
   await state.refresh();
-  state.exportSession();
+  await state.exportSession();
   const exported = JSON.parse(await state.blobs[0].text());
   assert.deepEqual(exported.messages, []);
   assert.deepEqual(exported.session, payload.session);
@@ -118,7 +122,7 @@ test("empty conversations can still export their metadata", async () => {
 for (const failure of ["blob", "click"]) test(`export errors (${failure}) are reported and temporary resources are cleaned up`, async () => {
   const state = mount(async () => fixture(), true, failure);
   await state.refresh();
-  state.exportSession();
+  await state.exportSession();
   assert.match(state.error.value, /^导出失败：/);
   assert.equal(state.links[0].removed, true);
   state.cleanup();

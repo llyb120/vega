@@ -4,6 +4,7 @@ import { applyDuty, type Employee } from "./employee";
 import { dutyCondition } from "../../shared/duty-condition";
 import { beijingDateTime } from "../../shared/time";
 import { assert, type Obj } from "./util";
+import { sceneModels } from "./config";
 
 const triggerTool = {
   name: "compile_duty_trigger",
@@ -27,7 +28,7 @@ export async function prepareDutyInput(engine: Engine, employee: Employee, input
   const condition = input.condition.trim();
   const output: Obj = { ...input, condition };
   if (existing && condition === dutyCondition(existing)) return output;
-  const config = engine.config(), selections = config.scenes?.lightweight?.length ? config.scenes.lightweight : [config.model];
+  const config = engine.config(), selections = sceneModels(config, "lightweight");
   assert(selections.some(Boolean), "请先配置沟通与任务起步模型，以识别触发条件");
   const abort = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(30000)]);
   let reply: Message | undefined, failure: unknown;

@@ -98,6 +98,7 @@ export const toolCall = (id: string, name: string, args: any) => ({
   function: { name, arguments: JSON.stringify(args) },
 });
 const cfg = (url: string) => ({
+  scenes: { lightweight: ["test/m"], coding: ["test/m"], computer: ["test/m"] },
   model: "test/m",
   provider: {
     test: {

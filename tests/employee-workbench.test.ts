@@ -20,7 +20,7 @@ import { sleep } from "../server/core/util";
 
 function fixture(run: EmployeeRuntime["run"] = async () => {}) {
   const store = new Store(":memory:"), vault = new Vault(store);
-  const runtime: EmployeeRuntime = { run, cancel() {}, isRunning: () => false, emit() {}, send: async () => ({}), config: () => ({ model: "fixture/model" }), isolated: true };
+  const runtime: EmployeeRuntime = { run, cancel() {}, isRunning: () => false, emit() {}, send: async () => ({}), config: () => ({ scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] } }), isolated: true };
   const employee = new Employee(store, vault, runtime);
   employee.closed = true;
   return { store, employee, vault, runtime };
@@ -135,7 +135,7 @@ test("employee conversation delegates through the existing engine without leakin
   const store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "fixture/model", provider: { fixture: { api: "openai-completions", baseURL: "https://fixture.test/v1", models: { model: { limit: { context: 128000, output: 8192 } } } } } });
+  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://fixture.test/v1", models: { model: { modalities: { input: ["text", "image"] }, limit: { context: 128000, output: 8192 } } } } } });
   try {
     const a = engine.employee.for(engine.employee.create({ name: "Alice worker", instruction: "Keep work isolated" }, "alice").id);
     const b = engine.employee.for(engine.employee.create({ name: "Bob worker" }, "bob").id);
@@ -174,7 +174,7 @@ test("employee chat delegates evidence-dependent questions, follows an existing 
   const store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "fixture/model", provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test/v1", models: { model: { limit: { context: 128000, output: 8192 } } } } } });
+  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test/v1", models: { model: { modalities: { input: ["text", "image"] }, limit: { context: 128000, output: 8192 } } } } } });
   const employee = engine.employee.for(engine.employee.create({ name: "Investigator" }, "owner").id), chat = employee.chat("owner");
   const question = "刚才任务调用 API 的地址是啥？";
   const investigation = "只读调查刚才任务的 HTTP response headers timed out：核对实际模型、网关、请求 URL 和日志证据。只返回脱敏后的 origin/path，不输出 API Key、Token 或带凭据的查询参数；不得修改配置、修复代码或重试原请求。";
@@ -256,9 +256,11 @@ test("generic recovery diagnoses in the original task/session, requires verified
     assert.match(store.messages(current.workSession).at(-1)!.text!, /自动恢复已达上限/);
     const reopened = new Employee(store, employee.vault, runtime);
     assert.equal(reopened.state().tasks[0].recovery.attempts, 4);
+    assert.match(current.waiting, /请选择/);
     await employee.control({ action: "answer", id: job.id, text: "environment fixed, continue" });
+    assert.equal(employee.state().tasks[0].recovery?.attempts, 4, "answer keeps recovery budget");
     runtime.run = async () => {
-      await assert.rejects(employee.execute(job.id, { action: "complete", text: "trust me" }), /verified plan/);
+      await assert.rejects(employee.execute(job.id, { action: "complete", text: "trust me" }), /settled plan|verified plan|尚未交付/);
       await employee.execute(job.id, { action: "progress", text: "checked", plan: [{ content: "verify target", status: "completed" }] });
       await employee.execute(job.id, { action: "complete", text: "verified target state with original external job receipt" });
     };
@@ -440,7 +442,7 @@ test("real executor recovery preserves committed tool outcomes and consumes each
   const dir = await mkdtemp(join(tmpdir(), "vega-interrupted-task-")), store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "fixture/model", provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test/v1", models: { model: { limit: { context: 128000, output: 8192 } } } } } });
+  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test/v1", models: { model: { modalities: { input: ["text", "image"] }, limit: { context: 128000, output: 8192 } } } } } });
   const employee = engine.employee, job = await task(employee, "Keep this original task", { cwd: dir });
   let phase = 0, writes = 0;
   const inputs: string[] = [];
@@ -482,7 +484,7 @@ test("a supplement delivered by a completion guard is not re-injected after anot
   const dir = await mkdtemp(join(tmpdir(), "vega-pending-supplement-")), store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "fixture/model", provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test/v1", models: { model: { limit: { context: 128000, output: 8192 } } } } } });
+  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test/v1", models: { model: { modalities: { input: ["text", "image"] }, limit: { context: 128000, output: 8192 } } } } } });
   const employee = engine.employee, job = await task(employee, "Original work", { cwd: dir });
   let requests = 0;
   engine.providers.chat = async (_model, _system, messages) => {
@@ -768,3 +770,58 @@ test("real independent employee Chromium instances retain private cookies across
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("unverified delivery with settlePreferred waits for user instead of looping recovery", async () => {
+  const { store, employee, runtime } = fixture();
+  try {
+    const job = await task(employee, "Design test cases only");
+    employee.update((s) => {
+      Object.assign(s.tasks[0], {
+        settlePreferred: true,
+        plan: [
+          { content: "read req", status: "completed" },
+          { content: "more verify", status: "blocked" },
+        ],
+        planRevision: 0,
+      });
+    });
+    runtime.run = async () => {};
+    const current = await segment(employee, job);
+    assert.equal(current.status, "waiting");
+    assert.match(current.waiting, /接受当前已有结论/);
+    assert.equal(current.recovery?.attempts || 0, 0);
+  } finally { employee.close(); store.close(); }
+});
+
+test("user can settle partial delivery with cancelled steps after recovery budget", async () => {
+  const { store, employee, runtime } = fixture();
+  try {
+    const job = await task(employee);
+    runtime.run = async () => { throw Error("boom"); };
+    let current = await segment(employee, job);
+    while (current.status === "recovering") current = await segment(employee, current);
+    assert.equal(current.status, "waiting");
+    assert.match(current.waiting, /请选择/);
+    await employee.control({ action: "answer", id: job.id, text: "1" });
+    assert.equal(employee.state().tasks[0].settlePreferred, true);
+    assert.equal(employee.state().tasks[0].recovery?.attempts, 4);
+    runtime.run = async () => {
+      await employee.execute(job.id, {
+        action: "progress",
+        text: "user accepted partial",
+        plan: [
+          { content: "attempted work", status: "completed" },
+          { content: "remaining", status: "cancelled" },
+        ],
+      });
+      await employee.execute(job.id, {
+        action: "complete",
+        text: "Partial result with cancelled remainder.",
+        summary: "部分交付，剩余已取消。",
+      });
+    };
+    current = await segment(employee, employee.task(employee.state(), job.id));
+    assert.equal(current.status, "done");
+  } finally { employee.close(); store.close(); }
+});
+

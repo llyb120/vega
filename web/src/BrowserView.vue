@@ -105,6 +105,7 @@ function loadedImage() {
     URL.revokeObjectURL(previousImageURL);
     previousImageURL = "";
   }
+  imageFailStreak = 0;
   if (!screenshot.value || socket?.readyState !== WebSocket.OPEN) return;
   imageReady.value = true;
   shownFrame = screenshot.value;
@@ -156,6 +157,7 @@ async function capture(tab) {
   resetView();
   if (selected.value !== tab.tag) text.value = "";
   imageReady.value = false;
+  imageFailStreak = 0;
   selected.value = tab.tag;
   screenshot.value = null;
   error.value = "";
@@ -198,18 +200,39 @@ async function capture(tab) {
         if (value.type === "frame") {
           if (typeof value.data !== "string" || value.data.length > 6000000)
             throw Error("画面过大");
+          let bytes;
+          try {
+            const binary = atob(value.data);
+            bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          } catch {
+            imageFailStreak++;
+            info.value = "收到损坏画面帧，已跳过";
+            if (value.frameId && ws.readyState === WebSocket.OPEN)
+              ws.send(JSON.stringify({ type: "frame_ack", frameId: value.frameId }));
+            return;
+          }
+          const nextURL = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+          const preview = new Image();
+          preview.src = nextURL;
+          try {
+            await preview.decode();
+          } catch {
+            URL.revokeObjectURL(nextURL);
+            imageFailStreak++;
+            info.value = "画面帧无法解码，已跳过";
+            if (value.frameId && ws.readyState === WebSocket.OPEN)
+              ws.send(JSON.stringify({ type: "frame_ack", frameId: value.frameId }));
+            return;
+          }
+          if (disposed || request !== version || socket !== ws) {
+            URL.revokeObjectURL(nextURL);
+            return;
+          }
           if (previousImageURL) URL.revokeObjectURL(previousImageURL);
           previousImageURL = imageURL;
-          imageURL = URL.createObjectURL(
-            new Blob(
-              [Uint8Array.from(atob(value.data), (c) => c.charCodeAt(0))],
-              { type: "image/jpeg" },
-            ),
-          );
-          const preview = new Image();
-          preview.src = imageURL;
-          await preview.decode();
-          if (disposed || request !== version || socket !== ws) return;
+          imageURL = nextURL;
+          imageFailStreak = 0;
           const { data, ...frame } = value;
           acceptScreenshot({
             ...frame,
@@ -728,8 +751,19 @@ function sendText() {
   text.value = "";
   void control({ action: "type", text: value });
 }
-function failedImage() {
+let imageFailStreak = 0;
+function failedImage(event) {
+  // Stale blob URLs and single corrupt JPEGs are common during tab switches;
+  // only tear down after repeated failures on the currently shown frame.
+  const src = event?.target?.currentSrc || event?.target?.src;
+  if (src && screenshot.value?.image?.url && src !== screenshot.value.image.url) return;
+  imageFailStreak++;
   imageReady.value = false;
+  if (imageFailStreak < 3 && socket?.readyState === WebSocket.OPEN) {
+    error.value = "";
+    info.value = "画面帧解码失败，正在等待下一帧…";
+    return;
+  }
   screenshot.value = null;
   disconnect();
   error.value = "实时画面加载失败，请刷新截图重新连接。";

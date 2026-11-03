@@ -174,30 +174,44 @@ test("explicitly returning to a retained lightweight caller preserves its pendin
   } finally { await engine.close(); store.close(); }
 });
 
-test("a read-only employee task can return to the default lightweight model without gaining write tools", async () => {
+test("lightweight stays unavailable when its scene models are empty (no default-model fallback)", async () => {
   const { store, engine, employee, add, segment } = fixture();
-  const config = engine.config(); config.model = "p/light"; config.scenes!.lightweight = []; store.put("config", config);
+  const config = engine.config(); config.scenes!.lightweight = []; store.put("config", config);
   try {
     const job = await add("只读代码分析后查询状态");
     const session = store.newSession({ employeeId: employee.employeeId, taskId: job.id, model: "p/code", scene: "coding", readOnly: true });
     employee.update(state => { state.tasks[0].workSession = session.id; });
     let requests = 0;
     engine.providers.chat = async (model, _system, _messages, definitions) => {
-      assert(requests < 3, "read-only selection test cannot loop on an unavailable state-changing tool");
-      assert(!definitions.some(tool => ["write", "edit", "bash"].includes(tool.name)));
-      if (requests++ === 0) {
-        assert.equal(model.selection, "p/code");
-        assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("lightweight"));
-        return call("light", "switch_scene", { scene: "lightweight", message: "只读分析完成，后续普通查询，不改文件" });
-      }
-      assert.equal(model.selection, "p/light");
-      return { role: "assistant", text: "只读查询已完成。" };
+      assert.equal(model.selection, "p/code");
+      const sceneTool = definitions.find(tool => tool.name === "switch_scene");
+      assert(!sceneTool?.parameters.properties.scene.enum.includes("lightweight"), "empty lightweight scene must not be offered");
+      requests++;
+      return { role: "assistant", text: "轻量场景未配置，保持只读编码模型。" };
     };
     const result = await segment(job);
-    assert.equal(result.status, "recovering", "read-only analysis cannot bypass the verified-completion contract");
-    assert.equal(store.session(session.id).scene, "lightweight");
-    assert.equal(store.session(session.id).readOnly, true);
-    assert.equal(store.sessions().length, 1);
+    assert.equal(store.session(session.id).scene, "coding");
+    assert.equal(store.session(session.id).model, "p/code");
+    assert.equal(requests, 1);
+    assert.notEqual(result.status, "done");
+  } finally { await engine.close(); store.close(); }
+});
+
+test("employee execution refuses to start when the target scene has no model", async () => {
+  const { store, engine, employee } = fixture();
+  const config = engine.config(); config.scenes!.computer = []; store.put("config", config);
+  try {
+    let threw = false;
+    try {
+      // requireSceneModel is used when creating the computer execution session
+      const { requireSceneModel } = await import("../server/core/config");
+      requireSceneModel(config, "computer");
+    } catch (e: any) {
+      threw = /未配置模型/.test(e.message);
+      assert.match(e.message, /未配置模型/);
+    }
+    assert(threw);
+    assert.equal(config.scenes!.lightweight?.[0], "p/light");
   } finally { await engine.close(); store.close(); }
 });
 

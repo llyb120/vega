@@ -11,7 +11,7 @@ test("completed records and business keys are not silently deleted when history 
       isRunning: () => false,
       send: async () => {},
       emit: () => {},
-      config: () => ({ model: "p/m" }),
+      config: () => ({ scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] }, model: "p/m" }),
     });
   employee.closed = true;
   try {
