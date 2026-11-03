@@ -297,7 +297,7 @@ test("employee external-job defer and Chrome relay reuse exactly two isolated se
     } else if (calls === 4) completion(res, { tool_calls: [call("verified", "employee", {
       action: "progress", text: "checked job123", plan: [{ content: "check job123", status: "completed" }],
     })] });
-    else completion(res, { tool_calls: [call("complete", "employee", { action: "complete", text: "job123 complete; verified original job status" })] });
+    else completion(res, { tool_calls: [call("complete", "employee", { action: "complete", deliverableRef: [], text: "job123 complete; verified original job status" })] });
   });
   const e = setup(url),
     cfg = e.config();

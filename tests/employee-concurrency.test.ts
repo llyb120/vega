@@ -35,7 +35,7 @@ test("a lightweight shell query releases its workspace lease before later model 
       assert([...engine.employee.writers.values()].some(lease => lease.taskId === writer));
     }
     return employee.task(employee.state(), id).plan?.length
-      ? call("done", "employee", { action: "complete", text: "verified result", summary: "已验证。" })
+      ? call("done", "employee", { action: "complete", deliverableRef: [], text: "verified result", summary: "已验证。" })
       : call("plan", "employee", { action: "progress", text: "verified", plan: [{ content: "verify", status: "completed" }] });
   };
   try {
@@ -93,7 +93,7 @@ test("ordinary tasks keep progressing while a shared-directory code writer is ac
       if (id === jobs.reader && !successful("read")) return call("read-in-parallel", "read", { path: "input.txt" });
     }
     return task.plan?.every((step: any) => step.status === "completed") && task.plan.length
-      ? call("done", "employee", { action: "complete", text: "verified actual result", summary: "已验证。" })
+      ? call("done", "employee", { action: "complete", deliverableRef: [], text: "verified actual result", summary: "已验证。" })
       : call("plan", "employee", { action: "progress", text: "verified actual result", plan: [{ content: "verify authorized result", status: "completed" }] });
   };
   try {

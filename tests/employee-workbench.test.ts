@@ -219,7 +219,7 @@ test("employee chat delegates evidence-dependent questions, follows an existing 
     employee.runtime.run = async (_session, prompt) => {
       assert(prompt.includes(investigation) && prompt.includes("不得修改配置"));
       await employee.execute(job.id, { action: "progress", text: "checked sanitized request evidence", plan: [{ content: "read-only investigation", status: "completed" }] });
-      await employee.execute(job.id, { action: "complete", text: "实际请求地址：https://gateway.example/v1/responses；已核对脱敏日志，未修改配置或重试请求。" });
+      await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "实际请求地址：https://gateway.example/v1/responses；已核对脱敏日志，未修改配置或重试请求。" });
     };
     assert.equal((await segment(employee, job)).status, "done");
     assert.match(store.messages(chat.id).at(-1)!.text!, /实际请求地址：https:\/\/gateway.example\/v1\/responses/);
@@ -260,9 +260,9 @@ test("generic recovery diagnoses in the original task/session, requires verified
     await employee.control({ action: "answer", id: job.id, text: "environment fixed, continue" });
     assert.equal(employee.state().tasks[0].recovery?.attempts, 4, "answer keeps recovery budget");
     runtime.run = async () => {
-      await assert.rejects(employee.execute(job.id, { action: "complete", text: "trust me" }), /settled plan|verified plan|尚未交付/);
+      await assert.rejects(employee.execute(job.id, { action: "complete", deliverableRef: [], text: "trust me" }), /settled plan|verified plan|尚未交付/);
       await employee.execute(job.id, { action: "progress", text: "checked", plan: [{ content: "verify target", status: "completed" }] });
-      await employee.execute(job.id, { action: "complete", text: "verified target state with original external job receipt" });
+      await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "verified target state with original external job receipt" });
     };
     current = await segment(employee, current);
     assert.equal(current.status, "done");
@@ -400,10 +400,10 @@ test("repeated supplements do not invalidate a verified plan or bypass the first
     await employee.control({ action: "resume", id: job.id, text: "preserve login" });
     assert.equal((await employee.control({ action: "resume", id: job.id, text: "preserve login" })).duplicate, true);
     assert.equal(employee.state().tasks[0].revision, 1);
-    assert.equal((await employee.execute(job.id, { action: "complete", text: "old result" })).value.ok, false, "the first new supplement must still be consumed");
+    assert.equal((await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "old result" })).value.ok, false, "the first new supplement must still be consumed");
     await employee.execute(job.id, { action: "progress", text: "latest requirements verified", plan: [{ content: "preserve login", status: "completed" }] });
     await employee.control({ action: "resume", id: job.id, text: "preserve login" });
-    assert.equal((await employee.execute(job.id, { action: "complete", text: "verified login preserved" })).value.ok, true);
+    assert.equal((await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "verified login preserved" })).value.ok, true);
   };
   try { assert.equal((await segment(employee, job)).status, "done"); }
   finally { employee.close(); store.close(); }
@@ -459,7 +459,7 @@ test("real executor recovery preserves committed tool outcomes and consumes each
     assert(!input.text!.includes("preserve login"), "the continuation must not re-acknowledge a supplement already in history");
     assert(messages.some((message) => message.role === "tool" && message.callId === "write-once"));
     if (phase === 4) return { role: "assistant", calls: [{ id: "verify", name: "employee", arguments: { action: "progress", text: "verified retained file and requirements", plan: [{ content: "preserve file and login", status: "completed" }] } }] };
-    return { role: "assistant", calls: [{ id: "finish", name: "employee", arguments: { action: "complete", text: "verified original write and latest supplement; no repeated write" } }] };
+    return { role: "assistant", calls: [{ id: "finish", name: "employee", arguments: { action: "complete", deliverableRef: [], text: "verified original write and latest supplement; no repeated write" } }] };
   };
   try {
     let current = await segment(employee, job);
@@ -492,13 +492,13 @@ test("a supplement delivered by a completion guard is not re-injected after anot
     if (requests === 1) {
       await employee.execute(job.id, { action: "progress", text: "old goal verified", plan: [{ content: "old goal", status: "completed" }] });
       await employee.control({ action: "resume", id: job.id, text: "latest requirement" });
-      return { role: "assistant", calls: [{ id: "guard", name: "employee", arguments: { action: "complete", text: "old goal done" } }] };
+      return { role: "assistant", calls: [{ id: "guard", name: "employee", arguments: { action: "complete", deliverableRef: [], text: "old goal done" } }] };
     }
     if (requests === 2) throw new ProviderError("interrupted after receiving supplement", 400);
     assert(!messages.findLast((message) => message.role === "user")!.text!.includes("latest requirement"));
     assert(messages.some((message) => message.role === "tool" && message.taskInput?.answer?.includes("latest requirement")));
     await employee.execute(job.id, { action: "progress", text: "latest goal verified", plan: [{ content: "latest requirement", status: "completed" }] });
-    return { role: "assistant", calls: [{ id: "finish", name: "employee", arguments: { action: "complete", text: "latest goal verified" } }] };
+    return { role: "assistant", calls: [{ id: "finish", name: "employee", arguments: { action: "complete", deliverableRef: [], text: "latest goal verified" } }] };
   };
   try {
     let current = await segment(employee, job);
@@ -561,7 +561,7 @@ test("orphaned runs are healed without restarting the service; a missing executi
     runtime.run = async (_session, prompt) => {
       assert.match(prompt, /原执行会话缺失/);
       await employee.execute(job.id, { action: "progress", text: "checked original receipt", plan: [{ content: "verify external state", status: "completed" }] });
-      await employee.execute(job.id, { action: "complete", text: "original external state verified; no resubmission" });
+      await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "original external state verified; no resubmission" });
     };
     current = await segment(employee, current);
     assert.equal(current.id, job.id);
@@ -592,12 +592,12 @@ test("new supplements cannot be silently lost by completing an in-flight task", 
     runtime.run = async () => {
       await employee.execute(job.id, { action: "progress", text: "verified old goal", plan: [{ content: "goal", status: "completed" }] });
       await employee.control({ action: "resume", id: job.id, text: "also preserve existing login" });
-      const result = await employee.execute(job.id, { action: "complete", text: "old result" });
+      const result = await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "old result" });
       assert.equal(result.value.ok, false);
       assert.match(result.value.supplement, /preserve existing login/);
-      await assert.rejects(employee.execute(job.id, { action: "complete", text: "old result again" }), /latest requirements/);
+      await assert.rejects(employee.execute(job.id, { action: "complete", deliverableRef: [], text: "old result again" }), /latest requirements/);
       await employee.execute(job.id, { action: "progress", text: "verified new goal", plan: [{ content: "goal and existing login", status: "completed" }] });
-      await employee.execute(job.id, { action: "complete", text: "verified new goal and retained login" });
+      await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "verified new goal and retained login" });
     };
     assert.equal((await segment(employee, job)).status, "done");
   } finally { employee.close(); store.close(); }
@@ -815,7 +815,7 @@ test("user can settle partial delivery with cancelled steps after recovery budge
         ],
       });
       await employee.execute(job.id, {
-        action: "complete",
+        action: "complete", deliverableRef: [],
         text: "Partial result with cancelled remainder.",
         summary: "部分交付，剩余已取消。",
       });
