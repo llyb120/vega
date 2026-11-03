@@ -206,6 +206,40 @@ async function screenshotFixture(t: TestContext, width = 800, height = 3000) {
   return { ...f, captures, layouts };
 }
 
+test("unchanged screenshots detect small pixel changes and keep frame streams separate", async (t) => {
+  const f = await screenshotFixture(t, 640, 480);
+  Object.assign(f.page.viewport, { width: 640, height: 480 });
+  const white = await sharp({ create: { width: 640, height: 480, channels: 3, background: "white" } }).png().toBuffer();
+  let pixels = white;
+  const raw = f.chrome.cdp;
+  f.chrome.cdp = async (...args) => args[1] === "Page.captureScreenshot" ? { data: pixels.toString("base64") } : raw(...args);
+  const first = await f.observe(); await f.chrome.capture(first, {});
+  const same = await f.observe(); await f.chrome.capture(same, {}, first);
+  assert.equal(same.images[0].unchanged, true);
+  assert.equal(same.images[0].blobId, first.images[0].blobId);
+  for (const [value, unchanged] of [[239, true], [238, false], [0, false]] as const) {
+    const patch = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: value, g: value, b: value } } }).png().toBuffer();
+    pixels = await sharp(white).composite([{ input: patch, left: 100, top: 100 }]).png().toBuffer();
+    const next = await f.observe(); await f.chrome.capture(next, {}, first);
+    assert.equal(next.images[0].unchanged, unchanged, `pixel delta ${255 - value}`);
+    assert.equal(next.images[0].blobId === first.images[0].blobId, unchanged);
+  }
+  pixels = white;
+  const full = await f.observe(); await f.chrome.capture(full, { fullPage: true }, first);
+  assert.equal(full.images[0].frameStream, "tab:document:0");
+  assert.equal(full.images[0].unchanged, false);
+  const fullAgain = await f.observe(); await f.chrome.capture(fullAgain, { fullPage: true }, full);
+  assert.equal(fullAgain.images[0].unchanged, true);
+  for (const args of [{ region: { x: 0, y: 0, width: 640, height: 480 } }, { expandScroll: true }]) {
+    const standalone = await f.observe(); await f.chrome.capture(standalone, args, first);
+    assert.equal(standalone.images[0].frameStream, undefined);
+    assert.equal(standalone.images[0].unchanged, false);
+  }
+  f.page.document = "new-document";
+  const navigated = await f.observe(); await f.chrome.capture(navigated, {}, first);
+  assert.equal(navigated.images[0].unchanged, false);
+});
+
 test("expanded scroll retains original pixels and remains read-only; ordinary images stay bounded", async (t) => {
   const f = await screenshotFixture(t);
   let o = await f.observe();

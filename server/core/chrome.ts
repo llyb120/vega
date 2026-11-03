@@ -320,8 +320,10 @@ export class Chrome {
           unchanged = false,
           blobID = blob;
         const imageX = full ? x : x - (vp.scrollX || 0), imageY = full ? y : y - (vp.scrollY || 0);
+        const frameStream = !region && !a.expandScroll ? `${tag}:${full ? "document:" + i : "viewport"}` : undefined;
         const previous = prior?.images.find(
           (v) =>
+            v.frameStream === frameStream &&
             v.x === imageX &&
             v.y === imageY &&
             v.width === w &&
@@ -330,16 +332,16 @@ export class Chrome {
             v.pixelHeight === info.height,
         );
         if (
-          !a.expandScroll && previous &&
-          Date.now() - (prior?.captured || 0) <= 180000 &&
-          prior?.pages[0].document === page.document &&
-          prior?.pages[0].stamp === page.stamp
+          frameStream && previous && prior?.fullPage === full &&
+          Date.now() - prior.captured <= 180000 &&
+          prior.pages[0].document === page.document &&
+          typeof page.stamp === "string" && prior.pages[0].stamp === page.stamp
         ) {
           const old = this.store.blobData(previous.blobId);
           if (old) {
             const [a, b] = await Promise.all([
-              sharp(old.data).resize(32, 32).removeAlpha().raw().toBuffer(),
-              sharp(data).resize(32, 32).removeAlpha().raw().toBuffer(),
+              sharp(old.data).removeAlpha().raw().toBuffer(),
+              sharp(data).removeAlpha().raw().toBuffer(),
             ]);
             if (
               a.length === b.length &&
@@ -364,7 +366,7 @@ export class Chrome {
           pixelWidth: info.width,
           pixelHeight: info.height,
           tile: full ? i : undefined,
-          frameStream: `${tag}:${full ? "document:" + i : "viewport"}`,
+          frameStream,
           unchanged,
           readOnlyImage: !!a.expandScroll,
         });
