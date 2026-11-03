@@ -8,7 +8,8 @@ import { assert, sleep } from "./util";
 
 // One persistent profile and private, authenticated bridge per employee.
 export class EmployeeBrowsers {
-  entries = new Map<string, { chrome: Chrome; browser: HeadlessBrowser; starting?: Promise<Chrome>; stopping?: boolean }>();
+  entries = new Map<string, { chrome: Chrome; browser: HeadlessBrowser; starting?: Promise<Chrome>; stopping?: boolean; probedAt?: number }>();
+  static PROBE_TTL_MS = 3000;
   closed = false;
   removed = new Set<string>();
   constructor(public store: Store, public pageScript: string) {}
@@ -26,12 +27,22 @@ export class EmployeeBrowsers {
       this.entries.set(id, entry);
     }
     assert(!entry.stopping, "Employee browser is stopping");
+    if (
+      entry.browser.child &&
+      entry.chrome.bridge.status().connected &&
+      entry.probedAt &&
+      Date.now() - entry.probedAt < EmployeeBrowsers.PROBE_TTL_MS &&
+      !entry.starting
+    ) {
+      return entry.chrome;
+    }
     if (entry.starting) return entry.starting;
     const current = entry;
     current.starting = (async () => {
       if (!current.browser.child) {
         current.chrome.observations.clear();
         current.chrome.bridge.close();
+        current.probedAt = undefined;
         assert(!this.closed && !current.stopping, "Browser manager stopped");
         await current.chrome.bridge.start();
         await current.browser.start(process.env.VEGA_DB || "vega.db", {
@@ -47,9 +58,13 @@ export class EmployeeBrowsers {
             // A cached heartbeat is not readiness; only this read-only probe may be retried.
             await current.chrome.bridge.request("status", {});
             assert(!this.closed && !current.stopping && current.browser.child, "Employee browser stopped while connecting");
+            current.probedAt = Date.now();
             return current.chrome;
-          } catch (error) { failure = error instanceof Error ? error.message : String(error); }
-        }
+          } catch (error) {
+            current.probedAt = undefined;
+            failure = error instanceof Error ? error.message : String(error);
+          }
+        } else current.probedAt = undefined;
         await sleep(100);
       }
       throw Error(`牛马浏览器连接暂不可用：${failure}；已保留浏览器和页面，下次使用会继续恢复，不会重放页面操作`);
@@ -64,6 +79,7 @@ export class EmployeeBrowsers {
     await entry.browser.close();
     entry.chrome.bridge.close();
     entry.chrome.observations.clear();
+    entry.probedAt = undefined;
     entry.stopping = false;
   }
   async remove(id: string) {

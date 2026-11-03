@@ -2,7 +2,7 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../server/core/store";
 import { Chrome } from "../server/core/chrome";
-import { ChromeBridge } from "../server/core/chrome-bridge";
+import { ChromeBridge, requestTimeout } from "../server/core/chrome-bridge";
 import { EmployeeBrowsers } from "../server/core/employee-browsers";
 import { HeadlessBrowser } from "../server/core/headless";
 
@@ -35,13 +35,14 @@ test("employee browsers start lazily, share concurrent recovery and stay residen
   assert.equal(f.probe.mock.callCount(), 1);
   const child = f.browser.child;
   assert.equal(await f.browsers.get("ea"), a);
-  assert.equal(f.probe.mock.callCount(), 2, "a cached connected flag cannot bypass a real probe");
+  assert.equal(f.probe.mock.callCount(), 1, "a recent successful probe is reused within the short TTL");
   assert.equal(f.browser.child, child);
   assert.equal(f.close.mock.callCount(), 0);
 
+  f.browsers.entries.get("ea")!.probedAt = Date.now() - EmployeeBrowsers.PROBE_TTL_MS - 1;
   f.probe.mock.mockImplementationOnce(async () => { throw Error("stale heartbeat"); });
   assert.equal(await f.browsers.get("ea"), a);
-  assert.equal(f.probe.mock.callCount(), 4, "only the harmless probe is retried");
+  assert.equal(f.probe.mock.callCount(), 3, "only the harmless probe is retried after TTL expiry");
   assert.equal(f.browser.child, child);
 
   f.browser.child = undefined;
@@ -72,6 +73,7 @@ test("a disconnected resident browser survives recovery timeout and heals on the
 test("stopping during a health probe cannot return or resurrect the browser", async (t) => {
   const f = fixture(t);
   await f.browsers.get("ea");
+  f.browsers.entries.get("ea")!.probedAt = Date.now() - EmployeeBrowsers.PROBE_TTL_MS - 1;
   let complete!: (value: any) => void;
   f.probe.mock.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
   const pending = assert.rejects(f.browsers.get("ea"), /browser.*(stopped|exited)/i);
@@ -110,4 +112,24 @@ test("a reloaded private worker immediately replaces a stale peer without replay
   assert.deepEqual(await probe, { version: bridge.version });
   cancelled.abort();
   await original;
+});
+
+
+test("bridge request timeouts give navigation and probes at least 10s headroom", async (t) => {
+  for (const op of ["tabs", "goto", "open", "new_tab", "status", "close_tab", "back", "forward", "reload", "cdp", "devtools"])
+    assert.equal(requestTimeout(op), 10000, op);
+  assert.equal(requestTimeout("act"), 8000);
+  assert.equal(requestTimeout("evaluate"), 8000);
+  assert.equal(requestTimeout("inspect"), 8000);
+  const bridge = new ChromeBridge(true);
+  t.after(() => bridge.close());
+  await bridge.start();
+  const client = crypto.randomUUID();
+  bridge.clients.set(client, { at: Date.now(), browser: "Google Chrome" });
+  const pending = bridge.request("tabs", {});
+  const queued = bridge.queues.get(client)![0] as any;
+  assert(queued.expiresAt - Date.now() >= 9000, "tabs command must not expire at the old 3s budget");
+  const id = queued.id;
+  bridge.pending.get(id)!.resolve({ tabs: [] });
+  await pending;
 });

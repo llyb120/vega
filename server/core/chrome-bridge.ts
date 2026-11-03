@@ -3,6 +3,14 @@ import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { assert, id, type Obj } from "./util";
 const EXTENSION_ID = "mdicifjlbgnkkdkcbfdnebeghhlamjbm";
+
+/** Navigation / readiness probes need headroom for extension reconnect gaps; CDP stays aligned. */
+const BRIDGE_NAV = new Set(["tabs", "goto", "open", "new_tab", "status", "close_tab", "back", "forward", "reload", "downloads", "connect"]);
+export function requestTimeout(operation: string) {
+  if (["cdp", "devtools"].includes(operation) || BRIDGE_NAV.has(operation)) return 10000;
+  // act / evaluate / inspect / screenshot / run: slightly above the old 3s default
+  return 8000;
+}
 export class ChromeBridge {
   server?: Server;
   port = 0;
@@ -93,7 +101,7 @@ export class ChromeBridge {
     );
     signal?.throwIfAborted();
     const key = id(),
-      timeout = ["cdp", "devtools"].includes(operation) ? 10000 : 3000;
+      timeout = requestTimeout(operation);
     return await new Promise((resolve, reject) => {
       const queue = this.queues.get(client!) || [];
       assert(queue.length < 128, "Chrome command queue is full");
