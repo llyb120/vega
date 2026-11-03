@@ -101,12 +101,12 @@ async function save() {
 <style scoped>
 .default-model { display: grid; gap: 6px; max-width: 420px; margin-bottom: 14px; }
 .callout { margin-bottom: 14px; }
-.scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.scene-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .scene-item { display: grid; align-content: start; gap: 8px; min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); }
 .scene-item header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .scene-item h4 { font-size: 13px; }
 .scene-rows { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.scene-row { display: flex; align-items: center; gap: 6px; }
+.scene-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .scene-rank { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--surface-3); color: var(--muted); font-size: 11px; font-weight: 600; }
 .scene-row select { flex: 1; min-width: 0; background-color: var(--surface); }
 .row-actions { display: flex; flex: none; }
@@ -114,7 +114,6 @@ async function save() {
 .flip { transform: rotate(180deg); }
 .add-model { justify-self: start; color: var(--accent-text); }
 @media (max-width: 767px) {
-  .scene-grid { grid-template-columns: minmax(0, 1fr); }
   .scene-item { padding: 12px; }
 }
 </style>
