@@ -89,6 +89,33 @@ test("preset selection, clearing and reopening preserve the employee's own avata
   } finally { root.close(); store.close(); }
 });
 
+test("new employees automatically get an unused shape/color pair without changing existing avatars", () => {
+  const { store, root } = fixture();
+  try {
+    const selected = root.create({ name: "Selected", avatar: "bot:cloud:teal" }, "owner");
+    const legacy = root.create({ name: "Legacy" }, "owner");
+    root.for(legacy.id).update((state) => { state.avatar = ""; });
+    const before = root.all().map((employee) => employee.state());
+    const used = new Set(before.map((state) => {
+      const bot = parseBotAvatar(state.avatar) || defaultBotAvatar(state.id);
+      return botAvatarPreset(bot.shape, bot.color);
+    }));
+    const created = [];
+    while (root.all().length < 50) {
+      const state = root.create({ name: "Automatic", ...(created.length % 2 ? { avatar: "" } : {}) }, "owner");
+      assert(parseBotAvatar(state.avatar), "persist an explicit preset, not a hash-only default");
+      assert(!used.has(state.avatar!), state.avatar);
+      used.add(state.avatar!);
+      created.push(state);
+    }
+    for (const state of before) assert.equal(root.for(state.id).state().avatar, state.avatar);
+    const reopened = new Employee(store, root.vault, root.runtime);
+    for (const state of created) assert.equal(reopened.for(state.id).state().avatar, state.avatar);
+    assert.equal(reopened.for(selected.id).state().avatar, "bot:cloud:teal");
+    assert.throws(() => root.create({ name: "Full" }, "owner"), /capacity/);
+  } finally { root.close(); store.close(); }
+});
+
 test("custom avatar uploads are normalized, metadata-free and stored separately from employee state", async () => {
   const { store, root, employee } = fixture();
   try {

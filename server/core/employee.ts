@@ -3,7 +3,7 @@ import {
   beijingTimestamp,
   beijingDateTime,
 } from "../../shared/time";
-import { isAvatarPreset } from "../../shared/employee-avatars";
+import { BOT_AVATAR_COLORS, BOT_AVATAR_SHAPES, botAvatarPreset, defaultBotAvatar, isAvatarPreset, parseBotAvatar } from "../../shared/employee-avatars";
 import { systemPresence, type Presence } from "./presence";
 import type { Store, Session, Message } from "./store";
 import { resolve, posix, win32 } from "node:path";
@@ -308,10 +308,21 @@ export class Employee {
     assert(a.avatar === undefined || isAvatarPreset(a.avatar), "Invalid employee avatar");
     assert(a.instruction === undefined || (typeof a.instruction === "string" && a.instruction.length <= 8000), "Invalid employee instruction");
     assert(a.cwd === undefined || (typeof a.cwd === "string" && a.cwd.length <= 4096), "Invalid cwd");
-    assert(this.all().length < 50, "Employee capacity reached");
+    const employees = this.all();
+    assert(employees.length < 50, "Employee capacity reached");
+    let avatar = a.avatar || "";
+    if (!avatar) {
+      const used = new Set(employees.map((employee) => {
+        const state = employee.state(), bot = parseBotAvatar(state.avatar) || defaultBotAvatar(state.id);
+        return botAvatarPreset(bot.shape, bot.color);
+      }));
+      const available = BOT_AVATAR_SHAPES.flatMap((shape) => BOT_AVATAR_COLORS.map((color) => botAvatarPreset(shape.id, color.id))).filter((preset) => !used.has(preset));
+      assert(available.length, "No unused avatar combination available");
+      avatar = available[Math.floor(Math.random() * available.length)];
+    }
     const key = id("e"), employee = new Employee(this.store, this.vault, this.runtime, key, this.root || this);
     const s = employee.state();
-    Object.assign(s, { name: a.name.trim(), avatar: a.avatar || "", instruction: a.instruction || "", ownerId, scope, cwd: a.cwd || process.cwd(), enabled: true, workStart: "00:00", workEnd: "00:00" });
+    Object.assign(s, { name: a.name.trim(), avatar, instruction: a.instruction || "", ownerId, scope, cwd: a.cwd || process.cwd(), enabled: true, workStart: "00:00", workEnd: "00:00" });
     employee.save(s);
     (this.root || this).members.set(key, employee);
     employee.emitChanged(s);
