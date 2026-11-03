@@ -755,6 +755,13 @@ export class Chrome {
     const site = vaultSite(url);
     assert(origins.every((allowed) => allowed.has(site)), "凭据尚未针对当前页面核对或已切换认证页面，已阻止这次凭据写入；请先观察实际页面（含 SSO / 子框架）再重新 get 核对使用条件，无需补网站配置，不要跨系统试用账号。");
   }
+  private coordinateImage(o: Observation, imageId?: string) {
+    const image = o.images.find((i) => i.imageId === imageId) || o.images[0];
+    assert(!image?.readOnlyImage, "Expanded screenshots are read-only");
+    if (image) return image;
+    const { width, height } = o.pages[0].viewport;
+    return { x: 0, y: 0, width, height, pixelWidth: width, pixelHeight: height };
+  }
   private async preflight(o: Observation, actions: Obj[], top: Obj, cwd: string) {
     for (const action of actions) {
       if (["click", "fill", "scroll"].includes(action.action) && action.ref) {
@@ -767,12 +774,10 @@ export class Chrome {
         action.files = await Promise.all(action.files.map((path: string) => this.workspaceFile(cwd, path)));
       }
       if (["click_at", "move", "drag", "scroll_at"].includes(action.action)) {
-        assert(o.screenshot, "Coordinate actions require an observed screenshot");
-        const image = top.imageId ? o.images.find((i) => i.imageId === top.imageId) : o.images.length === 1 ? o.images[0] : undefined;
-        assert(image && !image.readOnlyImage, "Use matching actionable imageId");
+        const image = this.coordinateImage(o, top.imageId);
         if (action.action === "drag") assert(!o.fullPage, "Drag requires viewport screenshot");
         for (const [x, y] of action.action === "drag" ? [[action.x, action.y], [action.to_x, action.to_y]] : [[action.x, action.y]])
-          assert(x < image.pixelWidth && y < image.pixelHeight, "Coordinates outside image");
+          assert(x < image.pixelWidth && y < image.pixelHeight, "Coordinates outside image or viewport");
       }
     }
   }
@@ -1018,13 +1023,7 @@ export class Chrome {
       return;
     }
     if (["click_at", "move", "drag", "scroll_at"].includes(kind)) {
-      assert(o.screenshot, "Coordinate actions require an observed screenshot");
-      const image = top.imageId
-        ? o.images.find((i) => i.imageId === top.imageId)
-        : o.images.length === 1
-          ? o.images[0]
-          : undefined;
-      assert(image && !image.readOnlyImage, "Use matching actionable imageId");
+      const image = this.coordinateImage(o, top.imageId);
       const map = (x: number, y: number) => {
         assert(
           Number.isFinite(x) &&
@@ -1033,7 +1032,7 @@ export class Chrome {
             y >= 0 &&
             x < image.pixelWidth &&
             y < image.pixelHeight,
-          "Coordinates outside image",
+          "Coordinates outside image or viewport",
         );
         return {
           x: image.x + (x * image.width) / image.pixelWidth,

@@ -23,6 +23,10 @@ function fixture(t: TestContext) {
     if (expression.includes("inputState")) return { identity: "email", editable: true, matches: true };
     if (expression.includes("verifyValue")) return { matches: true };
     if (expression.includes("innerScrollOverflow")) return 0;
+    if (expression.startsWith("__novaWebview.coordinate(")) {
+      const [x, y] = JSON.parse(`[${expression.slice("__novaWebview.coordinate(".length, -1)}]`);
+      return { x, y, identity: "coordinate", editable: false };
+    }
     if (expression.startsWith("__novaWebview.evaluate(")) return { status: "executed", value: null };
     return {};
   };
@@ -72,13 +76,63 @@ test("selecting a tab preserves other owners, and failed navigation does not dis
 test("whole-batch preflight rejects unknown refs, uploads and screenshot bounds before any input", async (t) => {
   const f = fixture(t); const o = await f.observe();
   f.chrome.workspaceFile = async () => { throw Error("Only regular workspace files"); };
-  for (const action of [{ action: "click", ref: "invented" }, { action: "upload", selector: "input[type=file]", files: ["outside"] }, { action: "click_at", x: 1, y: 1 }]) {
+  for (const action of [{ action: "click", ref: "invented" }, { action: "upload", selector: "input[type=file]", files: ["outside"] },
+    ...[800, -1, NaN, Infinity].map(x => ({ action: "click_at", x, y: 1 })),
+    { action: "drag", x: 1, y: 1, to_x: 2, to_y: 600 }]) {
     const r = await f.act({ actions: [{ action: "press", key: "Enter" }, action] });
     assert.equal(r.status, "not_executed"); assert.equal(r.completedActions, 0); assert.equal(r.inputAttempted, false);
   }
   o.screenshot = true; o.images = [{ imageId: "image", pixelWidth: 100, pixelHeight: 100 }];
   const r = await f.act({ imageId: "image", actions: [{ action: "press", key: "Enter" }, { action: "drag", x: 1, y: 1, to_x: 101, to_y: 2 }] });
   assert.equal(r.status, "not_executed"); assert.deepEqual(f.sent, []);
+});
+
+test("coordinate actions accept DOM-only observations with missing or stale image IDs", async (t) => {
+  for (const imageId of [undefined, "old-image"]) {
+    for (const action of [
+      { action: "click_at", x: 20, y: 30 },
+      { action: "move", x: 20, y: 30 },
+      { action: "scroll_at", x: 20, y: 30, delta: 120 },
+      { action: "drag", x: 20, y: 30, to_x: 40, to_y: 50, duration_ms: 80 },
+    ]) {
+      const f = fixture(t); await f.observe();
+      const r = await f.act({ imageId, action });
+      assert.equal(r.status, "executed", r.reason); assert.equal(r.completedActions, 1); assert.equal(r.inputAttempted, true);
+      assert.deepEqual(f.sent[0], { method: "Input.dispatchMouseEvent", type: "mouseMoved", x: 20, y: 30 });
+      if (action.action === "click_at") assert.equal(f.sent[1].action, "click");
+      if (action.action === "scroll_at") assert.equal(f.sent[1].deltaY, 120);
+      if (action.action === "drag") assert.deepEqual(f.sent.at(-1), {
+        method: "Input.dispatchMouseEvent", type: "mouseReleased", x: 40, y: 50, button: "left", clickCount: 1,
+      });
+    }
+  }
+});
+
+test("coordinate image IDs are optional hints while image scale and tile offsets are preserved", async (t) => {
+  for (const imageId of [undefined, "old-image", "current", "second"]) {
+    const f = fixture(t), o = await f.observe();
+    o.screenshot = true; o.fullPage = true;
+    o.images = [
+      { imageId: "current", x: 100, y: 200, width: 400, height: 300, pixelWidth: 200, pixelHeight: 150 },
+      { imageId: "second", x: 500, y: 200, width: 400, height: 300, pixelWidth: 200, pixelHeight: 150 },
+    ];
+    const r = await f.act({ imageId, action: { action: "click_at", x: 10, y: 20 } });
+    assert.equal(r.status, "executed", r.reason);
+    const x = imageId === "second" ? 520 : 120;
+    assert.deepEqual(f.sent[0], { method: "Input.dispatchMouseEvent", type: "mouseMoved", x, y: 240 });
+    assert(f.calls.some(call => call.expression === `__novaWebview.coordinate(${x},240,"stamp",true)`));
+  }
+});
+
+test("read-only expanded screenshots still stop a whole coordinate batch before input", async (t) => {
+  for (const imageId of [undefined, "old-image", "expanded"]) {
+    const f = fixture(t), o = await f.observe();
+    o.screenshot = true;
+    o.images = [{ imageId: "expanded", readOnlyImage: true, pixelWidth: 800, pixelHeight: 3000 }];
+    const r = await f.act({ imageId, actions: [{ action: "press", key: "Enter" }, { action: "click_at", x: 20, y: 30 }] });
+    assert.equal(r.status, "not_executed"); assert.equal(r.inputAttempted, false); assert.equal(r.completedActions, 0);
+    assert.match(r.reason, /read-only/); assert.deepEqual(f.sent, []);
+  }
 });
 
 test("a new child tab ends a batch; only a unique active child receives feedback", async (t) => {
