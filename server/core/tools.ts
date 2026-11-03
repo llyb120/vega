@@ -24,7 +24,7 @@ import { verifyVaultUse } from "./vault-use";
 import { VAULT_USAGE } from "./vault";
 import { isDeepStrictEqual } from "node:util";
 import { sceneModels, maskedConfig, mergeSecrets } from "./config";
-import { stripPlaceholderArgs } from "./tool-args";
+import { stripPlaceholderArgs, ignoredToggles } from "./tool-args";
 import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
 import { EMPLOYEE_CHAT_RULES } from "./prompt";
@@ -62,7 +62,8 @@ const schema = (
   parameters: { type: "object", properties: props, required },
 });
 const string = { type: "string" },
-  integer = { type: "integer" };
+  integer = { type: "integer" },
+  positive = { type: "integer", minimum: 1 };
 export class Tools {
   context: Context;
   setupAccess?: "provider";
@@ -95,7 +96,7 @@ export class Tools {
       schema(
         "read",
         "Read numbered lines using 1-based offset/limit; images return their pixels. SQLite archived paths are supported.",
-        { path: string, offset: integer, limit: integer },
+        { path: string, offset: positive, limit: positive },
         ["path"],
       ),
       schema("context_budget", "Estimated remaining context budget.", {}),
@@ -158,7 +159,7 @@ export class Tools {
         schema(
           "bash",
           "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome. All webpage interaction MUST use the chrome tool through its authorized extension. Web-field fill/type and press Enter via chrome are permitted; employee main tasks must relay to their computer session. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
-          { command: string, timeout: integer },
+          { command: string, timeout: positive },
           ["command"],
         ),
         schema(
@@ -369,6 +370,9 @@ export class Tools {
   async execute(call: Call, model: Model): Promise<Outcome> {
     try {
       const result = await this.executeInner(call, model);
+      const ignored = ignoredToggles(call.name, call.arguments || {}, (this.definitions(model).find((t) => t.name === call.name) as any)?.parameters);
+      if (ignored.length && !result.error && result.value && typeof result.value === "object" && !Array.isArray(result.value))
+        result.value = { ...result.value, ignoredFields: ignored, notice: `本次调用像是整表填了默认值，${ignored.join("、")} 未生效；如确需修改，请单独发一次只含 action、id 和该字段的 update。` };
       if (result.secret && (call.name === "vault" || (call.name === "employee" && call.arguments.action === "vault_get"))) {
         const credential = JSON.parse(result.secret);
         this.credentials.push({ site: credential.scopeSite || "", values: credentialValues(credential.content) });
