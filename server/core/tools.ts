@@ -24,6 +24,7 @@ import { verifyVaultUse } from "./vault-use";
 import { VAULT_USAGE } from "./vault";
 import { isDeepStrictEqual } from "node:util";
 import { sceneModels, maskedConfig, mergeSecrets } from "./config";
+import { stripPlaceholderArgs } from "./tool-args";
 import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
 import { EMPLOYEE_CHAT_RULES } from "./prompt";
@@ -381,12 +382,9 @@ export class Tools {
   }
   private async executeInner(call: Call, model: Model): Promise<Outcome> {
     this.signal.throwIfAborted();
-    const a = { ...call.arguments };
-    delete a._after;
-    assert(
-      this.definitions(model).some((t) => t.name === call.name),
-      "Tool unavailable in this scene",
-    );
+    const definition = this.definitions(model).find((t) => t.name === call.name);
+    assert(definition, "Tool unavailable in this scene");
+    const a = stripPlaceholderArgs(call.name, { ...call.arguments }, (definition as any).parameters);
     const waiting = this.session.employeeId && this.session.taskId && this.engine.employeeFor(this.session).state().tasks.find(task => task.id === this.session.taskId)?.workspaceWait;
     if (waiting) return { value: { status: "queued", reason: "工作区写入占用，任务已暂停，本步未执行；资源释放后自动续做。" }, error: true, stop: true };
     if (call.name === "read")
