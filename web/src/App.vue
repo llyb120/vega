@@ -384,13 +384,14 @@ const labels = {
   failed: "失败",
   cancelled: "已取消",
   stopped: "已停止",
+  sealed: "已封存",
   pending: "待执行",
   in_progress: "执行中",
   completed: "已完成",
   blocked: "受阻",
 };
 function ended(s) {
-  return ["done", "failed", "cancelled", "stopped"].includes(s);
+  return ["done", "failed", "cancelled", "stopped", "sealed"].includes(s);
 }
 function date(at) {
   return formatBeijing(at);
@@ -1250,7 +1251,8 @@ async function employeeTaskAction(task, action, text) {
   return attempt(async () => {
     if (action === "remove" && !confirm("永久删除此任务记录？")) return;
     if (action === "redispatch" && !confirm("重新派发为新任务？此前外部操作不会回滚。")) return;
-    await control({ id: task.id, action: action === "reject" ? "approve" : action, ...(action === "approve" || action === "reject" ? { approved: action === "approve" } : {}), ...(text ? { text } : {}), ...(action === "redispatch" ? { confirmed: true } : {}) });
+    if (action === "seal" && !confirm("封存此任务？封存后不能再恢复、续做或重新派发，只能查看或删除。")) return;
+    await control({ id: task.id, action: action === "reject" ? "approve" : action, ...(action === "approve" || action === "reject" ? { approved: action === "approve" } : {}), ...(text ? { text } : {}), ...(action === "redispatch" ? { confirmed: true } : {}), ...(action === "seal" ? { manual: true } : {}) });
     return true;
   });
 }

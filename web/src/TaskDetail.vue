@@ -137,7 +137,8 @@ async function run(action) {
         <button v-if="task.status === 'running'" type="button" :disabled="busy" @click="run('stop')"><Icon name="stop" :size="14" />停止任务</button>
         <button v-else-if="!ended" type="button" :disabled="busy" @click="run('stop')"><Icon name="pause" :size="14" />暂停任务</button>
         <button v-if="resumable" type="button" class="primary" :disabled="busy" @click="run('resume')"><Icon name="play" :size="14" />继续任务</button>
-        <button v-if="ended" type="button" :disabled="busy" @click="run('redispatch')"><Icon name="refresh" :size="14" />重新派发</button>
+        <button v-if="ended && task.status !== 'sealed'" type="button" :disabled="busy" @click="run('redispatch')"><Icon name="refresh" :size="14" />重新派发</button>
+        <button v-if="task.status !== 'sealed' && task.status !== 'running'" type="button" :disabled="busy" title="封存后禁止恢复、续做或重新派发" @click="run('seal')"><Icon name="lock" :size="14" />封存</button>
         <button v-if="ended" type="button" class="danger-text" :disabled="busy" @click="run('remove')"><Icon name="trash" :size="14" />删除记录</button>
       </template>
     </footer>
