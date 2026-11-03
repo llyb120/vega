@@ -91,9 +91,7 @@ export function promptHistory(
     rows.push(m);
   }
   close();
-  const dom = new Map<string, number>(),
-    images = new Map<string, number>();
-  let otherImages = 0;
+  const dom = new Map<string, number>();
   for (let i = rows.length - 1; i >= 0; i--) {
     let m = rows[i];
     if (m.role !== "tool") continue;
@@ -110,27 +108,45 @@ export function promptHistory(
         m = rows[i] = { ...m, text: parsed.prefix + JSON.stringify(value) };
       }
     }
-    if (!m.images?.length) continue;
-    const stream =
-      m.name === "chrome"
-        ? "chrome:" +
-          (tab || parsed?.value.images?.[0]?.frameStream || "default")
-        : "other";
-    const count = images.get(stream) || 0,
-      drop =
-        m.name === "chrome"
-          ? count >= 2
-          : !!options.trimImages && otherImages >= 2;
-    if (m.name !== "chrome") otherImages++;
-    if (drop)
-      rows[i] = {
-        ...m,
-        images: [],
-        text:
-          (m.text || "") +
-          "\n[Older tool image omitted from model view; original image/metadata remains archived in SQLite.]",
-      };
-    images.set(stream, count + 1);
+  }
+  return historyImages(rows, options);
+}
+
+export function historyImages(
+  input: Message[],
+  options: { trimImages?: boolean } = {},
+): Message[] {
+  const rows = [...input], streams = new Map<string, Set<string>>();
+  let otherImages = 0;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const m = rows[i];
+    if (m.role !== "tool" || !m.images?.length) continue;
+    const parsed = m.name === "chrome" ? resultBody(m) : undefined;
+    const metadata: Obj[] = Array.isArray(parsed?.value.images) ? parsed.value.images : [];
+    const keep = m.images.map(() => true);
+    if (m.name === "chrome") {
+      for (let j = m.images.length - 1; j >= 0; j--) {
+        const image = m.images[j];
+        // Earlier projections may have removed sibling attachments; archive blob IDs keep the mapping stable.
+        const meta = metadata.length === m.images.length ? metadata[j] : metadata.find(v => image.blobId && v.blobId === image.blobId);
+        if (!meta?.frameStream || meta.frame !== undefined || meta.readOnlyImage) continue;
+        const path = meta.path || image.blobId;
+        if (!path) continue;
+        let seen = streams.get(meta.frameStream);
+        if (!seen) streams.set(meta.frameStream, seen = new Set());
+        keep[j] = !seen.has(path) && seen.size < 2;
+        if (keep[j]) seen.add(path);
+      }
+    } else if (otherImages++ >= 2 && options.trimImages) keep.fill(false);
+    if (keep.every(Boolean)) continue;
+    const notice = "Older tool images omitted from model view; original images/metadata remain archived in SQLite.";
+    rows[i] = {
+      ...m,
+      images: m.images.filter((_, j) => keep[j]),
+      text: parsed
+        ? parsed.prefix + JSON.stringify({ ...parsed.value, imagesOmitted: notice })
+        : (m.text || "") + "\n[" + notice + "]",
+    };
   }
   return rows;
 }

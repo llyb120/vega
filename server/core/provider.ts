@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Message, Call } from "./store";
+import { historyImages } from "./history";
 import type { Model } from "./config";
 import { wireOptions } from "./config";
 import {
@@ -57,39 +58,6 @@ const historyHash = (rows: Message[]) =>
 const callID = (value: string) =>
   value.includes("|") ? "call_" + hash(value).slice(0, 24) : value;
 const imageURL = (image: Obj) => `data:${image.mime};base64,${image.data}`;
-function historyImages(rows: Message[]) {
-  const retained = new Set<number>();
-  const streams = new Map<string, number>();
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const m = rows[i];
-    if (m.role !== "tool" || m.name !== "chrome" || !m.images?.length) {
-      retained.add(i);
-      continue;
-    }
-    let data: Obj = {};
-    try {
-      data = JSON.parse(m.text || "{}");
-    } catch {}
-    const stream =
-      "chrome:" + (data.tabTag || data.images?.[0]?.frameStream || "default");
-    const n = streams.get(stream) || 0;
-    if (n < 2) {
-      retained.add(i);
-      streams.set(stream, n + 1);
-    }
-  }
-  return rows.map((m, i) =>
-    retained.has(i)
-      ? m
-      : {
-          ...m,
-          images: [],
-          text:
-            m.text +
-            "\n[Older Chrome screenshot omitted; metadata and original image remain archived]",
-        },
-  );
-}
 export function outputBudget(
   model: Model,
   system: string,

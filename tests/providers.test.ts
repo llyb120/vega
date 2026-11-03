@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { Store } from "../server/core/store";
+import { Store, type Message } from "../server/core/store";
+import { promptHistory } from "../server/core/history";
 import { Providers, ProviderError, bodyFor, type Tool } from "../server/core/provider";
 import { resolveModel } from "../server/core/config";
 import { Subscriptions } from "../server/core/subscriptions";
@@ -280,6 +281,55 @@ test("wire history preserves tool-call IDs, images and signed reasoning without 
     assert(!JSON.stringify(body).includes("call|item"));
   }
 });
+test("Chrome history keeps two distinct images per stream through ACP and every provider", () => {
+  const rows: Message[] = [];
+  const observe = (tab: string, images: { blobId: string; frameStream?: string; frame?: number; readOnlyImage?: boolean }[]) => {
+    const callId = "shot-" + rows.length;
+    rows.push(
+      { role: "assistant", calls: [{ id: callId, name: "chrome", arguments: {} }] },
+      { role: "tool", name: "chrome", callId,
+        text: `[m${String(rows.length + 1).padStart(5, "0")}] ` + JSON.stringify({
+          tabTag: tab, snapshotId: callId, pages: [{ text: callId }], completedActions: 1,
+          documentPath: "sqlite:browser-observation/" + callId,
+          images: images.map(image => ({ ...image, path: "sqlite:blob/" + image.blobId })),
+        }),
+        images: images.map(({ blobId }) => ({ mime: "image/png", blobId })),
+      },
+    );
+  };
+  observe("C1", [{ blobId: "view-old", frameStream: "C1:viewport" }]);
+  observe("C1", [{ blobId: "view-new", frameStream: "C1:viewport" }]);
+  observe("C1", [{ blobId: "view-new", frameStream: "C1:viewport" }]);
+  observe("C1", [{ blobId: "tile0-old", frameStream: "C1:document:0" }, { blobId: "tile1-old", frameStream: "C1:document:1" }]);
+  observe("C1", [{ blobId: "tile0-middle", frameStream: "C1:document:0" }, { blobId: "tile1-new", frameStream: "C1:document:1" }]);
+  observe("C1", [{ blobId: "tile0-new", frameStream: "C1:document:0" }]);
+  for (const blobId of ["crop1", "crop2", "crop3"]) observe("C1", [{ blobId }]);
+  observe("C1", [{ blobId: "export", frameStream: "C1:document:0", readOnlyImage: true }]);
+  observe("C1", [{ blobId: "scroll", frameStream: "C1:viewport", frame: 0 }]);
+  observe("C2", [{ blobId: "other-tab", frameStream: "C2:viewport" }]);
+  observe("C3", [{ blobId: "third-tab", frameStream: "C3:viewport" }]);
+  const original = structuredClone(rows);
+  const expected = ["view-old", "view-new", "tile1-old", "tile0-middle", "tile1-new", "tile0-new", "crop1", "crop2", "crop3", "export", "scroll", "other-tab", "third-tab"];
+  const projected = promptHistory(rows);
+  assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.blobId)), expected);
+  assert.deepEqual(promptHistory(projected), projected, "repeated projection must keep attachment/metadata alignment");
+  const old = JSON.parse(projected[1].text!.replace(/^\[m\d+\]\s*/, ""));
+  assert.equal(old.pages, undefined);
+  assert.equal(old.completedActions, 1);
+  assert.equal(old.documentPath, "sqlite:browser-observation/shot-0");
+  for (const api of ["openai-completions", "openai-responses", "anthropic-messages"]) {
+    for (const history of [rows, projected]) {
+      const resolved: string[] = [];
+      bodyFor(model(api, "https://example.test/v1"), "", history, [], image => {
+        resolved.push(image.blobId!);
+        return { mime: image.mime, data: "AA==" };
+      });
+      assert.deepEqual(resolved, expected, api);
+    }
+  }
+  assert.deepEqual(rows, original, "canonical history and image metadata remain archived intact");
+});
+
 test("native reasoning is replayed only to its source model and remains untouched in history", () => {
   for (const api of ["openai-responses", "anthropic-messages"]) {
     const m = model(api, "https://example.test/v1");
