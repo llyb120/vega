@@ -56,6 +56,15 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["chrome_downloads", { downloadId: "42" }, { operation: "downloads", downloadId: "42" }],
     ["chrome_devtools", { tabTag: "C1", kind: "network", requestId: "r1" }, { operation: "devtools", tabTag: "C1", devtools: { kind: "network", requestId: "r1" } }],
     ["employee_status", {}, { action: "list" }],
+    ["employee_status", { memoryQuery: "部署" }, { action: "list", query: "部署" }],
+    ["employee_task_create", { instructions: "x", profile: "编码" }, { action: "add", kind: "todo", text: "x", profile: "编码" }],
+    ["employee_task_manage", { taskId: "t1", request: { command: "update", instructions: "new", profile: "轻量化", delayMinutes: 5 } }, { action: "update", id: "t1", text: "new", profile: "轻量化", nextCheckInMinutes: 5 }],
+    ["employee_task_manage", { taskId: "t1", request: { command: "update", profile: "coding", runAt: null } }, { action: "update", id: "t1", profile: "coding" }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "update", instructions: "i", note: "", profile: "coding", enabled: false, trigger: { kind: "daily", times: ["09:00"] } } },
+      { action: "update", id: "d1", text: "i", note: "", profile: "coding", enabled: false, manual: false, times: ["09:00"], everyMinutes: 0 }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "update", trigger: { kind: "dynamic", runAt: "2030-01-01 09:00" } } }, { action: "update", id: "d1", manual: false, times: [], everyMinutes: 0, nextAt: "2030-01-01 09:00" }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "update", note: "n", trigger: { kind: "condition", condition: "每 30 分钟" } } }, { action: "update", id: "d1", note: "n", condition: "每 30 分钟" }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "update", trigger: { kind: "manual" } } }, { action: "update", id: "d1", manual: true }],
     ["employee_task_create", { instructions: "do it", dedupeKey: "k", runAt: "2030-01-01 09:00" }, { action: "add", kind: "todo", text: "do it", key: "k", nextAt: "2030-01-01 09:00" }],
     ["employee_task_create", { instructions: "later", delayMinutes: 30, profile: "coding" }, { action: "add", kind: "todo", text: "later", nextCheckInMinutes: 30, profile: "coding" }],
     ["employee_task_create", { instructions: "now" }, { action: "add", kind: "todo", text: "now" }],
@@ -130,6 +139,12 @@ test("branch errors name the field and the chosen branch's structure", () => {
   assert.throws(() => map("employee_duty_create", { instructions: "x", trigger: { kind: "daily", times: ["9:00"] } }), /times/);
   assert.throws(() => map("employee_duty_create", { instructions: "x", trigger: { kind: "interval", everyMinutes: 30, times: ["09:00"] } }), /不接受字段 times/);
   assert.throws(() => map("employee_task_create", { instructions: "x", profile: "computer" }), /profile/);
+  assert.throws(() => map("employee_task_create", { instructions: "x", profile: "电脑" }), /profile/, "computer work goes through relay, as before");
+  assert.throws(() => map("employee_task_manage", { taskId: "t1", request: { command: "update" } }), /至少要改一项/);
+  assert.throws(() => map("employee_duty_manage", { dutyId: "d1", request: { command: "update", note: null } }), /至少要改一项/);
+  assert.throws(() => map("employee_task_manage", { taskId: "t1", request: { command: "update", runAt: "2030-01-01 09:00", delayMinutes: 5 } }), /恰好填一个/);
+  assert.throws(() => map("employee_duty_manage", { dutyId: "d1", request: { command: "update", trigger: { kind: "dynamic" } } }), /request\.trigger\.runAt.*恰好填一个/);
+  assert.throws(() => map("employee_duty_manage", { dutyId: "d1", request: { command: "update", condition: "x" } }), /不接受字段 condition/);
 });
 
 test("narrow fallback: only null or an empty value its own bound rejects counts as omitted; legal '' and 0 are kept", () => {
@@ -169,7 +184,7 @@ test("visible tools and branches follow session, scene and permission like the o
   assert(!commands({ kind: "normal" }, "employee_task_manage").includes("resume"), "resume/answer/stop are chat-only");
   assert(commands(chat, "employee_task_manage").includes("stop"));
   assert.deepEqual(names({ kind: "chat", member: true }), ["employee_status", "employee_task_create", "employee_task_manage"]);
-  assert(!/set_instructions|set_profile|reschedule|cancel/.test(commands({ kind: "chat", member: true }, "employee_task_manage")));
+  assert(!/update|set_instructions|set_profile|reschedule|cancel/.test(commands({ kind: "chat", member: true }, "employee_task_manage")));
   const main = names({ kind: "task", dutyCommands: [] });
   assert.deepEqual(main, ["employee_status", "employee_task_create", "memory_manage", "memory_propose", "memory_search", "task_ask_user", "task_complete", "task_progress", "task_relay_computer", "task_request_approval", "task_reschedule", "task_wait", "vault_get", "vault_list"]);
   const computer = names({ kind: "task", computer: true, dutyCommands: [] });

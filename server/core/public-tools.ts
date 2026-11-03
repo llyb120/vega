@@ -91,7 +91,7 @@ const memoryId = str("记忆 ID（memory_search 返回的 id）", { minLength: 1
 const credentialId = str("密码本条目 ID（vault_list 返回的 id）", { minLength: 1 });
 const instructions = (what: string) => str(what + "，1–8000 字", { minLength: 1, maxLength: 8000 });
 const delayMinutes = (what: string) => int(`${what}，从现在起多少分钟，1–10080`, { minimum: 1, maximum: 10080 });
-const profile = str("开局场景偏好：lightweight（默认）或 coding；新主任务实际总是先用轻量模型判断，真正编码时在原会话用 switch_scene 升级", { enum: ["lightweight", "coding"] });
+const profile = str("开局场景偏好：lightweight（默认）或 coding，推荐用英文值；也接受中文别名 轻量化（= lightweight）、编码（= coding）。新主任务实际总是先用轻量模型判断，真正编码时在原会话用 switch_scene 升级", { enum: ["lightweight", "coding", "轻量化", "编码"] });
 const dailyTimes = { type: "array", minItems: 1, maxItems: 48, items: str("", { pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }), description: "每天触发的北京时间 HH:MM 列表，如 [\"09:00\",\"14:30\"]" };
 const everyMinutes = int("固定间隔分钟数 1–10080：立即开始，之后距上次任务完成每隔这么久触发一次", { minimum: 1, maximum: 10080 });
 const vaultUrl = str("可选：当前页面或服务地址，辅助核对使用条件；通常自动参考当前浏览器观察", { minLength: 1, maxLength: 2048 });
@@ -106,8 +106,17 @@ function request(branches: Obj[], allowed?: string[]) {
 const commands = (allowed: string[] | undefined, phrases: [string, string][]) =>
   phrases.filter(([command]) => !allowed || allowed.includes(command)).map(([command, text]) => `${command} ${text}`).join("；");
 
-export const TASK_COMMANDS = ["set_instructions", "set_profile", "reschedule", "cancel", "resume", "answer", "stop"];
-export const DUTY_COMMANDS = ["set_instructions", "set_note", "set_profile", "set_manual", "set_condition", "set_daily", "set_interval", "schedule_next", "enable", "disable", "remove"];
+export const TASK_COMMANDS = ["update", "set_instructions", "set_profile", "reschedule", "cancel", "resume", "answer", "stop"];
+export const DUTY_COMMANDS = ["update", "set_instructions", "set_note", "set_profile", "set_manual", "set_condition", "set_daily", "set_interval", "schedule_next", "enable", "disable", "remove"];
+
+/** Duty trigger branches shared by create and the multi-field update. */
+const dutyTrigger = (description: string) => ({ description, anyOf: [
+  obj({ kind: one("manual") }, ["kind"], "不定时，不自动触发"),
+  obj({ kind: one("condition"), condition: str("自然语言触发条件，1–2000 字；外部事件无法自动监听，须写明检查频率", { minLength: 1, maxLength: 2000 }) }, ["kind", "condition"], "按条件自动触发"),
+  obj({ kind: one("daily"), times: dailyTimes }, ["kind", "times"], "每天固定时刻"),
+  obj({ kind: one("interval"), everyMinutes }, ["kind", "everyMinutes"], "固定间隔"),
+  obj({ kind: one("dynamic"), runAt: beijing("下一次执行时间"), delayMinutes: delayMinutes("多久后执行") }, ["kind"], "动态安排，runAt 和 delayMinutes 二选一"),
+] });
 export const MEMORY_COMMANDS = ["confirm", "merge", "keep", "archive", "restore", "feedback", "pin", "unpin", "forget"];
 
 export type ToolContext = {
@@ -128,16 +137,18 @@ export function employeeTools(ctx: ToolContext): Tool[] {
   const out: Tool[] = [];
   const task = ctx.kind === "task";
   out.push(tool("employee_status",
-    "查看当前牛马总览：现在时间（北京时间）、职责、任务和进行中的待办、最近运行、相关记忆和待确认记忆、可用场景。派单、续做、停止或修改职责前用它核对 taskId 和 dutyId；查记忆细节用 memory_search。"));
+    "查看当前牛马总览：现在时间（北京时间）、职责、任务和进行中的待办、最近运行、相关记忆和待确认记忆、可用场景。派单、续做、停止或修改职责前用它核对 taskId 和 dutyId；查记忆细节用 memory_search。",
+    { memoryQuery: str("只影响返回的相关记忆：按这个关键词挑最相关的 30 条；省略为不按关键词", { maxLength: 2000 }) }));
   out.push(tool("employee_task_create",
     "给当前牛马派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。反复、定时或按条件做的事用 employee_duty_create" +
       (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : "。"),
     { instructions: instructions("任务要做什么、交付标准，保留用户原话和约束"), dedupeKey: str("业务唯一标识，≤200 字", { minLength: 1, maxLength: 200 }), runAt: beijing("开始时间；省略立即排队"), delayMinutes: delayMinutes("多久后开始"), profile },
     ["instructions"]));
   if (!task) {
-    const allowed = ctx.kind === "chat" ? (ctx.member ? ["resume", "answer", "stop"] : TASK_COMMANDS) : ["set_instructions", "set_profile", "reschedule", "cancel"];
+    const allowed = ctx.kind === "chat" ? (ctx.member ? ["resume", "answer", "stop"] : TASK_COMMANDS) : ["update", "set_instructions", "set_profile", "reschedule", "cancel"];
     out.push(tool("employee_task_manage",
       "管理一条指定任务（taskId），request.command 选一种：" + commands(allowed, [
+        ["update", "一次改多项：instructions、profile、runAt 或 delayMinutes 中至少给一项，一起生效（任一项不合法则全部不改；内容和场景只能改尚未开始、不是职责触发的任务，职责触发的任务不能改期）"],
         ["set_instructions", "改尚未开始的任务内容（职责触发的任务不能改）"],
         ["set_profile", "改尚未开始的任务的开局场景偏好（职责触发的任务不能改）"],
         ["reschedule", "改执行时间，runAt 或 delayMinutes 二选一（职责触发的任务不能改期）"],
@@ -147,6 +158,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         ["stop", "真正停止执行：回执 executionStopped=true 才算已停，false 表示停止请求已发出、正在收尾"],
       ]) + "。",
       { taskId, request: request([
+        obj({ command: one("update"), instructions: instructions("新的任务内容"), profile, runAt: beijing("新的执行时间"), delayMinutes: delayMinutes("多久后执行") }, ["command"]),
         obj({ command: one("set_instructions"), instructions: instructions("新的任务内容") }, ["command", "instructions"]),
         obj({ command: one("set_profile"), profile }, ["command", "profile"]),
         obj({ command: one("reschedule"), runAt: beijing("新的执行时间"), delayMinutes: delayMinutes("多久后执行") }, ["command"]),
@@ -161,19 +173,14 @@ export function employeeTools(ctx: ToolContext): Tool[] {
     out.push(tool("employee_duty_create",
       "新建一条职责（反复执行的工作，归用户所有，只在用户明确要求时创建）：instructions 写每次做什么；trigger.kind 选一种：manual 不定时（只按交代的任务需要执行，不自动触发）；condition 用自然语言描述（如“每天 9 点”“每 30 分钟检查”），系统编译成下面某种规则，无法可靠识别时报错；daily 每天固定时刻 times；interval 每隔 everyMinutes 分钟；dynamic 只安排首次执行（runAt 或 delayMinutes 二选一），之后由执行它的任务再安排下次。note 写用户的细化要求，每次执行都会带上。一次性的事用 employee_task_create。",
       { instructions: instructions("每次触发时要做的事"),
-        trigger: { anyOf: [
-          obj({ kind: one("manual") }, ["kind"], "不定时，不自动触发"),
-          obj({ kind: one("condition"), condition: str("自然语言触发条件，1–2000 字；外部事件无法自动监听，须写明检查频率", { minLength: 1, maxLength: 2000 }) }, ["kind", "condition"], "按条件自动触发"),
-          obj({ kind: one("daily"), times: dailyTimes }, ["kind", "times"], "每天固定时刻"),
-          obj({ kind: one("interval"), everyMinutes }, ["kind", "everyMinutes"], "固定间隔"),
-          obj({ kind: one("dynamic"), runAt: beijing("首次执行时间"), delayMinutes: delayMinutes("多久后首次执行") }, ["kind"], "动态安排，runAt 和 delayMinutes 二选一"),
-        ] },
+        trigger: dutyTrigger("触发规则，选一种 kind"),
         note: str("用户对这条职责的细化要求，≤4096 字节"),
         profile },
       ["instructions", "trigger"]));
   if (dutyAllowed.length)
     out.push(tool("employee_duty_manage",
-      (task ? "管理本任务所属的职责（dutyId 只能是本任务的职责），只能：" : "管理一条指定职责（dutyId），只在用户明确要求时调用，每次只改一个方面：") + commands(dutyAllowed, [
+      (task ? "管理本任务所属的职责（dutyId 只能是本任务的职责），只能：" : "管理一条指定职责（dutyId），只在用户明确要求时调用，request.command 选一种：") + commands(dutyAllowed, [
+        ["update", "一次改多项：instructions、note、profile、enabled、trigger 中至少给一项，一起生效（任一项不合法则全部不改）；trigger 与 employee_duty_create 相同，含义同下面对应的单项命令（dynamic 会改成动态职责并安排下一次）"],
         ["set_instructions", "替换职责内容（同步到尚未开始的派生任务）"],
         ["set_note", "替换备注，\"\" 清空"],
         ["set_profile", "改开局场景偏好（同步到尚未开始的派生任务）"],
@@ -187,6 +194,8 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         ["remove", "删除职责，并取消它还没收尾的任务"],
       ]) + "。",
       { dutyId, request: request([
+        obj({ command: one("update"), instructions: instructions("新的职责内容"), note: str("新的备注，\"\" 清空，≤4096 字节"), profile,
+          enabled: { type: "boolean", description: "true 启用；false 停用，并取消它还没收尾的任务（含派生的）" }, trigger: dutyTrigger("新的触发规则，选一种 kind") }, ["command"]),
         obj({ command: one("set_instructions"), instructions: instructions("新的职责内容") }, ["command", "instructions"]),
         obj({ command: one("set_note"), note: str("新的备注，\"\" 清空，≤4096 字节") }, ["command", "note"]),
         obj({ command: one("set_condition"), condition: str("自然语言触发条件，1–2000 字", { minLength: 1, maxLength: 2000 }) }, ["command", "condition"]),
@@ -300,6 +309,21 @@ function when(a: Obj, path: string, required = true): Obj {
   return Object.fromEntries(Object.entries({ nextAt: a.runAt, nextCheckInMinutes: a.delayMinutes }).filter(([, v]) => v !== undefined));
 }
 
+/**
+ * A trigger branch → the old add/update duty fields. On update (replace=true) the other automatic rules are reset
+ * in the same call, which is what the old update needed (manual=false plus the competing rule cleared) to switch kinds.
+ * Like the old update, only manual clears the old condition wording; condition compiles and overrides the rest.
+ */
+function dutyTriggerFields(t: Obj, path: string, replace: boolean): Obj {
+  switch (t.kind) {
+    case "manual": return { manual: true };
+    case "condition": return { condition: t.condition };
+    case "daily": return replace ? { manual: false, times: t.times, everyMinutes: 0 } : { times: t.times };
+    case "interval": return replace ? { manual: false, everyMinutes: t.everyMinutes, times: [] } : { everyMinutes: t.everyMinutes };
+    default: return replace ? { manual: false, times: [], everyMinutes: 0, ...when(t, path) } : when(t, path);
+  }
+}
+
 /** Map a validated public call onto the existing internal executor arguments. Fixed values cannot be overridden. */
 export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
   const chrome = (args: Obj): Internal => ({ tool: "chrome", args });
@@ -344,12 +368,18 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
     case "chrome_experience_feedback":
       return chrome({ operation: "experience_feedback", tabTag: a.tabTag, snapshotId: a.snapshotId, experience: { scope: a.scope, task: a.task, id: a.routeId, outcome: a.outcome, reason: a.reason, redacted: a.redacted } });
 
-    case "employee_status": return employee({ action: "list" });
+    case "employee_status": return employee(defined({ action: "list", query: a.memoryQuery }));
     case "employee_task_create":
       return employee(defined({ action: "add", kind: "todo", text: a.instructions, key: a.dedupeKey, ...when(a, "", false), profile: a.profile }));
     case "employee_task_manage": {
       const r = a.request, id = a.taskId;
       switch (r.command) {
+        case "update": {
+          const at = r.runAt !== undefined || r.delayMinutes !== undefined ? when(r, ".request") : {};
+          const fields = defined({ text: r.instructions, profile: r.profile, ...at });
+          if (!Object.keys(fields).length) throw new ArgumentError("参数.request 的 update 至少要改一项：instructions、profile、runAt 或 delayMinutes");
+          return employee({ action: "update", id, ...fields }, "task");
+        }
         case "set_instructions": return employee({ action: "update", id, text: r.instructions }, "task");
         case "set_profile": return employee({ action: "update", id, profile: r.profile }, "task");
         case "reschedule": return employee({ action: "update", id, ...when(r, ".request") }, "task");
@@ -359,18 +389,16 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
         default: return employee({ action: "stop", id }, "task");
       }
     }
-    case "employee_duty_create": {
-      const t = a.trigger;
-      const trigger: Obj = t.kind === "manual" ? { manual: true }
-        : t.kind === "condition" ? { condition: t.condition }
-        : t.kind === "daily" ? { times: t.times }
-        : t.kind === "interval" ? { everyMinutes: t.everyMinutes }
-        : when(t, ".trigger");
-      return employee(defined({ action: "add", kind: "duty", text: a.instructions, note: a.note, profile: a.profile, ...trigger }));
-    }
+    case "employee_duty_create":
+      return employee(defined({ action: "add", kind: "duty", text: a.instructions, note: a.note, profile: a.profile, ...dutyTriggerFields(a.trigger, ".trigger", false) }));
     case "employee_duty_manage": {
       const r = a.request, id = a.dutyId;
       if (r.command === "remove") return employee({ action: "done", id }, "duty");
+      if (r.command === "update") {
+        const fields = defined({ text: r.instructions, note: r.note, profile: r.profile, enabled: r.enabled, ...(r.trigger ? dutyTriggerFields(r.trigger, ".request.trigger", true) : {}) });
+        if (!Object.keys(fields).length) throw new ArgumentError("参数.request 的 update 至少要改一项：instructions、note、profile、enabled 或 trigger");
+        return employee({ action: "update", id, ...fields }, "duty");
+      }
       const fields: Obj =
         r.command === "set_instructions" ? { text: r.instructions }
         : r.command === "set_note" ? { note: r.note }

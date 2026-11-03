@@ -230,3 +230,41 @@ test("set_manual clears the old trigger wording, and a task can reschedule only 
     assert.equal(employee.task(employee.state(), other.id).status, "queued", "other tasks are untouched");
   } finally { await engine.close(); store.close(); }
 });
+
+test("one update changes several aspects together, with the old executor's semantics", async () => {
+  const { store, engine } = fixture();
+  try {
+    const employee = engine.employee.for(engine.employee.create({ name: "Multi" }, "alice").id);
+    const tools = new Tools(engine, employee.chat("alice"), engine.config(), new AbortController().signal, () => {});
+    tools.actorId = "alice";
+    const duty = await employee.execute("", { action: "add", kind: "duty", text: "old", manual: true });
+    await tools.execute({ id: "u", name: "employee_duty_manage", arguments: { dutyId: duty.value.id, request: {
+      command: "update", instructions: "new work", note: "细化", profile: "编码", trigger: { kind: "interval", everyMinutes: 30 } } } }, {} as any);
+    let row = employee.state().duties.find((d) => d.id === duty.value.id)!;
+    assert.deepEqual([row.text, row.note, row.profile, row.manual, row.everyMinutes], ["new work", "细化", "coding", false, 30]);
+    await tools.execute({ id: "d", name: "employee_duty_manage", arguments: { dutyId: duty.value.id, request: { command: "update", trigger: { kind: "daily", times: ["09:00"] } } } }, {} as any);
+    row = employee.state().duties.find((d) => d.id === duty.value.id)!;
+    assert.deepEqual([row.everyMinutes, row.times], [0, ["09:00"]], "switching kinds resets the competing rule");
+    await tools.execute({ id: "n", name: "employee_duty_manage", arguments: { dutyId: duty.value.id, request: { command: "update", trigger: { kind: "dynamic", delayMinutes: 15 } } } }, {} as any);
+    row = employee.state().duties.find((d) => d.id === duty.value.id)!;
+    assert(!row.manual && !row.everyMinutes && !row.times.length && row.nextCheckAt > Date.now());
+
+    // Like the old update, an invalid part rejects the whole call.
+    const before = JSON.stringify(row);
+    await assert.rejects(tools.execute({ id: "bad", name: "employee_duty_manage", arguments: { dutyId: duty.value.id, request: { command: "update", instructions: "x", profile: "电脑" } } }, {} as any));
+    assert.equal(JSON.stringify(employee.state().duties.find((d) => d.id === duty.value.id)), before);
+
+    // Like master, set_daily keeps the old condition wording; only set_manual clears it.
+    const worded = await employee.execute("", { action: "add", kind: "duty", text: "w", everyMinutes: 60, condition: "每小时" });
+    await tools.execute({ id: "sd", name: "employee_duty_manage", arguments: { dutyId: worded.value.id, request: { command: "set_daily", times: ["10:00"] } } }, {} as any);
+    assert.equal(employee.state().duties.find((d) => d.id === worded.value.id)!.condition, "每小时");
+
+    const job = await add(employee, "old task");
+    await tools.execute({ id: "t", name: "employee_task_manage", arguments: { taskId: job.id, request: { command: "update", instructions: "new task", profile: "coding", delayMinutes: 60 } } }, {} as any);
+    const moved = employee.task(employee.state(), job.id);
+    assert.deepEqual([moved.text, moved.profile, moved.status], ["new task", "coding", "queued"]);
+    assert(moved.nextCheckAt > Date.now() + 59 * 60_000);
+    await assert.rejects(tools.execute({ id: "past", name: "employee_task_manage", arguments: { taskId: job.id, request: { command: "update", instructions: "zzz", runAt: "2001-01-01 09:00" } } }, {} as any), /未来/);
+    assert.equal(employee.task(employee.state(), job.id).text, "new task", "the executor applies all parts or none");
+  } finally { await engine.close(); store.close(); }
+});
