@@ -65,7 +65,7 @@ export class ChromeBridge {
       current = live.find(([key]) => key === this.primaryID),
       chrome = live.find(([, v]) => v.browser === "Google Chrome");
     const next =
-      current && (current[1].browser === "Google Chrome" || !chrome)
+      current && (this.privateInstance || current[1].browser === "Google Chrome" || !chrome)
         ? current
         : chrome || live[0];
     this.primaryID = next?.[0] || "";
@@ -191,6 +191,8 @@ export class ChromeBridge {
       "Invalid extension client ID",
     );
     if (req.url === "/poll") {
+      // A private bridge has one browser; a reloaded worker supersedes its stale client ID.
+      if (this.privateInstance) this.primaryID = body.clientId;
       const ua = req.headers["user-agent"] || "";
       this.clients.set(body.clientId, {
         at: Date.now(),

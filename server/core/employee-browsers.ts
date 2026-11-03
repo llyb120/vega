@@ -27,7 +27,6 @@ export class EmployeeBrowsers {
     }
     assert(!entry.stopping, "Employee browser is stopping");
     if (entry.starting) return entry.starting;
-    if (entry.browser.child && entry.chrome.bridge.status().connected) return entry.chrome;
     const current = entry;
     current.starting = (async () => {
       if (!current.browser.child) {
@@ -39,14 +38,21 @@ export class EmployeeBrowsers {
           profile: this.profile(id), port: current.chrome.bridge.port, token: current.chrome.bridge.token,
         });
       }
-      for (let attempt = 0; attempt < 100; attempt++) {
+      const deadline = Date.now() + 30000;
+      let failure = "扩展未连接";
+      while (Date.now() < deadline) {
         assert(!this.closed && !current.stopping && current.browser.child, "Employee browser exited before connecting");
-        if (current.chrome.bridge.status().connected) return current.chrome;
+        if (current.chrome.bridge.status().connected) {
+          try {
+            // A cached heartbeat is not readiness; only this read-only probe may be retried.
+            await current.chrome.bridge.request("status", {});
+            assert(!this.closed && !current.stopping && current.browser.child, "Employee browser stopped while connecting");
+            return current.chrome;
+          } catch (error) { failure = error instanceof Error ? error.message : String(error); }
+        }
         await sleep(100);
       }
-      await current.browser.close();
-      current.chrome.bridge.close();
-      throw Error("牛马浏览器连接超时；可在原任务内恢复，不会重放页面操作");
+      throw Error(`牛马浏览器连接暂不可用：${failure}；已保留浏览器和页面，下次使用会继续恢复，不会重放页面操作`);
     })().finally(() => { current.starting = undefined; });
     return current.starting;
   }

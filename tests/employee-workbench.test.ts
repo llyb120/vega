@@ -732,8 +732,17 @@ test("real independent employee Chromium instances retain private cookies across
     const [a, b] = await Promise.all([browsers.get("ea"), browsers.get("eb")]);
     assert.notEqual(a.bridge.port, b.bridge.port);
     assert.notEqual(browsers.entries.get("ea")!.browser.child!.pid, browsers.entries.get("eb")!.browser.child!.pid);
+    const resident = browsers.entries.get("ea")!.browser.child;
     const openedA = await a.execute("a", dir, { operation: "new_tab", url });
     const openedB = await b.execute("b", dir, { operation: "new_tab", url });
+    await a.execute("a", dir, { operation: "evaluate", tabTag: openedA.tabTag, expression: "document.body.dataset.challenge='waiting-for-user-code'", feedback: "none" });
+    for (let i = 0; i < 100 && !a.bridge.queued.listenerCount(a.bridge.primaryID); i++) await sleep(5);
+    assert(a.bridge.queued.listenerCount(a.bridge.primaryID), "disconnect an actual outstanding poll");
+    a.bridge.server!.closeAllConnections();
+    assert.equal(await browsers.get("ea"), a);
+    assert.equal(browsers.entries.get("ea")!.browser.child, resident, "a broken transport heals without restarting Chromium");
+    const challenge = await a.execute("a", dir, { operation: "evaluate", tabTag: openedA.tabTag, expression: "document.body.dataset.challenge", feedback: "none" });
+    assert(JSON.stringify(challenge).includes("waiting-for-user-code"), "recovery must retain the original verification page, not only cookies");
     await a.execute("a", dir, { operation: "evaluate", tabTag: openedA.tabTag, expression: "document.cookie='employee=A; max-age=3600; path=/'", feedback: "none" });
     const cookie = await b.execute("b", dir, { operation: "evaluate", tabTag: openedB.tabTag, expression: "document.cookie", feedback: "none" });
     assert(!JSON.stringify(cookie).includes("employee=A"));
@@ -742,6 +751,15 @@ test("real independent employee Chromium instances retain private cookies across
     const tab = await resumed.execute("a", dir, { operation: "new_tab", url });
     const restored = await resumed.execute("a", dir, { operation: "evaluate", tabTag: tab.tabTag, expression: "document.cookie", feedback: "none" });
     assert(JSON.stringify(restored).includes("employee=A"));
+    const crashed = browsers.entries.get("ea")!.browser.child!;
+    const exited = new Promise<void>((resolve) => crashed.once("exit", () => resolve()));
+    crashed.kill("SIGKILL");
+    await exited;
+    const healed = await browsers.get("ea");
+    assert.notEqual(browsers.entries.get("ea")!.browser.child!.pid, crashed.pid);
+    const healedTab = await healed.execute("a", dir, { operation: "new_tab", url });
+    const healedCookie = await healed.execute("a", dir, { operation: "evaluate", tabTag: healedTab.tabTag, expression: "document.cookie", feedback: "none" });
+    assert(JSON.stringify(healedCookie).includes("employee=A"), "process recovery reuses the persistent employee profile");
   } finally {
     await browsers.close();
     store.close();
