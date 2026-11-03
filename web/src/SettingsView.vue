@@ -69,11 +69,12 @@ onMounted(() => void run(loadVault));
       <div :hidden="section !== 'scenes'"><SceneSettings :api="api" :config="config" :models="models" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
       <section :hidden="section !== 'vault'" class="card">
         <div class="card-head row"><div><h3>密码本 · {{ vault.length }} 条</h3><p class="hint">密码本全局共享，不归属牛马，无需逐牛马授权。可保存多条账号、密码或密钥，每条有独立的使用条件；凭据加密保存，只有管理员能修改。</p></div><button type="button" class="sm" :disabled="busy" @click="newVault">新增凭据</button></div>
+        <p class="hint">使用条件可写适用系统、账号角色、登录方式和限制，不必填写网站名；有网站名或地址会更容易判断。牛马会结合当前任务与页面核对条件，无法确定时询问，不混用其他系统的账号。</p>
         <p v-if="vaultForm.id" class="hint">正在编辑「{{ vaultForm.name }}」，凭据留空保留原内容。</p>
         <form class="form-grid two vault-form" @submit.prevent="saveVault">
           <label>名称<input v-model="vaultForm.name" required maxlength="100" placeholder="不要包含密钥内容" /></label>
-          <label>允许使用的条件<input v-model="vaultForm.condition" required maxlength="500" placeholder="例如：仅在发布任务中使用" /></label>
-          <label class="span-2">凭据<textarea v-model="vaultForm.content" :required="!vaultForm.id" rows="3" maxlength="16000" autocomplete="off"></textarea></label>
+          <label>允许使用的条件<input v-model="vaultForm.condition" required maxlength="500" placeholder="例如：仅用于某系统的邮箱密码登录，不用于 OA 登录" /></label>
+          <label class="span-2">凭据<textarea v-model="vaultForm.content" :required="!vaultForm.id" :placeholder="vaultForm.id ? '凭据已加密，留空视为不修改凭据' : undefined" rows="3" maxlength="16000" autocomplete="off"></textarea></label>
           <div class="span-2 actions end"><button class="primary sm" :disabled="busy"><Icon name="lock" :size="14" />{{ vaultForm.id ? '保存修改' : '新增并加密保存' }}</button></div>
         </form>
         <p v-if="!vault.length" class="empty-state">还没有凭据</p>

@@ -9,7 +9,7 @@ import type { Store, Session, Message } from "./store";
 import { resolve, posix, win32 } from "node:path";
 import { realpath } from "node:fs/promises";
 import { assert, id, clone, clip, sleep, type Obj } from "./util";
-import { Vault } from "./vault";
+import { Vault, VAULT_USAGE } from "./vault";
 export type Execution = Pick<Session, "localAgent" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
 export type Owner = { token: string; name: string };
 export type Task = Obj & {
@@ -624,11 +624,12 @@ export class Employee {
       !["vault_request", "vault_send"].includes(action)
     ) {
       if (action === "vault_list")
-        return { value: { entries: this.vault.list().filter((entry) => !entry.tempFor || entry.tempFor === caller) } };
+        return { value: { entries: this.vault.list().filter((entry) => !entry.tempFor || entry.tempFor === caller), tip: VAULT_USAGE } };
       if (action === "vault_get") {
         const value = this.vault.get(a.id, a.text, caller);
         return {
           value: {
+            id: value.id,
             name: value.name,
             condition: value.condition,
             content:

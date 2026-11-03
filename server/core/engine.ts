@@ -3,6 +3,7 @@ import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agen
 import { builtinCommand, expandBuiltin } from "./builtins";
 import { maskedConfig, mergeSecrets } from "./config";
 import { employeeConfig, migrateEmployeeCapabilities } from "./employee-capabilities";
+import { credentialValues } from "./credentials";
 import { createHash } from "node:crypto";
 import { MCP } from "./mcp";
 import { units, refName } from "./history";
@@ -931,6 +932,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             secrets.set(reply.calls[i].id, outcome.secret);
             const value = JSON.parse(outcome.secret);
             redact.add(value.content);
+            if (typeof value.scopeSite === "string") for (const part of credentialValues(value.content)) redact.add(part);
           }
           this.outcome(key, reply.calls[i], outcome, emit, redact);
           stop ||= !!outcome.stop;

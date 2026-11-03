@@ -55,6 +55,19 @@ test("MCP JSON validation rejects malformed transports and options", () => {
   assert.doesNotThrow(() => validateMcpServer({ command: "node", args: [], env: {}, enabled: false }, "service"));
 });
 
+test("vault keeps the existing name/condition/content form without requiring website configuration", async () => {
+  const form = { value: {} as any };
+  settingsFunction("editVault", { vaultForm: form })({ id: "entry", name: "account", condition: "仅用于合作伙伴身份验证，不用于业务站邮箱登录" });
+  assert.equal(form.value.condition, "仅用于合作伙伴身份验证，不用于业务站邮箱登录");
+  assert.equal(form.value.content, "");
+  let body: any;
+  await settingsFunction("saveVault", { vaultForm: form, props: { api: async (_path: string, _method: string, value: any) => { body = value; } }, run: async (fn: any) => fn(), newVault() {}, loadVault: async () => {}, emit() {} })();
+  assert.equal(body.condition, form.value.condition);
+  assert.equal(body.content, "");
+  assert.equal(body.site, undefined);
+  assert(!settings.includes('v-model="vaultForm.site"'));
+});
+
 test("vault adds multiple entries and edits only the chosen one without exposing secrets", () => {
   const store = new Store(":memory:"), vault = new Vault(store);
   try {

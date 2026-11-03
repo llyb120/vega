@@ -10,6 +10,7 @@ import {
 } from "node:crypto";
 import type { Store } from "./store";
 import { assert, id, type Obj } from "./util";
+export const VAULT_USAGE = "先 list 查看名称与使用条件，再结合用户任务、当前系统/页面和登录方式选择唯一适用的条目；get 的 text 必须说明本次用途及为什么符合 condition。网页填写前先观察实际登录页，取用时自动结合当前页面核对；缺少页面上下文时先观察再重新 get，不要要求用户补网站配置。网站名/URL 只是可选上下文，不是必填配置；没有网站名也可根据明确的使用条件判断。不能因为用户名相同、都属腾讯或发生跳转就复用其他系统凭据；DataBrain 邮箱登录、OA 与合作伙伴认证要分别判断。不取用条件不符的条目，可以重新核对列表选择明确适用者；仍无匹配或无法确定时才询问，不能靠实际登录轮流试账号。历史里的 [credential redacted]、[redacted]、__stored_secret__ 都不是真实凭据，续做或换会话需重新 get，不能填入页面。凭据只用于当前授权操作，不写进回复、记忆或备注。";
 const SPKI = Buffer.from("302a300506032b656e032100", "hex"),
   PKCS8 = Buffer.from("302e020100300506032b656e04220420", "hex");
 export const encrypt = (key: Buffer, aad: string, plain: Buffer | string) => {
@@ -106,14 +107,18 @@ export class Vault {
       !e.tempFor || e.tempFor === task,
       "Temporary credential belongs to another task",
     );
+    assert(!e.tempFor || Date.now() - e.createdAt <= 86400000, "Temporary credential expired");
+
+    const content = decrypt(this.key, "vault", e.secret).toString();
     e.usedAt = Date.now();
     e.usedFor = purpose.slice(0, 100);
     this.store.save("vault", key, e);
     return {
+      id: e.id,
       name: e.name,
       condition: e.condition,
-      content: decrypt(this.key, "vault", e.secret).toString(),
-      next: "Only use for the current authorized operation when the condition matches; never copy to replies, memory or notes.",
+      content,
+      next: VAULT_USAGE,
     };
   }
   remove(key: string) {
@@ -124,12 +129,13 @@ export class Vault {
     return {
       name: "vault",
       description:
-        "本机密码本，可存账号密码、API Key、Token、私钥等自由文本凭据。需要凭据时先用 action=list 查看条目（不含内容），每条的 condition 是使用条件，当前这件事符合才用 action=get（text 写清用途）取出 content。凭据只用于当前授权操作，不写进回复、记忆或备注。此工具不能增删改凭据；需要变更时请用户在「设置 → 密码本」操作。",
+        "本机密码本，可存账号密码、API Key、Token、私钥等自由文本凭据。list 只返回元数据，get 只按明确 id 取用；增删改请用户在设置 → 密码本操作。" + VAULT_USAGE,
       parameters: {
         type: "object",
         properties: {
           action: { type: "string", enum: ["list", "get"] },
           id: { type: "string", description: "get 必填：list 返回的条目 id" },
+          url: { type: "string", maxLength: 2048, description: "可选：当前实际页面或目标服务地址，作为使用条件判断的辅助上下文，不要求在密码本配置网站" },
           text: {
             type: "string",
             minLength: 1,
@@ -147,8 +153,8 @@ export class Vault {
     if (action === "list")
       return {
         value: {
-          entries: this.list(),
-          tip: "condition 是使用条件：当前这件事符合才可 get；列表里不含凭据内容",
+          entries: this.list().filter((entry) => !entry.tempFor),
+          tip: VAULT_USAGE,
         },
       };
     if (action === "get") {
@@ -159,6 +165,7 @@ export class Vault {
       const value = this.get(id, purpose);
       return {
         value: {
+          id: value.id,
           name: value.name,
           condition: value.condition,
           content:
@@ -227,7 +234,7 @@ export class Vault {
         data: encrypt(
           shared,
           req,
-          JSON.stringify({ name: e.name, password: content }),
+          JSON.stringify({ name: e.name, password: content, condition: e.condition }),
         ),
       },
     };
@@ -240,13 +247,15 @@ export class Vault {
       Buffer.from(sealed.epk, "base64"),
     );
     const data = JSON.parse(decrypt(shared, req, sealed.data).toString());
+    assert(typeof data.password === "string" && data.password.length > 0 && data.password.length <= 16000, "Invalid shared credential");
+    assert(data.condition === undefined || (typeof data.condition === "string" && data.condition.length <= 500), "Invalid shared credential condition");
     const key = id("v");
     this.store.transaction(() => {
       this.store.remove("vault-request", req);
       this.store.save("vault", key, {
         id: key,
         name: (data.name || "凭据") + "（对方传来）",
-        condition: `仅限任务「${task}」使用，任务结束即删除`,
+        condition: `仅限任务「${task}」使用，任务结束即删除` + (data.condition ? `；原使用条件：${data.condition}` : ""),
         secret: encrypt(
           this.key,
           "vault",

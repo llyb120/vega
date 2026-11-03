@@ -19,6 +19,9 @@ import chromeDefinition from "../../shared/chrome-tool.json";
 import employeeDefinition from "../../shared/employee-tool.json";
 import { readPath, textSlice } from "./file-read";
 import { materializeSkill, skillEntry, skillKind } from "./skills";
+import { credentialValues, vaultSite, type CredentialBinding } from "./credentials";
+import { verifyVaultUse } from "./vault-use";
+import { VAULT_USAGE } from "./vault";
 import { isDeepStrictEqual } from "node:util";
 import { maskedConfig, mergeSecrets } from "./config";
 import type { Session, Call, Message } from "./store";
@@ -63,6 +66,8 @@ export class Tools {
   context: Context;
   setupAccess?: "provider";
   actorId?: string;
+  private credentials: CredentialBinding[] = [];
+  private browserTab?: string;
   sceneStack: string[] = [];
   mcp: MCP;
   constructor(
@@ -286,6 +291,7 @@ export class Tools {
           (name: string) => !name.startsWith("orbit_"),
         );
       delete employee.parameters.properties.events;
+      employee.parameters.properties.url = { type: "string", maxLength: 2048, description: "可选：vault_get/vault_send 当前页面或服务地址，辅助核对使用条件；无需在密码本配置网站。通常会自动参考当前浏览器观察。" };
       employee.parameters.properties.condition = { type: "string", minLength: 1, maxLength: 2000, description: "职责的自然语言触发条件，配合text职责内容即可；新建/修改时自动识别，不与times/everyMinutes/nextAt混填。示例每天9点、每30分钟检查、按交代任务需要。无法自动监听的外部事件须明确检查频率，不能假称已订阅。" };
       employee.parameters.properties.text.description += "。remember仅一条稳定事实，去除首尾空白后须为1–200字符（中英文、标点与换行均计数），建议100字符以内；长度报错后先精简text，多件事分开保存，不要原样重试或直接截断。";
       employee.parameters.properties.profile.description = "兼容字段：新主任务始终从lightweight起步，不用profile直接选择编码模型；实际涉及编码时由原主会话switch_scene升级，续做保留现场，但可按后续需求回轻量或再次升级。";
@@ -304,6 +310,7 @@ export class Tools {
           : this.session.employeeId
             ? EMPLOYEE_CHAT_RULES
           : "当前是用户的普通会话，不是牛马任务。普通请求直接在本会话处理，不需要牛马启用、工作时间或progress/help/defer/relay流程，Chrome在computer场景直接使用。仅在用户明确派给牛马或管理牛马数据时调用此工具；用户说“交给牛马：xxx”时只add todo并告知，当前会话不转换为牛马会话，任务由牛马自己的独立会话执行。");
+      employee.description += VAULT_USAGE;
       if (this.session.employeeId) employee.description += "主动积累已验证、可复用且权限允许的长期事实；先核对并更新原id，先remember成功再确认，临时进度和凭据不进记忆，任务交付前保存新事实。";
       if (this.session.employeeId && !this.session.taskId) {
         const team = this.engine.employeeFor(this.session).state().scope === "team";
@@ -339,9 +346,32 @@ export class Tools {
     return agent;
   }
 
+  private async credentialScope(a: Obj) {
+    const entry = this.engine.vault.list().find((item) => item.id === a.id && (!item.tempFor || item.tempFor === this.session.taskId));
+    assert(entry, "Vault entry not found for this task");
+    const task = this.session.taskId ? this.engine.employeeFor(this.session).task(this.engine.employeeFor(this.session).state(), this.session.taskId).text
+      : this.engine.store.messages(this.session.id).findLast((message) => message.role === "user")?.text || "";
+    const browser = this.session.localAgent ? this.engine.localBrowsers.peek(this.session.id) : this.session.employeeId ? this.engine.browsers.peek(this.session.employeeId) : this.engine.chrome;
+    const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
+    const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
+    const pages = (observation?.pages || []).filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
+      url: vaultSite(page.url) + new URL(page.url).pathname, title: page.title || "", text: String(page.visibleText || page.text || "").slice(0, 2000),
+      fields: (page.items || []).filter((item: Obj) => item.editable && item.inView !== false).slice(0, 12).map((item: Obj) => ({ name: item.name, context: item.fieldContext })),
+    }));
+    const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (a.action === "vault_send" ? "为当前任务提供加密凭据支援" : ""), task: task.slice(0, 4000), ...(a.url ? { url: vaultSite(a.url) } : {}), pages }, this.signal);
+    this.signal.throwIfAborted();
+    const latest = this.engine.vault.list().find((item) => item.id === entry.id);
+    assert(latest?.name === entry.name && latest?.condition === entry.condition, "凭据使用条件已变化，请重新核对");
+    return scope;
+  }
   async execute(call: Call, model: Model): Promise<Outcome> {
     try {
-      return await this.executeInner(call, model);
+      const result = await this.executeInner(call, model);
+      if (result.secret && (call.name === "vault" || (call.name === "employee" && call.arguments.action === "vault_get"))) {
+        const credential = JSON.parse(result.secret);
+        this.credentials.push({ site: credential.scopeSite || "", values: credentialValues(credential.content) });
+      }
+      return result;
     } catch (error) {
       if (error instanceof LocalAgentUnavailable && !this.signal.aborted)
         return { value: { status: "needs_review", reason: error.message }, error: true, stop: true, pause: error.message };
@@ -480,15 +510,21 @@ export class Tools {
         const value = await employee.control(a);
         return { value, task: taskLink(a.id, a.action !== "stop" && !value.duplicate) };
       }
+      if (["vault_get", "vault_send"].includes(a.action)) employee.authorize(employee.state(), this.session.taskId || "", a);
+      const scope = ["vault_get", "vault_send"].includes(a.action) ? await this.credentialScope(a) : "";
       const result = await employee.execute(
         this.session.taskId || "",
         await prepareDutyInput(this.engine, employee, { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) }, this.session.taskId || "", this.signal),
       );
+      if (a.action === "vault_get" && result.secret) result.secret = JSON.stringify({ ...JSON.parse(result.secret), scopeSite: scope });
       return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? taskLink(result.value.id) : undefined };
     }
     if (call.name === "vault") {
       assert(!this.session.taskId, "Use the employee vault tools here");
-      return this.engine.vault.executeTool(a);
+      const scope = a.action === "get" ? await this.credentialScope(a) : "";
+      const result = this.engine.vault.executeTool(a);
+      if (result.secret) result.secret = JSON.stringify({ ...JSON.parse(result.secret), scopeSite: scope });
+      return result;
     }
     if (call.name === "chrome") {
       const browser = await this.engine.chromeFor(this.session, this.signal);
@@ -497,7 +533,9 @@ export class Tools {
         this.session.cwd,
         a,
         this.signal,
+        this.credentials,
       );
+      this.browserTab = result.tabTag || a.tabTag || this.browserTab;
       const images: Outcome["images"] = [];
       for (const im of result.images || []) {
         this.engine.store.grantBlob(im.blobId, this.session.id);
