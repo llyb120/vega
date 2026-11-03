@@ -14,14 +14,15 @@ function employeeWorkspace(url = "https://vega.test/", list = [{ id: "ea", activ
   } };
   const context: any = {
     URL, window, user: ref({ id: "alice" }), selectedEmployee: ref(""), employees: ref([]), activeTaskCount: ref(0), employee: ref({}),
+    employeeSessionVersion: ref(0), pruneChatCache: async () => {},
     employeeSession: ref(""), employeeEvent: ref(null), employeeTab: ref("chat"), employeeExecutionOpen: ref(false),
     employeeTaskFilter: ref("active"), employeeTaskFocus: ref(""), dutyOpen: ref(false), memoryID: ref(""), taskText: ref(""), employeeError: ref(""),
     employeeComposers: ref({}), creatingEmployee: ref(false), view: ref("employee"), closeNavigation() {},
     api: async (path: string) => { calls.push(path); return path === "/employees" ? list : { id: path.split("/").at(-1) }; },
   };
-  const methods = vm.runInNewContext(between("function employeeLocationChanged()", "function employeeApi(") + between("async function chooseEmployee(", "async function createEmployee(") + "\n({ loadEmployee, chooseEmployee, employeeLocationChanged })", context);
+  const methods = vm.runInNewContext(between("let employeeLoadVersion =", "function employeeApi(") + between("async function chooseEmployee(", "async function createEmployee(") + "\n({ loadEmployee, chooseEmployee, employeeLocationChanged })", context);
   context.refreshEmployee = methods.loadEmployee;
-  return { ...context, ...methods, calls, navigation, location };
+  return { ...context, ...methods, calls, navigation, location, setApi: (api: any) => { context.api = api; }, setPrune: (prune: any) => { context.pruneChatCache = prune; } };
 }
 
 test("employee URLs distinguish workspaces and survive refresh or opening a shared link", async () => {
@@ -37,6 +38,38 @@ test("employee URLs distinguish workspaces and survive refresh or opening a shar
   assert.equal(refreshed.employee.value.id, "eb");
   assert.deepEqual(refreshed.calls, ["/employees", "/employees/eb"]);
   assert.equal(refreshed.navigation.length, 0, "loading an existing link does not add redundant history entries");
+});
+
+test("switching to a known bot mounts its cached chat before workspace requests finish", async () => {
+  const state = employeeWorkspace();
+  await state.loadEmployee();
+  let release!: (value: any) => void;
+  state.setApi((path: string) => path === "/employees" ? new Promise((resolve) => release = resolve) : Promise.resolve({ id: "eb" }));
+  const choosing = state.chooseEmployee("eb");
+  assert.equal(state.employee.value.id, "eb");
+  assert.equal(state.employeeComposers.value.eb.text, "");
+  assert.equal(state.employee.value.canManage, false, "management waits for fresh authorized details");
+  release([{ id: "ea", activeTasks: 0 }, { id: "eb", activeTasks: 0 }]);
+  await choosing;
+});
+
+test("successful bot-list refresh prunes deleted bots; stale lists cannot undo a newer selection", async () => {
+  const state = employeeWorkspace();
+  await state.loadEmployee();
+  const pruned: any[] = [];
+  state.setPrune(async (...args: any[]) => pruned.push(args));
+  let release!: (value: any) => void, lists = 0;
+  state.setApi((path: string) => {
+    if (path !== "/employees") return Promise.resolve({ id: "eb" });
+    if (++lists === 1) return new Promise((resolve) => release = resolve);
+    return Promise.resolve([{ id: "eb", activeTasks: 0 }]);
+  });
+  const stale = state.loadEmployee();
+  await state.chooseEmployee("eb");
+  release([{ id: "ea", activeTasks: 0 }]);
+  await stale;
+  assert.equal(state.selectedEmployee.value, "eb");
+  assert.deepEqual(pruned.map(([user, ids]) => [user, Array.from(ids)]), [["alice", ["eb"]]]);
 });
 
 test("an inaccessible or deleted employee URL falls back only after checking the visible list", async () => {
@@ -80,8 +113,9 @@ test("an employee link remains intact through login and is resolved after authen
 });
 
 test("employee deletion requires confirmation, removes only its own draft and chooses a remaining employee", async () => {
-  const calls: any[] = [], context: any = {
+  const calls: any[] = [], cleared: any[] = [], context: any = {
     employee: ref({ id: "ea", name: "Delete" }), selectedEmployee: ref("ea"), employeeDeleting: ref(false),
+    user: ref({ id: "alice" }), employeeLoadVersion: 0, clearChatCache: async (...args: any[]) => cleared.push(args),
     employeeComposers: ref({ ea: { text: "delete draft" }, eb: { text: "keep draft" } }), employeeSession: ref(""), employeeTab: ref("settings"), employeeError: ref(""),
     confirm: () => false, api: async (...args: any[]) => calls.push(args), toast() {},
   };
@@ -96,6 +130,7 @@ test("employee deletion requires confirmation, removes only its own draft and ch
   assert.equal(context.employeeComposers.value.eb.text, "keep draft");
   assert.equal(context.selectedEmployee.value, "eb");
   assert.equal(context.employeeDeleting.value, false);
+  assert.deepEqual(cleared, [["alice", "ea"]]);
 });
 
 test("execution switch never overwrites a different employee selected while defaults are being validated", async () => {

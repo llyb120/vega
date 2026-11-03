@@ -32,7 +32,7 @@ function mount(handler: (path: string, method: string, data: any) => any = () =>
       onload: any;
       readAsDataURL() { readers.push(this); }
     },
-    localBridge: null, stopPresence() {}, employeeRefreshTimer: undefined, closed: false, eventGeneration: 0,
+    localBridge: null, stopPresence() {}, employeeLoadVersion: 0, clearChatCache: async () => {}, employeeRefreshTimer: undefined, closed: false, eventGeneration: 0,
     eventReconnect: undefined, eventsHeartbeat: undefined, eventsSocket: null, eventsReady: false, eventsWasConnected: false,
     clearTimeout, clearInterval, rejectSocketRequests() {}, authenticated: ref(true), password: ref(""), setupToken: ref(""),
     employees: ref([]), selectedEmployee: ref(""), employeeEvent: ref(null), employeeComposers: ref({}),

@@ -20,5 +20,8 @@ export function chatHistory(store: Store, session: string, query: URLSearchParam
   const limit = seqParam(query, "limit", 1, CHAT_PAGE_MAX), before = seqParam(query, "before", 1), after = seqParam(query, "after", 0);
   if (limit === undefined && before === undefined && after === undefined) return { messages: store.messages(session) };
   check(after === undefined || (before === undefined && limit === undefined), 400, "after cannot be combined with before or limit");
-  return store.messagePage(session, { before, after, limit: limit ?? 100 });
+  const page = store.messagePage(session, { before, after, limit: limit ?? 100 });
+  if (after === undefined) return page;
+  const lastSeq = (store.db.prepare("SELECT COALESCE(MAX(seq),0) seq FROM messages WHERE session=?").get(session) as { seq: number }).seq;
+  return { ...page, lastSeq };
 }

@@ -9,6 +9,17 @@ function fixture(count: number) {
   for (let i = 1; i <= count; i++) store.append(session.id, { role: i % 2 ? "user" : "assistant", text: "m" + i } as any);
   return { store, id: session.id };
 }
+test("incremental chat sync exposes the server tail so stale caches can detect deleted history", () => {
+  const { store, id } = fixture(5);
+  try {
+    assert.equal((chatHistory(store, id, q({ after: "5" })) as any).lastSeq, 5);
+    store.db.prepare("DELETE FROM messages WHERE session=? AND seq>?").run(id, 2);
+    const rolledBack = chatHistory(store, id, q({ after: "5" })) as any;
+    assert.equal(rolledBack.lastSeq, 2);
+    assert.deepEqual(rolledBack.messages, []);
+  } finally { store.close(); }
+});
+
 const q = (params: Record<string, string> = {}) => new URLSearchParams(params);
 
 test("chat history without paging parameters returns the full history unchanged", () => {

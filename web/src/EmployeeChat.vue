@@ -5,7 +5,8 @@ import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { employeeChatMessages } from "./conversation";
 import { createChatHistory } from "./chat-history.js";
-const props = defineProps({ api: Function, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array });
+import { createChatCache } from "./chat-cache.js";
+const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array });
 const emit = defineEmits(["task"]);
 const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
@@ -43,7 +44,7 @@ const displayed = computed(() => {
   }
   return rows;
 });
-const history = createChatHistory({ api: (...args) => props.api(...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore });
+const history = createChatHistory({ api: (...args) => props.api(...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore, cache: createChatCache(props.userId, props.employeeId) });
 
 // Message avatars rest on one up-right glance. The reply that replaces the typing row starts from the typing
 // avatar's last glance and eases into it (in memory only; nothing is persisted).
@@ -77,7 +78,7 @@ async function loadOlder() {
     await history.older();
     await nextTick();
     if (el && !disposed) el.scrollTop = top + (el.scrollHeight - height);
-  } catch (e) { if (!disposed) error.value = e.message; }
+  } catch (e) { if (!disposed && !e.network) error.value = e.message; }
   finally { loadingOlder.value = false; }
 }
 const OLDER_THRESHOLD = 600;
@@ -86,21 +87,26 @@ async function fillViewport() {
   for (let guard = 0; guard < 20 && hasMore.value && !disposed; guard++) {
     const el = transcript.value;
     if (el && el.scrollHeight > el.clientHeight + OLDER_THRESHOLD) break;
+    const first = messages.value[0]?.seq;
     await loadOlder();
+    if (messages.value[0]?.seq === first) break;
   }
 }
 let ready = false;
 function onScroll() {
   const el = transcript.value;
   if (!ready || !el || el.scrollTop >= OLDER_THRESHOLD || !hasMore.value || loadingOlder.value) return;
-  void loadOlder().then(onScroll);
+  const first = messages.value[0]?.seq;
+  void loadOlder().then(() => { if (messages.value[0]?.seq !== first) onScroll(); });
 }
 async function load() {
+  let cached = false;
   try {
-    await history.load();
-    await scroll();
-    await fillViewport();
+    await history.load(async () => { cached = true; ready = true; await scroll(); });
+    if (disposed) return;
+    if (!cached || nearBottom()) await scroll();
     ready = true;
+    await fillViewport();
   } catch (e) { if (!disposed && !e.network) error.value = e.message; }
 }
 /** Fetch only messages after the newest one we hold; `apply` runs in the same tick as the merge. */
@@ -228,7 +234,7 @@ watch(() => props.revision, () => refresh());
 // the last of them, so every event is handled synchronously as it is assigned.
 watch(() => props.event, handleEvent, { flush: "sync" });
 onMounted(load);
-onBeforeUnmount(() => { disposed = true; });
+onBeforeUnmount(() => { disposed = true; history.dispose(); });
 </script>
 <template>
   <section class="employee-chat">

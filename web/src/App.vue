@@ -7,6 +7,7 @@ import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
 import EmployeeChat from "./EmployeeChat.vue";
+import { clearChatCache, pruneChatCache } from "./chat-cache.js";
 import EmployeeHeader from "./EmployeeHeader.vue";
 import EmployeeTasks from "./EmployeeTasks.vue";
 import EmployeeDuties from "./EmployeeDuties.vue";
@@ -505,13 +506,13 @@ function socketMessage(value) {
       const result = value.body ? JSON.parse(value.body) : null;
       if (value.status === 401 && authenticated.value) resetLogin();
       if (value.status < 200 || value.status >= 300)
-        throw Error(
+        throw Object.assign(Error(
           result?.data?.error ||
             result?.statusMessage ||
             result?.message ||
             (typeof result?.error === "string" ? result.error : "") ||
             value.statusText,
-        );
+        ), { status: value.status });
       request.resolve(result);
     } catch (e) {
       request.reject(e);
@@ -690,6 +691,8 @@ async function login() {
   authBusy.value = false;
 }
 function resetLogin() {
+  void clearChatCache(user.value?.id);
+  employeeLoadVersion++;
   try {
     sessionStorage.removeItem("vega:provider-login:" + user.value?.id);
     sessionStorage.removeItem("vega:session:" + user.value?.id);
@@ -1130,6 +1133,7 @@ async function handleEvent(event) {
       break;
   }
 }
+let employeeLoadVersion = 0;
 function employeeLocationChanged() {
   if (user.value) return chooseEmployee(new URL(window.location.href).searchParams.get("employee") || "");
 }
@@ -1139,11 +1143,19 @@ function setEmployeeURL(id, replace = false) {
   else url.searchParams.delete("employee");
   if (url.href !== window.location.href) window.history[replace ? "replaceState" : "pushState"](null, "", url.href);
 }
+function prepareEmployee(id) {
+  const entry = employees.value.find((item) => item.id === id);
+  if (!entry) return;
+  employeeComposers.value[id] ||= { text: "", images: [] };
+  if (employee.value.id !== id)
+    employee.value = { ...entry, canManage: false, duties: [], tasks: [], memories: [], runs: [] };
+}
 async function loadEmployee() {
   if (!user.value) return;
-  const owner = user.value.id;
+  const owner = user.value.id, request = ++employeeLoadVersion;
   const list = await api("/employees");
-  if (user.value?.id !== owner) return;
+  if (user.value?.id !== owner || request !== employeeLoadVersion) return;
+  void pruneChatCache(owner, list.map((entry) => entry.id));
   employees.value = list;
   activeTaskCount.value = list.reduce((count, employee) => count + employee.activeTasks, 0);
   const requested = selectedEmployee.value || new URL(window.location.href).searchParams.get("employee");
@@ -1155,9 +1167,10 @@ async function loadEmployee() {
     employeeSession.value = "";
     return;
   }
-  employeeComposers.value[id] ||= { text: "", images: [] };
+  prepareEmployee(id);
   const data = await api(`/employees/${id}`);
-  if (user.value?.id !== owner || selectedEmployee.value !== id) return;
+  if (user.value?.id !== owner || selectedEmployee.value !== id || request !== employeeLoadVersion) return;
+  employeeSessionVersion.value++;
   if (employeeTab.value !== "settings" || employee.value.id !== id) employee.value = data;
   else { employee.value.tasks = data.tasks; employee.value.busy = data.busy; employee.value.chatRunning = data.chatRunning; employee.value.executionClients = data.executionClients; employee.value.execution = data.execution; employee.value.avatar = data.avatar; }
 }
@@ -1170,6 +1183,7 @@ function employeeBrowserApi(path, method = "GET", data) {
 }
 async function chooseEmployee(id) {
   selectedEmployee.value = id;
+  prepareEmployee(id);
   setEmployeeURL(id);
   employeeSession.value = "";
   employeeEvent.value = null;
@@ -1198,11 +1212,13 @@ async function createEmployee() {
 }
 async function deleteEmployee() {
   if (employeeDeleting.value || !employee.value.id) return;
-  const id = employee.value.id, name = employee.value.name;
+  const id = employee.value.id, name = employee.value.name, owner = user.value.id;
   if (!confirm(`永久删除「${name}」？\n\n将删除该牛马的职责、记忆、所有任务和执行会话，并清除其浏览器登录数据。项目文件和共享密码本不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
   employeeDeleting.value = true;
   try {
     await api(`/employees/${id}?confirmed=true`, "DELETE");
+    employeeLoadVersion++;
+    void clearChatCache(owner, id);
     delete employeeComposers.value[id];
     if (selectedEmployee.value === id) {
       selectedEmployee.value = "";
@@ -1500,7 +1516,7 @@ onBeforeUnmount(() => {
               <button v-if="attentionTasks.length && !workPanelVisible" type="button" class="attention-strip" @click="attentionTasks.length === 1 ? openEmployeeTask(attentionTasks[0].id) : showTasks('attention')">
                 <Icon name="hand" :size="16" /><span><strong>{{ attentionTasks.length }} 项需要你处理</strong><span class="truncate">{{ attentionTasks[0].text }}</span></span><Icon name="right" :size="16" />
               </button>
-              <EmployeeChat :key="selectedEmployee" :api="api" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" :tasks="employee.tasks" @task="openEmployeeTask" />
+              <EmployeeChat :key="user.id + ':' + selectedEmployee" :api="api" :user-id="user.id" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" :tasks="employee.tasks" @task="openEmployeeTask" />
             </div>
             <button v-if="workPanelVisible && !wide" type="button" class="panel-backdrop" aria-label="关闭当前工作" tabindex="-1" @click="workRailOpen = false"></button>
             <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
