@@ -39,7 +39,7 @@ async function segment(employee: Employee, job: Task) {
 test("employees isolate state, business keys, conversations and owner access but share credentials; legacy state stays default", async () => {
   const { store, employee, vault } = fixture();
   try {
-    employee.update((s) => s.memories.push({ id: "old", text: "legacy" }));
+    employee.update((s) => s.memories.push({ id: "old", claim: "legacy", kind: "convention", scope: "global", scene: "any", confidence: 0.5, usefulness: 0.4, status: "active", links: {}, createdAt: Date.now(), updatedAt: Date.now(), text: "legacy" }));
     const a = employee.for(employee.create({ name: "A" }, "alice").id);
     const b = employee.for(employee.create({ name: "B" }, "bob").id);
     assert(a.accessible({ id: "alice", role: "operator" }));
@@ -47,8 +47,8 @@ test("employees isolate state, business keys, conversations and owner access but
     assert(a.accessible({ id: "alice", role: "viewer" }));
     assert(!a.manageable({ id: "alice", role: "viewer" }));
     assert(a.accessible({ id: "root", role: "admin" }));
-    assert.equal(employee.state().memories[0].text, "legacy");
-    await a.execute("", { action: "remember", text: "A-only" });
+    assert.equal(employee.state().memories[0].claim || employee.state().memories[0].text, "legacy");
+    await a.execute("", { action: "memory_propose", claim: "A-only durable convention", source: "ui" });
     assert.equal(b.state().memories.length, 0);
     const first = await task(a, "A work", { key: "same-business-key" });
     const second = await task(b, "B work", { key: "same-business-key" });
@@ -76,7 +76,7 @@ test("employees isolate state, business keys, conversations and owner access but
     }
     assert.equal(store.object<any>("vault", secret.id).usedFor, "test");
     const reopened = new Employee(store, vault, employee.runtime);
-    assert.equal(reopened.for(a.employeeId).state().memories[0].text, "A-only");
+    assert.match(reopened.for(a.employeeId).state().memories[0].claim, /A-only/);
   } finally { employee.close(); store.close(); }
 });
 

@@ -75,19 +75,19 @@ test("team chat management uses the current sender, not the employee owner or a 
     const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {});
     const action = (name: string) => tools.definitions({} as any).find((tool) => tool.name === "employee")!.parameters.properties.action.enum.includes(name);
     tools.actorId = "admin";
-    assert(action("remember") && action("add"));
-    await tools.execute({ id: "remember", name: "employee", arguments: { action: "remember", text: "Use this workflow" } }, {} as any);
+    assert(action("memory_propose") && action("add"));
+    await tools.execute({ id: "remember", name: "employee", arguments: { action: "memory_propose", claim: "Use this workflow", source: "ui" } }, {} as any);
     await tools.execute({ id: "duty", name: "employee", arguments: { action: "add", kind: "duty", text: "Weekly review", manual: true } }, {} as any);
     assert.equal(employee.state().duties.length, 1);
     tools.actorId = "member";
-    assert(!action("remember") && !action("vault_get"));
-    await assert.rejects(tools.execute({ id: "denied", name: "employee", arguments: { action: "remember", text: "untrusted change" } }, {} as any), /无团队牛马管理权限/);
+    assert(!action("memory_propose") && !action("vault_get"));
+    await assert.rejects(tools.execute({ id: "denied", name: "employee", arguments: { action: "memory_propose", claim: "untrusted change", source: "ui" } }, {} as any), /无团队牛马管理权限/);
     await tools.execute({ id: "work", name: "employee", arguments: { action: "add", kind: "todo", text: "authorized work" } }, {} as any);
     tools.actorId = "admin";
     store.db.prepare("UPDATE web_users SET role='operator' WHERE id='admin'").run();
-    assert(!action("remember"), "revoked management cannot survive in a cached conversation");
+    assert(!action("memory_propose"), "revoked management cannot survive in a cached conversation");
     tools.actorId = undefined;
-    assert(!action("remember"), "owner identity is never a fallback for a shared conversation");
+    assert(!action("memory_propose"), "owner identity is never a fallback for a shared conversation");
   } finally { await engine.close(); store.close(); }
 });
 

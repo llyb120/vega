@@ -332,37 +332,20 @@ test("duty validation, manual scheduling and removed Orbit do not trigger work",
       Date.parse("2026-02-01T23:00:00+08:00"),
   );
 });
-test("memory forgetting, permanent retention and relevant reinforcement", () => {
-  const e = employee(),
-    now = Date.now();
-  const state = e.state();
-  state.memories = [
-    {
-      id: "old",
-      text: "obsolete",
-      at: now - 40 * 86400000,
-      importance: 1,
-      strength: 1,
-    },
-    {
-      id: "keep",
-      text: "长期项目使用Go",
-      at: now - 1000 * 86400000,
-      importance: 3,
-      strength: 1,
-    },
-    {
-      id: "related",
-      text: "长期项目使用TS",
-      at: now,
-      importance: 1,
-      strength: 1,
-    },
-  ];
-  const result = recallMemory(state, "长期项目使用TS", now);
-  assert.equal(result.length, 2);
-  assert.equal(state.memories[1].strength, 2);
-  assert.equal(retention(state.memories[0], now), 1);
+test("memory relevance floor, migration and feedback-driven usefulness", () => {
+  const now = Date.now();
+  const state: any = {
+    memories: [
+      { id: "perm", text: "午餐偏好麻辣烫", importance: 3, at: now - 40 * 86400000 },
+      { id: "code", text: "长期项目使用TS", importance: 2, strength: 1, at: now - 3 * 86400000, usedAt: now - 3 * 86400000 },
+    ],
+  };
+  const result = recallMemory(state, "长期项目使用TS", now, true);
+  assert(result.some((m: any) => m.id === "code"));
+  assert(!result.some((m: any) => m.id === "perm"), "unrelated permanent preference must not enter TopK");
+  assert.equal(state.memories.find((m: any) => m.id === "code").claim, "长期项目使用TS");
+  assert(state.memories.find((m: any) => m.id === "code").usefulness > 0.3);
+  assert.equal(retention(state.memories.find((m: any) => m.id === "perm"), now), 1);
 });
 test("vault AES-GCM/X25519 matches original wire format and task-limited temporary entries", () => {
   const s1 = store(),

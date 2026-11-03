@@ -18,7 +18,7 @@ import { Catalog } from "./catalog";
 import { Providers, ProviderError, type Emit } from "./provider";
 import { Tools, type Outcome } from "./tools";
 import { Context, estimate, ACP_GUIDE } from "./context";
-import { Employee, recallMemory, type EmployeeRuntime } from "./employee";
+import { Employee, recallMemory, formatMemoriesForPrompt, type EmployeeRuntime } from "./employee";
 import { EmployeeBrowsers } from "./employee-browsers";
 import { LocalBrowsers } from "./local-browsers";
 import { Vault } from "./vault";
@@ -637,7 +637,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         if (session.employeeId && session.taskId && session.scene === "coding" && !await this.employeeFor(session).claimWorkspace(session, true)) return;
         const skills = await loadSkills(config, this.store, session.cwd);
         const employeeState = worker?.state();
-        const memories = employeeState ? "\n相关长期记忆（已保存，按当前问题召回；工具写入/更新后立即刷新）：" + JSON.stringify(recallMemory(employeeState, memoryQuery, Date.now(), false)) : "";
+        const memories = employeeState ? formatMemoriesForPrompt(recallMemory(employeeState, memoryQuery, Date.now(), false) as any) : "";
         const taskIndex = employeeState ? "\n当前任务索引（详情和证据用employee list核对）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: task.text, status: task.status }))) : "";
         const system =
           stable + memories + taskIndex + "\n" + (await sessionPrompt(session, config, this.store, session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : ""));
