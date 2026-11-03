@@ -292,7 +292,7 @@ export class Relay {
       return {
         status: "ready",
         tasks: s.tasks.filter(
-          (t) => !["done", "failed", "stopped", "cancelled"].includes(t.status),
+          (t) => !["done", "failed", "stopped", "cancelled", "sealed"].includes(t.status),
         ).length,
       };
     }

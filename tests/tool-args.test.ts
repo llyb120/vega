@@ -46,3 +46,11 @@ test("task sessions follow the scene's current primary model", () => {
   assert.equal(boundSceneModel(config, { model: "p/old", scene: "lightweight" }), "p/old");
   assert.equal(boundSceneModel(config, { model: "p/gone", scene: "coding" }), "p/code");
 });
+
+test("Chrome actions ignore schema-filled defaults but still reject real stray fields", async () => {
+  const { normalizeAction } = await import("../server/core/browser-actions");
+  const filled = { action: "click", frame: 0, ref: "e12", button: "", click_count: 0, text: "", key: "", ms: 0, selector: "", files: [], x: 0, y: 0, to_x: 0, to_y: 0, delta: 0, delta_x: 0, duration_ms: 0 };
+  assert.deepEqual(normalizeAction(filled), { action: "click", frame: 0, ref: "e12" });
+  assert.deepEqual(normalizeAction({ action: "fill", ref: "e3", text: "" }), { action: "fill", ref: "e3", text: "", frame: 0 });
+  assert.throws(() => normalizeAction({ action: "click", ref: "e1", x: 10, y: 20 }), /click: x, y/);
+});

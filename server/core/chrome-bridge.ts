@@ -28,7 +28,7 @@ export class ChromeBridge {
     }
   >();
   queued = new EventEmitter();
-  version = "0.1.15";
+  version = "0.1.16";
   constructor(public privateInstance = false) {}
   async start() {
     if (this.server) return;

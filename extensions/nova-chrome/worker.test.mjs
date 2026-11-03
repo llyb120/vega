@@ -290,6 +290,29 @@ test('ordinary poll and reply failures reconnect automatically without replaying
   assert.deepEqual(delays,[500,500],'a successful poll resets reconnect backoff');
 });
 
+test('a Chrome call that never settles cannot wedge the poll loop',async()=>{
+  const event=()=>({addListener(){}});let polls=0;const replies=[];
+  const chrome={extension:{isAllowedIncognitoAccess:async()=>false},
+    storage:{session:{get:async()=>({}),set:async()=>{}}},
+    tabs:{query:async()=>[{id:11,url:'about:blank',active:true}],get:async()=>({id:11}),update:()=>new Promise(()=>{}),onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{onDetach:event(),onEvent:event()},runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,clearTimeout,setTimeout,fetch:async(url,init)=>{
+    const endpoint=new URL(url);
+    if(endpoint.port!=='47653')return new Promise(()=>{});
+    if(endpoint.pathname==='/pair')return {ok:true,json:async()=>({token:'t'.repeat(32)})};
+    if(endpoint.pathname==='/reply'){replies.push(JSON.parse(init.body));return {ok:true};}
+    polls++;
+    if(polls>2)return new Promise(()=>{});
+    const [tab]=await scope.api.inventory();
+    return {ok:true,json:async()=>({command:{id:`hung-${polls}`,operation:'goto',args:{tabTag:tab.tag,url:'http://localhost:6502/'},expiresAt:Date.now()+50}})};
+  }};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+'\nglobalThis.api={inventory};',scope);
+  for(let i=0;i<400 && polls<3;i++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(polls,3,'the loop keeps polling after a hung command');
+  assert.deepEqual(replies.map(r=>r.id),['hung-1','hung-2']);
+  assert.match(replies[0].error,/时限/);
+});
+
 test('after a reload Nova still holds the old clientId: retry soon instead of waiting for the alarm',async()=>{
   const event=()=>({addListener(){}});let polls=0;
   const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},tabs:{query:async()=>[],onRemoved:event(),onReplaced:event(),onUpdated:event()},

@@ -10,6 +10,7 @@ export const TASK_LABELS = {
   failed: "失败",
   stopped: "已停止",
   cancelled: "已取消",
+  sealed: "已封存",
   pending: "待执行",
   in_progress: "进行中",
   completed: "已完成",
@@ -25,7 +26,7 @@ export const taskTone = (status) => TONES[status] || "neutral";
 export const taskLabel = (status) => TASK_LABELS[status] || status || "";
 /** Actively being worked on right now: the statuses the shared mapping shows in the "info" tone. */
 export const isInProgress = (status) => taskTone(status) === "info";
-export const isEnded = (status) => ["done", "failed", "cancelled", "stopped"].includes(status);
+export const isEnded = (status) => ["done", "failed", "cancelled", "stopped", "sealed"].includes(status);
 export const needsAttention = (status) => ["waiting", "approval"].includes(status);
 export function planProgress(plan) {
   if (!plan?.length) return null;

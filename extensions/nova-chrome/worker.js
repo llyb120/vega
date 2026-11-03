@@ -276,6 +276,9 @@ async function connect(origin, attempt = 0) {
     const post = (path,body) => fetch(`${config.origin}${path}`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${config.token}`},body:JSON.stringify({...body,clientId:model.clientId}),signal:AbortSignal.timeout(25000)});
     instances.set(origin, post);
     for (;;) {
+      // Chrome suspends an MV3 worker after ~30s without extension API activity, even with a fetch in flight;
+      // a cheap API call per long-poll round keeps it awake so queued commands are taken immediately.
+      await Promise.resolve(chrome.runtime.getPlatformInfo?.()).catch(()=>{});
       const response = await post('/poll',{});
       if (!response.ok) throw Object.assign(Error(`连接被拒绝 HTTP ${response.status}；检查是否连接了另一个 Chrome 实例`),{conflict:response.status===409});
       connections.add(origin);
@@ -288,7 +291,12 @@ async function connect(origin, attempt = 0) {
       }
       if (!command) continue;
       let reply;
-      const result = commands.then(()=>execute(command));
+      // A Chrome API that never settles (e.g. a tab stuck loading a hung dev server) must not wedge the poll loop:
+      // past the command's deadline the reply goes out and the next command is taken.
+      let deadline;
+      const result = Promise.race([commands.then(()=>execute(command)), new Promise((_, reject)=>{
+        deadline = setTimeout(()=>reject(Error('Chrome 未在时限内完成该命令（页面可能卡在加载或无响应）；结果可能已执行，请先 tabs 观察再决定，不要直接重放')), Math.max(0, command.expiresAt - Date.now()) + 500);
+      })]).finally(()=>clearTimeout(deadline));
       commands = result.catch(()=>{});
       try { reply={id:command.id,result:await result}; }
       catch(error){reply={id:command.id,error:String(error?.message || error)};}
@@ -298,8 +306,9 @@ async function connect(origin, attempt = 0) {
     }
   } catch (error) {
     // Reconnect transport after ordinary failures too; never resend an executed command.
-    if (attempt < 12) reconnects.set(origin, setTimeout(() => void connect(origin, attempt + 1),
-      error?.conflict ? 5000 : Math.min(500 * 2 ** attempt, 5000)));
+    // Keep retrying (capped backoff): giving up left Chrome disconnected until the next alarm or a manual reload.
+    reconnects.set(origin, setTimeout(() => void connect(origin, attempt + 1),
+      error?.conflict ? 5000 : Math.min(500 * 2 ** Math.min(attempt, 4), 5000)));
   } finally { connections.delete(origin); instances.delete(origin); loops.delete(origin); }
 }
 chrome.debugger.onEvent.addListener((source,method,params)=>{

@@ -54,7 +54,9 @@ const workspaceKey = async (session: Session) => {
   return (session.localAgent ? "client:" + session.clientId : "server") + "\0" + (windows ? path.toLowerCase() : path);
 };
 export const ended = (status: string) =>
-  ["done", "failed", "stopped", "cancelled"].includes(status);
+  ["done", "failed", "stopped", "cancelled", "sealed"].includes(status);
+/** Sealed tasks are archived by the user by hand; nothing (model, scheduler, remote member) may revive them. */
+const SEALED_MESSAGE = "任务已封存，禁止恢复、续做或重新派发";
 
 const PLAN_SETTLED = new Set(["completed", "cancelled"]);
 const planUnresolved = (plan: Obj[] | undefined) =>
@@ -1232,6 +1234,8 @@ export class Employee {
         !owner.token || t.owner.token === owner.token,
         "Only the assigning member may control this task",
       );
+      if (t.status === "sealed")
+        assert(["stop", "remove"].includes(a.action), SEALED_MESSAGE);
       if (a.action === "resume" && a.text) {
         assert(typeof a.text === "string" && a.text.length <= 8000 && a.text.trim(), "Invalid task supplement");
         assert(!["approval", "done", "cancelled"].includes(t.status), "Use explicit approval or a new task");
@@ -1260,6 +1264,24 @@ export class Employee {
           "Task still executing; wait until slot is released",
         );
       switch (a.action) {
+        case "seal": {
+          assert(!owner.token && a.manual === true, "封存只能由用户在界面上手动操作");
+          t.sealedFrom = t.status;
+          t.status = "sealed";
+          t.nextCheckAt = 0;
+          t.waiting = "";
+          t.approval = "";
+          t.recovery = undefined;
+          t.workspaceWait = undefined;
+          t.supplementPending = false;
+          t.finishedAt ||= Date.now();
+          this.releaseWorkspace(t.id);
+          this.vault.dropTemp(t.id);
+          for (const session of new Set([t.workSession, t.computerSession].filter(Boolean)))
+            this.runtime.cancel(session);
+          this.note(s, t, "seal", owner.name || "用户", "任务已封存");
+          break;
+        }
         case "stop":
           if (ended(t.status) && t.status !== "stopped") return { ok: true, status: t.status };
           t.status = "stopped";
