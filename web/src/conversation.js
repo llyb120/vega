@@ -42,7 +42,7 @@ export function timelineOf(messages) {
     else
       groups.push({
         kind: "process",
-        key: `process-${item.seq ?? groups.length}`,
+        key: `process-${item.callId || item.id || item.seq || groups.length}`,
         items: [item],
       });
   };
@@ -67,8 +67,12 @@ export function timelineOf(messages) {
   return groups;
 }
 
-export function conversationTurns(messages, { running = false, thinking = "", live = "" } = {}) {
+export function conversationTurns(messages, { running = false, thinking = "", live = "" } = {}, previous = []) {
   const turns = groupTurns(messages);
+  const bySeq = new Map();
+  for (const turn of previous) for (const message of [turn.user, ...turn.body])
+    if (message?.seq != null) bySeq.set(message.seq, turn);
+  const itemKey = (item) => `${item.role}-${item.callId || item.id || item.seq}`;
   if (running && !turns.length) turns.push({ user: null, body: [], process: [], conclusion: [] });
   return turns.map((turn, index) => {
     const active = running && index === turns.length - 1;
@@ -83,8 +87,19 @@ export function conversationTurns(messages, { running = false, thinking = "", li
     for (const entry of conclusion) if (entry.kind === "process") appendThoughts(entry.items);
     if (active && thinking) appendThoughts([{ role: "thought", seq: "live-thought", text: thinking }]);
     if (active && live) process.push({ kind: "message", key: "assistant-live", message: { role: "assistant", text: live, streaming: true }, continuation: false });
+    // Prepending can reveal a turn's user or the beginning of an open tool group: keep mounted folds by overlap.
+    const old = bySeq.get(turn.user?.seq) || turn.body.map((message) => bySeq.get(message.seq)).find(Boolean);
+    const keys = new Map(), used = new Set();
+    for (const entry of old?.process || []) if (entry.kind === "process")
+      for (const item of entry.items) keys.set(itemKey(item), entry.key);
+    for (const entry of process) if (entry.kind === "process") {
+      const key = entry.items.map((item) => keys.get(itemKey(item))).find((key) => key != null && !used.has(key));
+      entry.key = key ?? entry.key;
+      used.add(entry.key);
+    }
     return {
       ...turn,
+      key: old?.key ?? `turn-${turn.user?.seq ?? turn.body[0]?.seq ?? "live"}`,
       running: active,
       process,
       lastProcessIndex: process.findLastIndex((entry) => entry.kind === "process"),

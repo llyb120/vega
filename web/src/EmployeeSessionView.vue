@@ -21,66 +21,108 @@ const session = ref(null),
   loadingOlder = ref(false),
   error = ref("");
 const transcript = ref(null);
-let version = 0;
+let version = 0, refreshVersion = 0, activeSession = "", ready = false;
+const OLDER_THRESHOLD = 600;
+const nearBottom = () => !transcript.value || transcript.value.scrollHeight - transcript.value.scrollTop - transcript.value.clientHeight < 80;
 async function refresh() {
-  const request = ++version;
-  if (session.value?.id !== props.sessionId) {
+  if (activeSession !== props.sessionId) {
+    activeSession = props.sessionId;
+    version++;
+    ready = false;
+    loadingOlder.value = false;
     record.value = null;
     session.value = null;
     messages.value = [];
     running.value = false;
     hasMore.value = false;
   }
+  const current = version, request = ++refreshVersion;
+  const initial = !record.value, last = messages.value.at(-1)?.seq ?? 0, atBottom = nearBottom();
   busy.value = true;
   error.value = "";
   try {
     const result = await props.api(
-      "/sessions/" + encodeURIComponent(props.sessionId) + "?limit=" + CHAT_PAGE_SIZE,
+      "/sessions/" + encodeURIComponent(props.sessionId) + (initial ? "?limit=" + CHAT_PAGE_SIZE : "?after=" + last),
     );
-    if (request !== version) return;
+    if (current !== version || request !== refreshVersion) return;
     if (!result.session.taskId && !(props.debug && result.session.employeeId)) throw Error("这不是牛马的会话");
+    if (!initial && Number.isSafeInteger(result.lastSeq) && result.lastSeq < last) {
+      record.value = null;
+      messages.value = [];
+      hasMore.value = false;
+      running.value = false;
+      ready = false;
+      version++;
+      loadingOlder.value = false;
+      return refresh();
+    }
+    const follow = initial || (atBottom && nearBottom());
     record.value = result;
     session.value = result.session;
-    messages.value = result.messages || [];
-    hasMore.value = !!result.hasMore;
+    messages.value = initial ? result.messages || [] : mergeMessages(messages.value, result.messages || []);
+    if (initial) hasMore.value = !!result.hasMore;
     running.value = !!result.running;
     await nextTick();
-    if (transcript.value) transcript.value.scrollTop = transcript.value.scrollHeight;
+    if (current !== version || request !== refreshVersion) return;
+    if (follow && transcript.value) transcript.value.scrollTop = transcript.value.scrollHeight;
+    if (initial) await fillViewport(current);
+    if (current === version) ready = true;
   } catch (e) {
-    if (request === version) {
-      record.value = null;
-      error.value = e.message;
+    if (current === version && request === refreshVersion) {
+      if ([401, 403, 404].includes(e.status)) {
+        record.value = null;
+        messages.value = [];
+        hasMore.value = false;
+        running.value = false;
+        ready = false;
+        version++;
+        loadingOlder.value = false;
+        busy.value = false;
+      }
+      if (initial || !e.network) error.value = e.message;
     }
   } finally {
-    if (request === version) busy.value = false;
+    if (current === version && request === refreshVersion) busy.value = false;
   }
 }
 async function loadOlder() {
   const first = messages.value[0]?.seq;
-  if (loadingOlder.value || !hasMore.value || busy.value || !first) return;
+  if (loadingOlder.value || !hasMore.value || !first) return;
   const request = version;
   loadingOlder.value = true;
-  const el = transcript.value, height = el?.scrollHeight ?? 0, top = el?.scrollTop ?? 0;
+  const el = transcript.value;
   try {
     const result = await props.api(
       "/sessions/" + encodeURIComponent(props.sessionId) + "?before=" + first + "&limit=" + CHAT_PAGE_SIZE,
     );
     if (request !== version || messages.value[0]?.seq !== first) return;
     if (!result.session.taskId && !(props.debug && result.session.employeeId)) throw Error("这不是牛马的会话");
+    const height = el?.scrollHeight ?? 0, top = el?.scrollTop ?? 0;
     messages.value = mergeMessages(result.messages || [], messages.value);
     hasMore.value = !!result.hasMore;
     await nextTick();
-    if (el) el.scrollTop = top + (el.scrollHeight - height);
+    if (request === version && el) el.scrollTop = top + (el.scrollHeight - height);
   } catch (e) {
-    if (request === version) error.value = e.message;
+    if (request === version && !e.network) error.value = e.message;
   } finally {
     if (request === version) loadingOlder.value = false;
   }
 }
+async function fillViewport(current = version) {
+  // A raw page can collapse into one tool summary; page all roles until the reader can scroll.
+  while (current === version && hasMore.value && transcript.value) {
+    const el = transcript.value;
+    if (el.scrollHeight > el.clientHeight + OLDER_THRESHOLD) break;
+    const first = messages.value[0]?.seq;
+    await loadOlder();
+    if (messages.value[0]?.seq === first) break;
+  }
+}
 function onScroll() {
   const el = transcript.value;
-  if (!el || loadingOlder.value || !hasMore.value) return;
-  if (el.scrollTop < 240) void loadOlder();
+  if (!ready || !el || loadingOlder.value || !hasMore.value || el.scrollTop >= OLDER_THRESHOLD) return;
+  const current = version, first = messages.value[0]?.seq;
+  void loadOlder().then(() => { if (current === version && messages.value[0]?.seq !== first) onScroll(); });
 }
 async function exportSession() {
   if (!props.debug || busy.value || !record.value) return;
@@ -139,9 +181,10 @@ onBeforeUnmount(() => { version++; });
     <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>牛马 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>模型 / 场景</dt><dd>{{ session.model || '未配置' }} / {{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-if="busy && !messages.length" class="context-note" role="status"><span class="spinner"></span>正在加载记录…</p>
-    <button v-if="hasMore" type="button" class="sm ghost load-older" :disabled="loadingOlder" @click="loadOlder">
-      <span v-if="loadingOlder" class="spinner"></span>{{ loadingOlder ? '加载更早记录…' : '加载更早记录' }}
-    </button>
+    <div v-if="hasMore" class="load-older" :aria-busy="loadingOlder">
+      <span v-if="loadingOlder" class="spinner" role="status" aria-label="正在加载更早的记录"></span>
+      <button v-else type="button" class="sm ghost" @click="loadOlder">上滑查看更早的记录</button>
+    </div>
     <ConversationTimeline v-if="!raw" :key="sessionId" :messages="messages" :running="running" />
     <template v-else><article
       v-for="(message, i) in messages"
@@ -197,9 +240,9 @@ onBeforeUnmount(() => { version++; });
   </section>
 </template>
 <style scoped>
-.employee-session { background: var(--surface); }
+.employee-session { background: var(--surface); overflow-anchor: none; }
 .session-note { max-width: 820px; margin: 0 auto 12px; }
-.load-older { display: flex; align-items: center; gap: 8px; margin: 0 auto 12px; }
+.load-older { display: flex; align-items: center; justify-content: center; height: 32px; margin: 0 auto 12px; color: var(--muted); }
 .debug-metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; max-width: 820px; margin: 0 auto 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); font-size: 12px; }
 .debug-metadata dt { color: var(--muted); }
 .debug-metadata dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); }

@@ -14,10 +14,10 @@ const props = defineProps({
   name: { type: String, default: "Vega" },
   model: String,
 });
-const turns = computed(() => conversationTurns(props.messages, { running: props.running, live: props.live, thinking: props.thinking }));
+const turns = computed((previous) => conversationTurns(props.messages, { running: props.running, live: props.live, thinking: props.thinking }, previous));
 </script>
 <template>
-  <section v-for="(turn, index) in turns" :key="turn.user?.seq ?? index" class="conversation-turn">
+  <section v-for="turn in turns" :key="turn.key" class="conversation-turn">
     <article v-if="turn.user" class="message user">
       <UserMessage v-if="turn.user.text" :text="turn.user.displayText || turn.user.text" />
       <img v-for="(image, n) in turn.user.images || []" :key="n" :src="image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`" alt="用户附图" />

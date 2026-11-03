@@ -38,7 +38,7 @@ const icon = (item) => icons[toolKind(item.name)];
       </span>
     </button>
     <div v-show="expanded" class="tool-steps-body">
-      <template v-for="(m, i) in allItems" :key="`${m.role}-${m.seq || m.callId || m.id || i}`">
+      <template v-for="(m, i) in allItems" :key="`${m.role}-${m.callId || m.id || m.seq || i}`">
         <details v-if="m.role === 'thought'" class="reasoning tool-thought">
           <summary>思考过程</summary>
           <pre>{{ m.text }}</pre>
