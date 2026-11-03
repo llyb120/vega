@@ -201,3 +201,32 @@ test("employee deletion removes its sessions/profile and survives restart withou
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("set_manual clears the old trigger wording, and a task can reschedule only itself", async () => {
+  const { store, engine } = fixture();
+  try {
+    const employee = engine.employee.for(engine.employee.create({ name: "Planner" }, "alice").id);
+    const duty = await employee.execute("", { action: "add", kind: "duty", text: "report", times: ["09:00"], condition: "每天 9 点" });
+    const owner = new Tools(engine, employee.chat("alice"), engine.config(), new AbortController().signal, () => {});
+    owner.actorId = "alice";
+    await owner.execute({ id: "m", name: "employee_duty_manage", arguments: { dutyId: duty.value.id, request: { command: "set_manual" } } }, {} as any);
+    const row = employee.state().duties.find((d) => d.id === duty.value.id)!;
+    assert.equal(row.manual, true);
+    assert.equal(row.condition, undefined, "a stale condition would keep describing the old schedule");
+    assert.deepEqual(row.times, []);
+
+    const job = await add(employee, "call back later");
+    const other = await add(employee, "someone else");
+    const session = store.newSession({ employeeId: employee.employeeId, taskId: job.id, cwd: job.cwd, ownerId: "alice" });
+    employee.update((state) => { state.tasks.find((t) => t.id === job.id)!.status = "running"; state.tasks.find((t) => t.id === job.id)!.workSession = session.id; });
+    employee.busy.set(job.id, { session: session.id, computer: false });
+    const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {});
+    assert(tools.definitions({} as any).some((t) => t.name === "task_reschedule"));
+    const before = Date.now();
+    await tools.execute({ id: "r", name: "task_reschedule", arguments: { delayMinutes: 90 } }, {} as any);
+    const moved = employee.task(employee.state(), job.id);
+    assert.equal(moved.status, "deferred");
+    assert(moved.nextCheckAt >= before + 89 * 60_000 && moved.nextCheckAt <= Date.now() + 91 * 60_000);
+    assert.equal(employee.task(employee.state(), other.id).status, "queued", "other tasks are untouched");
+  } finally { await engine.close(); store.close(); }
+});

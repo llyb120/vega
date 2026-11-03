@@ -101,6 +101,7 @@ export class Tools {
     const dynamic = !!duty && !duty.manual && !duty.everyMinutes && !duty.times?.length && !duty.events?.length;
     return {
       kind: "task",
+      taskId: this.session.taskId,
       computer: this.session.scene === "computer",
       dutyCommands: duty ? (dynamic ? ["schedule_next", "disable"] : ["disable"]) : [],
       vaultRequest: !!task?.owner?.token,

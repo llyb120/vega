@@ -27,6 +27,13 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["chrome_tab_control", { tabTag: "C1", command: "select" }, { operation: "select_tab", tabTag: "C1" }],
     ["chrome_tab_control", { tabTag: "C1", command: "close" }, { operation: "close_tab", tabTag: "C1" }],
     ["chrome_tab_control", { tabTag: "C1", command: "reload" }, { operation: "reload", tabTag: "C1" }],
+    ["chrome_tab_control", { tabTag: "C1", command: "back", observe: "none" }, { operation: "back", tabTag: "C1", observe: "none" }],
+    ["chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab", tabTag: "C1" }, observe: "screenshot", settleMs: 3000, visual: "none" },
+      { operation: "goto", tabTag: "C1", url: "https://a.test", observe: "screenshot", settleMs: 3000, visual: "none" }],
+    ["chrome_tabs", { query: "jira", visual: "none" }, { operation: "tabs", query: "jira", visual: "none" }],
+    ["chrome_act", { tabTag: "C1", actions: [{ action: "type", text: "" }, { action: "wait" }] }, { operation: "act", tabTag: "C1", actions: [{ action: "type", text: "" }, { action: "wait" }] }],
+    ["chrome_run", { tabTag: "C1", task: "t", steps: [{ action: "click", target: "Submit", expectedText: "ok" }] }, { operation: "run", tabTag: "C1", plan: { task: "t", steps: [{ action: "click", target: "Submit", expectedText: "ok" }] } }],
+    ["chrome_downloads", { since: 0 }, { operation: "downloads", since: 0 }],
     ["chrome_inspect", { tabTag: "C1", scope: "viewport", visual: "none" }, { operation: "inspect", tabTag: "C1", scope: "viewport", visual: "none" }],
     ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" } }, { operation: "screenshot", tabTag: "C1" }],
     ["chrome_screenshot", { tabTag: "C1", capture: { kind: "page", tileOffset: 2 } }, { operation: "screenshot", tabTag: "C1", fullPage: true, tileOffset: 2 }],
@@ -50,13 +57,28 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["chrome_devtools", { tabTag: "C1", kind: "network", requestId: "r1" }, { operation: "devtools", tabTag: "C1", devtools: { kind: "network", requestId: "r1" } }],
     ["employee_status", {}, { action: "list" }],
     ["employee_task_create", { instructions: "do it", dedupeKey: "k", runAt: "2030-01-01 09:00" }, { action: "add", kind: "todo", text: "do it", key: "k", nextAt: "2030-01-01 09:00" }],
+    ["employee_task_create", { instructions: "later", delayMinutes: 30, profile: "coding" }, { action: "add", kind: "todo", text: "later", nextCheckInMinutes: 30, profile: "coding" }],
+    ["employee_task_create", { instructions: "now" }, { action: "add", kind: "todo", text: "now" }],
     ["employee_task_manage", { taskId: "t1", request: { command: "reschedule", runAt: "2030-01-01 09:00" } }, { action: "update", id: "t1", nextAt: "2030-01-01 09:00" }],
+    ["employee_task_manage", { taskId: "t1", request: { command: "reschedule", delayMinutes: 60 } }, { action: "update", id: "t1", nextCheckInMinutes: 60 }],
+    ["employee_task_manage", { taskId: "t1", request: { command: "set_profile", profile: "lightweight" } }, { action: "update", id: "t1", profile: "lightweight" }],
+    ["task_reschedule", { delayMinutes: 120 }, { action: "update", id: "self", nextCheckInMinutes: 120 }, { ...task, taskId: "self" }],
+    ["task_reschedule", { runAt: "2030-01-01 09:00" }, { action: "update", id: "self", nextAt: "2030-01-01 09:00" }, { ...task, taskId: "self" }],
     ["employee_task_manage", { taskId: "t1", request: { command: "cancel" } }, { action: "done", id: "t1" }],
     ["employee_task_manage", { taskId: "t1", request: { command: "resume" } }, { action: "resume", id: "t1" }, chat],
     ["employee_task_manage", { taskId: "t1", request: { command: "answer", answer: "yes" } }, { action: "answer", id: "t1", text: "yes" }, chat],
     ["employee_task_manage", { taskId: "t1", request: { command: "stop" } }, { action: "stop", id: "t1" }, chat],
     ["employee_duty_create", { instructions: "daily report", trigger: { kind: "condition", condition: "每天 9 点" } }, { action: "add", kind: "duty", text: "daily report", condition: "每天 9 点" }],
     ["employee_duty_create", { instructions: "on demand", trigger: { kind: "manual" } }, { action: "add", kind: "duty", text: "on demand", manual: true }],
+    ["employee_duty_create", { instructions: "r", trigger: { kind: "daily", times: ["09:00", "14:30"] }, profile: "coding" }, { action: "add", kind: "duty", text: "r", profile: "coding", times: ["09:00", "14:30"] }],
+    ["employee_duty_create", { instructions: "r", trigger: { kind: "interval", everyMinutes: 30 } }, { action: "add", kind: "duty", text: "r", everyMinutes: 30 }],
+    ["employee_duty_create", { instructions: "r", trigger: { kind: "dynamic", delayMinutes: 10 } }, { action: "add", kind: "duty", text: "r", nextCheckInMinutes: 10 }],
+    ["employee_duty_create", { instructions: "r", trigger: { kind: "dynamic", runAt: "2030-01-01 09:00" } }, { action: "add", kind: "duty", text: "r", nextAt: "2030-01-01 09:00" }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "set_daily", times: ["08:00"] } }, { action: "update", id: "d1", manual: false, times: ["08:00"], everyMinutes: 0 }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "set_interval", everyMinutes: 15 } }, { action: "update", id: "d1", manual: false, everyMinutes: 15, times: [] }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "set_profile", profile: "coding" } }, { action: "update", id: "d1", profile: "coding" }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "enable" } }, { action: "update", id: "d1", enabled: true }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "schedule_next", delayMinutes: 45 } }, { action: "update", id: "d1", nextCheckInMinutes: 45 }, task],
     ["employee_duty_manage", { dutyId: "d1", request: { command: "set_note", note: "" } }, { action: "update", id: "d1", note: "" }],
     ["employee_duty_manage", { dutyId: "d1", request: { command: "disable" } }, { action: "update", id: "d1", enabled: false }],
     ["employee_duty_manage", { dutyId: "d1", request: { command: "set_manual" } }, { action: "update", id: "d1", manual: true }],
@@ -69,6 +91,8 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["task_relay_computer", { handoff: "open page" }, { action: "relay", scene: "computer", text: "open page" }, task],
     ["task_complete", { evidence: "ok", deliverableRefs: [] }, { action: "complete", text: "ok", deliverableRef: [] }, task],
     ["memory_propose", { claim: "c", memoryKind: "convention" }, { action: "memory_propose", claim: "c", memoryKind: "convention" }, chat],
+    ["memory_propose", { claim: "c", pinned: true, memoryKind: null }, { action: "memory_propose", claim: "c", pinned: true }, chat],
+    ["memory_manage", { request: { command: "feedback", memoryId: "a", signal: "correction", claim: "new" } }, { action: "memory_resolve", resolveAction: "feedback", id: "a", signal: "correction", claim: "new" }, chat],
     ["memory_manage", { request: { command: "merge", memoryIds: ["a", "b"] } }, { action: "memory_resolve", resolveAction: "merge", ids: ["a", "b"] }, chat],
     ["memory_manage", { request: { command: "forget", memoryId: "a" } }, { action: "memory_resolve", resolveAction: "drop", id: "a" }, chat],
     ["memory_manage", { request: { command: "unpin", memoryId: "a" } }, { action: "memory_pin", id: "a", pinned: false }, chat],
@@ -84,7 +108,7 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
 
 test("memory source is decided by the server and memory_manage requires an explicit command", () => {
   assert.throws(() => map("memory_propose", { claim: "c", memoryKind: "convention", source: "ui" }, chat), /不接受字段 source/);
-  assert.throws(() => map("memory_propose", { claim: "c" }, chat), /缺少必填字段 memoryKind/);
+  assert.throws(() => map("memory_propose", { claim: "c", memoryKind: "guess" }, chat), /memoryKind/);
   assert.throws(() => map("memory_manage", { request: { memoryId: "a" } }, chat), ArgumentError);
 });
 
@@ -96,10 +120,20 @@ test("branch errors name the field and the chosen branch's structure", () => {
   assert.throws(() => map("task_wait", { checkpoint: "x" }, task), /resumeAt 和 参数\.delayMinutes 必须恰好填一个/);
   assert.throws(() => map("task_wait", { checkpoint: "x", delayMinutes: 5, resumeAt: "2030-01-01 09:00" }, task), /恰好填一个/);
   assert.throws(() => map("employee_task_create", { instructions: "x", runAt: "tomorrow 9am" }), /runAt 至少 16 个字符|runAt 格式不对/);
+  const self = { ...task, taskId: "self" };
+  assert.throws(() => map("task_reschedule", {}, self), /runAt 和 参数\.delayMinutes 必须恰好填一个/);
+  assert.throws(() => map("task_reschedule", { runAt: "2030-01-01 09:00", delayMinutes: 5 }, self), /恰好填一个/);
+  assert.throws(() => map("task_reschedule", { delayMinutes: 5, taskId: "other" }, self), /不接受字段 taskId/, "a task can only reschedule itself");
+  assert.throws(() => map("employee_task_create", { instructions: "x", runAt: "2030-01-01 09:00", delayMinutes: 5 }), /最多填一个/);
+  assert.throws(() => map("employee_task_manage", { taskId: "t1", request: { command: "reschedule" } }), /request\.runAt 和 参数\.request\.delayMinutes 必须恰好填一个/);
+  assert.throws(() => map("employee_duty_create", { instructions: "x", trigger: { kind: "dynamic" } }), /trigger\.runAt.*恰好填一个/);
+  assert.throws(() => map("employee_duty_create", { instructions: "x", trigger: { kind: "daily", times: ["9:00"] } }), /times/);
+  assert.throws(() => map("employee_duty_create", { instructions: "x", trigger: { kind: "interval", everyMinutes: 30, times: ["09:00"] } }), /不接受字段 times/);
+  assert.throws(() => map("employee_task_create", { instructions: "x", profile: "computer" }), /profile/);
 });
 
 test("narrow fallback: only null or an empty value its own bound rejects counts as omitted; legal '' and 0 are kept", () => {
-  assert.deepEqual(map("chrome_downloads", { downloadId: "", since: 0 }).args, { operation: "downloads" });
+  assert.deepEqual(map("chrome_downloads", { downloadId: "", since: 0 }).args, { operation: "downloads", since: 0 });
   assert.deepEqual(map("chrome_inspect", { tabTag: "C1", query: null, maxItems: 0 }).args, { operation: "inspect", tabTag: "C1" });
   assert.deepEqual(map("employee_duty_manage", { dutyId: "d1", request: { command: "set_note", note: "" } }).args.note, "");
   const act = map("chrome_act", { tabTag: "C1", actions: [{ action: "scroll_at", x: 0, y: 0, deltaY: 0 }], settleMs: 0 }).args;
@@ -135,9 +169,9 @@ test("visible tools and branches follow session, scene and permission like the o
   assert(!commands({ kind: "normal" }, "employee_task_manage").includes("resume"), "resume/answer/stop are chat-only");
   assert(commands(chat, "employee_task_manage").includes("stop"));
   assert.deepEqual(names({ kind: "chat", member: true }), ["employee_status", "employee_task_create", "employee_task_manage"]);
-  assert(!/set_instructions|reschedule|cancel/.test(commands({ kind: "chat", member: true }, "employee_task_manage")));
+  assert(!/set_instructions|set_profile|reschedule|cancel/.test(commands({ kind: "chat", member: true }, "employee_task_manage")));
   const main = names({ kind: "task", dutyCommands: [] });
-  assert.deepEqual(main, ["employee_status", "employee_task_create", "memory_manage", "memory_propose", "memory_search", "task_ask_user", "task_complete", "task_progress", "task_relay_computer", "task_request_approval", "task_wait", "vault_get", "vault_list"]);
+  assert.deepEqual(main, ["employee_status", "employee_task_create", "memory_manage", "memory_propose", "memory_search", "task_ask_user", "task_complete", "task_progress", "task_relay_computer", "task_request_approval", "task_reschedule", "task_wait", "vault_get", "vault_list"]);
   const computer = names({ kind: "task", computer: true, dutyCommands: [] });
   assert(!computer.includes("task_relay_computer") && !computer.includes("task_complete"));
   assert(names({ kind: "task", vaultRequest: true, vaultSend: true }).includes("vault_request"));

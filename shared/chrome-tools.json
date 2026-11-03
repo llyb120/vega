@@ -12,6 +12,14 @@
         "incognito": {
           "type": "boolean",
           "description": "true 只列无痕窗口，false 只列普通窗口；省略列出全部"
+        },
+        "visual": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "none"
+          ],
+          "description": "恰好命中一个标签时附的观察：auto（默认）带视口图；none 只返回 DOM"
         }
       },
       "required": [],
@@ -20,7 +28,7 @@
   },
   {
     "name": "chrome_navigate",
-    "description": "打开一个 http(s) 网址：target.kind=new_tab 新建标签（incognito=true 开无痕窗口），existing_tab 在 tabTag 标签里跳转（该标签旧的 ref 作废）。等待加载（最多约 1.5 秒）后附新观察。网址只用用户给的或观察里已有的 href，不猜。页面可能已打开时先用 chrome_tabs 找；不带网址的切换、关闭、后退、前进、刷新用 chrome_tab_control。",
+    "description": "打开一个 http(s) 网址：target.kind=new_tab 新建标签（incognito=true 开无痕窗口），existing_tab 在 tabTag 标签里跳转（该标签旧的 ref 作废）。等待加载（默认最多 1.5 秒，settleMs 可调）后附新观察；observe=none 只执行不观察。网址只用用户给的或观察里已有的 href，不猜。页面可能已打开时先用 chrome_tabs 找；不带网址的切换、关闭、后退、前进、刷新用 chrome_tab_control。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -75,6 +83,29 @@
               "description": "在已有标签中跳转"
             }
           ]
+        },
+        "observe": {
+          "type": "string",
+          "enum": [
+            "inspect",
+            "screenshot",
+            "none"
+          ],
+          "description": "导航后的观察：inspect（默认）新 DOM 摘要 + 视口图；screenshot 截取视口图并附 DOM 摘要；none 只执行，不等待加载、不返回观察"
+        },
+        "settleMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4000,
+          "description": "等待页面加载完成的上限毫秒，默认 1500（0 也按 1500）"
+        },
+        "visual": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "none"
+          ],
+          "description": "auto（默认）观察附当前视口图；none 只返回 DOM"
         }
       },
       "required": [
@@ -86,7 +117,7 @@
   },
   {
     "name": "chrome_tab_control",
-    "description": "对一个已有标签执行不带网址的控制：select 切到前台，close 关闭，back/forward/reload 后退、前进、刷新。除 close 外都会等待加载并附新观察；close 不返回观察，之后该 tabTag 失效。去新网址用 chrome_navigate；要中止正在执行的浏览器调用用 chrome_connection 的 cancel_operation，不是关标签。",
+    "description": "对一个已有标签执行不带网址的控制：select 切到前台，close 关闭，back/forward/reload 后退、前进、刷新。除 close 外都会等待加载并附新观察（observe=none 时只执行）；close 不返回观察，之后该 tabTag 失效。去新网址用 chrome_navigate；要中止正在执行的浏览器调用用 chrome_connection 的 cancel_operation，不是关标签。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -104,6 +135,29 @@
             "forward",
             "reload"
           ]
+        },
+        "observe": {
+          "type": "string",
+          "enum": [
+            "inspect",
+            "screenshot",
+            "none"
+          ],
+          "description": "导航后的观察：inspect（默认）新 DOM 摘要 + 视口图；screenshot 截取视口图并附 DOM 摘要；none 只执行，不等待加载、不返回观察"
+        },
+        "settleMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4000,
+          "description": "等待页面加载完成的上限毫秒，默认 1500（0 也按 1500）"
+        },
+        "visual": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "none"
+          ],
+          "description": "auto（默认）观察附当前视口图；none 只返回 DOM"
         }
       },
       "required": [
@@ -454,9 +508,8 @@
                   },
                   "text": {
                     "type": "string",
-                    "minLength": 1,
                     "maxLength": 16000,
-                    "description": "要输入的文本，≤16000 字"
+                    "description": "要输入的文本，≤16000 字（可为空串）"
                   }
                 },
                 "required": [
@@ -541,12 +594,11 @@
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 2000,
-                    "description": "等待毫秒数 0–2000"
+                    "description": "等待毫秒数 0–2000，默认 250"
                   }
                 },
                 "required": [
-                  "action",
-                  "milliseconds"
+                  "action"
                 ],
                 "additionalProperties": false,
                 "description": "等待"
@@ -890,6 +942,12 @@
                     "maxLength": 500,
                     "description": "执行后应成立的页面证据（文字或 URL 片段，| 分隔任选其一）"
                   },
+                  "expectedText": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "expect 的别名；两者都给时用 expect"
+                  },
                   "repeat": {
                     "type": "integer",
                     "minimum": 0,
@@ -957,6 +1015,12 @@
                     "maxLength": 500,
                     "description": "执行后应成立的页面证据（文字或 URL 片段，| 分隔任选其一）"
                   },
+                  "expectedText": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "expect 的别名；两者都给时用 expect"
+                  },
                   "repeat": {
                     "type": "integer",
                     "minimum": 0,
@@ -1007,6 +1071,12 @@
                     "minLength": 1,
                     "maxLength": 500,
                     "description": "执行后应成立的页面证据（文字或 URL 片段，| 分隔任选其一）"
+                  },
+                  "expectedText": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "expect 的别名；两者都给时用 expect"
                   },
                   "repeat": {
                     "type": "integer",
@@ -1080,6 +1150,12 @@
                     "minLength": 1,
                     "maxLength": 500,
                     "description": "执行后应成立的页面证据（文字或 URL 片段，| 分隔任选其一）"
+                  },
+                  "expectedText": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "expect 的别名；两者都给时用 expect"
                   },
                   "repeat": {
                     "type": "integer",
@@ -1198,9 +1274,9 @@
         },
         "since": {
           "type": "integer",
-          "minimum": 1,
+          "minimum": 0,
           "maximum": 8640000000000000,
-          "description": "起始 Unix 毫秒时间戳；默认最近 10 分钟"
+          "description": "起始 Unix 毫秒时间戳（0 表示不限起点）；省略为最近 10 分钟"
         }
       },
       "required": [],

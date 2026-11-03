@@ -151,6 +151,8 @@ export function applyDuty(d: Obj, a: Obj, now = Date.now()) {
       d[k] = a[k];
     }
   if (a.manual === true) {
+    // Switching to manual drops the old trigger wording too, unless this same update supplies new wording.
+    if (!("condition" in a)) delete d.condition;
     d.times = [];
     d.events = [];
     d.everyMinutes = 0;
