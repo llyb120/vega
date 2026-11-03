@@ -4,14 +4,26 @@ import Icon from "./Icon.vue";
 import MessageText from "./MessageText.vue";
 import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
+import { exportResult } from "./export-result.js";
 const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean });
 const emit = defineEmits(["inspect", "back"]);
-const busy = ref(false), answer = ref("");
-watch(() => props.task.id, () => { answer.value = ""; });
+const busy = ref(false), answer = ref(""), exportOpen = ref(false), exportError = ref("");
+watch(() => props.task.id, () => { answer.value = ""; exportOpen.value = false; exportError.value = ""; });
 const ended = computed(() => isEnded(props.task.status));
 const resumable = computed(() => ["failed", "stopped", "cancelled"].includes(props.task.status));
 const progress = computed(() => planProgress(props.task.plan));
 const stepIcon = { completed: "check", in_progress: "play", blocked: "alert" };
+const exportMarkdown = computed(() => String(props.task.result || props.task.completion || props.task.summary || "").trim());
+const canExport = computed(() => !!exportMarkdown.value);
+function runExport(format) {
+  exportError.value = "";
+  try {
+    exportResult(format, { title: props.task.text || "任务结果", markdown: exportMarkdown.value });
+    exportOpen.value = false;
+  } catch (error) {
+    exportError.value = error?.message || String(error);
+  }
+}
 async function run(action) {
   if (busy.value) return;
   busy.value = true;
@@ -60,7 +72,19 @@ async function run(action) {
     </section>
 
     <section v-if="task.result" class="detail-section">
-      <h3>{{ task.status === 'failed' ? '失败原因' : '结果' }}</h3>
+      <div class="result-head">
+        <h3>{{ task.status === 'failed' ? '失败原因' : '结果' }}</h3>
+        <div v-if="canExport" class="result-export">
+          <button type="button" class="ghost sm" :aria-expanded="exportOpen" @click="exportOpen = !exportOpen"><Icon name="download" :size="14" />导出</button>
+          <div v-if="exportOpen" class="result-export-menu" role="menu">
+            <button type="button" role="menuitem" @click="runExport('html')">HTML</button>
+            <button type="button" role="menuitem" @click="runExport('pdf')">PDF</button>
+            <button type="button" role="menuitem" @click="runExport('docx')">DOCX</button>
+            <button type="button" role="menuitem" @click="runExport('xlsx')">XLSX</button>
+          </div>
+        </div>
+      </div>
+      <p v-if="exportError" class="export-error" role="alert">{{ exportError }}</p>
       <div class="result-box" :class="{ failed: task.status === 'failed' }"><MessageText :text="task.result" /></div>
     </section>
 
@@ -112,8 +136,15 @@ async function run(action) {
 .plan li.in_progress { color: var(--text); font-weight: 500; }
 .plan li.in_progress .step-mark { border-color: var(--accent); background: var(--accent); }
 .plan li.blocked .step-mark { border-color: var(--warn); background: var(--warn); }
-.result-box { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); }
+.result-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.result-export { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.result-export-menu { display: flex; flex-wrap: wrap; gap: 4px; }
+.result-export-menu button { min-height: 28px; padding: 0 10px; border-color: var(--border); background: var(--surface); font-size: 12px; }
+.export-error { margin: 0; color: var(--danger); font-size: 12px; }
+.result-box { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); overflow-x: auto; }
 .result-box.failed { border-color: var(--danger-border); background: var(--danger-soft); }
+.result-box :deep(.markdown-table) { max-width: 100%; }
+.result-box :deep(.markdown-body img) { max-width: 100%; height: auto; }
 .meta-list { gap: 4px; }
 .meta-list p { display: flex; align-items: flex-start; gap: 6px; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .meta-list .icon-svg { margin-top: 2px; }

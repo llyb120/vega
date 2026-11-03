@@ -294,3 +294,32 @@ test("full legacy task evidence stays in the task while a fallback delivery rema
     assert.equal(delivery.tasks?.[0].id, job.id);
   } finally { await engine.close(); store.close(); }
 });
+
+test("answer appends a quoted user message in chat without duplicating identical replies", async () => {
+  const { store, engine, employee, chat } = fixture();
+  let calls = 0;
+  engine.providers.chat = async () => calls++ === 0
+    ? { role: "assistant", calls: [{ id: "assign", name: "employee", arguments: { action: "add", kind: "todo", text: "Need a verification code", profile: "coding" } }] }
+    : { role: "assistant", text: "已安排。" };
+  try {
+    await engine.run(chat.id, { role: "user", text: "帮我登录并核对" });
+    const job = employee.state().tasks[0];
+    employee.runtime.run = async () => {
+      await employee.execute(job.id, { action: "help", text: "请提供邮箱里的 6 位验证码" });
+    };
+    employee.update((state) => { state.tasks[0].status = "running"; });
+    employee.busy.set(job.id, { computer: false, session: "" });
+    await employee.run(employee.state().tasks[0]);
+    const delivery = store.messages(chat.id).findLast((message) => message.delivery)!;
+    assert.equal(delivery.tasks?.[0].id, job.id);
+    assert.match(delivery.text!, /6 位验证码/);
+    assert.equal(employee.state().tasks[0].status, "waiting");
+    await employee.control({ action: "answer", id: job.id, text: "123456" }, { token: "", name: "林林" });
+    const users = store.messages(chat.id).filter((message) => message.role === "user" && message.text === "123456");
+    assert.equal(users.length, 1);
+    assert.equal(users[0].quote?.seq, delivery.seq);
+    assert.match(users[0].quote!.text, /验证码|需要你处理/);
+    assert.equal(employee.appendChatReply(chat.id, delivery, "123456")?.seq, users[0].seq);
+    assert.equal(store.messages(chat.id).filter((message) => message.role === "user" && message.text === "123456").length, 1);
+  } finally { await engine.close(); store.close(); }
+});

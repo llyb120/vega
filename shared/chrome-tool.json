@@ -510,7 +510,7 @@
       },
       "fullPage": {
         "type": "boolean",
-        "description": "screenshot默认false，只截当前视口，不改变页面缩放或视口尺寸；true显式请求整页分片（可能短暂重排布局）。缩图在截图后本地完成。各标签页的普通整页文档分片及视口截图各自维护帧流，每次返回完整图。images[].unchanged=true表示该图无明显像素变化（按32×32格比较，RGB通道差异阈值16），复用已交付的同一文件；沿用已见画面及本次snapshotId/imageId，不代表动作失败，不重放输入或循环截图；仍在加载时可wait后观察。模型上下文中同一工具同一帧流只保留最新2张不同内容的完整图，更早的换成路径说明，图片直接进入上下文，无需read/recall重复加载；操作用最新snapshotId与最新完整图的imageId，不换算CSS/DPI。局部裁剪和expandScroll长图仍返回完整独立图片。"
+        "description": "screenshot默认false，只截当前视口，不改变页面缩放或视口尺寸；true显式请求整页分片（可能短暂重排布局）。缩图在截图后本地完成。各标签页的普通整页文档分片及视口截图各自维护帧流，每次返回完整图。images[].unchanged=true表示该图无明显像素变化（按原分辨率逐像素比较，RGB通道差异阈值16），复用已交付的同一文件；沿用已见画面及本次snapshotId/imageId，不代表动作失败，不重放输入或循环截图；仍在加载时可wait后观察。模型上下文中同一工具同一帧流只保留最新2张不同内容的完整图，更早的换成路径说明，图片直接进入上下文，无需read/recall重复加载；操作用最新snapshotId与最新完整图的imageId，不换算CSS/DPI。局部裁剪和expandScroll长图仍返回完整独立图片。"
       },
       "expandScroll": {
         "type": "boolean",

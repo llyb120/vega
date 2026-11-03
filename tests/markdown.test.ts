@@ -244,20 +244,25 @@ test("Markdown images support web, authenticated archive and raster data URLs wi
 test("legacy employee reports display standalone archived screenshot URLs inline without rewriting the report", () => {
   const first = "/api/blobs/blob-" + "1".repeat(32);
   const second = "sqlite:blob/blob-" + "2".repeat(32);
-  const report = `证据截图：Bing 结果页 ${first}；新标签验证页 ${second}。`;
+  const bare = "blob-" + "a".repeat(32);
+  const report = `证据截图：Bing 结果页 ${first}；新标签验证页 ${second}；裸引用 ${bare}。`;
   const { html } = renderMarkdown(report);
-  assert.equal((html.match(/<img /g) || []).length, 2);
+  assert.equal((html.match(/<img /g) || []).length, 3);
   assert(html.includes(`src="${first}"`));
   assert(html.includes(`src="${second.replace("sqlite:blob/", "/api/blobs/")}"`));
+  assert(html.includes(`src="/api/blobs/${bare}"`));
   assert(html.includes("证据截图：Bing 结果页") && html.includes("；新标签验证页"));
   assert(html.includes('alt="存档图片" loading="lazy" decoding="async" referrerpolicy="no-referrer"'));
   assert.equal((renderInline(`![证据](<${first}>)`).match(/<img /g) || []).length, 1, "valid Markdown is not expanded twice");
+  assert.equal((renderInline(`![裸](${bare})`).match(/<img /g) || []).length, 1, "Markdown image syntax accepts bare blob ids");
   assert.equal(renderMarkdown(`\`\`\`txt\n${first}\n\`\`\``).codes[0], first);
   assert(!renderInline(`\`${first}\``).includes("<img"));
+  assert(!renderInline(`\`${bare}\``).includes("<img"));
   for (const value of [
     `https://other.test${first}`, `prefix${first}`, `[图片地址](${first})`,
     `${first}/../secret`, `${first}?download=true`, `${first}#private`, `${first}.txt`, `${first}a`,
     "/api/blobs/blob-", "/api/blobs/blob-made-up", "/api/auth/logout", "/workspace/photo.png",
+    "blob-fixture", "blob-" + "1".repeat(31), "prefix" + bare,
   ]) assert(!renderInline(value).includes("<img"), value);
 });
 

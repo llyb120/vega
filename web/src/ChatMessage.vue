@@ -3,13 +3,37 @@ import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime, isInProgress } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, quotable: Boolean });
+import { exportResult } from "./export-result.js";
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, tasks: Array, quotable: Boolean });
 const emit = defineEmits(["quote", "jump", "task", "retry"]);
+const exportOpen = ref(false), exportError = ref("");
 // Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
 const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
+const linkedTask = computed(() => {
+  const id = props.message.tasks?.[0]?.id;
+  return id ? (props.tasks || []).find((task) => task.id === id) : undefined;
+});
+// Delivery bubbles stay brief; export always prefers the live task's full result.
+// Bubble text stays brief; export always pulls the live task's full result, never the truncated delivery summary.
+const exportMarkdown = computed(() => {
+  const task = linkedTask.value;
+  if (!task) return "";
+  return String(task.result || task.completion || "").trim();
+});
+const canExport = computed(() => props.message.delivery && !!exportMarkdown.value);
+const exportTitle = computed(() => linkedTask.value?.text || props.message.tasks?.[0]?.title || "任务结果");
+function runExport(format) {
+  exportError.value = "";
+  try {
+    exportResult(format, { title: exportTitle.value, markdown: exportMarkdown.value });
+    exportOpen.value = false;
+  } catch (error) {
+    exportError.value = error?.message || String(error);
+  }
+}
 // While a linked task is actively running, this reply's bot keeps glancing around like the typing avatar.
 // Only live statuses count, so an old snapshot saying "running" never animates forever.
 const working = computed(() => !!props.message.tasks?.some((task) => isInProgress(props.taskStatus?.[task.id])));
@@ -38,6 +62,16 @@ const working = computed(() => !!props.message.tasks?.some((task) => isInProgres
         <button v-for="task in message.tasks" :key="task.id" type="button" class="chat-task-link" :data-task-id="task.id" :aria-label="'查看任务：' + task.title" @click="emit('task', task.id)">
           <Icon name="tasks" :size="15" /><span class="truncate">{{ task.title }}</span><span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span><Icon name="right" :size="14" />
         </button>
+      </div>
+      <div v-if="canExport" class="chat-export">
+        <button type="button" class="chat-export-toggle" :aria-expanded="exportOpen" @click="exportOpen = !exportOpen"><Icon name="download" :size="14" />导出完整结果</button>
+        <div v-if="exportOpen" class="chat-export-menu" role="menu">
+          <button type="button" role="menuitem" @click="runExport('html')">HTML</button>
+          <button type="button" role="menuitem" @click="runExport('pdf')">PDF</button>
+          <button type="button" role="menuitem" @click="runExport('docx')">DOCX</button>
+          <button type="button" role="menuitem" @click="runExport('xlsx')">XLSX</button>
+        </div>
+        <p v-if="exportError" class="chat-export-error" role="alert">{{ exportError }}</p>
       </div>
     </div>
   </article>
@@ -78,6 +112,14 @@ const working = computed(() => !!props.message.tasks?.some((task) => isInProgres
 .chat-task-link > .badge, .chat-task-link > .icon-svg { flex: none; }
 .chat-task-link > .icon-svg:last-child { color: var(--faint); }
 .chat-task-link:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-softer); }
+.chat-export { display: grid; justify-items: start; gap: 4px; width: 100%; }
+.chat-export-toggle { gap: 6px; min-height: 30px; padding: 0 8px; border-color: var(--border); background: var(--surface); color: var(--text-2); font-size: 12px; font-weight: 500; }
+.chat-export-toggle:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-softer); color: var(--accent); }
+.chat-export-menu { display: flex; flex-wrap: wrap; gap: 4px; }
+.chat-export-menu button { min-height: 28px; padding: 0 10px; border-color: var(--border); background: var(--surface); font-size: 12px; }
+.chat-export-error { margin: 0; color: var(--danger); font-size: 12px; }
+.chat-bubble :deep(.markdown-table) { max-width: 100%; }
+.chat-bubble :deep(.markdown-body img) { max-width: 100%; max-height: 360px; height: auto; }
 @media (hover: none) { .chat-reply { opacity: .7; } .reply-label { display: none; } }
 @media (max-width: 767px) {
   .chat-message { margin-bottom: 14px; }
