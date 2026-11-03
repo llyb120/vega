@@ -14,7 +14,6 @@ import EmployeeDuties from "./EmployeeDuties.vue";
 import EmployeeMemories from "./EmployeeMemories.vue";
 import EmployeeSettings from "./EmployeeSettings.vue";
 import EmployeeCapabilities from "./EmployeeCapabilities.vue";
-import EmployeeAvatarPicker from "./EmployeeAvatarPicker.vue";
 import WorkPanel from "./WorkPanel.vue";
 import AppSidebar from "./AppSidebar.vue";
 import PageHeader from "./PageHeader.vue";
@@ -234,8 +233,6 @@ const employee = ref({
   creatingEmployee = ref(false),
   newEmployeeName = ref(""),
   newEmployeeInstruction = ref(""),
-  newEmployeeAvatar = ref({ avatar: "", image: undefined }),
-  newEmployeeAvatarBusy = ref(false),
   employeeSession = ref(""),
   employeeSessionVersion = ref(0),
   employeeError = ref(""),
@@ -739,8 +736,6 @@ function resetLogin() {
   creatingEmployee.value = false;
   newEmployeeName.value = "";
   newEmployeeInstruction.value = "";
-  newEmployeeAvatar.value = { avatar: "", image: undefined };
-  newEmployeeAvatarBusy.value = false;
   employee.value = { duties: [], tasks: [], memories: [], runs: [] };
   taskText.value = "";
   memoryText.value = "";
@@ -1207,13 +1202,12 @@ async function chooseEmployee(id) {
   await refreshEmployee();
 }
 async function createEmployee() {
-  if (employeeSaving.value || newEmployeeAvatarBusy.value) return;
+  if (employeeSaving.value) return;
   employeeSaving.value = true;
   try { await attempt(async () => {
-    const created = await api("/employees", "POST", { name: newEmployeeName.value, instruction: newEmployeeInstruction.value, cwd: project.value, avatar: newEmployeeAvatar.value.avatar, ...(newEmployeeAvatar.value.image ? { avatarImage: newEmployeeAvatar.value.image } : {}) });
+    const created = await api("/employees", "POST", { name: newEmployeeName.value, instruction: newEmployeeInstruction.value, cwd: project.value });
     newEmployeeName.value = "";
     newEmployeeInstruction.value = "";
-    newEmployeeAvatar.value = { avatar: "", image: undefined };
     await chooseEmployee(created.id);
   }); } finally { employeeSaving.value = false; }
 }
@@ -1490,12 +1484,11 @@ onBeforeUnmount(() => {
                 <label>牛马名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
                 <label>工作方向<textarea v-model="newEmployeeInstruction" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
               </div>
-              <EmployeeAvatarPicker :name="newEmployeeName" :avatar="newEmployeeAvatar.avatar" :image="newEmployeeAvatar.image" :disabled="employeeSaving" @change="newEmployeeAvatar = $event" @busy="newEmployeeAvatarBusy = $event" />
               <ul class="create-facts">
                 <li><Icon name="check" :size="14" />创建后即可接活，无需设置启用或工作时间</li>
                 <li><Icon name="check" :size="14" />独立的记忆、任务列表和浏览器会自动准备</li>
               </ul>
-              <div class="actions end"><button v-if="employees.length" type="button" class="ghost" @click="creatingEmployee = false">取消</button><button class="primary" :disabled="employeeSaving || newEmployeeAvatarBusy">{{ employeeSaving ? '正在创建…' : newEmployeeAvatarBusy ? '读取头像中…' : '创建牛马' }}</button></div>
+              <div class="actions end"><button v-if="employees.length" type="button" class="ghost" @click="creatingEmployee = false">取消</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '正在创建…' : '创建牛马' }}</button></div>
             </form>
           </div>
         </template>

@@ -36,7 +36,7 @@ function mount(handler: (path: string, method: string, data: any) => any = () =>
     eventReconnect: undefined, eventsHeartbeat: undefined, eventsSocket: null, eventsReady: false, eventsWasConnected: false,
     clearTimeout, clearInterval, rejectSocketRequests() {}, authenticated: ref(true), password: ref(""), setupToken: ref(""),
     employees: ref([]), selectedEmployee: ref(""), employeeEvent: ref(null), employeeComposers: ref({}),
-    employeeTab: ref("chat"), creatingEmployee: ref(false), newEmployeeName: ref(""), newEmployeeInstruction: ref(""), newEmployeeAvatar: ref({ avatar: "", image: undefined }), newEmployeeAvatarBusy: ref(false), vaultEntries: ref([]), employee: ref({}), taskText: ref(""), memoryText: ref(""), memoryID: ref(""), dutyOpen: ref(false), duty: ref({}), emptyDuty: () => ({}),
+    employeeTab: ref("chat"), creatingEmployee: ref(false), newEmployeeName: ref(""), newEmployeeInstruction: ref(""), vaultEntries: ref([]), employee: ref({}), taskText: ref(""), memoryText: ref(""), memoryID: ref(""), dutyOpen: ref(false), duty: ref({}), emptyDuty: () => ({}),
     onlineClients: ref([]), localPairing: ref(null), clientListReady: ref(true), config: ref({}), catalogModels: ref([]), activeTaskCount: ref(null), employeeSession: ref(""), employeeError: ref(""),
   };
   context.attempt = async (fn: any) => { try { return await fn(); } catch (e: any) { context.error.value = e.message; } };

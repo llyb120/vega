@@ -1,4 +1,4 @@
-import { prepareEmployeeAvatarImage, updateEmployeeAvatar } from "../../core/employee-avatar";
+import { updateEmployeeAvatar } from "../../core/employee-avatar";
 import { chatHistory } from "../../core/chat-page";
 import { prepareDutyInput } from "../../core/duty-condition";
 import { employeeCapabilities } from "../../core/employee-capabilities";
@@ -159,9 +159,7 @@ export default defineEventHandler(async (event) => {
         });
         if (method === "POST") {
           check(user.role !== "viewer", 403, "Execution permission required");
-          check(a.avatarImage === undefined || !a.avatar, 400, "预设头像和上传图片不能同时提交");
-          const image = a.avatarImage === undefined ? undefined : await prepareEmployeeAvatarImage(a.avatarImage);
-          return engine.employee.create(a, user.id, user.role === "admin" ? "team" : "personal", image);
+          return engine.employee.create(a, user.id, user.role === "admin" ? "team" : "personal");
         }
       }
       const employee = engine.employee.all().find((employee) => employee.employeeId === path[1]);
