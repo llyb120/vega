@@ -1,0 +1,160 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { Store } from "../server/core/store";
+import { Vault } from "../server/core/vault";
+import { Tools } from "../server/core/tools";
+import {
+  ArgumentError, CHROME_TOOL_DEFINITIONS, STANDALONE_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type ToolContext,
+} from "../server/core/public-tools";
+
+const all = (ctx: ToolContext) => [...employeeTools(ctx), ...vaultTools(ctx), ...CHROME_TOOL_DEFINITIONS];
+const schemaOf = (name: string, ctx: ToolContext) => {
+  const tool = all(ctx).find((t) => t.name === name);
+  assert(tool, `${name} visible in ${JSON.stringify(ctx)}`);
+  return tool.parameters;
+};
+const map = (name: string, args: any, ctx: ToolContext = { kind: "normal" }) => toInternal(name, checkArgs(schemaOf(name, ctx), args), ctx);
+const task: ToolContext = { kind: "task", dutyCommands: ["schedule_next", "disable"], vaultRequest: true, vaultSend: true };
+const chat: ToolContext = { kind: "chat" };
+
+test("every public tool maps onto the unchanged internal executor arguments", () => {
+  const cases: [string, any, any, ToolContext?][] = [
+    ["chrome_tabs", { query: "jira" }, { operation: "tabs", query: "jira" }],
+    ["chrome_tabs", { incognito: false }, { operation: "tabs", incognito: false }],
+    ["chrome_navigate", { url: "https://a.test", target: { kind: "new_tab" } }, { operation: "open", url: "https://a.test" }],
+    ["chrome_navigate", { url: "https://a.test", target: { kind: "new_tab", incognito: true } }, { operation: "open", url: "https://a.test", incognito: true }],
+    ["chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab", tabTag: "C1" } }, { operation: "goto", tabTag: "C1", url: "https://a.test" }],
+    ["chrome_tab_control", { tabTag: "C1", command: "select" }, { operation: "select_tab", tabTag: "C1" }],
+    ["chrome_tab_control", { tabTag: "C1", command: "close" }, { operation: "close_tab", tabTag: "C1" }],
+    ["chrome_tab_control", { tabTag: "C1", command: "reload" }, { operation: "reload", tabTag: "C1" }],
+    ["chrome_inspect", { tabTag: "C1", scope: "viewport", visual: "none" }, { operation: "inspect", tabTag: "C1", scope: "viewport", visual: "none" }],
+    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" } }, { operation: "screenshot", tabTag: "C1" }],
+    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "page", tileOffset: 2 } }, { operation: "screenshot", tabTag: "C1", fullPage: true, tileOffset: 2 }],
+    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "element", ref: "e3", frame: 1 } }, { operation: "screenshot", tabTag: "C1", ref: "e3", frame: 1 }],
+    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "region", region: { x: 0, y: 0, width: 10, height: 20 } } }, { operation: "screenshot", tabTag: "C1", region: { x: 0, y: 0, width: 10, height: 20 } }],
+    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "scroll_area" } }, { operation: "screenshot", tabTag: "C1", expandScroll: true }],
+    ["chrome_act", { tabTag: "C1", actions: [
+      { action: "click", ref: "e1", clickCount: 2 }, { action: "fill", ref: "e2", value: "" }, { action: "type", text: "hi" }, { action: "press", key: "Enter" },
+      { action: "scroll", deltaY: 0, deltaX: 40 }, { action: "wait", milliseconds: 0 }, { action: "upload", selector: "#f", files: ["a.png"] },
+      { action: "click_at", x: 0, y: 0 }, { action: "move", x: 1, y: 2 }, { action: "drag", fromX: 1, fromY: 2, toX: 3, toY: 4, durationMs: 100 }, { action: "scroll_at", x: 5, y: 6, deltaY: -100 },
+    ], settleMs: 0 }, { operation: "act", tabTag: "C1", settleMs: 0, actions: [
+      { action: "click", ref: "e1", click_count: 2 }, { action: "fill", ref: "e2", text: "" }, { action: "type", text: "hi" }, { action: "press", key: "Enter" },
+      { action: "scroll", delta: 0, delta_x: 40 }, { action: "wait", ms: 0 }, { action: "upload", selector: "#f", files: ["a.png"] },
+      { action: "click_at", x: 0, y: 0 }, { action: "move", x: 1, y: 2 }, { action: "drag", x: 1, y: 2, to_x: 3, to_y: 4, duration_ms: 100 }, { action: "scroll_at", x: 5, y: 6, delta: -100 },
+    ] }],
+    ["chrome_evaluate", { tabTag: "C1", expression: "1", observe: false }, { operation: "evaluate", tabTag: "C1", expression: "1", feedback: "none" }],
+    ["chrome_evaluate", { tabTag: "C1", expression: "1" }, { operation: "evaluate", tabTag: "C1", expression: "1" }],
+    ["chrome_connection", { command: "status" }, { operation: "status" }],
+    ["chrome_connection", { command: "cancel_operation" }, { operation: "stop" }],
+    ["chrome_downloads", { downloadId: "42" }, { operation: "downloads", downloadId: "42" }],
+    ["chrome_devtools", { tabTag: "C1", kind: "network", requestId: "r1" }, { operation: "devtools", tabTag: "C1", devtools: { kind: "network", requestId: "r1" } }],
+    ["employee_status", {}, { action: "list" }],
+    ["employee_task_create", { instructions: "do it", dedupeKey: "k", runAt: "2030-01-01 09:00" }, { action: "add", kind: "todo", text: "do it", key: "k", nextAt: "2030-01-01 09:00" }],
+    ["employee_task_manage", { taskId: "t1", request: { command: "reschedule", runAt: "2030-01-01 09:00" } }, { action: "update", id: "t1", nextAt: "2030-01-01 09:00" }],
+    ["employee_task_manage", { taskId: "t1", request: { command: "cancel" } }, { action: "done", id: "t1" }],
+    ["employee_task_manage", { taskId: "t1", request: { command: "resume" } }, { action: "resume", id: "t1" }, chat],
+    ["employee_task_manage", { taskId: "t1", request: { command: "answer", answer: "yes" } }, { action: "answer", id: "t1", text: "yes" }, chat],
+    ["employee_task_manage", { taskId: "t1", request: { command: "stop" } }, { action: "stop", id: "t1" }, chat],
+    ["employee_duty_create", { instructions: "daily report", trigger: { kind: "condition", condition: "每天 9 点" } }, { action: "add", kind: "duty", text: "daily report", condition: "每天 9 点" }],
+    ["employee_duty_create", { instructions: "on demand", trigger: { kind: "manual" } }, { action: "add", kind: "duty", text: "on demand", manual: true }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "set_note", note: "" } }, { action: "update", id: "d1", note: "" }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "disable" } }, { action: "update", id: "d1", enabled: false }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "set_manual" } }, { action: "update", id: "d1", manual: true }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "remove" } }, { action: "done", id: "d1" }],
+    ["employee_duty_manage", { dutyId: "d1", request: { command: "schedule_next", runAt: "2030-01-01 09:00" } }, { action: "update", id: "d1", nextAt: "2030-01-01 09:00" }, task],
+    ["task_progress", { message: "m", plan: [{ content: "a", status: "completed" }] }, { action: "progress", text: "m", plan: [{ content: "a", status: "completed" }] }, task],
+    ["task_request_approval", { request: "pay" }, { action: "ask", text: "pay" }, task],
+    ["task_ask_user", { question: "code?" }, { action: "help", text: "code?" }, task],
+    ["task_wait", { checkpoint: "job 1", delayMinutes: 5 }, { action: "defer", text: "job 1", nextCheckInMinutes: 5 }, task],
+    ["task_relay_computer", { handoff: "open page" }, { action: "relay", scene: "computer", text: "open page" }, task],
+    ["task_complete", { evidence: "ok", deliverableRefs: [] }, { action: "complete", text: "ok", deliverableRef: [] }, task],
+    ["memory_propose", { claim: "c", memoryKind: "convention" }, { action: "memory_propose", claim: "c", memoryKind: "convention" }, chat],
+    ["memory_manage", { request: { command: "merge", memoryIds: ["a", "b"] } }, { action: "memory_resolve", resolveAction: "merge", ids: ["a", "b"] }, chat],
+    ["memory_manage", { request: { command: "forget", memoryId: "a" } }, { action: "memory_resolve", resolveAction: "drop", id: "a" }, chat],
+    ["memory_manage", { request: { command: "unpin", memoryId: "a" } }, { action: "memory_pin", id: "a", pinned: false }, chat],
+    ["vault_get", { credentialId: "v1", purpose: "login" }, { action: "vault_get", id: "v1", text: "login" }, task],
+    ["vault_send", { credentialId: "v1" }, { action: "vault_send", id: "v1" }, task],
+  ];
+  for (const [name, args, internal, ctx] of cases)
+    assert.deepEqual(map(name, args, ctx).args, internal, name + " " + JSON.stringify(args));
+  assert.deepEqual(map("vault_get", { credentialId: "v1", purpose: "login" }), { tool: "vault", args: { action: "get", id: "v1", text: "login" } }, "ordinary sessions keep the standalone vault executor");
+  assert.equal(map("employee_task_manage", { taskId: "t1", request: { command: "cancel" } }).target, "task");
+  assert.equal(map("employee_duty_manage", { dutyId: "d1", request: { command: "remove" } }).target, "duty");
+});
+
+test("memory source is decided by the server and memory_manage requires an explicit command", () => {
+  assert.throws(() => map("memory_propose", { claim: "c", memoryKind: "convention", source: "ui" }, chat), /不接受字段 source/);
+  assert.throws(() => map("memory_propose", { claim: "c" }, chat), /缺少必填字段 memoryKind/);
+  assert.throws(() => map("memory_manage", { request: { memoryId: "a" } }, chat), ArgumentError);
+});
+
+test("branch errors name the field and the chosen branch's structure", () => {
+  assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab" } }), /tabTag.*kind="existing_tab" 的结构：必填 kind、tabTag/s);
+  assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "elsewhere" } }), /target\.kind 只能是 "new_tab" \/ "existing_tab"/);
+  assert.throws(() => map("chrome_act", { tabTag: "C1", actions: [{ action: "click", ref: "e1", x: 1 }] }), /不接受字段 x.*必填 action、ref/s);
+  assert.throws(() => map("chrome_screenshot", { tabTag: "C1", capture: { kind: "region", region: { x: 0, y: 0, width: 0, height: 0 } } }), /width 必须大于 0/);
+  assert.throws(() => map("task_wait", { checkpoint: "x" }, task), /resumeAt 和 参数\.delayMinutes 必须恰好填一个/);
+  assert.throws(() => map("task_wait", { checkpoint: "x", delayMinutes: 5, resumeAt: "2030-01-01 09:00" }, task), /恰好填一个/);
+  assert.throws(() => map("employee_task_create", { instructions: "x", runAt: "tomorrow 9am" }), /runAt 至少 16 个字符|runAt 格式不对/);
+});
+
+test("narrow fallback: only null or an empty value its own bound rejects counts as omitted; legal '' and 0 are kept", () => {
+  assert.deepEqual(map("chrome_downloads", { downloadId: "", since: 0 }).args, { operation: "downloads" });
+  assert.deepEqual(map("chrome_inspect", { tabTag: "C1", query: null, maxItems: 0 }).args, { operation: "inspect", tabTag: "C1" });
+  assert.deepEqual(map("employee_duty_manage", { dutyId: "d1", request: { command: "set_note", note: "" } }).args.note, "");
+  const act = map("chrome_act", { tabTag: "C1", actions: [{ action: "scroll_at", x: 0, y: 0, deltaY: 0 }], settleMs: 0 }).args;
+  assert.deepEqual(act.actions, [{ action: "scroll_at", x: 0, y: 0, delta: 0 }]);
+  assert.equal(act.settleMs, 0);
+  assert.deepEqual(map("chrome_tabs", { incognito: false }).args, { operation: "tabs", incognito: false }, "false is a real filter, never dropped");
+  assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab", tabTag: "" } }), /tabTag/, "an empty tabTag never silently means new tab");
+});
+
+test("a whole-schema default fill is rejected before any browser or employee side effect", async (t) => {
+  const store = new Store(":memory:");
+  t.after(() => store.close());
+  let browser = 0, employee = 0;
+  const session = store.newSession({ scene: "computer" });
+  const engine = {
+    store, vault: new Vault(store), mcpFor: () => ({}),
+    chromeFor: async () => { browser++; throw Error("must not reach Chrome"); },
+    employeeFor: () => { employee++; throw Error("must not reach the employee"); },
+  } as any;
+  const tools = new Tools(engine, session, { model: "", provider: {} } as any, new AbortController().signal, () => {});
+  const filled = { tabTag: "C1", actions: [{ action: "click", ref: "e1", frame: 0, button: "", clickCount: 0, value: "", text: "", key: "", x: 0, y: 0 }], imageId: "", visual: "", settleMs: 0 };
+  await assert.rejects(tools.execute({ id: "a", name: "chrome_act", arguments: filled }, {} as any), ArgumentError);
+  await assert.rejects(tools.execute({ id: "b", name: "chrome_navigate", arguments: { url: "https://a.test", target: { kind: "new_tab", tabTag: "", incognito: false } } }, {} as any), /不接受字段 tabTag/);
+  await assert.rejects(tools.execute({ id: "c", name: "employee_task_manage", arguments: { taskId: "t1", request: { command: "reschedule", runAt: "", instructions: "" } } }, {} as any), ArgumentError);
+  assert.equal(browser, 0);
+  assert.equal(employee, 0);
+});
+
+test("visible tools and branches follow session, scene and permission like the old definitions", () => {
+  const names = (ctx: ToolContext) => [...employeeTools(ctx), ...vaultTools(ctx)].map((t) => t.name).sort();
+  const commands = (ctx: ToolContext, tool: string) => JSON.stringify(employeeTools(ctx).find((t) => t.name === tool)?.parameters).match(/"enum":\["[^\]]+"\]/g)?.join(",") || "";
+  assert.deepEqual(names({ kind: "normal" }), ["employee_duty_create", "employee_duty_manage", "employee_status", "employee_task_create", "employee_task_manage", "memory_manage", "memory_propose", "memory_search", "vault_get", "vault_list"]);
+  assert(!commands({ kind: "normal" }, "employee_task_manage").includes("resume"), "resume/answer/stop are chat-only");
+  assert(commands(chat, "employee_task_manage").includes("stop"));
+  assert.deepEqual(names({ kind: "chat", member: true }), ["employee_status", "employee_task_create", "employee_task_manage"]);
+  assert(!/set_instructions|reschedule|cancel/.test(commands({ kind: "chat", member: true }, "employee_task_manage")));
+  const main = names({ kind: "task", dutyCommands: [] });
+  assert.deepEqual(main, ["employee_status", "employee_task_create", "memory_manage", "memory_propose", "memory_search", "task_ask_user", "task_complete", "task_progress", "task_relay_computer", "task_request_approval", "task_wait", "vault_get", "vault_list"]);
+  const computer = names({ kind: "task", computer: true, dutyCommands: [] });
+  assert(!computer.includes("task_relay_computer") && !computer.includes("task_complete"));
+  assert(names({ kind: "task", vaultRequest: true, vaultSend: true }).includes("vault_request"));
+  assert(names({ kind: "task", vaultRequest: true, vaultSend: true }).includes("vault_send"));
+  assert.equal(commands({ kind: "task", dutyCommands: ["disable"] }, "employee_duty_manage"), '"enum":["disable"]', "fixed duty: a task may only disable its own duty");
+  assert(commands({ kind: "task", dutyCommands: ["schedule_next", "disable"] }, "employee_duty_manage").includes("schedule_next"));
+  for (const name of ["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete", "vault_request", "vault_send"]) assert(STANDALONE_TOOLS.has(name));
+});
+
+test("chrome tools appear only where the old chrome tool did", (t) => {
+  const store = new Store(":memory:");
+  t.after(() => store.close());
+  const engine = { store, vault: new Vault(store), mcpFor: () => ({}) } as any;
+  const config = { model: "", provider: {}, scenes: { lightweight: ["p/l"], coding: ["p/c"], computer: ["p/x"] } } as any;
+  const visible = (session: any, model?: any) => new Tools(engine, session, config, new AbortController().signal, () => {}).definitions(model).filter((d) => d.name.startsWith("chrome_")).length;
+  assert.equal(visible(store.newSession({ scene: "computer" })), 14);
+  assert.equal(visible(store.newSession({ scene: "coding" })), 0);
+  assert.equal(visible(store.newSession({ scene: "coding" }), { selection: "p/x" }), 14);
+  assert.equal(visible(store.newSession({ scene: "computer", readOnly: true })), 0);
+});

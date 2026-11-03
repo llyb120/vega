@@ -72,7 +72,7 @@ test("employee chat bubbles, citations and task jumps work on mobile while debug
     }
     const final = body.messages.at(-1)?.role === "tool";
     res.setHeader("Content-Type", "text/event-stream"); res.write(": heartbeat\n\n");
-    providerTimers.push(setTimeout(() => res.end("data: " + JSON.stringify({ choices: [{ index: 0, delta: final ? { content: "引用内容已核对，结论：只查看已验证的结果。" } : { content: "中间工具过程不应显示", reasoning_content: "internal thought", tool_calls: [{ index: 0, id: "ui-list", type: "function", function: { name: "employee", arguments: '{"action":"list"}' } }] }, finish_reason: final ? "stop" : "tool_calls" }] }) + "\n\ndata: [DONE]\n\n"), final ? 900 : 50));
+    providerTimers.push(setTimeout(() => res.end("data: " + JSON.stringify({ choices: [{ index: 0, delta: final ? { content: "引用内容已核对，结论：只查看已验证的结果。" } : { content: "中间工具过程不应显示", reasoning_content: "internal thought", tool_calls: [{ index: 0, id: "ui-list", type: "function", function: { name: "employee_status", arguments: '{}' } }] }, finish_reason: final ? "stop" : "tool_calls" }] }) + "\n\ndata: [DONE]\n\n"), final ? 900 : 50));
   });
   try {
     await new Promise<void>(resolve => provider.listen(0, "127.0.0.1", resolve));

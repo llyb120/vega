@@ -9,6 +9,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Tools } from "../server/core/tools";
 import { Redactor } from "../server/core/util";
 import { employeeChatMessages } from "../web/src/conversation.js";
+import { employeeCall } from "./public-call";
 
 function fixture() {
   const store = new Store(":memory:");
@@ -93,7 +94,7 @@ test("task delivery quotes its originating chat message, carries a task link and
   const original = "Investigate the endpoint. " + "Keep the scope read-only. ".repeat(20);
   let calls = 0;
   engine.providers.chat = async () => calls++ === 0
-    ? { role: "assistant", calls: [{ id: "assign", name: "employee", arguments: { action: "add", kind: "todo", text: "Investigate endpoint", profile: "coding" } }] }
+    ? { role: "assistant", calls: [{ id: "assign", ...employeeCall({ action: "add", kind: "todo", text: "Investigate endpoint", profile: "coding" }) }] }
     : { role: "assistant", text: "调查已安排。" };
   try {
     await engine.run(chat.id, { role: "user", text: original });
@@ -134,7 +135,7 @@ test("complete feedback identifies missing evidence, unverified steps and stale 
     const created = await employee.execute("", { action: "add", kind: "todo", text: "Verify result" });
     employee.busy.set(created.value.id, { computer: false, session: "" });
     const cases = [
-      { text: " ", plan: verified, planRevision: 2, revision: 2, error: /text=空/ },
+      { text: " ", plan: verified, planRevision: 2, revision: 2, error: /evidence=空/ },
       { text: "actual evidence", plan: [], planRevision: 2, revision: 2, error: /plan=0步/ },
       { text: "actual evidence", plan: ["in_progress", "blocked", "failed", "completed"].map(status => ({ content: "verify result", status })), planRevision: 2, revision: 2, error: /未验证步骤=1:in_progress、2:blocked、3:failed/ },
       { text: "actual evidence", plan: verified, planRevision: 1, revision: 2, error: /planRevision=1，revision=2/ },
@@ -236,7 +237,7 @@ test("scheduled execution records persist conclusions for stopping task tools wi
     let requests = 0;
     engine.providers.chat = async () => {
       assert.equal(++requests, 1, "stopping a task must not request an extra model turn just to generate its conclusion");
-      return { role: "assistant", calls: [{ id: "stop", name: "employee", arguments: scenario.arguments }] };
+      return { role: "assistant", calls: [{ id: "stop", ...employeeCall(scenario.arguments) }] };
     };
     try {
       const created = await employee.execute("", { action: "add", kind: "todo", text: "Verify an existing result" });
@@ -288,7 +289,7 @@ test("quoted context reaches delegated work once and is retained through interru
   const original = store.append(chat.id, { role: "assistant", text: "The verified finding is in the original gateway request log." });
   let requests = 0;
   engine.providers.chat = async () => requests++ === 0
-    ? { role: "assistant", calls: [{ id: "assign", name: "employee", arguments: { action: "add", kind: "todo", text: "Investigate this finding without modifying configuration" } }] }
+    ? { role: "assistant", calls: [{ id: "assign", ...employeeCall({ action: "add", kind: "todo", text: "Investigate this finding without modifying configuration" }) }] }
     : { role: "assistant", text: "已安排调查。" };
   try {
     await engine.run(chat.id, { role: "user", text: "调查这条结论", quote: store.quote(chat.id, original.seq!) });
@@ -317,8 +318,8 @@ test("the concise delivery field cannot bypass credential redaction", async () =
     employee.busy.set(created.value.id, { computer: false, session: session.id });
     const redactor = new Redactor(); redactor.add("private-test-token"); engine.redactors.set(session.id, redactor);
     const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {}), model = await engine.catalog.resolve(engine.config(), engine.config().scenes!.lightweight![0]);
-    assert.equal(tools.definitions(model).find(tool => tool.name === "employee")!.parameters.properties.summary.maxLength, 400);
-    await assert.rejects(tools.execute({ id: "complete", name: "employee", arguments: { action: "complete", deliverableRef: [], text: "verified result", summary: "The private-test-token works" } }, model), /Credentials/);
+    assert.equal(tools.definitions(model).find(tool => tool.name === "task_complete")!.parameters.properties.summary.maxLength, 400);
+    await assert.rejects(tools.execute({ id: "complete", ...employeeCall({ action: "complete", deliverableRef: [], text: "verified result", summary: "The private-test-token works" }) }, model), /Credentials/);
     assert.equal(employee.state().tasks[0].completion, undefined);
     employee.busy.delete(created.value.id); engine.redactors.delete(session.id);
     await tools.close();
@@ -348,7 +349,7 @@ test("answer appends a quoted user message in chat without duplicating identical
   const { store, engine, employee, chat } = fixture();
   let calls = 0;
   engine.providers.chat = async () => calls++ === 0
-    ? { role: "assistant", calls: [{ id: "assign", name: "employee", arguments: { action: "add", kind: "todo", text: "Need a verification code", profile: "coding" } }] }
+    ? { role: "assistant", calls: [{ id: "assign", ...employeeCall({ action: "add", kind: "todo", text: "Need a verification code", profile: "coding" }) }] }
     : { role: "assistant", text: "已安排。" };
   try {
     await engine.run(chat.id, { role: "user", text: "帮我登录并核对" });
@@ -414,7 +415,7 @@ test("complete delivers the cited deliverable body verbatim instead of only the 
   const { store, engine, employee, chat } = fixture();
   let calls = 0;
   engine.providers.chat = async () => calls++ === 0
-    ? { role: "assistant", calls: [{ id: "assign", name: "employee", arguments: { action: "add", kind: "todo", text: "写测试用例清单" } }] }
+    ? { role: "assistant", calls: [{ id: "assign", ...employeeCall({ action: "add", kind: "todo", text: "写测试用例清单" }) }] }
     : { role: "assistant", text: "已安排。" };
   try {
     await engine.run(chat.id, { role: "user", text: "写测试用例清单" });

@@ -15,6 +15,7 @@ import { Catalog } from "../server/core/catalog";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { maskedConfig, resolveModel } from "../server/core/config";
+import { employeeCall } from "./public-call";
 function engine() {
   const store = new Store(":memory:"),
     auth = new Subscriptions(store, ""),
@@ -101,7 +102,7 @@ test("empty employee chat generations recover with the same request and never re
   let requests = 0, dispatches = 0;
   const retries: any[] = [];
   e.events.on("event", (event) => {
-    if (event.type === "tool_start" && event.data.name === "employee") dispatches++;
+    if (event.type === "tool_start" && event.data.name === "employee_task_create") dispatches++;
     if (event.type === "retry") retries.push(event.data);
   });
   e.providers.chat = async (model, system, messages) => {
@@ -110,7 +111,7 @@ test("empty employee chat generations recover with the same request and never re
     if (requests === 1 || requests === 3) throw new ProviderError("thinking only", 0, "empty");
     assert.equal(model.options.reasoningEffort, "low");
     assert(system.includes("未返回正文或工具调用"));
-    if (requests === 2) return { role: "assistant", calls: [{ id: "delegate-once", name: "employee", arguments: { action: "add", kind: "todo", text: "authorized work" } }] };
+    if (requests === 2) return { role: "assistant", calls: [{ id: "delegate-once", ...employeeCall({ action: "add", kind: "todo", text: "authorized work" }) }] };
     assert(messages.some((message) => message.role === "tool" && message.callId === "delegate-once"));
     return { role: "assistant", text: "已创建任务，后续在任务页跟进。" };
   };
@@ -300,7 +301,7 @@ test("removed image service is hidden and unavailable while reading image pixels
     const archived = await tools.read({ path: "sqlite:blob/" + id });
     assert.equal(archived.images?.[0].blobId, id);
     assert.equal(archived.value.url, "/api/blobs/" + id);
-    assert(tools.definitions(model).some((tool) => tool.name === "chrome"));
+    assert(tools.definitions(model).some((tool) => tool.name === "chrome_screenshot"));
     assert(!("image" in (await e.saveConfig(legacy))));
     assert(!("image" in store.get<any>("config", {})));
   } finally {

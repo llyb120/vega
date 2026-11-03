@@ -64,13 +64,11 @@ test("ordinary conversations do not depend on employee state, schedule or task r
         .filter((event) => event.session === session.id)
         .every((event) => !event.taskId),
     );
-    const description = tools
-      .definitions(model)
-      .find((tool) => tool.name === "employee")!.description;
-    assert(description.includes("普通会话"));
-    assert(description.includes("不需要牛马启用"));
-    assert(tools.definitions(model).some((tool) => tool.name === "chrome"));
-    assert(tools.definitions(model).some((tool) => tool.name === "vault"));
+    const rules = tools.rules(model);
+    assert(rules.includes("普通会话"));
+    assert(rules.includes("不需要牛马启用"));
+    assert(tools.definitions(model).some((tool) => tool.name === "chrome_act"));
+    assert(tools.definitions(model).some((tool) => tool.name === "vault_get"));
     const readOnlyTools = new Tools(
       engine,
       store.newSession({ title: "readonly", readOnly: true }),
@@ -79,17 +77,15 @@ test("ordinary conversations do not depend on employee state, schedule or task r
       () => {},
     );
     assert(
-      !readOnlyTools.definitions(model).some((tool) => tool.name === "vault"),
+      !readOnlyTools.definitions(model).some((tool) => tool.name.startsWith("vault_")),
     );
     engine.employee.state = originalState;
     const delegated = await tools.execute(
       {
         id: "delegate",
-        name: "employee",
+        name: "employee_task_create",
         arguments: {
-          action: "add",
-          kind: "todo",
-          text: "explicitly delegated independent task",
+          instructions: "explicitly delegated independent task",
         },
       },
       model,
@@ -116,13 +112,10 @@ test("ordinary conversations do not depend on employee state, schedule or task r
       () => {},
     );
     assert(
-      taskTools
-        .definitions(model)
-        .find((tool) => tool.name === "employee")!
-        .description.includes("当前会话属于牛马任务"),
+      taskTools.rules(model).includes("当前会话属于牛马任务"),
     );
     assert(
-      !taskTools.definitions(model).some((tool) => tool.name === "vault"),
+      !taskTools.definitions(model).some((tool) => ["vault_request", "vault_send"].includes(tool.name)),
     );
     await engine.run(taskSession.id, {
       role: "user",

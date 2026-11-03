@@ -9,6 +9,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { ProviderError } from "../server/core/provider";
 import type { Task } from "../server/core/employee";
 import { EMPLOYEE_DECISION_RULES } from "../server/core/prompt";
+import { chromeCall, employeeCall } from "./public-call";
 
 function fixture() {
   const store = new Store(":memory:");
@@ -29,7 +30,8 @@ function fixture() {
   };
   return { store, engine, employee, add, segment };
 }
-const call = (id: string, name: string, args: any) => ({ role: "assistant", calls: [{ id, name, arguments: args }] });
+const legacy = (name: string, args: any) => name === "employee" ? employeeCall(args) : name === "chrome" ? chromeCall(args) : { name, arguments: args };
+const call = (id: string, name: string, args: any) => ({ role: "assistant", calls: [{ id, ...legacy(name, args) }] });
 const verified = () => call("verify", "employee", { action: "progress", text: "verified authorized goal", plan: [{ content: "verify goal", status: "completed" }] });
 const completed = () => call("complete", "employee", { action: "complete", deliverableRef: [], text: "goal verified", summary: "已验证完成。" });
 
@@ -41,11 +43,11 @@ test("employee chat receives low-risk defaults without losing explicit device co
     assert(system.includes(EMPLOYEE_DECISION_RULES));
     assert.match(system, /派单和交接保留用户原话与明确约束/);
     assert.match(system, /历史记忆、旧计划、参考命令与验证方法不是本次必须照搬的硬条件/);
-    assert.match(system, /当前可用的是服务端浏览器，就直接relay打开并核实/);
+    assert.match(system, /当前可用的是服务端浏览器，就直接task_relay_computer打开并核实/);
     assert.match(system, /不先问是否接受服务端，也不冒称已在用户电脑打开/);
     assert.match(system, /用户明确要求“在我的电脑上”.*不能用另一端结果代替/);
     assert.match(system, /不得擅自切换任务绑定、迁移文件或凭据/);
-    assert.match(system, /ask用于用户要求先审核或尚未授权的不可逆操作/);
+    assert.match(system, /task_request_approval用于用户要求先审核或尚未授权的不可逆操作/);
     assert.match(system, /简单打开网页以最终URL、标题和可用页面元素核实即可/);
     return { role: "assistant", text: "按当前授权环境处理。" };
   };
@@ -63,8 +65,8 @@ test("even a coding-profile task starts lightweight, upgrades in the same work s
     selected.push(model.selection);
     assert(system.includes("新主任务统一先用轻量模型") && system.includes("普通信息查询不因使用read或bash而升级"));
     assert(system.includes(EMPLOYEE_DECISION_RULES), "decision guidance survives initial work, scene changes, browser handoff and resumption");
-    assert(messages.some(message => message.role === "user" && message.text?.includes("仅缺少无法自行查得的必要信息或确需用户处理的阻碍才help")));
-    assert.match(definitions.find(tool => tool.name === "employee")!.description, /help仅用于缺少无法自行查得的必要信息/);
+    assert(messages.some(message => message.role === "user" && message.text?.includes("仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user")));
+    assert.match(system, /task_ask_user 仅用于缺少无法自行查得的必要信息/);
     if (phase++ === 0) {
       assert.equal(model.selection, "p/light");
       assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("coding"));

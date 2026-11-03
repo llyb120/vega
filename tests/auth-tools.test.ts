@@ -82,7 +82,7 @@ test("website login and role revocation never filter internal tools or interrupt
         .map((t) => t.name)
         .sort(),
     );
-    assert(definitions().includes("employee"));
+    assert(definitions().includes("employee_status"));
     engine.providers.chat = async () => {
       if (++requests === 1) {
         started();
@@ -92,8 +92,8 @@ test("website login and role revocation never filter internal tools or interrupt
           calls: [
             {
               id: "runtime-employee-list",
-              name: "employee",
-              arguments: { action: "list" },
+              name: "employee_status",
+              arguments: {},
             },
           ],
         };
@@ -121,7 +121,7 @@ test("website login and role revocation never filter internal tools or interrupt
     release();
     await running;
     assert(
-      store.messages(session.id).some((m) => m.name === "employee" && !m.error),
+      store.messages(session.id).some((m) => m.name === "employee_status" && !m.error),
     );
     assert(
       store

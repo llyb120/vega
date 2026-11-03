@@ -17,6 +17,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { privateWorker } from "../server/core/headless";
 import { Vault } from "../server/core/vault";
 import { sleep } from "../server/core/util";
+import { chromeCall, employeeCall } from "./public-call";
 
 function fixture(run: EmployeeRuntime["run"] = async () => {}) {
   const store = new Store(":memory:"), vault = new Vault(store);
@@ -147,7 +148,7 @@ test("employee conversation delegates through the existing engine without leakin
       assert(!system.includes("Bob worker"));
       assert(!definitions.some((tool) => ["bash", "write", "chrome", "vault", "mcp"].includes(tool.name)));
       return calls++ === 0
-        ? { role: "assistant", calls: [{ id: "delegate", name: "employee", arguments: { action: "add", kind: "todo", text: "finish authorized work", key: "work" } }] }
+        ? { role: "assistant", calls: [{ id: "delegate", ...employeeCall({ action: "add", kind: "todo", text: "finish authorized work", key: "work" }) }] }
         : { role: "assistant", text: "已安排工作" };
     };
     await engine.run(session.id, { role: "user", text: "请完成这项工作" });
@@ -180,14 +181,13 @@ test("employee chat delegates evidence-dependent questions, follows an existing 
   const investigation = "只读调查刚才任务的 HTTP response headers timed out：核对实际模型、网关、请求 URL 和日志证据。只返回脱敏后的 origin/path，不输出 API Key、Token 或带凭据的查询参数；不得修改配置、修复代码或重试原请求。";
   const source = await task(employee, "Original coding work");
   employee.update((state) => { Object.assign(state.tasks[0], { status: "failed", result: "HTTP response headers timed out" }); });
-  const follow = (id: string, arguments_: any) => ({ role: "assistant", calls: [{ id, name: "employee", arguments: arguments_ }] });
+  const follow = (id: string, arguments_: any) => ({ role: "assistant", calls: [{ id, ...employeeCall(arguments_) }] });
   engine.providers.chat = async (_model, system, messages, definitions) => {
     assert(system.includes("需要现场证据的问题") && system.includes("自动安排只读调查"));
     assert(system.includes("不能以沟通会话没有 shell") && system.includes("不是实际发起的请求地址"));
     assert(system.includes("用户明确要求只讨论、不执行时遵守") && system.includes("不得擅自重启用户停止的任务或绕过审批"));
-    const description = definitions.find((tool) => tool.name === "employee")!.description;
-    assert(description.includes("自动安排只读调查") && description.includes("不要重复派单"));
-    assert(!definitions.some((tool) => ["bash", "write", "edit", "chrome", "switch_scene"].includes(tool.name)));
+    assert(system.includes("自动安排只读调查") && system.includes("不要重复派单"));
+    assert(!definitions.some((tool) => ["bash", "write", "edit", "switch_scene"].includes(tool.name) || tool.name.startsWith("chrome_")));
     const last = messages.at(-1)!;
     if (last.role === "user" && last.text?.includes("1+1")) return { role: "assistant", text: "2" };
     if (last.role === "user") return follow("inspect", { action: "list" });
@@ -280,9 +280,9 @@ test("computer execution keeps a real final answer once and never treats tool na
       runtime.run = async (session, prompt, _signal, input) => {
         store.append(session, { role: "user", text: prompt, taskInput: input });
         store.append(session, toolOnly
-          ? { role: "assistant", text: "正在检查网页。", calls: [{ id: "inspect", name: "chrome", arguments: { operation: "inspect" } }] }
+          ? { role: "assistant", text: "正在检查网页。", calls: [{ id: "inspect", ...chromeCall({ operation: "inspect" }) }] }
           : { role: "assistant", text: "已核实网页结果，没有再次提交。" });
-        if (toolOnly) store.append(session, { role: "tool", name: "chrome", callId: "inspect", text: "inspection failed", error: true });
+        if (toolOnly) store.append(session, { role: "tool", name: "chrome_inspect", callId: "inspect", text: "inspection failed", error: true });
       };
       const current = await segment(employee, employee.task(employee.state(), job.id));
       const messages = store.messages(current.computerSession), conclusion = messages.at(-1)!;
@@ -458,8 +458,8 @@ test("real executor recovery preserves committed tool outcomes and consumes each
     }
     assert(!input.text!.includes("preserve login"), "the continuation must not re-acknowledge a supplement already in history");
     assert(messages.some((message) => message.role === "tool" && message.callId === "write-once"));
-    if (phase === 4) return { role: "assistant", calls: [{ id: "verify", name: "employee", arguments: { action: "progress", text: "verified retained file and requirements", plan: [{ content: "preserve file and login", status: "completed" }] } }] };
-    return { role: "assistant", calls: [{ id: "finish", name: "employee", arguments: { action: "complete", deliverableRef: [], text: "verified original write and latest supplement; no repeated write" } }] };
+    if (phase === 4) return { role: "assistant", calls: [{ id: "verify", ...employeeCall({ action: "progress", text: "verified retained file and requirements", plan: [{ content: "preserve file and login", status: "completed" }] }) }] };
+    return { role: "assistant", calls: [{ id: "finish", ...employeeCall({ action: "complete", deliverableRef: [], text: "verified original write and latest supplement; no repeated write" }) }] };
   };
   try {
     let current = await segment(employee, job);
@@ -492,13 +492,13 @@ test("a supplement delivered by a completion guard is not re-injected after anot
     if (requests === 1) {
       await employee.execute(job.id, { action: "progress", text: "old goal verified", plan: [{ content: "old goal", status: "completed" }] });
       await employee.control({ action: "resume", id: job.id, text: "latest requirement" });
-      return { role: "assistant", calls: [{ id: "guard", name: "employee", arguments: { action: "complete", deliverableRef: [], text: "old goal done" } }] };
+      return { role: "assistant", calls: [{ id: "guard", ...employeeCall({ action: "complete", deliverableRef: [], text: "old goal done" }) }] };
     }
     if (requests === 2) throw new ProviderError("interrupted after receiving supplement", 400);
     assert(!messages.findLast((message) => message.role === "user")!.text!.includes("latest requirement"));
     assert(messages.some((message) => message.role === "tool" && message.taskInput?.answer?.includes("latest requirement")));
     await employee.execute(job.id, { action: "progress", text: "latest goal verified", plan: [{ content: "latest requirement", status: "completed" }] });
-    return { role: "assistant", calls: [{ id: "finish", name: "employee", arguments: { action: "complete", deliverableRef: [], text: "latest goal verified" } }] };
+    return { role: "assistant", calls: [{ id: "finish", ...employeeCall({ action: "complete", deliverableRef: [], text: "latest goal verified" }) }] };
   };
   try {
     let current = await segment(employee, job);

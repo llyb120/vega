@@ -10,7 +10,7 @@ import {
 } from "node:crypto";
 import type { Store } from "./store";
 import { assert, id, type Obj } from "./util";
-export const VAULT_USAGE = "先 list 查看名称与使用条件，再结合用户任务、当前系统/页面和登录方式选择唯一适用的条目；get 的 text 必须说明本次用途及为什么符合 condition。网页填写前先观察实际登录页，取用时自动结合当前页面核对；缺少页面上下文时先观察再重新 get，不要要求用户补网站配置。网站名/URL 只是可选上下文，不是必填配置；没有网站名也可根据明确的使用条件判断。不能因为用户名相同、都属腾讯或发生跳转就复用其他系统凭据；DataBrain 邮箱登录、OA 与合作伙伴认证要分别判断。不取用条件不符的条目，可以重新核对列表选择明确适用者；仍无匹配或无法确定时才询问，不能靠实际登录轮流试账号。历史里的 [credential redacted]、[redacted]、__stored_secret__ 都不是真实凭据，续做或换会话需重新 get，不能填入页面。凭据只用于当前授权操作，不写进回复、记忆或备注。";
+export const VAULT_USAGE = "先 vault_list 查看名称与使用条件，再结合用户任务、当前系统/页面和登录方式选择唯一适用的条目；vault_get 的 purpose 必须说明本次用途及为什么符合 condition。网页填写前先观察实际登录页，取用时自动结合当前页面核对；缺少页面上下文时先观察再重新 vault_get，不要要求用户补网站配置。网站名/URL 只是可选上下文，不是必填配置；没有网站名也可根据明确的使用条件判断。不能因为用户名相同、都属腾讯或发生跳转就复用其他系统凭据；DataBrain 邮箱登录、OA 与合作伙伴认证要分别判断。不取用条件不符的条目，可以重新核对列表选择明确适用者；仍无匹配或无法确定时才询问，不能靠实际登录轮流试账号。历史里的 [credential redacted]、[redacted]、__stored_secret__ 都不是真实凭据，续做或换会话需重新 vault_get，不能填入页面。凭据只用于当前授权操作，不写进回复、记忆或备注。";
 const SPKI = Buffer.from("302a300506032b656e032100", "hex"),
   PKCS8 = Buffer.from("302e020100300506032b656e04220420", "hex");
 export const encrypt = (key: Buffer, aad: string, plain: Buffer | string) => {
@@ -125,29 +125,6 @@ export class Vault {
     assert(this.store.object("vault", key), "Vault entry not found");
     this.store.remove("vault", key);
   }
-  toolDefinition() {
-    return {
-      name: "vault",
-      description:
-        "本机密码本，可存账号密码、API Key、Token、私钥等自由文本凭据。list 只返回元数据，get 只按明确 id 取用；增删改请用户在设置 → 密码本操作。" + VAULT_USAGE,
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", enum: ["list", "get"] },
-          id: { type: "string", description: "get 必填：list 返回的条目 id" },
-          url: { type: "string", maxLength: 2048, description: "可选：当前实际页面或目标服务地址，作为使用条件判断的辅助上下文，不要求在密码本配置网站" },
-          text: {
-            type: "string",
-            minLength: 1,
-            maxLength: 8000,
-            description: "get 必填：这次取用的用途",
-          },
-        },
-        required: ["action"],
-        additionalProperties: false,
-      },
-    };
-  }
   executeTool(a: Obj) {
     const action = a.action;
     if (action === "list")
@@ -160,8 +137,8 @@ export class Vault {
     if (action === "get") {
       const id = typeof a.id === "string" ? a.id.trim() : "",
         purpose = typeof a.text === "string" ? a.text.trim() : "";
-      assert(id, "缺少 id：先 list 查看密码本");
-      assert(purpose, "缺少 text：写明这次取用的用途");
+      assert(id, "缺少 credentialId：先 vault_list 查看密码本");
+      assert(purpose, "缺少 purpose：写明这次取用的用途");
       const value = this.get(id, purpose);
       return {
         value: {

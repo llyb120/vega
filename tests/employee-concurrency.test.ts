@@ -10,8 +10,10 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { sleep } from "../server/core/util";
+import { chromeCall, employeeCall } from "./public-call";
 
-const call = (id: string, name: string, arguments_: any) => ({ role: "assistant", calls: [{ id, name, arguments: arguments_ }] });
+const legacy = (name: string, args: any) => name === "employee" ? employeeCall(args) : name === "chrome" ? chromeCall(args) : { name, arguments: args };
+const call = (id: string, name: string, arguments_: any) => ({ role: "assistant", calls: [{ id, ...legacy(name, arguments_) }] });
 
 test("a lightweight shell query releases its workspace lease before later model reasoning finishes", { timeout: 10000 }, async () => {
   const cwd = await mkdtemp(join(tmpdir(), "vega-transient-work-")), store = new Store(":memory:");

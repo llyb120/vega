@@ -28,11 +28,10 @@ test('native downloads expose progress, interruption and completion without tab 
   for(const args of [{since:-1},{since:'1'},{since:8640000000000001},{downloadId:'oops'},{downloadId:'9007199254740992'},{incognito:'true'}])await assert.rejects(scope.run(args));
   assert.equal(calls,4,'invalid inputs must not query or trigger downloads');
   delete chrome.downloads;await assert.rejects(scope.run({}),/0\.1\.6/);
-  const schema=JSON.parse(await readFile(new URL('../../shared/chrome-tool.json',import.meta.url),'utf8'));
-  assert.ok(schema.inputSchema.properties.operation.enum.includes('downloads'));
-  assert.ok(schema.inputSchema.properties.operation.enum.includes('devtools'));
-  assert.match(schema.description,/Ctrl\+C.*TSV/);
-  assert.equal(schema.inputSchema.properties.downloadId.type,'string');
+  const tools=JSON.parse(await readFile(new URL('../../shared/chrome-tools.json',import.meta.url),'utf8'));const byName=Object.fromEntries(tools.map(t=>[t.name,t]));
+  assert.ok(byName.chrome_downloads);assert.ok(byName.chrome_devtools);
+  assert.match(byName.chrome_act.description,/Ctrl\+C.*TSV/);
+  assert.equal(byName.chrome_downloads.parameters.properties.downloadId.type,'string');
   assert.match(done.notice,/state=complete/);
 });
 

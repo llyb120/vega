@@ -235,12 +235,12 @@ test("projection repairs missing/orphan pairs and trims old Chrome DOM without r
       {
         seq: 5 + n * 2,
         role: "assistant",
-        calls: [{ id: "c" + n, name: "chrome", arguments: {} }],
+        calls: [{ id: "c" + n, name: "chrome_inspect", arguments: {} }],
       },
       {
         seq: 6 + n * 2,
         role: "tool",
-        name: "chrome",
+        name: "chrome_inspect",
         callId: "c" + n,
         text:
           `[m000${n}] ` +
@@ -258,7 +258,7 @@ test("projection repairs missing/orphan pairs and trims old Chrome DOM without r
   assert(!fixed.some((m) => m.callId === "orphan"));
   assert.deepEqual(fixed[0], rows[0]);
   assert(fixed.some((m) => m.thinking === "current thinking"));
-  const chrome = fixed.filter((m) => m.name === "chrome");
+  const chrome = fixed.filter((m) => m.name === "chrome_inspect");
   assert(!chrome[0].text?.includes("dom-0"));
   assert(chrome[2].text?.includes("dom-2"));
   assert(chrome[0].text?.includes("completedActions"));

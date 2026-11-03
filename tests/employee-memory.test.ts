@@ -19,6 +19,7 @@ import {
   ACTIVE_MEMORY_CAP,
   type MemoryRecord,
 } from "../server/core/employee";
+import { employeeCall } from "./public-call";
 
 function fixture() {
   const store = new Store(":memory:");
@@ -28,7 +29,7 @@ function fixture() {
   const employee = engine.employee.for(engine.employee.create({ name: "Memory employee" }, "owner").id), chat = employee.chat("owner");
   return { store, engine, employee, chat };
 }
-const action = (id: string, arguments_: any) => ({ role: "assistant", calls: [{ id, name: "employee", arguments: arguments_ }] });
+const action = (id: string, arguments_: any) => ({ role: "assistant", calls: [{ id, ...employeeCall(arguments_) }] });
 
 test("migrates legacy memories into structured records", () => {
   const now = Date.now();
@@ -139,9 +140,8 @@ test("employee memory tools propose/search/resolve and refresh prompt in the sam
   let phase = "propose", requests = 0, memory = "";
   engine.providers.chat = async (_model, system, _messages, definitions) => {
     assert(system.includes("主动积累") && system.includes("memory_propose"));
-    const definition = definitions.find((tool) => tool.name === "employee")!;
-    assert(definition.parameters.properties.action.enum.includes("memory_propose"));
-    assert(!definition.parameters.properties.action.enum.includes("remember"));
+    assert(["memory_search", "memory_propose", "memory_manage"].every((name) => definitions.some((tool) => tool.name === name)));
+    assert(!definitions.some((tool) => tool.name === "employee" || tool.name === "remember"));
     if (requests++ % 2 === 0) {
       if (phase === "forget") return action("forget", { action: "memory_forget", id: memory });
       if (phase === "propose") return action("propose", { action: "memory_propose", claim: "Project Aurora uses the east region.", memoryKind: "convention", source: "ui" });

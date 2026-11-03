@@ -9,6 +9,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { LocalAgents, LocalAgentUnavailable } from "../server/core/local-agent";
 import { Tools } from "../server/core/tools";
 import { resolveModel } from "../server/core/config";
+import { chromeCall, employeeCall } from "./public-call";
 
 const client = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Local PC", cwd: "C:\\only-on-client", platform: "windows" };
 function fixture(t: TestContext) {
@@ -36,7 +37,7 @@ function fixture(t: TestContext) {
 test("local Chrome tools and employee tasks use only their selected native browser and local uploads", async (t) => {
   const { engine, store, session, calls } = fixture(t);
   const tools = new Tools(engine, session, { model: "", provider: {} }, new AbortController().signal, () => {});
-  const result = await tools.execute({ id: "tabs", name: "chrome", arguments: { operation: "tabs" } }, {} as any);
+  const result = await tools.execute({ id: "tabs", ...chromeCall({ operation: "tabs" }) }, {} as any);
   assert.equal(result.value.tabs[0].tag, "local-a");
   const chrome = await engine.chromeFor({ ...session, employeeId: "employee", taskId: "task" });
   assert.equal(chrome, await engine.chromeFor(store.session(session.id)));
@@ -94,8 +95,8 @@ test("employee relay keeps its task-bound local Chrome for new and legacy comput
     const id = added.value.id;
     let turns = 0;
     engine.providers.chat = async () => {
-      if (++turns === 1) return { role: "assistant", calls: [{ id: "relay", name: "employee", arguments: { action: "relay", scene: "computer", text: "Inspect the existing local Chrome tab" } }] };
-      if (turns === 2) return { role: "assistant", calls: [{ id: "local-tabs", name: "chrome", arguments: { operation: "tabs" } }] };
+      if (++turns === 1) return { role: "assistant", calls: [{ id: "relay", ...employeeCall({ action: "relay", scene: "computer", text: "Inspect the existing local Chrome tab" }) }] };
+      if (turns === 2) return { role: "assistant", calls: [{ id: "local-tabs", ...chromeCall({ operation: "tabs" }) }] };
       return { role: "assistant", text: "Verified the selected local Chrome" };
     };
     employee.update((state) => { state.tasks[0].status = "running"; });
@@ -175,7 +176,7 @@ test("competing sessions pause without input; releasing a turn admits the next s
   await engine.chromeFor(session);
   const second = store.newSession({ localAgent: true, clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
   const tools = new Tools(engine, second, { model: "", provider: {} }, new AbortController().signal, () => {});
-  const result = await tools.execute({ id: "busy", name: "chrome", arguments: { operation: "open", url: "https://example.com" } }, {} as any);
+  const result = await tools.execute({ id: "busy", ...chromeCall({ operation: "open", url: "https://example.com" }) }, {} as any);
   assert.equal(result.stop, true);
   assert.match(result.pause!, /独占/);
   assert(!calls.some((call) => call.operation === "open"));
@@ -208,7 +209,7 @@ test("native browser leases survive model/tool roundtrips and release on complet
     const next = store.newSession({ localAgent: true, clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
     let turns = 0;
     engine.providers.chat = async () => {
-      if (++turns === 1) return { role: "assistant", calls: [{ id: "local-tabs", name: "chrome", arguments: { operation: "tabs" } }] };
+      if (++turns === 1) return { role: "assistant", calls: [{ id: "local-tabs", ...chromeCall({ operation: "tabs" }) }] };
       await assert.rejects(engine.chromeFor(next), /独占/);
       if (mode === "failure") throw Error("fixture provider failure");
       if (mode === "cancel") engine.cancel(session.id);

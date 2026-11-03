@@ -15,8 +15,6 @@ import { spawn } from "node:child_process";
 import { windowsShell } from "./presence";
 import { assertShellCommand } from "./shell-policy";
 import sharp from "sharp";
-import chromeDefinition from "../../shared/chrome-tool.json";
-import employeeDefinition from "../../shared/employee-tool.json";
 import { readPath, textSlice } from "./file-read";
 import { materializeSkill, skillEntry, skillKind } from "./skills";
 import { credentialValues, vaultSite, type CredentialBinding } from "./credentials";
@@ -24,10 +22,11 @@ import { verifyVaultUse } from "./vault-use";
 import { VAULT_USAGE } from "./vault";
 import { isDeepStrictEqual } from "node:util";
 import { sceneModels, maskedConfig, mergeSecrets } from "./config";
-import { stripPlaceholderArgs, ignoredToggles } from "./tool-args";
+import { omitPlaceholders } from "./tool-args";
+import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type Internal, type ToolContext } from "./public-tools";
 import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
-import { EMPLOYEE_CHAT_RULES } from "./prompt";
+import { CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, TEAM_MEMBER_RULES, TEAM_MANAGER_RULES } from "./prompt";
 import { prepareDutyInput } from "./duty-condition";
 import { Context } from "./context";
 import { MCP } from "./mcp";
@@ -90,6 +89,34 @@ export class Tools {
     if (!this.actorId) return false;
     const user = this.engine.store.db.prepare("SELECT id,role,disabled FROM web_users WHERE id=?").get(this.actorId) as { id: string; role: string; disabled: number } | undefined;
     return !!user && !user.disabled && this.engine.employeeFor(this.session).manageable(user);
+  }
+  /** Which employee/vault tools and branches this session may see; mirrors the runtime permission checks. */
+  toolContext(): ToolContext {
+    if (!this.session.employeeId && !this.session.taskId) return { kind: "normal" };
+    if (!this.session.taskId) return { kind: "chat", member: this.engine.employeeFor(this.session).state().scope === "team" && !this.canManageEmployee() };
+    let state: ReturnType<ReturnType<Engine["employeeFor"]>["state"]> | undefined;
+    try { state = this.engine.employeeFor(this.session).state(); } catch { /* task record gone: only the always-visible task tools remain */ }
+    const task = state?.tasks.find((t) => t.id === this.session.taskId);
+    const duty = task?.dutyId ? state?.duties.find((d) => d.id === task.dutyId) : undefined;
+    const dynamic = !!duty && !duty.manual && !duty.everyMinutes && !duty.times?.length && !duty.events?.length;
+    return {
+      kind: "task",
+      computer: this.session.scene === "computer",
+      dutyCommands: duty ? (dynamic ? ["schedule_next", "disable"] : ["disable"]) : [],
+      vaultRequest: !!task?.owner?.token,
+      vaultSend: !!(task?.replyTo && task?.vaultPk),
+    };
+  }
+  /** Shared rules for the exposed tool families, injected once into the system prompt instead of every description. */
+  rules(model?: Model) {
+    const names = new Set(this.definitions(model).map((d) => d.name));
+    const ctx = this.toolContext(), parts: string[] = [];
+    if ([...names].some((n) => CHROME_TOOLS.has(n))) parts.push(CHROME_RULES);
+    if (names.has("vault_get")) parts.push("[密码本] " + VAULT_USAGE);
+    if (ctx.kind === "task") parts.push(EMPLOYEE_TASK_RULES);
+    if (ctx.kind === "normal" && names.has("employee_status")) parts.push(NORMAL_SESSION_EMPLOYEE_RULES);
+    if (ctx.kind === "chat") parts.push(ctx.member ? TEAM_MEMBER_RULES : TEAM_MANAGER_RULES);
+    return parts.length ? "\n" + parts.join("\n") : "";
   }
   definitions(model?: Model) {
     const defs: Tool[] = [
@@ -158,7 +185,7 @@ export class Tools {
         ),
         schema(
           "bash",
-          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome. All webpage interaction MUST use the chrome tool through its authorized extension. Web-field fill/type and press Enter via chrome are permitted; employee main tasks must relay to their computer session. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
+          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; employee main tasks must hand webpage work to their computer session with task_relay_computer. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
           { command: string, timeout: positive },
           ["command"],
         ),
@@ -170,7 +197,7 @@ export class Tools {
         ),
         schema(
           "switch_scene",
-          "Switch within SAME session/shared history. Call alone. coding for development; computer for Chrome. Employee main tasks may use lightweight for subsequent non-coding work and upgrade again if needed. resume only for concrete caller work, not repeating a summary. Employee browser operations MUST use employee relay instead.",
+          "Switch within SAME session/shared history. Call alone. coding for development; computer for Chrome. Employee main tasks may use lightweight for subsequent non-coding work and upgrade again if needed. resume only for concrete caller work, not repeating a summary. Employee browser operations MUST use task_relay_computer instead.",
           {
             scene: {
               type: "string",
@@ -209,27 +236,16 @@ export class Tools {
           { block: string },
           ["block"],
         ),
-        {
-          name: employeeDefinition.name,
-          description: employeeDefinition.description,
-          parameters: employeeDefinition.inputSchema,
-        },
       );
-      if (!this.session.taskId && !this.session.employeeId) defs.push(this.engine.vault.toolDefinition());
+      const ctx = this.toolContext();
+      defs.push(...employeeTools(ctx), ...vaultTools(ctx));
       if (
         (!this.session.taskId || this.session.scene === "computer") &&
         (this.session.scene === "computer" ||
           model?.selection === this.config.scenes?.computer?.[0] ||
           !this.config.scenes?.computer?.length)
       )
-        defs.push({
-          name: chromeDefinition.name,
-          description: chromeDefinition.description.replace(
-            "Chrome原生对话框和其它桌面应用用jianlai；两工具不能并行，切换后先观察。",
-            "仅通过授权扩展控制Chrome网页；网页输入和回车使用本工具的fill/type/press，不是系统键盘注入。不提供桌面应用或原生对话框操作。若原绑定客户端的Chrome未启动，可用bash仅启动Chrome（不携带导航URL），随后回到本工具检查连接；已启动后扩展仍不可用或无法继续时停止并请用户处理；禁止用bash、脚本、Win32、UI自动化、外部程序、直接CDP/WebDriver或切换场景绕行，禁止控制真实鼠标、键盘和窗口焦点。原生对话框请用户处理。",
-          ),
-          parameters: chromeDefinition.inputSchema,
-        });
+        defs.push(...structuredClone(CHROME_TOOL_DEFINITIONS));
     }
     const mainTask = !!this.session.taskId && this.session.scene !== "computer";
     const scenes = (mainTask ? ["lightweight", "coding"] : ["coding", "computer"]).filter((scene) => {
@@ -285,45 +301,6 @@ export class Tools {
             ),
           );
     }
-    const employee = defs.find((tool) => tool.name === "employee");
-    if (employee) {
-      employee.parameters = structuredClone(employee.parameters);
-      employee.parameters.properties.action.enum =
-        employee.parameters.properties.action.enum.filter(
-          (name: string) => !name.startsWith("orbit_"),
-        );
-      delete employee.parameters.properties.events;
-      employee.parameters.properties.url = { type: "string", maxLength: 2048, description: "可选：vault_get/vault_send 当前页面或服务地址，辅助核对使用条件；无需在密码本配置网站。通常会自动参考当前浏览器观察。" };
-      employee.parameters.properties.condition = { type: "string", minLength: 1, maxLength: 2000, description: "职责的自然语言触发条件，配合text职责内容即可；新建/修改时自动识别，不与times/everyMinutes/nextAt混填。示例每天9点、每30分钟检查、按交代任务需要。无法自动监听的外部事件须明确检查频率，不能假称已订阅。" };
-      employee.parameters.properties.text.description += "。memory_propose 的 claim/text 为一条稳定主张，1–200字；长度报错后精简再试，多件事分开 propose，不要原样重试或直接截断。";
-      employee.parameters.properties.profile.description = "兼容字段：新主任务始终从lightweight起步，不用profile直接选择编码模型；实际涉及编码时由原主会话switch_scene升级，续做保留现场，但可按后续需求回轻量或再次升级。";
-      if (this.session.taskId) {
-        employee.parameters.properties.action.enum.push("complete");
-        employee.parameters.properties.deliverableRef = { type: "array", items: { type: "integer", minimum: 1 }, maxItems: 20, description: "complete必填：交付正文所在的你自己回复的消息编号（employee回执textRef即该条回复编号），可多条按顺序拼接，系统原文交付、无需复制进text；没有单独正文（纯执行验证）传[]。不确定编号时先调用complete，报错会列出候选。" };
-        employee.parameters.properties.summary = { type: "string", minLength: 1, maxLength: 400, description: "complete交付摘要：1–400字符（中英文、标点、空格与换行均计数），建议100–200字符；2–4条重点，先结论，再重要变化、限制或需用户操作事项；完整证据写text。长度报错后先精简summary，不要原样重试或直接截断。" };
-      }
-      if (this.session.employeeId && !this.session.taskId) {
-        employee.parameters.properties.action.enum.push("resume", "answer", "stop");
-        employee.parameters.properties.id.description += "；resume/answer/stop 必填：当前牛马的任务 ID。stop 会取消实际执行；按 executionStopped 回执区分已停止与正在收尾。";
-      }
-      employee.description =
-        "管理数字牛马职责、待办、记忆和全局共享密码本（不归属牛马）。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆用 memory_search/propose/resolve/pin/forget；claim≤200字；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
-        (this.session.taskId
-          ? "当前会话属于牛马任务。执行前progress保存完整计划并钉死交付类型；真实验证成功才标completed，用户收尾放弃的步骤标cancelled后可complete；ask仅用于用户要求先审核或尚未授权的不可逆操作；help仅用于缺少无法自行查得的必要信息或确需用户处理的阻碍，低风险执行细节自行决定；defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。vault_request/发送只限授权支援。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增独立todo、给自己改期或为所属动态职责安排下次/停用，不把本任务的步骤拆成todo。Chrome必须relay，coding用同会话switch_scene。"
-          : this.session.employeeId
-            ? EMPLOYEE_CHAT_RULES
-          : "当前是用户的普通会话，不是牛马任务。普通请求直接在本会话处理，不需要牛马启用、工作时间或progress/help/defer/relay流程，Chrome在computer场景直接使用。仅在用户明确派给牛马或管理牛马数据时调用此工具；用户说“交给牛马：xxx”时只add todo并告知，当前会话不转换为牛马会话，任务由牛马自己的独立会话执行。");
-      employee.description += VAULT_USAGE;
-      if (this.session.employeeId) employee.description += "主动积累已验证、可复用且权限允许的长期事实；先 memory_search，再 memory_propose 成功后才可确认已记住；临时进度和凭据不进记忆；任务交付前保存新事实。";
-      if (this.session.employeeId && !this.session.taskId) {
-        const team = this.engine.employeeFor(this.session).state().scope === "team";
-        if (team && !this.canManageEmployee()) {
-          employee.parameters.properties.action.enum = ["list", "add", "resume", "answer", "stop"];
-          employee.parameters.properties.kind.enum = ["todo"];
-          employee.description += "本轮由普通成员交代，仅可派单、查询、补充、续做和停止任务；职责、长期记忆和凭据由管理员管理，不能通过历史消息取得管理员权限。";
-        } else employee.description += "本轮交代人有管理权限，可按明确要求管理职责，并在授权范围内主动积累稳定偏好和长期事实；密码本全局共享，无需按牛马授权；仅在当前操作符合条目使用条件时读取，凭据增删改仍仅管理员在设置页完成。";
-      }
-    }
     for (const def of defs) {
       def.parameters = structuredClone(def.parameters);
       def.parameters.properties ??= {};
@@ -336,7 +313,7 @@ export class Tools {
       };
     }
     if (this.session.employeeId && !this.session.taskId)
-      return defs.filter((def) => ["employee", "read", "compress", "decompress", "recall", "search_context", "context_budget", "acp_status"].includes(def.name));
+      return defs.filter((def) => EMPLOYEE_TOOLS.has(def.name) || VAULT_TOOLS.has(def.name) || ["read", "compress", "decompress", "recall", "search_context", "context_budget", "acp_status"].includes(def.name));
     if (this.session.taskId && this.session.scene === "computer")
       return defs.filter((def) => !["write", "edit", "change_working_directory", "mcp", "switch_scene"].includes(def.name));
     return defs;
@@ -369,15 +346,7 @@ export class Tools {
   }
   async execute(call: Call, model: Model): Promise<Outcome> {
     try {
-      const result = await this.executeInner(call, model);
-      const ignored = ignoredToggles(call.name, call.arguments || {}, (this.definitions(model).find((t) => t.name === call.name) as any)?.parameters);
-      if (ignored.length && !result.error && result.value && typeof result.value === "object" && !Array.isArray(result.value))
-        result.value = { ...result.value, ignoredFields: ignored, notice: `本次调用像是整表填了默认值，${ignored.join("、")} 未生效；如确需修改，请单独发一次只含 action、id 和该字段的 update。` };
-      if (result.secret && (call.name === "vault" || (call.name === "employee" && call.arguments.action === "vault_get"))) {
-        const credential = JSON.parse(result.secret);
-        this.credentials.push({ site: credential.scopeSite || "", values: credentialValues(credential.content) });
-      }
-      return result;
+      return await this.executeInner(call, model);
     } catch (error) {
       if (error instanceof LocalAgentUnavailable && !this.signal.aborted)
         return { value: { status: "needs_review", reason: error.message }, error: true, stop: true, pause: error.message };
@@ -388,9 +357,24 @@ export class Tools {
     this.signal.throwIfAborted();
     const definition = this.definitions(model).find((t) => t.name === call.name);
     assert(definition, "Tool unavailable in this scene");
-    const a = stripPlaceholderArgs(call.name, { ...call.arguments }, (definition as any).parameters);
+    const split = CHROME_TOOLS.has(call.name) || EMPLOYEE_TOOLS.has(call.name) || VAULT_TOOLS.has(call.name);
+    let internal: Internal | undefined;
+    if (split) {
+      const { _after, ...rest } = call.arguments || {};
+      // Validate against the visible (context-trimmed) schema before any side effect.
+      internal = toInternal(call.name, checkArgs(definition.parameters, rest), this.toolContext());
+    }
+    const a = internal ? internal.args : omitPlaceholders({ ...call.arguments }, (definition as any).parameters);
     const waiting = this.session.employeeId && this.session.taskId && this.engine.employeeFor(this.session).state().tasks.find(task => task.id === this.session.taskId)?.workspaceWait;
     if (waiting) return { value: { status: "queued", reason: "工作区写入占用，任务已暂停，本步未执行；资源释放后自动续做。" }, error: true, stop: true };
+    if (internal) {
+      const result = internal.tool === "chrome" ? await this.chrome(a) : internal.tool === "vault" ? await this.vault(a) : await this.employee(internal);
+      if (result.secret && (internal.tool === "vault" || a.action === "vault_get")) {
+        const credential = JSON.parse(result.secret);
+        this.credentials.push({ site: credential.scopeSite || "", values: credentialValues(credential.content) });
+      }
+      return result;
+    }
     if (call.name === "read")
       return this.read(a);
     if (a.path === "sqlite:config" && call.name === "write") {
@@ -487,89 +471,92 @@ export class Tools {
         }
       return { value: result, images, error: result.isError };
     }
-    if (call.name === "employee") {
-      const guarded = { text: a.text, condition: a.condition, summary: a.summary, note: a.note, plan: a.plan };
-      assert(
-        JSON.stringify(
-          this.engine.redactors.get(this.session.id)?.value(guarded) ?? guarded,
-        ) === JSON.stringify(guarded),
-        "Credentials may not be copied to employee memory/notes/checkpoints",
-      );
-      const employee = this.engine.employeeFor(this.session);
-      const source = this.session.employeeId && !this.session.taskId ? this.engine.store.messages(this.session.id).findLast((message) => message.role === "user") : undefined;
-      const taskLink = (id: string, replace = false) => {
-        if (source?.seq) employee.update((state) => {
-          const task = employee.task(state, id);
-          if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
-        });
-        const task = employee.task(employee.state(), id);
-        return { id, title: task.text.slice(0, 80), status: task.status };
-      };
-      if (this.session.employeeId && !this.session.taskId && employee.state().scope === "team" && !this.canManageEmployee())
-        assert(["list", "resume", "answer", "stop"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "当前交代人无团队牛马管理权限；可以派单、查询、补充、续做和停止任务，职责、记忆和凭据请管理员管理");
-      if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
-        const task = employee.task(employee.state(), a.id);
-        assert(!task.owner.token, "Remote tasks require their assigning member");
-        const value = await employee.control(a);
-        return { value, task: taskLink(a.id, a.action !== "stop" && !value.duplicate) };
-      }
-      if (["vault_get", "vault_send"].includes(a.action)) employee.authorize(employee.state(), this.session.taskId || "", a);
-      const scope = ["vault_get", "vault_send"].includes(a.action) ? await this.credentialScope(a) : "";
-      const result = await employee.execute(
-        this.session.taskId || "",
-        await prepareDutyInput(this.engine, employee, { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) }, this.session.taskId || "", this.signal),
-      );
-      if (a.action === "vault_get" && result.secret) result.secret = JSON.stringify({ ...JSON.parse(result.secret), scopeSite: scope });
-      return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? taskLink(result.value.id) : undefined };
-    }
-    if (call.name === "vault") {
-      assert(!this.session.taskId, "Use the employee vault tools here");
-      const scope = a.action === "get" ? await this.credentialScope(a) : "";
-      const result = this.engine.vault.executeTool(a);
-      if (result.secret) result.secret = JSON.stringify({ ...JSON.parse(result.secret), scopeSite: scope });
-      return result;
-    }
-    if (call.name === "chrome") {
-      const browser = await this.engine.chromeFor(this.session, this.signal);
-      const result = await browser.execute(
-        this.session.id,
-        this.session.cwd,
-        a,
-        this.signal,
-        this.credentials,
-      );
-      this.browserTab = result.tabTag || a.tabTag || this.browserTab;
-      const images: Outcome["images"] = [];
-      for (const im of result.images || []) {
-        this.engine.store.grantBlob(im.blobId, this.session.id);
-        images.push({ mime: im.mime, blobId: im.blobId });
-      }
-      // not_executed/needs_review is a structured resumable state, not a tool
-      // failure: the model must read status/reason/next and re-observe, not stop.
-      // errors_first: on any non-executed act/evaluate, lift decision fields to
-      // the front so context trimming never drops them. Same order as Lyra.
-      const isActResult =
-        result.status !== undefined && result.status !== "executed";
-      if (isActResult) {
-        const head: Obj = {};
-        for (const key of [
-          "status",
-          "reason",
-          "completedActions",
-          "inputAttempted",
-          "snapshotId",
-          "tabTag",
-          "observationError",
-          "next",
-        ])
-          if (result[key] !== undefined) head[key] = result[key];
-        for (const key of Object.keys(result))
-          if (!(key in head)) head[key] = result[key];
-        return { value: head, images };
-      }
-      return { value: result, images };
-    }
     throw Error("Runtime-only or unknown tool: " + call.name);
+  }
+  private async employee(internal: Internal): Promise<Outcome> {
+    const a = internal.args;
+    const guarded = { text: a.text, condition: a.condition, summary: a.summary, note: a.note, plan: a.plan };
+    assert(
+      JSON.stringify(
+        this.engine.redactors.get(this.session.id)?.value(guarded) ?? guarded,
+      ) === JSON.stringify(guarded),
+      "Credentials may not be copied to employee memory/notes/checkpoints",
+    );
+    const employee = this.engine.employeeFor(this.session);
+    const source = this.session.employeeId && !this.session.taskId ? this.engine.store.messages(this.session.id).findLast((message) => message.role === "user") : undefined;
+    const taskLink = (id: string, replace = false) => {
+      if (source?.seq) employee.update((state) => {
+        const task = employee.task(state, id);
+        if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
+      });
+      const task = employee.task(employee.state(), id);
+      return { id, title: task.text.slice(0, 80), status: task.status };
+    };
+    if (internal.target === "task") assert(employee.state().tasks.some((t) => t.id === a.id), "taskId 不是当前牛马的任务；职责请用 employee_duty_manage");
+    if (internal.target === "duty") assert(employee.state().duties.some((d) => d.id === a.id), "dutyId 不是当前牛马的职责；任务请用 employee_task_manage");
+    if (this.session.employeeId && !this.session.taskId && employee.state().scope === "team" && !this.canManageEmployee())
+      assert(["list", "resume", "answer", "stop"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "当前交代人无团队牛马管理权限；可以派单、查询、补充、续做和停止任务，职责、记忆和凭据请管理员管理");
+    if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
+      const task = employee.task(employee.state(), a.id);
+      assert(!task.owner.token, "Remote tasks require their assigning member");
+      const value = await employee.control(a);
+      return { value, task: taskLink(a.id, a.action !== "stop" && !value.duplicate) };
+    }
+    if (["vault_get", "vault_send"].includes(a.action)) employee.authorize(employee.state(), this.session.taskId || "", a);
+    const scope = ["vault_get", "vault_send"].includes(a.action) ? await this.credentialScope(a) : "";
+    const result = await employee.execute(
+      this.session.taskId || "",
+      await prepareDutyInput(this.engine, employee, { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) }, this.session.taskId || "", this.signal),
+    );
+    if (a.action === "vault_get" && result.secret) result.secret = JSON.stringify({ ...JSON.parse(result.secret), scopeSite: scope });
+    return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? taskLink(result.value.id) : undefined };
+  }
+  private async vault(a: Obj): Promise<Outcome> {
+    assert(!this.session.taskId, "Use the employee vault tools here");
+    const scope = a.action === "get" ? await this.credentialScope(a) : "";
+    const result = this.engine.vault.executeTool(a);
+    if (result.secret) result.secret = JSON.stringify({ ...JSON.parse(result.secret), scopeSite: scope });
+    return result;
+  }
+  private async chrome(a: Obj): Promise<Outcome> {
+    const browser = await this.engine.chromeFor(this.session, this.signal);
+    const result = await browser.execute(
+      this.session.id,
+      this.session.cwd,
+      a,
+      this.signal,
+      this.credentials,
+    );
+    this.browserTab = result.tabTag || a.tabTag || this.browserTab;
+    const images: Outcome["images"] = [];
+    for (const im of result.images || []) {
+      this.engine.store.grantBlob(im.blobId, this.session.id);
+      images.push({ mime: im.mime, blobId: im.blobId });
+    }
+    // not_executed/needs_review is a structured resumable state, not a tool
+    // failure: the model must read status/reason/next and re-observe, not stop.
+    // errors_first: on any non-executed act/evaluate, lift decision fields to
+    // the front so context trimming never drops them. Same order as Lyra.
+    const isActResult =
+      result.status !== undefined && result.status !== "executed";
+    if (isActResult) {
+      const head: Obj = {};
+      for (const key of [
+        "status",
+        "reason",
+        "completedActions",
+        "inputAttempted",
+        "snapshotId",
+        "tabTag",
+        "observationError",
+        "next",
+      ])
+        if (result[key] !== undefined) head[key] = result[key];
+      for (const key of Object.keys(result))
+        if (!(key in head)) head[key] = result[key];
+      return { value: head, images };
+    }
+    return { value: result, images };
   }
   async read(a: Obj, serverOnly = false): Promise<Outcome> {
     if (a.path === "sqlite:config")

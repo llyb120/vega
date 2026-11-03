@@ -2,16 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveDeliverable } from "../server/core/employee";
 import { MEMORY_CLAIM_MAX } from "../server/core/memory";
+import { employeeCall } from "./public-call";
 
 const body = "# 测试用例清单\n" + "TC-01 指标卡标题取管理端配置。\n".repeat(30);
 const session: any[] = [
   { seq: 1, role: "user", text: "[牛马任务] 派单" },
-  { seq: 2, role: "assistant", model: "m", text: "先勘察页面。", calls: [{ id: "a", name: "chrome", arguments: {} }] },
+  { seq: 2, role: "assistant", model: "m", text: "先勘察页面。", calls: [{ id: "a", name: "chrome_inspect", arguments: {} }] },
   { seq: 3, role: "tool", text: "{\"ok\":true}" },
-  { seq: 4, role: "assistant", model: "m", text: body, calls: [{ id: "b", name: "employee", arguments: { action: "progress" } }] },
+  { seq: 4, role: "assistant", model: "m", text: body, calls: [{ id: "b", ...employeeCall({ action: "progress" }) }] },
   { seq: 5, role: "tool", text: "{\"ok\":true}" },
   { seq: 6, role: "assistant", text: "本轮未完成，将在原会话恢复。" },
-  { seq: 7, role: "assistant", model: "m", text: "", calls: [{ id: "c", name: "employee", arguments: { action: "complete" } }] },
+  { seq: 7, role: "assistant", model: "m", text: "", calls: [{ id: "c", ...employeeCall({ action: "complete" }) }] },
 ];
 
 test("complete must declare the deliverable and gets candidates when it does not", () => {

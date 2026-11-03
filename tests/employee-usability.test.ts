@@ -13,6 +13,7 @@ import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Auth } from "../server/core/auth";
 import { Tools } from "../server/core/tools";
+import { employeeCall } from "./public-call";
 
 function fixture() {
   const store = new Store(":memory:");
@@ -73,16 +74,20 @@ test("team chat management uses the current sender, not the employee owner or a 
     const employee = engine.employee.for(engine.employee.create({ name: "Team" }, "admin", "team").id);
     const session = employee.chat("admin");
     const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {});
-    const action = (name: string) => tools.definitions({} as any).find((tool) => tool.name === "employee")!.parameters.properties.action.enum.includes(name);
+    const action = (name: string) => tools.definitions({} as any).some((tool) => tool.name === ({ add: "employee_task_create" } as Record<string, string>)[name] || tool.name === name);
     tools.actorId = "admin";
     assert(action("memory_propose") && action("add"));
-    await tools.execute({ id: "remember", name: "employee", arguments: { action: "memory_propose", claim: "Use this workflow", source: "ui" } }, {} as any);
-    await tools.execute({ id: "duty", name: "employee", arguments: { action: "add", kind: "duty", text: "Weekly review", manual: true } }, {} as any);
+    await tools.execute({ id: "remember", ...employeeCall({ action: "memory_propose", claim: "Use this workflow", source: "ui" }) }, {} as any);
+    await tools.execute({ id: "duty", ...employeeCall({ action: "add", kind: "duty", text: "Weekly review", manual: true }) }, {} as any);
     assert.equal(employee.state().duties.length, 1);
     tools.actorId = "member";
     assert(!action("memory_propose") && !action("vault_get"));
-    await assert.rejects(tools.execute({ id: "denied", name: "employee", arguments: { action: "memory_propose", claim: "untrusted change", source: "ui" } }, {} as any), /无团队牛马管理权限/);
-    await tools.execute({ id: "work", name: "employee", arguments: { action: "add", kind: "todo", text: "authorized work" } }, {} as any);
+    await assert.rejects(tools.execute({ id: "denied", ...employeeCall({ action: "memory_propose", claim: "untrusted change", source: "ui" }) }, {} as any), /Tool unavailable/);
+    await assert.rejects(tools.execute({ id: "denied-duty", name: "employee_duty_create", arguments: { instructions: "x", trigger: { kind: "manual" } } }, {} as any), /Tool unavailable/);
+    const work = await tools.execute({ id: "work", ...employeeCall({ action: "add", kind: "todo", text: "authorized work" }) }, {} as any);
+    await assert.rejects(tools.execute({ id: "denied-edit", name: "employee_task_manage", arguments: { taskId: work.value.id, request: { command: "set_instructions", instructions: "changed" } } }, {} as any), /command 只能是 "resume" \/ "answer" \/ "stop"/);
+    assert.equal(employee.state().duties.length, 1);
+    assert.equal(employee.task(employee.state(), work.value.id).text, "authorized work");
     tools.actorId = "admin";
     store.db.prepare("UPDATE web_users SET role='operator' WHERE id='admin'").run();
     assert(!action("memory_propose"), "revoked management cannot survive in a cached conversation");

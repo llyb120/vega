@@ -286,8 +286,8 @@ test("Chrome history keeps two distinct images per stream through ACP and every 
   const observe = (tab: string, images: { blobId: string; frameStream?: string; frame?: number; readOnlyImage?: boolean }[]) => {
     const callId = "shot-" + rows.length;
     rows.push(
-      { role: "assistant", calls: [{ id: callId, name: "chrome", arguments: {} }] },
-      { role: "tool", name: "chrome", callId,
+      { role: "assistant", calls: [{ id: callId, name: "chrome_inspect", arguments: {} }] },
+      { role: "tool", name: "chrome_inspect", callId,
         text: `[m${String(rows.length + 1).padStart(5, "0")}] ` + JSON.stringify({
           tabTag: tab, snapshotId: callId, pages: [{ text: callId }], completedActions: 1,
           documentPath: "sqlite:browser-observation/" + callId,

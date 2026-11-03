@@ -88,7 +88,7 @@ test(
             choices: [
               {
                 index: 0,
-                delta: thinkingOnly ? { reasoning_content: "I need to respond, but no answer was generated" } : memoryCall ? { tool_calls: [{ index: 0, id: "memory-fixture", type: "function", function: { name: "employee", arguments: JSON.stringify({ action: "memory_propose", claim: memory, source: "model", memoryKind: "convention" }) } }] } : { content: "private session response" },
+                delta: thinkingOnly ? { reasoning_content: "I need to respond, but no answer was generated" } : memoryCall ? { tool_calls: [{ index: 0, id: "memory-fixture", type: "function", function: { name: "memory_propose", arguments: JSON.stringify({ claim: memory, memoryKind: "convention" }) } }] } : { content: "private session response" },
                 finish_reason: memoryCall ? "tool_calls" : "stop",
               },
             ],

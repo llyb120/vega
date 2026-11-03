@@ -1,3 +1,4 @@
+import { CHROME_TOOLS } from "./public-tools";
 import type { Message } from "./store";
 import type { Obj } from "./util";
 export type Unit = { start: number; end: number; ref?: number; open: boolean };
@@ -95,7 +96,7 @@ export function promptHistory(
   for (let i = rows.length - 1; i >= 0; i--) {
     let m = rows[i];
     if (m.role !== "tool") continue;
-    const parsed = m.name === "chrome" ? resultBody(m) : undefined,
+    const parsed = CHROME_TOOLS.has(m.name || "") ? resultBody(m) : undefined,
       tab = parsed?.value.tabTag;
     if (tab && parsed?.value.pages?.length) {
       const n = (dom.get(tab) || 0) + 1;
@@ -121,10 +122,10 @@ export function historyImages(
   for (let i = rows.length - 1; i >= 0; i--) {
     const m = rows[i];
     if (m.role !== "tool" || !m.images?.length) continue;
-    const parsed = m.name === "chrome" ? resultBody(m) : undefined;
+    const parsed = CHROME_TOOLS.has(m.name || "") ? resultBody(m) : undefined;
     const metadata: Obj[] = Array.isArray(parsed?.value.images) ? parsed.value.images : [];
     const keep = m.images.map(() => true);
-    if (m.name === "chrome") {
+    if (CHROME_TOOLS.has(m.name || "")) {
       for (let j = m.images.length - 1; j >= 0; j--) {
         const image = m.images[j];
         // Earlier projections may have removed sibling attachments; archive blob IDs keep the mapping stable.

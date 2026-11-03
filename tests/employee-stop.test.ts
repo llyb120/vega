@@ -1,3 +1,4 @@
+import { EMPLOYEE_CHAT_RULES } from "../server/core/prompt";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../server/core/store";
@@ -7,6 +8,7 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Tools } from "../server/core/tools";
+import { employeeCall } from "./public-call";
 
 async function fixture() {
   const store = new Store(":memory:");
@@ -20,7 +22,7 @@ async function fixture() {
   const chat = employee.chat("admin");
   const tools = new Tools(engine, chat, engine.config(), new AbortController().signal, () => {});
   tools.actorId = "member";
-  const stop = () => tools.execute({ id: "stop", name: "employee", arguments: { action: "stop", id: task.id } }, {} as any);
+  const stop = () => tools.execute({ id: "stop", ...employeeCall({ action: "stop", id: task.id }) }, {} as any);
   return { store, engine, employee, task, chat, tools, stop };
 }
 
@@ -44,9 +46,9 @@ test("chat stop aborts both execution sessions and confirms termination without 
       }), { once: true });
     }
     engine.active.set(unrelated.id, { control: other, steer: [] });
-    const definition = tools.definitions({} as any).find((tool) => tool.name === "employee")!;
-    assert(definition.parameters.properties.action.enum.includes("stop"));
-    assert(definition.description.includes("不能用resume") && definition.description.includes("executionStopped"));
+    const definition = tools.definitions({} as any).find((tool) => tool.name === "employee_task_manage")!;
+    assert(JSON.stringify(definition.parameters).includes('"stop"'));
+    assert(EMPLOYEE_CHAT_RULES.includes("不能用resume") && definition.description.includes("executionStopped"));
     const result = await stop();
     assert(controls.every((control) => control.signal.aborted));
     assert.equal(other.signal.aborted, false);

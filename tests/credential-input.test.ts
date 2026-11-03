@@ -8,6 +8,7 @@ import { Catalog } from "../server/core/catalog";
 import { Subscriptions } from "../server/core/subscriptions";
 import { Tools } from "../server/core/tools";
 import { credentialValues, type CredentialBinding } from "../server/core/credentials";
+import { chromeCall, vaultCall } from "./public-call";
 
 const site = "https://databrain.example", other = "https://partner.example";
 const credentials: CredentialBinding[] = [{ site, values: credentialValues("账号：sample@example.test\n密码：password-example") }];
@@ -136,8 +137,8 @@ test("successful vault reads pass observed-page credential scope into Chrome for
   try {
     const entry = engine.vault.save({ name: "account", condition: "email login", content: "账号：sample@example.test\n密码：password-example" });
     const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {});
-    await tools.execute({ id: "vault", name: "vault", arguments: { action: "get", id: entry.id, text: "login", url: site } }, { supportsImages: true } as any);
-    await tools.execute({ id: "browser", name: "chrome", arguments: { operation: "inspect", tabTag: "tab" } }, { supportsImages: true } as any);
+    await tools.execute({ id: "vault", ...vaultCall({ action: "get", id: entry.id, text: "login", url: site }) }, { supportsImages: true } as any);
+    await tools.execute({ id: "browser", ...chromeCall({ operation: "inspect", tabTag: "tab" }) }, { supportsImages: true } as any);
     assert.equal(passed[0].site, site);
     assert(passed[0].values.includes("sample@example.test") && passed[0].values.includes("password-example"));
   } finally { await engine.close(); store.close(); }

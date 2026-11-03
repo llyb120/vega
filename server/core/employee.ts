@@ -76,17 +76,17 @@ const preview = (m: Message) => {
 export const resolveDeliverable = (messages: Message[], ref: unknown): { declared: boolean; refs: number[]; texts: string[]; error?: string; later: Message[] } => {
   const candidates = messages.filter(authored);
   const list = candidates.slice(-8).map(preview).join("；") || "无";
-  if (ref === undefined || ref === null || ref === "") return { declared: false, refs: [], texts: [], later: [], error: `complete 需要声明交付正文：用 deliverableRef 引用本任务里你写过的正文消息编号（可多条，按顺序拼接；正文无需复制进 text），没有单独正文（如纯执行验证）传 deliverableRef=[]。本任务可引用：${list}` };
+  if (ref === undefined || ref === null || ref === "") return { declared: false, refs: [], texts: [], later: [], error: `task_complete 需要声明交付正文：用 deliverableRefs 引用本任务里你写过的正文消息编号（可多条，按顺序拼接；正文无需复制进 evidence），没有单独正文（如纯执行验证）传 deliverableRefs=[]。本任务可引用：${list}` };
   const raw = Array.isArray(ref) ? ref : [ref];
   const refs: number[] = [];
   for (const item of raw) {
     const n = typeof item === "number" ? item : Number(String(item).trim().replace(/^#/, ""));
-    if (!Number.isSafeInteger(n) || n <= 0) return { declared: true, refs: [], texts: [], later: [], error: `deliverableRef 只能是消息编号，如 [21] 或 ["#21"]；收到 ${JSON.stringify(item)}。本任务可引用：${list}` };
+    if (!Number.isSafeInteger(n) || n <= 0) return { declared: true, refs: [], texts: [], later: [], error: `deliverableRefs 只能是消息编号，如 [21]；收到 ${JSON.stringify(item)}。本任务可引用：${list}` };
     if (!refs.includes(n)) refs.push(n);
   }
   const bySeq = new Map(messages.map((m) => [m.seq, m]));
   const bad = refs.filter((n) => !authored(bySeq.get(n)));
-  if (bad.length) return { declared: true, refs, texts: [], later: [], error: `deliverableRef ${bad.map((n) => "#" + n).join("、")} 不是本任务里你写的正文（工具结果、调度器消息、空回复不能引用）。本任务可引用：${list}` };
+  if (bad.length) return { declared: true, refs, texts: [], later: [], error: `deliverableRefs ${bad.map((n) => "#" + n).join("、")} 不是本任务里你写的正文（工具结果、调度器消息、空回复不能引用）。本任务可引用：${list}` };
   const last = Math.max(0, ...refs);
   const later = candidates.filter((m) => m.seq! > last && [...String(m.text).trim()].length >= 300);
   return { declared: true, refs, texts: refs.map((n) => String(bySeq.get(n)!.text).trim()), later };
@@ -111,16 +111,16 @@ export function requestedTime(a: Obj, now = Date.now()) {
     assert(
       typeof a.nextAt === "string" &&
         /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(a.nextAt),
-      "nextAt must be Beijing YYYY-MM-DD HH:MM",
+      "时间必须是北京时间 YYYY-MM-DD HH:MM",
     );
     const [year, month, day, hour, minute] = a.nextAt
       .match(/\d+/g)!
       .map(Number);
     const at = beijingTimestamp(year, month - 1, day, hour, minute);
-    assert(beijingDateTime(at) === a.nextAt, "nextAt must be a valid Beijing time");
+    assert(beijingDateTime(at) === a.nextAt, "时间必须是有效的北京时间 YYYY-MM-DD HH:MM");
     // Minute-granular times just passed (model wrote "now" or the call took a while) mean "as soon as possible".
     if (at <= now && now - at <= 10 * 60000) return now + 1000;
-    assert(at > now, `nextAt must be a future Beijing time (now ${beijingDateTime(now)}); to run immediately omit nextAt and nextCheckInMinutes`);
+    assert(at > now, `时间必须是未来的北京时间（当前 ${beijingDateTime(now)}）；要立即执行就省略时间参数`);
     return at;
   }
   if (a.nextCheckInMinutes !== undefined) {
@@ -128,7 +128,7 @@ export function requestedTime(a: Obj, now = Date.now()) {
       Number.isInteger(a.nextCheckInMinutes) &&
         a.nextCheckInMinutes >= 1 &&
         a.nextCheckInMinutes <= 10080,
-      "nextCheckInMinutes must be 1–10080; omit it (and nextAt) when no reschedule is needed",
+      "延后分钟数必须是 1–10080 的整数",
     );
     return now + a.nextCheckInMinutes * 60000;
   }
@@ -230,6 +230,7 @@ import {
   type MemoryRecord,
   type MemoryScene,
   type MemoryKind,
+  type ResolveInput,
 } from "./memory";
 export {
   retention,
@@ -811,7 +812,7 @@ export class Employee {
               const value = profile(a.profile);
               assert(
                 ["lightweight", "coding"].includes(value),
-                "Tasks start in lightweight/coding; computer work uses relay",
+                "Tasks start in lightweight/coding; computer work uses task_relay_computer",
               );
               task.profile = value;
             }
@@ -820,7 +821,7 @@ export class Employee {
           if (at) {
             assert(
               !task.dutyId || caller,
-              "Duty-triggered tasks use defer rather than direct rescheduling",
+              "Duty-triggered tasks use task_wait rather than direct rescheduling",
             );
             task.nextCheckAt = at;
             if (caller) {
@@ -863,17 +864,17 @@ export class Employee {
           }
           const pending = planUnresolved(t.plan);
           const settleHint = pending.length
-            ? "若用户已要求按现有结果收尾/交付，用progress将不再需要的步骤标为cancelled（并在text/summary写明未覆盖项）后再complete；不要把未验证步骤假标completed。"
+            ? "若用户已要求按现有结果收尾/交付，用task_progress将不再需要的步骤标为cancelled（并在evidence/summary写明未覆盖项）后再task_complete；不要把未验证步骤假标completed。"
             : "不要仅为通过校验把步骤标completed，也不要原样重试。";
           assert(
             content && t.plan?.length && !pending.length && (t.planRevision || 0) === (t.revision || 0),
-            `Complete requires a settled plan for the latest requirements and result evidence in text. 尚未交付：text=${content ? "非空" : "空"}，plan=${t.plan?.length || 0}步，未验证步骤=${pending.join("、") || "无"}，planRevision=${t.planRevision || 0}，revision=${t.revision || 0}。请补齐text中的实际结果与验证证据；未完成步骤继续执行，真实验证后再用progress提交对应最新要求的完整plan。${settleHint}`,
+            `task_complete requires a settled plan for the latest requirements and result evidence. 尚未交付：evidence=${content ? "非空" : "空"}，plan=${t.plan?.length || 0}步，未验证步骤=${pending.join("、") || "无"}，planRevision=${t.planRevision || 0}，revision=${t.revision || 0}。请在evidence补齐实际结果与验证证据；未完成步骤继续执行，真实验证后再用task_progress提交对应最新要求的完整plan。${settleHint}`,
           );
           if (a.summary !== undefined) {
             const length = typeof a.summary === "string" ? [...a.summary].length : 0;
             assert(
               typeof a.summary === "string" && a.summary.trim() && length <= 400,
-              `Delivery summary requires 1–400 characters; received ${length} (type: ${typeof a.summary}). 尚未交付：summary须为非空、非全空白的字符串，中英文、标点、空格与换行均计数。请先填写或精简summary（建议100–200字符），只保留结果、重要限制与需用户处理事项；完整证据放text，不要原样重试或直接截断。`,
+              `Delivery summary requires 1–400 characters; received ${length} (type: ${typeof a.summary}). 尚未交付：summary须为非空、非全空白的字符串，中英文、标点、空格与换行均计数。请先填写或精简summary（建议100–200字符），只保留结果、重要限制与需用户处理事项；完整证据放evidence，不要原样重试或直接截断。`,
             );
           }
           const cited = resolveDeliverable(t.workSession ? this.store.messages(t.workSession) : [], a.deliverableRef);
@@ -881,7 +882,7 @@ export class Employee {
           const signature = cited.refs.join(",") + "|" + cited.later.map((m) => m.seq).join(",");
           if (cited.later.length && t.deliverableWarned !== signature) {
             t.deliverableWarned = signature;
-            return { ok: false, error: `尚未交付：引用的正文之后你还写过较长正文 ${cited.later.map(preview).join("；")}。若它是更新版本，改为引用它（或一并引用）；确认原引用无误则原样再次 complete。` };
+            return { ok: false, error: `尚未交付：引用的正文之后你还写过较长正文 ${cited.later.map(preview).join("；")}。若它是更新版本，改为引用它（或一并引用）；确认原引用无误则原样再次 task_complete。` };
           }
           t.summary = a.summary?.trim() || "";
           t.completion = content;
@@ -926,7 +927,7 @@ export class Employee {
           assert(t, "Action requires a running task");
           if (action !== "vault_send") assert(content, "text required");
           if (action === "progress") {
-            assert([...content].length <= 200, "progress is at most 200 chars");
+            assert([...content].length <= 200, "task_progress.message is at most 200 chars");
             if (a.plan) {
               assert(
                 Array.isArray(a.plan) &&
@@ -961,7 +962,7 @@ export class Employee {
                   /(验证码|访问码|otp|2fa|mfa|one[\s-]?time)/i.test(step.content) &&
                   /(无法|受阻|跳过|降级|截图取证|未做现网|无法获取)/i.test(step.content)
                 ) {
-                  assert(false, "验证码/访问码等用户凭据步骤不能标 completed；请先 help 请求验证码并等待，用户明确放弃后再标 cancelled");
+                  assert(false, "验证码/访问码等用户凭据步骤不能标 completed；请先 task_ask_user 请求验证码并等待，用户明确放弃后再标 cancelled");
                 }
               }
               if (a.plan.some((step: Obj) => step.status === "cancelled")) t.settlePreferred = true;
@@ -986,7 +987,7 @@ export class Employee {
             if (action === "vault_request") {
               assert(
                 t.owner.token,
-                "Local task must use help for missing credentials",
+                "Local task must use task_ask_user for missing credentials",
               );
               t.vaultPk = this.vault.request(t.id);
             }
@@ -1011,7 +1012,7 @@ export class Employee {
           }
           if (action === "defer") {
             const at = requestedTime(a, now);
-            assert(at, "defer requires future check time");
+            assert(at, "task_wait requires a future resume time");
             t.nextCheckAt = at;
             t.checkpoint = content;
             t.status = "deferred";
@@ -1019,9 +1020,9 @@ export class Employee {
           if (action === "relay") {
             assert(
               a.scene === "computer" && t.side !== "computer",
-              "Only work session can relay to computer",
+              "Only the main task session can use task_relay_computer",
             );
-            assert(!t.waiting && !t.approval, "Cannot relay a suspended task");
+            assert(!t.waiting && !t.approval, "Cannot task_relay_computer a suspended task");
             t.side = "computer";
             t.handoff = content;
             t.handoffRevision = (t.handoffRevision || 0) + 1;
@@ -1073,7 +1074,7 @@ export class Employee {
               pinned: !!m.pinned,
               lastUsedAt: m.lastUsedAt,
             })),
-            tip: "仅注入相关短列表；写入请用 memory_propose，冲突/草稿用 memory_resolve。",
+            tip: "仅注入相关短列表；写入请用 memory_propose，冲突/草稿用 memory_manage。",
           };
         }
         case "memory_propose":
@@ -1111,8 +1112,9 @@ export class Employee {
           };
         }
         case "memory_resolve": {
+          assert(typeof a.resolveAction === "string" && a.resolveAction, "memory_resolve requires resolveAction");
           const resolved = resolveMemory(s.memories as MemoryRecord[], {
-            action: a.resolveAction || a.op || a.mode || "confirm",
+            action: a.resolveAction as ResolveInput["action"],
             id: a.id,
             ids: a.ids,
             keepId: a.keepId,
@@ -1567,7 +1569,7 @@ export class Employee {
           stored.employeeId = this.employeeId;
           if (computer && task.execution?.localAgent && !stored.localAgent) {
             Object.assign(stored, task.execution, { cwd: task.cwd });
-            task.checkpoint = (task.checkpoint || "") + "\n电脑会话已恢复到任务绑定的客户端；历史网页结果来自服务端，不得复用旧标签/ref。先用 chrome tabs/inspect 核对本机现场，不重放已提交的操作。";
+            task.checkpoint = (task.checkpoint || "") + "\n电脑会话已恢复到任务绑定的客户端；历史网页结果来自服务端，不得复用旧标签/ref。先用 chrome_tabs/chrome_inspect 核对本机现场，不重放已提交的操作。";
           }
           stored.ownerId ||= task.execution?.ownerId || state.ownerId || undefined;
           stored.scene ||= scene;
@@ -1576,7 +1578,7 @@ export class Employee {
         }
         catch {
           task.previousSessions = [...(task.previousSessions || []), session].slice(-3);
-          task.checkpoint = (task.checkpoint || "") + "\n原执行会话缺失或不可读，保留任务与计划，改用新执行上下文；先核对外部回执，无法核验则help，不得重放提交。";
+          task.checkpoint = (task.checkpoint || "") + "\n原执行会话缺失或不可读，保留任务与计划，改用新执行上下文；先核对外部回执，无法核验则task_ask_user，不得重放提交。";
           session = "";
         }
       }
@@ -1643,9 +1645,9 @@ export class Employee {
         ? `[牛马任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n当前计划和恢复点：${snapshot}${memoryBlock}`
         : `[牛马任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, fromDuty: task.fromDuty, triggerCondition: task.triggerCondition })}${memoryBlock}`;
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
-      const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用progress将不再需要的步骤标为cancelled，在text/summary写明未覆盖项后complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用help等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
+      const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才help，低风险执行细节自行决定，不等待轮询。验证码/访问码/2FA 属于必须 help 的用户阻碍，不得自行认定无法获取后降级。relay交接须继承当前交付类型与完成标准，不得擅自改成另一种目标。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA 等仅用户能提供的凭据时，必须立即 help（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。浏览器/扩展连续失败≥2 次（非验证码场景）才应 help 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），complete时用deliverableRef引用这些正文的消息编号（employee工具回执的textRef即本条回复编号；不确定时complete会列出候选），系统按引用原文连同summary交付，不必复制进text；无单独正文传deliverableRef=[]；text写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
+      const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用task_progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。task_request_approval/task_ask_user/task_wait/task_relay_computer后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。验证码/访问码/2FA 属于必须 task_ask_user 的用户阻碍，不得自行认定无法获取后降级。task_relay_computer交接须继承当前交付类型与完成标准，不得擅自改成另一种目标。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后用 chrome_connection 检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。浏览器/扩展连续失败≥2 次（非验证码场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码使用switch_scene（主会话共享历史），Chrome必须用task_relay_computer交给独立computer会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时用deliverableRefs引用这些正文的消息编号（牛马工具回执的textRef即本条回复编号；不确定时task_complete会列出候选），系统按引用原文连同summary交付，不必复制进evidence；无单独正文传deliverableRefs=[]；evidence写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       await this.runtime.run(session, prompt, undefined, input);
       const last = this.store.messages(session).at(-1);

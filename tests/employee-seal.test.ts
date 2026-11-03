@@ -7,6 +7,7 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Tools } from "../server/core/tools";
+import { employeeCall } from "./public-call";
 
 async function fixture() {
   const store = new Store(":memory:");
@@ -35,7 +36,7 @@ test("sealing is manual only and a sealed task can never be revived", async () =
     // The model's chat tool has no way to seal or revive it either.
     const chat = employee.chat("admin");
     const tools = new Tools(engine, chat, engine.config(), new AbortController().signal, () => {});
-    const resumed = await tools.execute({ id: "c", name: "employee", arguments: { action: "resume", id } }, {} as any).catch((e) => ({ error: e }));
+    const resumed = await tools.execute({ id: "c", ...employeeCall({ action: "resume", id }) }, {} as any).catch((e) => ({ error: e }));
     assert.ok((resumed as any).error || (resumed as any).value?.error || JSON.stringify(resumed).includes("封存"));
     assert.equal(employee.task(employee.state(), id).status, "sealed");
     await employee.control({ action: "remove", id });

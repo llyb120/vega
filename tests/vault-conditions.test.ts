@@ -10,6 +10,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Tools } from "../server/core/tools";
 import { credentialValues } from "../server/core/credentials";
 import { Redactor } from "../server/core/util";
+import { employeeCall, vaultCall } from "./public-call";
 
 const decision = (allowed: boolean, reason = "匹配当前用途", pageUrl?: string) => ({ role: "assistant" as const, calls: [{ id: "check", name: "check_credential_use", arguments: { allowed, reason, ...(pageUrl ? { pageUrl } : {}) } }] });
 function fixture() {
@@ -21,7 +22,7 @@ function fixture() {
   const session = store.newSession({ cwd: ".", scene: "computer" });
   store.append(session.id, { role: "user", text: "按当前任务的授权检查系统，不尝试其他系统账号" });
   const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {});
-  const get = (id: string, text = "当前任务需要核对授权信息") => tools.execute({ id: "get", name: "vault", arguments: { action: "get", id, text } }, { supportsImages: true } as any);
+  const get = (id: string, text = "当前任务需要核对授权信息") => tools.execute({ id: "get", ...vaultCall({ action: "get", id, text }) }, { supportsImages: true } as any);
   return { store, engine, session, tools, get };
 }
 
@@ -111,7 +112,7 @@ test("employee task vault reads pass the same semantic check before releasing a 
     employee.busy.set(created.value.id, { session: session.id, computer: true });
     const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {});
     const entry = engine.vault.save({ name: "account", condition: "仅用于授权客户端只读核对", content: "private-value" });
-    const call = { id: "get", name: "employee", arguments: { action: "vault_get", id: entry.id, text: "按任务授权核对待办" } };
+    const call = { id: "get", ...employeeCall({ action: "vault_get", id: entry.id, text: "按任务授权核对待办" }) };
     engine.providers.chat = async () => decision(false, "需要确认客户端类型");
     await assert.rejects(tools.execute(call, { supportsImages: true } as any), /客户端类型/);
     assert.equal(store.object<any>("vault", entry.id).usedAt, undefined);

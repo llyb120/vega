@@ -18,6 +18,7 @@ import { Engine } from "../server/core/engine";
 import { Relay } from "../server/core/relay";
 import { compileScript, parse } from "@vue/compiler-sfc";
 import { envelope, fieldBytes, fieldNumber } from "../server/core/devin";
+import { chromeCall, employeeCall } from "./public-call";
 const cleanup: (() => any)[] = [];
 afterEach(async () => {
   for (const f of cleanup.splice(0).reverse()) await f();
@@ -55,10 +56,11 @@ const completion = (res: any, m: any) => {
       "\n\ndata: [DONE]\n\n",
   );
 };
+const legacy = (name: string, args: any) => name === "employee" ? employeeCall(args) : name === "chrome" ? chromeCall(args) : { name, arguments: args };
 const call = (id: string, name: string, args: any) => ({
   index: 0,
   id,
-  function: { name, arguments: JSON.stringify(args) },
+  function: { name: legacy(name, args).name, arguments: JSON.stringify(legacy(name, args).arguments) },
 });
 function setup(url: string) {
   const s = new Store(":memory:"),
