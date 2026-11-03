@@ -359,9 +359,10 @@ export class Tools {
     const definition = this.definitions(model).find((t) => t.name === call.name);
     assert(definition, "Tool unavailable in this scene");
     const split = CHROME_TOOLS.has(call.name) || EMPLOYEE_TOOLS.has(call.name) || VAULT_TOOLS.has(call.name);
-    let internal: Internal | undefined;
+    let internal: Internal | undefined, rest: Obj = {};
     if (split) {
-      const { _after, ...rest } = call.arguments || {};
+      const { _after, ...publicArgs } = call.arguments || {};
+      rest = publicArgs;
       // Validate against the visible (context-trimmed) schema before any side effect.
       internal = toInternal(call.name, checkArgs(definition.parameters, rest), this.toolContext());
     }
@@ -369,7 +370,7 @@ export class Tools {
     const waiting = this.session.employeeId && this.session.taskId && this.engine.employeeFor(this.session).state().tasks.find(task => task.id === this.session.taskId)?.workspaceWait;
     if (waiting) return { value: { status: "queued", reason: "工作区写入占用，任务已暂停，本步未执行；资源释放后自动续做。" }, error: true, stop: true };
     if (internal) {
-      const result = internal.tool === "chrome" ? await this.chrome(a) : internal.tool === "vault" ? await this.vault(a) : await this.employee(internal);
+      const result = internal.tool === "chrome" ? await this.chrome(a) : internal.tool === "vault" ? await this.vault(a) : await this.employee(internal, call.name, rest);
       if (result.secret && (internal.tool === "vault" || a.action === "vault_get")) {
         const credential = JSON.parse(result.secret);
         this.credentials.push({ site: credential.scopeSite || "", values: credentialValues(credential.content) });
@@ -474,15 +475,21 @@ export class Tools {
     }
     throw Error("Runtime-only or unknown tool: " + call.name);
   }
-  private async employee(internal: Internal): Promise<Outcome> {
+  private async employee(internal: Internal, tool = "", publicArgs: Obj = {}): Promise<Outcome> {
     const a = internal.args;
     const guarded = { text: a.text, condition: a.condition, summary: a.summary, note: a.note, plan: a.plan };
-    assert(
-      JSON.stringify(
-        this.engine.redactors.get(this.session.id)?.value(guarded) ?? guarded,
-      ) === JSON.stringify(guarded),
-      "Credentials may not be copied to employee memory/notes/checkpoints",
-    );
+    const redactor = this.engine.redactors.get(this.session.id);
+    if (redactor && JSON.stringify(redactor.value(guarded)) !== JSON.stringify(guarded)) {
+      // Name the public fields that carry vault content, so the model can drop just that value.
+      const fields: string[] = [];
+      const walk = (v: unknown, path: string) => {
+        if (typeof v === "string") { if (redactor.value(v) !== v) fields.push(path); }
+        else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${path}[${i}]`));
+        else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x, path ? `${path}.${k}` : k);
+      };
+      walk(publicArgs, "");
+      throw new Error(`${tool || "该工具"} 的 ${fields.length ? fields.join("、") : "文本字段"} 含有密码本凭据内容（如账号、密码或令牌），不能写入任务进度、提问、备注或恢复点。请删去该值后重试；需要指代时写“密码本中的某条目”。`);
+    }
     const employee = this.engine.employeeFor(this.session);
     const source = this.session.employeeId && !this.session.taskId ? this.engine.store.messages(this.session.id).findLast((message) => message.role === "user") : undefined;
     const taskLink = (id: string, replace = false) => {

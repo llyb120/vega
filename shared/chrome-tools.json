@@ -28,7 +28,7 @@
   },
   {
     "name": "chrome_navigate",
-    "description": "打开一个 http(s) 网址：target.kind=new_tab 新建标签（incognito=true 开无痕窗口），existing_tab 在 tabTag 标签里跳转（该标签旧的 ref 作废）。等待加载（默认最多 1.5 秒，settleMs 可调）后附新观察；observe=none 只执行不观察。网址只用用户给的或观察里已有的 href，不猜。页面可能已打开时先用 chrome_tabs 找；不带网址的切换、关闭、后退、前进、刷新用 chrome_tab_control。",
+    "description": "打开一个 http(s) 网址：target.kind=new_tab 新建标签（incognito=true 开无痕窗口），existing_tab 在 tabTag 标签里跳转（该标签旧的 ref 作废）。等待加载完成（标签不再 loading 且文档 readyState=complete，默认最多 4 秒，settleMs 可调）后附新观察；页面仍在加载时调大 settleMs，不要用 chrome_act 的 wait 补；长轮询、流式页面到上限即返回。observe=none 只执行不观察。网址只用用户给的或观察里已有的 href，不猜。页面可能已打开时先用 chrome_tabs 找；不带网址的切换、关闭、后退、前进、刷新用 chrome_tab_control。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -97,7 +97,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 4000,
-          "description": "等待页面加载完成的上限毫秒，默认 1500（0 也按 1500）"
+          "description": "等待页面加载完成的上限毫秒（0–4000），默认 4000（0 也按默认）；加载完成即提前返回"
         },
         "visual": {
           "type": "string",
@@ -149,7 +149,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 4000,
-          "description": "等待页面加载完成的上限毫秒，默认 1500（0 也按 1500）"
+          "description": "等待页面加载完成的上限毫秒（0–4000），默认 4000（0 也按默认）；加载完成即提前返回"
         },
         "visual": {
           "type": "string",

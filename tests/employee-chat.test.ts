@@ -319,7 +319,7 @@ test("the concise delivery field cannot bypass credential redaction", async () =
     const redactor = new Redactor(); redactor.add("private-test-token"); engine.redactors.set(session.id, redactor);
     const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {}), model = await engine.catalog.resolve(engine.config(), engine.config().scenes!.lightweight![0]);
     assert.equal(tools.definitions(model).find(tool => tool.name === "task_complete")!.parameters.properties.summary.maxLength, 400);
-    await assert.rejects(tools.execute({ id: "complete", ...employeeCall({ action: "complete", deliverableRef: [], text: "verified result", summary: "The private-test-token works" }) }, model), /Credentials/);
+    await assert.rejects(tools.execute({ id: "complete", ...employeeCall({ action: "complete", deliverableRef: [], text: "verified result", summary: "The private-test-token works" }) }, model), /task_complete 的 summary 含有密码本凭据内容/);
     assert.equal(employee.state().tasks[0].completion, undefined);
     employee.busy.delete(created.value.id); engine.redactors.delete(session.id);
     await tools.close();

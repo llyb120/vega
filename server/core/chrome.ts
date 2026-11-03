@@ -27,6 +27,9 @@ type Observation = {
   screenshot: boolean;
 };
 
+/** Default navigation settle bound while the page is still loading. */
+export const NAVIGATION_SETTLE_MS = 4000;
+
 export class Chrome {
   gate = new Mutex();
   tabGates = new Map<string, Mutex>();
@@ -722,6 +725,28 @@ export class Chrome {
       }
     }
   }
+  /**
+   * After open/goto/back/forward/reload/select: wait while the tab is loading or its document is not
+   * complete, bounded by settleMs (0 or omitted = 4000 ms). Long-polling or streaming pages simply hit the bound.
+   * Returns the last tab list.
+   */
+  async settleNavigation(tag: string, settleMs: number | undefined, signal: AbortSignal) {
+    const deadline = Date.now() + Math.min(settleMs || NAVIGATION_SETTLE_MS, 5000);
+    let tabs: Obj[] | undefined;
+    for (;;) {
+      tabs = (await this.bridge.request("tabs", {}, signal)).tabs;
+      const tab = tabs?.find((t: Obj) => t.tag === tag);
+      let loading = !!tab?.loading;
+      if (tab && !loading) {
+        // A tab can stop "loading" while the document is still interactive (SPA bootstrap, redirects).
+        const state = await this.cdp(tag, "Runtime.evaluate", { expression: "document.readyState", returnByValue: true }, undefined, signal)
+          .then((r: Obj) => r?.result?.value, () => "complete");
+        loading = typeof state === "string" && state !== "complete";
+      }
+      if (!loading || Date.now() >= deadline) return tabs;
+      await sleep(Math.min(100, Math.max(0, deadline - Date.now())), signal);
+    }
+  }
   private async waitForLoad(tag: string, ms: number, signal: AbortSignal) {
     const deadline = Date.now() + ms;
     if (ms > 0) await sleep(Math.min(120, ms), signal);
@@ -1199,15 +1224,11 @@ export class Chrome {
       if (op === "close_tab") return result;
       if (a.observe === "none") return result;
       if (tag) {
-        let loading = true;
-        const deadline = Date.now() + Math.min(a.settleMs || 1500, 5000);
-        while (loading && Date.now() < deadline) {
-          const tabs = await this.bridge.request("tabs", {}, signal);
-          loading = tabs.tabs.find((t: Obj) => t.tag === tag)?.loading;
-          if (loading) await sleep(50, signal);
-        }
+        const tabs = await this.settleNavigation(tag, a.settleMs, signal);
         return {
           ...result,
+          // The bridge listed tabs as the navigation started; report them as they are after settling.
+          ...(tabs && result.tabs ? { tabs } : {}),
           ...(await this.feedback(
             owner,
             tag,

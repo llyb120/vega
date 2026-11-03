@@ -432,3 +432,33 @@ test("inspect still rejects region/ref; screenshot validates region strictly", a
     /Invalid screenshot region/,
   );
 });
+
+test("navigation waits while the document is still loading, bounded, and reports tabs after settling", async (t) => {
+  const f = fixture(t);
+  let probes = 0;
+  f.chrome.cdp = async (_tag, method, params: Obj = {}) => {
+    if (method === "Runtime.evaluate" && params.expression === "document.readyState") return { result: { value: ++probes < 3 ? "interactive" : "complete" } };
+    return {};
+  };
+  f.chrome.bridge.request = async (operation) => {
+    f.calls.push({ operation });
+    if (operation === "goto") return { tabTag: "tab", tabs: [{ tag: "tab", title: "old page", loading: true }] };
+    return { tabs: [{ tag: "tab", title: "new page", loading: false }] };
+  };
+  const result = await f.chrome.execute("owner", ".", { operation: "goto", tabTag: "tab", url: "https://example.test/next", visual: "none" });
+  assert.equal(probes, 3, "waits until readyState is complete");
+  assert.deepEqual(result.tabs, [{ tag: "tab", title: "new page", loading: false }], "tabs are the post-settle list, not the navigation-start one");
+
+  // A page that never completes (long polling, streaming) returns at the settleMs bound.
+  f.chrome.cdp = async () => ({ result: { value: "interactive" } });
+  const started = Date.now();
+  await f.chrome.execute("owner", ".", { operation: "goto", tabTag: "tab", url: "https://example.test/stream", visual: "none", settleMs: 300 });
+  const took = Date.now() - started;
+  assert(took >= 280 && took < 1500, `bounded wait, took ${took}ms`);
+
+  // A tab stuck in loading is bounded the same way.
+  f.chrome.bridge.request = async (operation) => operation === "goto" ? { tabTag: "tab" } : { tabs: [{ tag: "tab", loading: true }] };
+  const again = Date.now();
+  await f.chrome.execute("owner", ".", { operation: "reload", tabTag: "tab", visual: "none", settleMs: 200 });
+  assert(Date.now() - again < 1500);
+});
