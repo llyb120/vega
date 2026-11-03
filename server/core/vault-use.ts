@@ -2,6 +2,7 @@ import type { Engine } from "./engine";
 import type { Message } from "./store";
 import { assert, type Obj } from "./util";
 import { vaultSite } from "./credentials";
+import { sceneModels } from "./config";
 
 const decisionTool = {
   name: "check_credential_use",
@@ -15,7 +16,7 @@ const decisionTool = {
 
 export async function verifyVaultUse(engine: Engine, entry: { name: string; condition: string }, context: { purpose: string; task: string; url?: string; pages: Obj[] }, signal: AbortSignal) {
   assert(typeof context.purpose === "string" && context.purpose.trim() && context.purpose.length <= 8000, "Vault purpose required (1–8000 characters)");
-  const config = engine.config(), selections = config.scenes?.lightweight?.length ? config.scenes.lightweight : [config.model];
+  const config = engine.config(), selections = sceneModels(config, "lightweight");
   assert(selections.some(Boolean), "请先配置轻量模型，以核对密码本使用条件");
   const abort = AbortSignal.any([signal, AbortSignal.timeout(30000)]);
   let reply: Message | undefined, failure: unknown;

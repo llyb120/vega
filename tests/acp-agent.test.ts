@@ -17,6 +17,7 @@ test("actual agent loop delivers ACP guide/refs/nudge, executes model compressio
     );
   engine.employee.closed = true;
   store.put("config", {
+    scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
     model: "p/m",
     contextMode: "acp",
     provider: {

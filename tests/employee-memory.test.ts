@@ -24,7 +24,7 @@ function fixture() {
   const store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "fixture/model", provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test", models: { model: { limit: { context: 128000, output: 8192 } } } } } });
+  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test", models: { model: { modalities: { input: ["text", "image"] }, limit: { context: 128000, output: 8192 } } } } } });
   const employee = engine.employee.for(engine.employee.create({ name: "Memory employee" }, "owner").id), chat = employee.chat("owner");
   return { store, engine, employee, chat };
 }

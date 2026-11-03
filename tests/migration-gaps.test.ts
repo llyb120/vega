@@ -25,7 +25,7 @@ function engine() {
     );
   e.employee.closed = true;
   const config: any = {
-    model: "p/m",
+    scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
     contextMode: "acp",
     provider: {
       p: {
@@ -34,6 +34,7 @@ function engine() {
         models: {
           m: {
             reasoning: true,
+            modalities: { input: ["text", "image"] },
             options: { reasoningEffort: "high" },
             limit: { context: 128000, output: 8192 },
           },
@@ -81,7 +82,7 @@ test("output-length recovery lowers effort only once and never replays already c
     assert.deepEqual(efforts, ["high", "high", "low"]);
     assert.equal(await readFile(join(dir, "once"), "utf8"), "only once");
     assert.equal(config.provider.p.models.m.options.reasoningEffort, "high");
-    const model = resolveModel(config);
+    const model = resolveModel(config, config.scenes.lightweight[0]);
     model.api = "anthropic-messages";
     model.options.supportsThinkingToggle = true;
     assert.equal(recoveryModel(model)?.options.reasoningEffort, "none");
@@ -164,7 +165,7 @@ test("cancelling a thinking-only generation never triggers recovery or creates a
 test("setup virtual config is explicit-authorized, section-scoped and secret-preserving", async () => {
   const { e, store, config } = engine(),
     session = store.newSession(),
-    model = resolveModel(config),
+    model = resolveModel(config, config.scenes.lightweight[0]),
     tools = new Tools(
       e,
       session,
@@ -250,7 +251,7 @@ test("removed image service is hidden and unavailable while reading image pixels
     },
   };
   store.put("config", legacy);
-  const model = resolveModel(config),
+  const model = resolveModel(config, config.scenes.lightweight[0]),
     session = store.newSession({ cwd: dir }),
     tools = new Tools(
       e,

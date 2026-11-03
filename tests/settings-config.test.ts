@@ -39,7 +39,7 @@ test("MCP and skill editors belong to the employee while the vault remains globa
   assert.match(settings, /<PageHeader title="系统设置"/);
   assert.match(capabilities, /v-model="mcp\[key\]"[^>]*:aria-label="key \+ ' JSON配置'"/);
   assert(!settings.includes("saveMcp") && !settings.includes("/skills/upload"));
-  assert(capabilities.includes('v-if="canEdit"') && capabilities.includes("只有创建者可以查看和编辑详情"));
+  assert(capabilities.includes('v-if="canEdit"') && capabilities.includes("v-else") && capabilities.includes("尚未配置 MCP"));
   assert.match(settings, /@click="editVault\(item\)"/);
   assert.match(settings, /@click="newVault"/);
   assert.match(settings, /v-model="vaultForm.content" :required="!vaultForm.id"/);

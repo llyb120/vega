@@ -16,7 +16,7 @@ function fixture() {
   const store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "fixture/light", provider: {} });
+  store.put("config", { scenes: { lightweight: ["fixture/light"], coding: ["fixture/light"], computer: ["fixture/light"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test", models: { light: { modalities: { input: ["text", "image"] }, limit: { context: 128000, output: 8192 } } } } } });
   engine.catalog.resolve = async () => ({ selection: "fixture/light" } as any);
   const session = store.newSession({ cwd: ".", scene: "computer" });
   store.append(session.id, { role: "user", text: "按当前任务的授权检查系统，不尝试其他系统账号" });

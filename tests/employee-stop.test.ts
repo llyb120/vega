@@ -12,7 +12,7 @@ async function fixture() {
   const store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "fixture/model", provider: {} });
+  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, model: "fixture/model", provider: {} });
   store.db.prepare("INSERT INTO web_users(id,username,password,role,disabled,createdAt,lastLogin) VALUES(?,?,?,?,0,0,0)").run("member", "member", "fixture", "operator");
   const employee = engine.employee.for(engine.employee.create({ name: "Team" }, "admin", "team").id);
   const created = await employee.execute("", { action: "add", kind: "todo", text: "authorized task" });

@@ -16,6 +16,7 @@ test("long Lyra turns are governed by completion/cancellation rather than an art
     );
   engine.employee.closed = true;
   store.put("config", {
+    scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
     model: "p/m",
     contextMode: "acp",
     provider: {

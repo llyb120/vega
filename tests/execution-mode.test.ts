@@ -25,9 +25,9 @@ function fixture(t: TestContext) {
 
 test("client hints follow only the bound device and owner, refresh live and never change cwd", async (t) => {
   const { engine, store } = fixture(t);
-  const config = { model: "fixture/model", provider: { fixture: { baseURL: "https://unused.test", models: { model: {} } } } };
+  const config = { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { baseURL: "https://unused.test", models: { model: { modalities: { input: ["text", "image"] } } } } } };
   store.put("config", config);
-  engine.catalog.resolve = async () => resolveModel(config);
+  engine.catalog.resolve = async (_c, selection) => resolveModel(config, selection || config.scenes.lightweight[0]);
   const officeHint = "项目目录：D:\\code\\office\n辅助提示，不是切换工作目录。", homeHint = "Home-only hint", bobHint = "Bob-only hint";
   engine.localAgents.connect("alice", { ...client, supplement: officeHint });
   engine.localAgents.connect("alice", { ...client, clientId: "e".repeat(32), instance: "b".repeat(32), supplement: homeHint });

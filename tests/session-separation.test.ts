@@ -18,6 +18,7 @@ test("ordinary conversations do not depend on employee state, schedule or task r
     );
   engine.employee.closed = true;
   const config = {
+    scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
     model: "p/m",
     provider: {
       p: {

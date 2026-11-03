@@ -127,7 +127,7 @@ test("successful vault reads pass observed-page credential scope into Chrome for
   const store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "fixture/model", provider: {} });
+  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: {} });
   engine.catalog.resolve = async () => ({ selection: "fixture/model" } as any);
   engine.providers.chat = async () => ({ role: "assistant", calls: [{ id: "check", name: "check_credential_use", arguments: { allowed: true, reason: "当前用途符合邮箱登录条件" } }] });
   const session = store.newSession({ cwd: ".", scene: "computer" });

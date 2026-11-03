@@ -18,7 +18,7 @@ function fixture() {
   const store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "fixture/model", provider: {} });
+  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, model: "fixture/model", provider: {} });
   return { store, engine };
 }
 async function add(employee: Engine["employee"], text = "work") {

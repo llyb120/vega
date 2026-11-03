@@ -1,7 +1,7 @@
 import { Fire } from "./fire";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
 import { builtinCommand, expandBuiltin } from "./builtins";
-import { maskedConfig, mergeSecrets } from "./config";
+import { requireSceneModel, sceneModels, maskedConfig, mergeSecrets } from "./config";
 import { employeeConfig, migrateEmployeeCapabilities } from "./employee-capabilities";
 import { credentialValues } from "./credentials";
 import { createHash } from "node:crypto";
@@ -236,18 +236,23 @@ export class Engine {
     delete (next as Obj).image;
     const previous = this.config();
     mergeSecrets(next, previous);
-    assert(
-      next.provider && typeof next.model === "string",
-      "model/provider required",
-    );
-    if (next.model) await this.catalog.resolve(next, next.model);
+    assert(next.provider && typeof next.provider === "object", "provider required");
+    // Default model is retired: scene lists are the only model source.
+    delete (next as Obj).model;
+    next.scenes = {
+      lightweight: Array.isArray(next.scenes?.lightweight) ? next.scenes!.lightweight : previous.scenes?.lightweight,
+      coding: Array.isArray(next.scenes?.coding) ? next.scenes!.coding : previous.scenes?.coding,
+      computer: Array.isArray(next.scenes?.computer) ? next.scenes!.computer : previous.scenes?.computer,
+    };
     for (const [scene, selections] of Object.entries(next.scenes || {})) {
+      if (selections == null) continue;
       assert(
         ["lightweight", "coding", "computer"].includes(scene) &&
           Array.isArray(selections),
         "Invalid scene",
       );
       for (const selection of selections) {
+        if (!selection) continue;
         const model = await this.catalog.resolve(next, selection);
         assert(
           scene !== "computer" || model.supportsImages,
@@ -427,7 +432,7 @@ export class Engine {
           note: "Original image archived in SQLite; do not infer unseen pixels",
         })),
       }));
-    const summaryID = tools.config.scenes?.lightweight?.[0];
+    const summaryID = sceneModels(tools.config, "lightweight")[0];
     let summaryModel = summaryID
       ? await this.catalog.resolve(tools.config, summaryID)
       : model;
@@ -568,11 +573,11 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       const config = this.config(session);
       if (session.employeeId && !session.taskId) {
         session.scene = "lightweight";
-        session.model = config.scenes?.lightweight?.[0] || config.model;
+        session.model = requireSceneModel(config, "lightweight");
         original = { model: session.model, scene: session.scene };
       }
       session.scene ||= "lightweight";
-      session.model ||= config.scenes?.[session.scene]?.[0] || config.model;
+      session.model ||= requireSceneModel(config, session.scene || "lightweight");
       await this.catalog.resolve(config, session.model);
       onStart?.();
       emit("started");
@@ -842,7 +847,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               "resume must be non-empty concrete caller work",
             );
             const returning = mainTask && !a.resume ? frames.findLastIndex(frame => frame.scene === a.scene) : -1;
-            const ids = a.scene === "lightweight" && !config.scenes?.lightweight?.length ? [config.model] : config.scenes?.[a.scene];
+            const ids = sceneModels(config, a.scene);
             assert(
               ids?.length &&
                 a.scene !== session.scene &&

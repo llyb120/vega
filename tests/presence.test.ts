@@ -29,7 +29,7 @@ test("locked computer tasks remain queued, unlock resumes same task without LLM 
     isRunning: () => false,
     send: async () => {},
     emit: () => {},
-    config: () => ({ model: "p/m" }),
+    config: () => ({ scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] }, model: "p/m" }),
     presence: async () => ({
       available: true,
       locked,

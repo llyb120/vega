@@ -14,7 +14,7 @@ function fixture() {
   const store = new Store(":memory:");
   const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "fixture/model", provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test", models: { model: { limit: { context: 128000, output: 8192 } } } } } });
+  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test", models: { model: { modalities: { input: ["text", "image"] }, limit: { context: 128000, output: 8192 } } } } } });
   const employee = engine.employee.for(engine.employee.create({ name: "Chat employee" }, "owner").id), chat = employee.chat("owner");
   return { store, engine, employee, chat };
 }
@@ -153,6 +153,55 @@ test("complete feedback identifies missing evidence, unverified steps and stale 
   } finally { await engine.close(); store.close(); }
 });
 
+test("complete accepts cancelled steps as settled partial delivery and progress marks settlePreferred", async () => {
+  const { store, engine, employee } = fixture();
+  try {
+    const created = await employee.execute("", { action: "add", kind: "todo", text: "Design cases" });
+    employee.busy.set(created.value.id, { computer: false, session: "" });
+    employee.update(state => { Object.assign(state.tasks[0], { status: "running", revision: 0, planRevision: 0 }); });
+    await employee.execute(created.value.id, {
+      action: "progress",
+      text: "partial delivery accepted",
+      plan: [
+        { content: "read requirement", status: "completed" },
+        { content: "design case list", status: "completed" },
+        { content: "execute remaining cases", status: "cancelled" },
+      ],
+    });
+    assert.equal(employee.state().tasks[0].settlePreferred, true);
+    const completed = await employee.execute(created.value.id, {
+      action: "complete",
+      text: "Case list delivered; remaining execution cancelled per user.",
+      summary: "已交付用例清单；未执行项已标注取消。",
+    });
+    assert.equal(completed.stop, true);
+    assert.equal(employee.state().tasks[0].completion.includes("Case list"), true);
+  } finally { await engine.close(); store.close(); }
+});
+
+test("complete still rejects blocked/failed/in_progress steps and hints cancelled for user settle", async () => {
+  const { store, engine, employee } = fixture();
+  try {
+    const created = await employee.execute("", { action: "add", kind: "todo", text: "Verify result" });
+    employee.busy.set(created.value.id, { computer: false, session: "" });
+    employee.update(state => {
+      Object.assign(state.tasks[0], {
+        status: "running",
+        revision: 1,
+        planRevision: 1,
+        plan: [
+          { content: "done", status: "completed" },
+          { content: "stuck", status: "blocked" },
+        ],
+      });
+    });
+    await assert.rejects(
+      employee.execute(created.value.id, { action: "complete", text: "partial", summary: "partial" }),
+      /未验证步骤=2:blocked[\s\S]*cancelled/,
+    );
+  } finally { await engine.close(); store.close(); }
+});
+
 test("complete summary feedback reports character counts and preserves the previous result until a valid correction", async () => {
   const { store, engine, employee } = fixture();
   const boundary = "字".repeat(200) + "😀".repeat(200);
@@ -267,7 +316,7 @@ test("the concise delivery field cannot bypass credential redaction", async () =
     employee.update(state => { Object.assign(state.tasks[0], { status: "running", workSession: session.id, plan: [{ content: "verify", status: "completed" }] }); });
     employee.busy.set(created.value.id, { computer: false, session: session.id });
     const redactor = new Redactor(); redactor.add("private-test-token"); engine.redactors.set(session.id, redactor);
-    const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {}), model = await engine.catalog.resolve(engine.config());
+    const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {}), model = await engine.catalog.resolve(engine.config(), engine.config().scenes!.lightweight![0]);
     assert.equal(tools.definitions(model).find(tool => tool.name === "employee")!.parameters.properties.summary.maxLength, 400);
     await assert.rejects(tools.execute({ id: "complete", name: "employee", arguments: { action: "complete", text: "verified result", summary: "The private-test-token works" } }, model), /Credentials/);
     assert.equal(employee.state().tasks[0].completion, undefined);

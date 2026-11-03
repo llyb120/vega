@@ -281,11 +281,13 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "access")
         check(false, 404, "Private sessions cannot be shared");
 
-      if (path.length === 2 && method === "GET")
+      if (path.length === 2 && method === "GET") {
+        const query = getRequestURL(event).searchParams;
+        const history = chatHistory(store, key, query);
         return {
           session,
           canWrite: !session.taskId && auth.canWrite(user, session),
-          messages: store.messages(key),
+          ...history,
           folds: engine.store.db
             .prepare("SELECT data FROM folds WHERE session=?")
             .all(key)
@@ -298,6 +300,7 @@ export default defineEventHandler(async (event) => {
             engine.config().contextMode === "acp" ? "acp" : "auto",
           ).status(),
         };
+      }
       if (path.length === 2 && method === "DELETE") {
         const family = store.sessionFamily(key);
         assert(

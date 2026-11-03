@@ -72,6 +72,7 @@ function setup(url: string) {
     engine = new Engine(s, catalog, chrome);
   engine.employee.closed = true;
   s.put("config", {
+    scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
     model: "p/m",
     provider: {
       p: {
@@ -230,6 +231,7 @@ test("Responses reasoning survives new user turns and invalid continuation falls
     );
   });
   const model = resolveModel({
+      scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
       model: "p/m",
       provider: {
         p: {
@@ -303,7 +305,7 @@ test("employee external-job defer and Chrome relay reuse exactly two isolated se
     limit: { context: 128000, output: 8192 },
     modalities: { input: ["text", "image"] },
   };
-  cfg.scenes = { computer: ["p/vision"] };
+  cfg.scenes = { ...cfg.scenes, computer: ["p/vision"] };
   e.store.put("config", cfg);
   const dir = await mkdtemp(join(tmpdir(), "vega-worker-"));
   cleanup.push(() => rm(dir, { recursive: true, force: true }));
