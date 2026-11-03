@@ -59,7 +59,12 @@ export function stripPlaceholderArgs(name: string, args: Obj, schema?: { propert
     if (fields && k !== "action" && k in properties && !fields.includes(k)) continue;
     if (required.has(k) || k === "action") { out[k] = v; continue; }
     if (v == null || zeroObject(v)) continue;
+    // 0 is never a real value for a field declared with minimum >= 1 (read offset/limit, bash timeout).
+    if (v === 0 && properties[k]?.minimum >= 1) continue;
     if (name === "employee") {
+      // In a schema fill a toggle's value is a guess either way: a stray enabled:false would silently stop a duty,
+      // a stray manual:true would wipe its schedule. Ignore both; the caller is told to resend them alone.
+      if (filled && args.action === "update" && (k === "enabled" || k === "manual")) continue;
       // complete's deliverableRef: [] is the explicit "no separate body" answer.
       if (k === "deliverableRef") { out[k] = v; continue; }
       if (k === "nextCheckInMinutes" && v === 0) continue;
@@ -74,4 +79,10 @@ export function stripPlaceholderArgs(name: string, args: Obj, schema?: { propert
     out[k] = v;
   }
   return out;
+}
+
+/** Toggles ignored by stripPlaceholderArgs because the call looked like a schema fill. */
+export function ignoredToggles(name: string, args: Obj, schema?: { properties?: Obj }): string[] {
+  if (name !== "employee" || args.action !== "update" || !schemaFilled(args, schema?.properties || {})) return [];
+  return ["enabled", "manual"].filter((k) => typeof args[k] === "boolean");
 }

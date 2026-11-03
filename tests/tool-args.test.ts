@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { stripPlaceholderArgs } from "../server/core/tool-args";
+import { stripPlaceholderArgs, ignoredToggles } from "../server/core/tool-args";
 import { requestedTime } from "../server/core/employee";
 import { boundSceneModel } from "../server/core/engine";
 import employeeDefinition from "../shared/employee-tool.json";
@@ -53,4 +53,20 @@ test("Chrome actions ignore schema-filled defaults but still reject real stray f
   assert.deepEqual(normalizeAction(filled), { action: "click", frame: 0, ref: "e12" });
   assert.deepEqual(normalizeAction({ action: "fill", ref: "e3", text: "" }), { action: "fill", ref: "e3", text: "", frame: 0 });
   assert.throws(() => normalizeAction({ action: "click", ref: "e1", x: 10, y: 20 }), /click: x, y/);
+});
+
+test("a schema-filled update never flips duty toggles in either direction", () => {
+  const fill = { action: "update", id: "d1", text: "", note: "", profile: "", times: [], everyMinutes: 0, nextAt: "", nextCheckInMinutes: 0, events: [], condition: "" };
+  for (const toggles of [{ enabled: false, manual: true }, { enabled: true, manual: false }]) {
+    const args = { ...fill, ...toggles };
+    assert.deepEqual(stripPlaceholderArgs("employee", args, schema), { action: "update", id: "d1" });
+    assert.deepEqual(ignoredToggles("employee", args, schema), ["enabled", "manual"]);
+  }
+  assert.deepEqual(ignoredToggles("employee", { action: "update", id: "d1", enabled: true }, schema), []);
+});
+
+test("0 is dropped for fields that must be >= 1", () => {
+  const read = { properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1 } }, required: ["path"] };
+  assert.deepEqual(stripPlaceholderArgs("read", { path: "a.ts", offset: 0, limit: 0 }, read), { path: "a.ts" });
+  assert.deepEqual(stripPlaceholderArgs("read", { path: "a.ts", offset: 5, limit: 10 }, read), { path: "a.ts", offset: 5, limit: 10 });
 });
