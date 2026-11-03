@@ -104,8 +104,8 @@ test("task delivery quotes its originating chat message, carries a task link and
     const full = "Full verified evidence\n" + "Trace details that belong to the task record.\n".repeat(60);
     employee.runtime.run = async () => {
       await employee.execute(job.id, { action: "progress", text: "verified endpoint", plan: [{ content: "verify endpoint", status: "completed" }] });
-      await assert.rejects(employee.execute(job.id, { action: "complete", text: full, summary: "x".repeat(401) }), /summary/);
-      await employee.execute(job.id, { action: "complete", text: full, summary: "**结论**：地址已确认。\n- 未修改配置或重试请求。" });
+      await assert.rejects(employee.execute(job.id, { action: "complete", deliverableRef: [], text: full, summary: "x".repeat(401) }), /summary/);
+      await employee.execute(job.id, { action: "complete", deliverableRef: [], text: full, summary: "**结论**：地址已确认。\n- 未修改配置或重试请求。" });
     };
     employee.update((state) => { state.tasks[0].status = "running"; });
     employee.busy.set(job.id, { computer: false, session: "" });
@@ -142,11 +142,11 @@ test("complete feedback identifies missing evidence, unverified steps and stale 
     for (const scenario of cases) {
       employee.update(state => { Object.assign(state.tasks[0], { status: "running", plan: scenario.plan, planRevision: scenario.planRevision, revision: scenario.revision }); });
       const before = structuredClone(employee.state().tasks[0]);
-      await assert.rejects(employee.execute(created.value.id, { action: "complete", text: scenario.text, summary: "Verified outcome" }), { message: scenario.error });
+      await assert.rejects(employee.execute(created.value.id, { action: "complete", deliverableRef: [], text: scenario.text, summary: "Verified outcome" }), { message: scenario.error });
       assert.deepEqual(employee.state().tasks[0], before);
     }
     await employee.execute(created.value.id, { action: "progress", text: "latest result verified", plan: verified });
-    const completed = await employee.execute(created.value.id, { action: "complete", text: "actual verified evidence", summary: "Verified outcome" });
+    const completed = await employee.execute(created.value.id, { action: "complete", deliverableRef: [], text: "actual verified evidence", summary: "Verified outcome" });
     assert.equal(completed.stop, true);
     assert.equal(employee.state().tasks[0].completion, "actual verified evidence");
     assert.equal(employee.state().tasks[0].planRevision, 2);
@@ -170,7 +170,7 @@ test("complete accepts cancelled steps as settled partial delivery and progress 
     });
     assert.equal(employee.state().tasks[0].settlePreferred, true);
     const completed = await employee.execute(created.value.id, {
-      action: "complete",
+      action: "complete", deliverableRef: [],
       text: "Case list delivered; remaining execution cancelled per user.",
       summary: "已交付用例清单；未执行项已标注取消。",
     });
@@ -196,7 +196,7 @@ test("complete still rejects blocked/failed/in_progress steps and hints cancelle
       });
     });
     await assert.rejects(
-      employee.execute(created.value.id, { action: "complete", text: "partial", summary: "partial" }),
+      employee.execute(created.value.id, { action: "complete", deliverableRef: [], text: "partial", summary: "partial" }),
       /未验证步骤=2:blocked[\s\S]*cancelled/,
     );
   } finally { await engine.close(); store.close(); }
@@ -211,12 +211,12 @@ test("complete summary feedback reports character counts and preserves the previ
     employee.busy.set(created.value.id, { computer: false, session: "" });
     const before = structuredClone(employee.state().tasks[0]);
     for (const { summary, length } of [{ summary: "", length: 0 }, { summary: " \n\t", length: 3 }, { summary: boundary + "。", length: 401 }, { summary: boundary + " ", length: 401 }, { summary: 42, length: 0 }]) {
-      await assert.rejects(employee.execute(created.value.id, { action: "complete", text: "new verified evidence", summary }), {
+      await assert.rejects(employee.execute(created.value.id, { action: "complete", deliverableRef: [], text: "new verified evidence", summary }), {
         message: new RegExp(`Delivery summary requires 1–400 characters; received ${length}.*请先填写或精简summary`),
       });
       assert.deepEqual(employee.state().tasks[0], before);
     }
-    const completed = await employee.execute(created.value.id, { action: "complete", text: "new verified evidence", summary: boundary });
+    const completed = await employee.execute(created.value.id, { action: "complete", deliverableRef: [], text: "new verified evidence", summary: boundary });
     assert.equal(completed.stop, true);
     assert.equal(employee.state().tasks[0].summary, boundary);
     assert.equal(employee.state().tasks[0].completion, "new verified evidence");
@@ -225,7 +225,7 @@ test("complete summary feedback reports character counts and preserves the previ
 
 test("scheduled execution records persist conclusions for stopping task tools without another model request", async () => {
   const cases = [
-    { arguments: { action: "complete", text: "已核验完整证据，未修改配置。", summary: "已确认实际地址，未修改配置。" }, status: "done", conclusion: /已确认实际地址，未修改配置/ },
+    { arguments: { action: "complete", deliverableRef: [], text: "已核验完整证据，未修改配置。", summary: "已确认实际地址，未修改配置。" }, status: "done", conclusion: /已确认实际地址，未修改配置/ },
     { arguments: { action: "ask", text: "是否批准发布？" }, status: "approval", conclusion: /等待你确认：是否批准发布/ },
     { arguments: { action: "help", text: "请提供目标环境。" }, status: "waiting", conclusion: /需要你处理：请提供目标环境/ },
     { arguments: { action: "defer", text: "导出作业export-123已提交，只检查原作业。", nextCheckInMinutes: 5 }, status: "deferred", conclusion: /已挂起[\s\S]*export-123/ },
@@ -318,7 +318,7 @@ test("the concise delivery field cannot bypass credential redaction", async () =
     const redactor = new Redactor(); redactor.add("private-test-token"); engine.redactors.set(session.id, redactor);
     const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {}), model = await engine.catalog.resolve(engine.config(), engine.config().scenes!.lightweight![0]);
     assert.equal(tools.definitions(model).find(tool => tool.name === "employee")!.parameters.properties.summary.maxLength, 400);
-    await assert.rejects(tools.execute({ id: "complete", name: "employee", arguments: { action: "complete", text: "verified result", summary: "The private-test-token works" } }, model), /Credentials/);
+    await assert.rejects(tools.execute({ id: "complete", name: "employee", arguments: { action: "complete", deliverableRef: [], text: "verified result", summary: "The private-test-token works" } }, model), /Credentials/);
     assert.equal(employee.state().tasks[0].completion, undefined);
     employee.busy.delete(created.value.id); engine.redactors.delete(session.id);
     await tools.close();
@@ -332,7 +332,7 @@ test("full legacy task evidence stays in the task while a fallback delivery rema
     const job = employee.task(employee.state(), created.value.id), full = "Verified result. ".repeat(200);
     employee.runtime.run = async () => {
       await employee.execute(job.id, { action: "progress", text: "verified", plan: [{ content: "verify", status: "completed" }] });
-      await employee.execute(job.id, { action: "complete", text: full });
+      await employee.execute(job.id, { action: "complete", deliverableRef: [], text: full });
     };
     employee.update((state) => { state.tasks[0].status = "running"; });
     employee.busy.set(job.id, { computer: false, session: "" });
@@ -408,4 +408,33 @@ test("clearEmployeeChat refuses while the chat turn is still running", async () 
     await engine.close();
     store.close();
   }
+});
+
+test("complete delivers the cited deliverable body verbatim instead of only the summary", async () => {
+  const { store, engine, employee, chat } = fixture();
+  let calls = 0;
+  engine.providers.chat = async () => calls++ === 0
+    ? { role: "assistant", calls: [{ id: "assign", name: "employee", arguments: { action: "add", kind: "todo", text: "写测试用例清单" } }] }
+    : { role: "assistant", text: "已安排。" };
+  try {
+    await engine.run(chat.id, { role: "user", text: "写测试用例清单" });
+    let job = employee.state().tasks[0];
+    const body = "# 测试用例清单\n" + "TC-01 指标卡标题取管理端配置。\n".repeat(30);
+    employee.runtime.run = async (session: string) => {
+      const reply = store.append(session, { role: "assistant", model: "fixture/model", text: body, calls: [{ id: "p", name: "employee", arguments: {} }] });
+      const progressed = await employee.execute(job.id, { action: "progress", text: "清单已写完", plan: [{ content: "写清单", status: "completed" }] });
+      assert.equal(progressed.value.textRef, reply.seq, "tool receipts expose the reply number to cite");
+      await assert.rejects(employee.execute(job.id, { action: "complete", text: "证据", summary: "交付25条用例。" }), /deliverableRef[\s\S]*#\d+（/);
+      await employee.execute(job.id, { action: "complete", deliverableRef: [reply.seq], text: "证据：已读需求单。", summary: "交付25条用例。" });
+    };
+    employee.update((state) => { state.tasks[0].status = "running"; });
+    employee.busy.set(job.id, { computer: false, session: "" });
+    await employee.run(employee.state().tasks[0]);
+    job = employee.state().tasks[0];
+    assert.equal(job.status, "done");
+    assert(job.result.startsWith(body.trim()) && job.result.includes("证据：已读需求单。"));
+    const conclusion = store.messages(job.workSession).at(-1)!;
+    assert(conclusion.text!.startsWith(body.trim()) && conclusion.text!.endsWith("交付25条用例。"));
+    assert.match(store.messages(chat.id).at(-1)!.text!, /完整交付物见任务详情/);
+  } finally { await engine.close(); store.close(); }
 });

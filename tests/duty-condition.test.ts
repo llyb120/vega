@@ -134,7 +134,7 @@ test("fired tasks keep their original trigger condition even when the responsibi
       assert(prompt.includes('"triggerCondition":"按交代的任务需要检查原项目"'));
       assert(prompt.includes("不因排队/续做晚于时刻而拒绝执行"));
       await employee.execute(job.id, { action: "progress", text: "verified", plan: [{ content: "verify", status: "completed" }] });
-      await employee.execute(job.id, { action: "complete", text: "verified result" });
+      await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "verified result" });
     };
     employee.update(state => { state.tasks[0].status = "running"; }); employee.busy.set(job.id, { computer: false, session: "" });
     await employee.run(employee.state().tasks[0]);

@@ -212,7 +212,7 @@ test("task complete auto-extracts durable memories and later chat can recall the
   engine.providers.chat = async (_model, system) => {
     assert(system.includes("memory_propose") || system.includes("可用记忆") || system.includes("长期记忆") || true);
     if (requests++ === 0) return action("progress", { action: "progress", text: "核验中", plan: [{ content: "verify gateway", status: "completed" }] });
-    if (requests === 2) return action("complete", { action: "complete", text: "verified gateway without configuration changes", summary: "项目银河网关固定使用HTTP/1.1。交付默认用表格。" });
+    if (requests === 2) return action("complete", { action: "complete", deliverableRef: [], text: "verified gateway without configuration changes", summary: "项目银河网关固定使用HTTP/1.1。交付默认用表格。" });
     return { role: "assistant", text: "按已保存约定处理。" };
   };
   try {
@@ -236,7 +236,7 @@ test("continuing task prompt includes recalled memory block", async () => {
     const user = messages.findLast((m: any) => m.role === "user");
     const text = String(user?.text || "");
     if (text.includes("可用记忆") && text.includes("TypeScript")) saw = true;
-    return action("complete", { action: "complete", text: "verified typescript convention", summary: "项目银河统一使用TypeScript并在原目录开发。" });
+    return action("complete", { action: "complete", deliverableRef: [], text: "verified typescript convention", summary: "项目银河统一使用TypeScript并在原目录开发。" });
   };
   try {
     employee.update((state) => {

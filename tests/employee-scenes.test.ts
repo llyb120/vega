@@ -31,7 +31,7 @@ function fixture() {
 }
 const call = (id: string, name: string, args: any) => ({ role: "assistant", calls: [{ id, name, arguments: args }] });
 const verified = () => call("verify", "employee", { action: "progress", text: "verified authorized goal", plan: [{ content: "verify goal", status: "completed" }] });
-const completed = () => call("complete", "employee", { action: "complete", text: "goal verified", summary: "已验证完成。" });
+const completed = () => call("complete", "employee", { action: "complete", deliverableRef: [], text: "goal verified", summary: "已验证完成。" });
 
 test("employee chat receives low-risk defaults without losing explicit device constraints or approval boundaries", async () => {
   const { store, engine, employee } = fixture();
