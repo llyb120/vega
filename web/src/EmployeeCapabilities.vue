@@ -92,7 +92,7 @@ onBeforeUnmount(() => { disposed = true; });
 </script>
 <template>
   <div class="page-scroll capabilities">
-    <p class="hint">每个牛马独立配置技能和 MCP，不继承其他牛马或全局配置。{{ canEdit ? '仅你作为创建者可查看详情、编辑；新执行轮次使用更新后的配置。' : '只有创建者可以查看和编辑详情，你仅可查看名称。' }}</p>
+    <p class="callout capabilities-warning"><Icon name="alert" :size="14" /><span>本系统设计架构不推荐使用 Skill 或 MCP，后续有可能会移除相关支持，请谨慎使用。</span></p>
     <section class="card">
       <div class="card-head"><h3>技能</h3><p v-if="canEdit" class="hint">上传 ZIP 技能包；勾选覆盖可更新当前牛马的同名技能。</p></div>
       <div v-if="canEdit" class="upload-row">
@@ -121,6 +121,7 @@ onBeforeUnmount(() => { disposed = true; });
 <style scoped>
 .capabilities { display: grid; align-content: start; gap: 16px; }
 .capabilities > * { width: 100%; max-width: 1000px; }
+.capabilities-warning { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-border); }
 .card-head { display: grid; gap: 4px; margin-bottom: 12px; }
 .card-head.row { display: flex; align-items: center; justify-content: space-between; }
 .upload-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
