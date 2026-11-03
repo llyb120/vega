@@ -2,8 +2,8 @@
 import { computed } from "vue";
 import Icon from "./Icon.vue";
 import EmployeeAvatarPicker from "./EmployeeAvatarPicker.vue";
-const props = defineProps({ employee: Object, api: Function, saving: Boolean, deleting: Boolean, busy: Boolean });
-const emit = defineEmits(["save", "delete", "execution", "avatar", "cancel"]);
+const props = defineProps({ employee: Object, api: Function, saving: Boolean, deleting: Boolean, clearing: Boolean, busy: Boolean });
+const emit = defineEmits(["save", "delete", "clear-chat", "execution", "avatar", "cancel"]);
 const clients = computed(() => props.employee.executionClients || []);
 const local = computed(() => !!props.employee.execution?.localAgent);
 </script>
@@ -31,8 +31,11 @@ const local = computed(() => !!props.employee.execution?.localAgent);
           <p v-if="!clients.length" class="hint">无在线客户端；连接后可切换。</p>
         </section>
         <section class="card danger-zone">
-          <div class="card-head"><h3>删除牛马</h3><p class="hint">删除职责、记忆、所有任务和执行会话，并清除其浏览器登录数据。项目文件和共享密码本不会删除。</p></div>
-          <button type="button" class="danger" :disabled="deleting" @click="emit('delete')"><Icon name="trash" :size="15" />{{ deleting ? '正在删除…' : '永久删除' }}</button>
+          <div class="card-head"><h3>危险操作</h3><p class="hint">清空聊天只影响本牛马的对话记录；删除会连同职责、记忆、任务和浏览器登录一并清除。项目文件和共享密码本不会删除。</p></div>
+          <div class="danger-actions">
+            <button type="button" class="ghost danger-soft" :disabled="clearing || deleting" @click="emit('clear-chat')"><Icon name="trash" :size="15" />{{ clearing ? '正在清空…' : '清空聊天记录' }}</button>
+            <button type="button" class="danger" :disabled="deleting || clearing" @click="emit('delete')"><Icon name="trash" :size="15" />{{ deleting ? '正在删除…' : '永久删除牛马' }}</button>
+          </div>
         </section>
       </div>
     </div>
@@ -57,5 +60,7 @@ const local = computed(() => !!props.employee.execution?.localAgent);
 .place-options + .hint { margin-top: 8px; }
 .danger-zone { border-color: var(--danger-border); }
 .danger-zone h3 { color: var(--danger); }
+.danger-actions { display: grid; gap: 8px; }
+.danger-soft { justify-content: flex-start; border-color: var(--danger-border); color: var(--danger); }
 @media (max-width: 1023px) { .settings-grid { grid-template-columns: minmax(0, 1fr); } }
 </style>

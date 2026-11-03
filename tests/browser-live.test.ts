@@ -174,6 +174,7 @@ test("isolated browser presence is per-platform and headless arguments are consi
   assert(args.includes("--load-extension=/app/extension"));
   assert(args.includes("--remote-debugging-port=0"));
   assert(args.includes("--password-store=basic"));
+  assert(args.includes("--window-size=1920,1200"), "default isolated Chrome viewport should be tall enough for denser pages");
 });
 async function fixture() {
   const bytes = await sharp({

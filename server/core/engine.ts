@@ -361,6 +361,17 @@ export class Engine {
       this.employee.schedule();
     } catch (error) { employee.deleting = false; throw error; }
   }
+  clearEmployeeChat(key: string) {
+    const employee = this.employee.for(key), chatId = employee.state().chatSession;
+    assert(!employee.deleting && !this.closing, "牛马正在删除或服务正在停止，请稍候");
+    if (!chatId) return { ok: true, cleared: false };
+    assert(!this.active.has(chatId), "对话仍在进行，请先停止后再清空聊天记录");
+    this.providers.reset(chatId);
+    this.store.clearSessionHistory(chatId);
+    this.emit({ type: "compacted", session: chatId, data: { folds: [], cleared: true } });
+    employee.runtime.emit("employee_changed", { employeeId: key });
+    return { ok: true, cleared: true };
+  }
   employeeFor(session: Session) {
     if (session.employeeId) return this.employee.for(session.employeeId);
     if (session.taskId) {
@@ -961,13 +972,14 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         if (stop) return;
       }
     } catch (e: any) {
-      error = e instanceof Error ? e : new Error(String(e));
-      error.message = String(redact.value(error.message));
+      const raw = e instanceof Error ? e : new Error(String(e));
+      const safe = String(redact.value(raw.message || String(raw)));
+      error = raw.message === safe ? raw : Object.assign(new Error(safe), { name: raw.name, cause: raw });
       if (session?.employeeId && !session.taskId && !control.signal.aborted) {
-        const failure = this.store.append(key, { role: "assistant", text: `本轮未完成：${error.message}\n已执行的操作仍保留，可补充消息继续。`, error: true, tasks: chatTasks.size ? [...chatTasks.values()] : undefined });
+        const failure = this.store.append(key, { role: "assistant", text: `本轮未完成：${safe}\n已执行的操作仍保留，可补充消息继续。`, error: true, tasks: chatTasks.size ? [...chatTasks.values()] : undefined });
         emit("message_end", failure);
       }
-      emit("error", error.message);
+      emit("error", safe);
       throw error;
     } finally {
       try {

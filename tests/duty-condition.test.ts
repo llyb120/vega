@@ -141,3 +141,25 @@ test("fired tasks keep their original trigger condition even when the responsibi
     assert.equal(employee.state().tasks[0].status, "done");
   } finally { await engine.close(); store.close(); }
 });
+
+
+test("stray condition on todo add is ignored so dispatch still works", async () => {
+  const { engine, store, employee } = fixture();
+  try {
+    const prepared = await prepareDutyInput(engine, employee, {
+      action: "add",
+      kind: "todo",
+      text: "为 TAPD 需求设计用例",
+      condition: "按交代任务需要",
+    });
+    assert.equal("condition" in prepared, false);
+    const result = await employee.execute("", prepared);
+    assert(result.value.id);
+    const job = employee.task(employee.state(), result.value.id);
+    assert.equal(job.kind || "todo", "todo");
+    assert.match(job.text, /TAPD/);
+  } finally {
+    await engine.close();
+    store.close();
+  }
+});

@@ -917,6 +917,15 @@ export class Employee {
               assert(size <= 8000, "Plan exceeds 8000 characters");
               t.plan = a.plan;
               t.planRevision = t.revision || 0;
+              for (const step of a.plan) {
+                if (
+                  step.status === "completed" &&
+                  /(验证码|访问码|otp|2fa|mfa|one[\s-]?time)/i.test(step.content) &&
+                  /(无法|受阻|跳过|降级|截图取证|未做现网|无法获取)/i.test(step.content)
+                ) {
+                  assert(false, "验证码/访问码等用户凭据步骤不能标 completed；请先 help 请求验证码并等待，用户明确放弃后再标 cancelled");
+                }
+              }
               if (a.plan.some((step: Obj) => step.status === "cancelled")) t.settlePreferred = true;
             }
             t.progress ??= [];
@@ -1571,9 +1580,9 @@ export class Employee {
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用progress将不再需要的步骤标为cancelled，在text/summary写明未覆盖项后complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用help等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才help，低风险执行细节自行决定，不等待轮询。relay交接须继承当前交付类型与完成标准，不得擅自改成另一种目标。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；连续失败≥2 次应 help 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
+      const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才help，低风险执行细节自行决定，不等待轮询。验证码/访问码/2FA 属于必须 help 的用户阻碍，不得自行认定无法获取后降级。relay交接须继承当前交付类型与完成标准，不得擅自改成另一种目标。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA 等仅用户能提供的凭据时，必须立即 help（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。浏览器/扩展连续失败≥2 次（非验证码场景）才应 help 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
-      await this.runtime.run(session, prompt, AbortSignal.timeout(15 * 60000), input);
+      await this.runtime.run(session, prompt, undefined, input);
       const last = this.store.messages(session).at(-1);
       if (last?.role === "assistant" && !last.calls?.length && last.seq! > after) {
         lastReply = last;
