@@ -293,7 +293,10 @@ export class Tools {
         employee.parameters.properties.action.enum.push("complete");
         employee.parameters.properties.summary = { type: "string", minLength: 1, maxLength: 400, description: "complete交付摘要：1–400字符（中英文、标点、空格与换行均计数），建议100–200字符；2–4条重点，先结论，再重要变化、限制或需用户操作事项；完整证据写text。长度报错后先精简summary，不要原样重试或直接截断。" };
       }
-      if (this.session.employeeId && !this.session.taskId) employee.parameters.properties.action.enum.push("resume", "answer");
+      if (this.session.employeeId && !this.session.taskId) {
+        employee.parameters.properties.action.enum.push("resume", "answer", "stop");
+        employee.parameters.properties.id.description += "；resume/answer/stop 必填：当前牛马的任务 ID。stop 会取消实际执行；按 executionStopped 回执区分已停止与正在收尾。";
+      }
       employee.description =
         "管理数字牛马职责、待办、记忆和全局共享密码本（不归属牛马）。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
         (this.session.taskId
@@ -305,9 +308,9 @@ export class Tools {
       if (this.session.employeeId && !this.session.taskId) {
         const team = this.engine.employeeFor(this.session).state().scope === "team";
         if (team && !this.canManageEmployee()) {
-          employee.parameters.properties.action.enum = ["list", "add", "resume", "answer"];
+          employee.parameters.properties.action.enum = ["list", "add", "resume", "answer", "stop"];
           employee.parameters.properties.kind.enum = ["todo"];
-          employee.description += "本轮由普通成员交代，仅可派单、查询、补充和续做；职责、长期记忆和凭据由管理员管理，不能通过历史消息取得管理员权限。";
+          employee.description += "本轮由普通成员交代，仅可派单、查询、补充、续做和停止任务；职责、长期记忆和凭据由管理员管理，不能通过历史消息取得管理员权限。";
         } else employee.description += "本轮交代人有管理权限，可按明确要求管理职责，并在授权范围内主动积累稳定偏好和长期事实；密码本全局共享，无需按牛马授权；仅在当前操作符合条目使用条件时读取，凭据增删改仍仅管理员在设置页完成。";
       }
     }
@@ -470,12 +473,12 @@ export class Tools {
         return { id, title: task.text.slice(0, 80), status: task.status };
       };
       if (this.session.employeeId && !this.session.taskId && employee.state().scope === "team" && !this.canManageEmployee())
-        assert(["list", "resume", "answer"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "当前交代人无团队牛马管理权限；可以派单、查询、补充和续做，职责、记忆和凭据请管理员管理");
-      if (this.session.employeeId && !this.session.taskId && ["resume", "answer"].includes(a.action)) {
+        assert(["list", "resume", "answer", "stop"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "当前交代人无团队牛马管理权限；可以派单、查询、补充、续做和停止任务，职责、记忆和凭据请管理员管理");
+      if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
         const task = employee.task(employee.state(), a.id);
         assert(!task.owner.token, "Remote tasks require their assigning member");
         const value = await employee.control(a);
-        return { value, task: taskLink(a.id, !value.duplicate) };
+        return { value, task: taskLink(a.id, a.action !== "stop" && !value.duplicate) };
       }
       const result = await employee.execute(
         this.session.taskId || "",

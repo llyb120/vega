@@ -8,7 +8,7 @@ import { systemPresence, type Presence } from "./presence";
 import type { Store, Session, Message } from "./store";
 import { resolve, posix, win32 } from "node:path";
 import { realpath } from "node:fs/promises";
-import { assert, id, clone, clip, type Obj } from "./util";
+import { assert, id, clone, clip, sleep, type Obj } from "./util";
 import { Vault } from "./vault";
 export type Execution = Pick<Session, "localAgent" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
 export type Owner = { token: string; name: string };
@@ -1104,11 +1104,13 @@ export class Employee {
         );
       switch (a.action) {
         case "stop":
+          if (ended(t.status) && t.status !== "stopped") return { ok: true, status: t.status };
           t.status = "stopped";
+          t.nextCheckAt = 0;
           t.result = "用户停止：续做前核对外部操作，不要重放。";
-          this.runtime.cancel(
-            t.side === "computer" ? t.computerSession : t.workSession,
-          );
+          for (const session of new Set([this.busy.get(t.id)?.session, t.workSession, t.computerSession].filter(Boolean)))
+            this.runtime.cancel(session);
+          if (!this.busy.has(t.id)) t.finishedAt = Date.now();
           break;
         case "answer":
           assert(t.status === "waiting", "Task not waiting for information");
@@ -1193,6 +1195,16 @@ export class Employee {
       }
       return { ok: true };
     });
+    if (a.action === "stop") {
+      const task = this.task(this.state(), a.id);
+      const sessions = [this.busy.get(task.id)?.session, task.workSession, task.computerSession].filter(Boolean);
+      const stopped = () => !this.busy.has(task.id) && !sessions.some((session) => this.runtime.isRunning(session));
+      const deadline = Date.now() + 1500;
+      while (!stopped() && Date.now() < deadline) await sleep(25);
+      const current = this.task(this.state(), a.id);
+      const executionStopped = stopped() && ended(current.status);
+      return { ...value, id: task.id, status: !executionStopped && current.status === "stopped" ? "stopping" : current.status, executionStopped, next: executionStopped ? "任务执行已结束；已提交的外部作业或已发生的操作不代表已撤销，不能承诺回滚" : "停止请求已发出，但当前尚不能确认执行已结束；不能宣称已经停止，也不要循环查询" };
+    }
     if (reply)
       await this.runtime.send(reply.token, "starlink.reply", {
         id: reply.id,
