@@ -7,8 +7,8 @@ import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime, isInProgress } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
 import { exportResult } from "./export-result.js";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, tasks: Array, quotable: Boolean });
-const emit = defineEmits(["quote", "jump", "task", "retry"]);
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean });
+const emit = defineEmits(["quote", "jump", "task", "retry", "remember"]);
 const exportOpen = ref(false), exportError = ref("");
 // Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
 const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
@@ -46,6 +46,7 @@ const working = computed(() => !!props.message.tasks?.some((task) => isInProgres
         <strong v-if="message.role !== 'user'">{{ name }}</strong>
         <time v-if="message.at">{{ shortTime(message.at) }}</time>
         <button v-if="quotable && message.seq" type="button" class="chat-reply" aria-label="引用这条消息" title="引用" @click="emit('quote', message)"><Icon name="reply" :size="13" /><span class="reply-label">引用</span></button>
+        <button v-if="rememberable && message.role !== 'user' && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
       </div>
       <div class="chat-bubble" :class="{ failed: message.error }" :role="message.error ? 'alert' : undefined">
         <button v-if="message.quote" type="button" class="chat-quote" :aria-label="'跳转到引用的消息：' + message.quote.text" @click="emit('jump', message.quote.seq)"><strong>{{ message.quote.role === 'user' ? '我' : name }}</strong><span>{{ message.quote.text }}</span></button>

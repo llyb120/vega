@@ -88,7 +88,7 @@ test(
             choices: [
               {
                 index: 0,
-                delta: thinkingOnly ? { reasoning_content: "I need to respond, but no answer was generated" } : memoryCall ? { tool_calls: [{ index: 0, id: "memory-fixture", type: "function", function: { name: "employee", arguments: JSON.stringify({ action: "remember", text: memory }) } }] } : { content: "private session response" },
+                delta: thinkingOnly ? { reasoning_content: "I need to respond, but no answer was generated" } : memoryCall ? { tool_calls: [{ index: 0, id: "memory-fixture", type: "function", function: { name: "employee", arguments: JSON.stringify({ action: "memory_propose", claim: memory, source: "model", memoryKind: "convention" }) } }] } : { content: "private session response" },
                 finish_reason: memoryCall ? "tool_calls" : "stop",
               },
             ],
@@ -490,8 +490,8 @@ test(
         assert(finished, 'team fixture turn must finish');
       }
       const teamState = await ok(`/employees/${team.id}`, 'GET', undefined, admin);
-      assert(teamState.memories.some((memory: any) => memory.text === 'team-memory-fixture-admin'));
-      assert(!teamState.memories.some((memory: any) => memory.text === 'team-memory-fixture-member'), 'a forged actorId cannot inherit the administrator who owns the team employee');
+      assert(teamState.memories.some((memory: any) => memory.claim === 'team-memory-fixture-admin' || memory.text === 'team-memory-fixture-admin'));
+      assert(!teamState.memories.some((memory: any) => memory.claim === 'team-memory-fixture-member' || memory.text === 'team-memory-fixture-member'), 'a forged actorId cannot inherit the administrator who owns the team employee');
       await ok(`/employees/${team.id}/messages`, 'POST', { text: 'thinking-only-chat-fixture' }, admin);
       let failedChat: any;
       for (let index = 0; index < 100; index++) {

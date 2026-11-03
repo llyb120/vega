@@ -293,7 +293,7 @@ export class Tools {
       delete employee.parameters.properties.events;
       employee.parameters.properties.url = { type: "string", maxLength: 2048, description: "可选：vault_get/vault_send 当前页面或服务地址，辅助核对使用条件；无需在密码本配置网站。通常会自动参考当前浏览器观察。" };
       employee.parameters.properties.condition = { type: "string", minLength: 1, maxLength: 2000, description: "职责的自然语言触发条件，配合text职责内容即可；新建/修改时自动识别，不与times/everyMinutes/nextAt混填。示例每天9点、每30分钟检查、按交代任务需要。无法自动监听的外部事件须明确检查频率，不能假称已订阅。" };
-      employee.parameters.properties.text.description += "。remember仅一条稳定事实，去除首尾空白后须为1–200字符（中英文、标点与换行均计数），建议100字符以内；长度报错后先精简text，多件事分开保存，不要原样重试或直接截断。";
+      employee.parameters.properties.text.description += "。memory_propose 的 claim/text 为一条稳定主张，1–120字；长度报错后精简再试，多件事分开 propose，不要原样重试或直接截断。";
       employee.parameters.properties.profile.description = "兼容字段：新主任务始终从lightweight起步，不用profile直接选择编码模型；实际涉及编码时由原主会话switch_scene升级，续做保留现场，但可按后续需求回轻量或再次升级。";
       if (this.session.taskId) {
         employee.parameters.properties.action.enum.push("complete");
@@ -304,14 +304,14 @@ export class Tools {
         employee.parameters.properties.id.description += "；resume/answer/stop 必填：当前牛马的任务 ID。stop 会取消实际执行；按 executionStopped 回执区分已停止与正在收尾。";
       }
       employee.description =
-        "管理数字牛马职责、待办、记忆和全局共享密码本（不归属牛马）。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆每条200字，remember/forget；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
+        "管理数字牛马职责、待办、记忆和全局共享密码本（不归属牛马）。list查看状态；add duty为用户职责、todo为独立任务，业务key跨完成记录去重；update只改授权字段。职责支持不定时manual、北京时间每天times、完成后everyMinutes、显式nextAt/nextCheckInMinutes动态安排。记忆用 memory_search/propose/resolve/pin/forget；claim≤120字；vault_list只看元数据，vault_get需text写用途并按condition使用，凭据不得写入回复、记忆、计划或交接；密码本改动仅用户可以。" +
         (this.session.taskId
           ? "当前会话属于牛马任务。执行前progress保存完整计划，验证成功才标completed；ask仅用于用户要求先审核或尚未授权的不可逆操作；help仅用于缺少无法自行查得的必要信息或确需用户处理的阻碍，低风险执行细节自行决定；defer保存外部作业恢复点后挂起，relay仅主会话交给独立computer会话，以上动作调用后立即结束本轮，复用原任务和历史，不重复提交。vault_request/发送只限授权支援。用户拥有职责原文、备注和固定规则，执行任务不得修改；任务可新增独立todo、给自己改期或为所属动态职责安排下次/停用，不把本任务的步骤拆成todo。Chrome必须relay，coding用同会话switch_scene。"
           : this.session.employeeId
             ? EMPLOYEE_CHAT_RULES
           : "当前是用户的普通会话，不是牛马任务。普通请求直接在本会话处理，不需要牛马启用、工作时间或progress/help/defer/relay流程，Chrome在computer场景直接使用。仅在用户明确派给牛马或管理牛马数据时调用此工具；用户说“交给牛马：xxx”时只add todo并告知，当前会话不转换为牛马会话，任务由牛马自己的独立会话执行。");
       employee.description += VAULT_USAGE;
-      if (this.session.employeeId) employee.description += "主动积累已验证、可复用且权限允许的长期事实；先核对并更新原id，先remember成功再确认，临时进度和凭据不进记忆，任务交付前保存新事实。";
+      if (this.session.employeeId) employee.description += "主动积累已验证、可复用且权限允许的长期事实；先 memory_search，再 memory_propose 成功后才可确认已记住；临时进度和凭据不进记忆；任务交付前保存新事实。";
       if (this.session.employeeId && !this.session.taskId) {
         const team = this.engine.employeeFor(this.session).state().scope === "team";
         if (team && !this.canManageEmployee()) {

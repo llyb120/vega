@@ -1315,12 +1315,18 @@ function removeDuty(d) {
 }
 async function saveMemory(data) {
   return attempt(async () => {
-    await employeeAction({ action: "remember", ...data });
+    await employeeAction({ action: "memory_propose", source: "ui", ...data });
     return true;
   });
 }
 function forgetMemory(m) {
-  return attempt(() => employeeAction({ action: "forget", id: m.id }));
+  return attempt(() => employeeAction({ action: "memory_forget", id: m.id }));
+}
+function resolveMemory(data) {
+  return attempt(() => employeeAction({ action: "memory_resolve", ...data }));
+}
+function pinMemory(m, pinned = true) {
+  return attempt(() => employeeAction({ action: "memory_pin", id: m.id, pinned }));
 }
 async function saveEmployeeSettings() {
   if (employeeSaving.value) return;
@@ -1517,7 +1523,7 @@ onBeforeUnmount(() => {
               <button v-if="attentionTasks.length && !workPanelVisible" type="button" class="attention-strip" @click="attentionTasks.length === 1 ? openEmployeeTask(attentionTasks[0].id) : showTasks('attention')">
                 <Icon name="hand" :size="16" /><span><strong>{{ attentionTasks.length }} 项需要你处理</strong><span class="truncate">{{ attentionTasks[0].text }}</span></span><Icon name="right" :size="16" />
               </button>
-              <EmployeeChat :key="user.id + ':' + selectedEmployee" :api="api" :user-id="user.id" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" :tasks="employee.tasks" @task="openEmployeeTask" />
+              <EmployeeChat :key="user.id + ':' + selectedEmployee" :api="api" :user-id="user.id" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" :tasks="employee.tasks" :remember="employee.canManage ? saveMemory : undefined" @task="openEmployeeTask" />
             </div>
             <button v-if="workPanelVisible && !wide" type="button" class="panel-backdrop" aria-label="关闭当前工作" tabindex="-1" @click="workRailOpen = false"></button>
             <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
@@ -1533,13 +1539,14 @@ onBeforeUnmount(() => {
             :focus="employeeTaskFocus"
             :readonly="!canExecute"
             :act="employeeTaskAction"
+            :save-memory="saveMemory"
             @filter="employeeTaskFilter = $event"
             @select="employeeTaskFocus = $event"
             @inspect="openEmployee($event)"
             @chat="employeeTab = 'chat'"
           />
           <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
-          <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" /></div>
+          <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" /></div>
           <EmployeeCapabilities v-if="employeeTab === 'capabilities'" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
           <EmployeeSettings
             v-if="employeeTab === 'settings' && employee.canManage"

@@ -173,52 +173,45 @@ export function applyDuty(d: Obj, a: Obj, now = Date.now()) {
     "Duty note exceeds 4096 bytes",
   );
 }
-export function retention(m: Obj, now = Date.now()) {
-  return m.importance >= 3
-    ? 1
-    : Math.exp(
-        -Math.max(0, now - Math.max(m.at || 0, m.usedAt || 0)) /
-          86400000 /
-          (5 * Math.max(1, m.strength || 1) * Math.max(1, m.importance || 1)),
-      );
-}
-function bigrams(s: string) {
-  const a = [...s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "")];
-  return new Set(a.slice(1).map((c, i) => a[i] + c));
-}
-export function recallMemory(
-  state: EmployeeState,
-  task: string,
-  now = Date.now(),
-  reinforce = true,
-) {
-  state.memories = state.memories.filter((m) => retention(m, now) >= 0.05);
-  const words = bigrams(task),
-    r = state.memories.map((m) => {
-      const own = bigrams(m.text);
-      return own.size
-        ? [...own].filter((v) => words.has(v)).length / own.size
-        : 0;
-    }),
-    top = Math.max(0, ...r),
-    scored = state.memories
-      .map((m, i) => ({
-        m,
-        r: r[i],
-        score:
-          (top ? (3 * r[i]) / top : 0) +
-          (Math.max(1, m.importance || 1) - 1) +
-          0.5 * retention(m, now),
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 12);
-  for (const { m, r } of scored)
-    if (reinforce && r >= 0.2) {
-      m.strength = Math.max(1, m.strength || 1) + 1;
-      m.usedAt = now;
-    }
-  return scored.map((v) => v.m);
-}
+import {
+  retention,
+  recallMemory,
+  migrateMemories,
+  proposeMemory,
+  resolveMemory,
+  pinMemory,
+  forgetMemory as removeMemory,
+  searchMemories,
+  recallMemories,
+  formatMemoriesForPrompt,
+  extractMemoryCandidates,
+  pruneMemories,
+  applyFeedback,
+  ACTIVE_MEMORY_CAP,
+  type MemoryRecord,
+  type MemoryScene,
+  type MemoryKind,
+} from "./memory";
+export {
+  retention,
+  recallMemory,
+  migrateMemories,
+  proposeMemory,
+  resolveMemory,
+  pinMemory,
+  searchMemories,
+  recallMemories,
+  formatMemoriesForPrompt,
+  extractMemoryCandidates,
+  pruneMemories,
+  applyFeedback,
+  ACTIVE_MEMORY_CAP,
+  type MemoryRecord,
+  type MemoryScene,
+  type MemoryKind,
+};
+export { forgetMemory, exportMemoriesMarkdown, gateMemoryClaim } from "./memory";
+
 export function nextFixed(times: string[], after: number) {
   const p = beijingParts(after),
     values: number[] = [];
@@ -489,6 +482,11 @@ export class Employee {
         if (!duty.manual && !duty.everyMinutes && !duty.times?.length)
           duty.enabled = false;
       }
+    const migrated = migrateMemories(state.memories);
+    state.memories = migrated.memories;
+    const pruned = pruneMemories(state.memories as MemoryRecord[]);
+    state.memories = pruned.memories;
+    if (migrated.changed || pruned.changed) this.save(state);
     return state;
   }
   update<T>(fn: (s: EmployeeState) => T): T {
@@ -560,6 +558,11 @@ export class Employee {
         "progress",
         "complete",
         "relay",
+        "memory_search",
+        "memory_propose",
+        "memory_resolve",
+        "memory_pin",
+        "memory_forget",
         "remember",
         "forget",
         "vault_list",
@@ -660,10 +663,10 @@ export class Employee {
             recentRuns: s.runs
               .filter((r) => !caller || r.taskId === caller)
               .slice(-10),
-            memories: [...s.memories]
-              .sort((a, b) => retention(b) - retention(a))
-              .slice(0, 30),
-            memoryCount: s.memories.length,
+            memories: searchMemories(s.memories as MemoryRecord[], String(a.query || a.text || ""), { status: "all", limit: 30 }),
+            pendingMemories: searchMemories(s.memories as MemoryRecord[], "", { status: "pending", limit: 30 }),
+            memoryCount: (s.memories as MemoryRecord[]).filter((m) => m.status === "active").length,
+            memoryPendingCount: (s.memories as MemoryRecord[]).filter((m) => m.status === "draft" || m.status === "conflict").length,
             scenes: ["lightweight", "coding", "computer"],
           };
         case "add": {
@@ -832,8 +835,33 @@ export class Employee {
           }
           t.summary = a.summary?.trim() || "";
           t.completion = content;
+          const candidates = extractMemoryCandidates({
+            summary: t.summary,
+            result: content,
+            taskText: t.text,
+            cwd: t.cwd || s.cwd,
+            scene: t.side === "computer" || t.profile === "computer" ? "computer" : "coding",
+          });
+          const suggestions: Obj[] = [];
+          for (const candidate of candidates) {
+            const proposed = proposeMemory(s.memories as MemoryRecord[], candidate, now);
+            if (!proposed.ok) continue;
+            suggestions.push({
+              id: proposed.memory.id,
+              claim: proposed.memory.claim,
+              kind: proposed.memory.kind,
+              status: proposed.memory.status,
+              action: proposed.action,
+            });
+          }
+          t.memorySuggestions = suggestions;
+          pruneMemories(s.memories as MemoryRecord[], now);
           stop = true;
-          return { ok: true, next: "Task verified; the scheduler saves and delivers the conclusion. End this turn now." };
+          return {
+            ok: true,
+            next: "Task verified; the scheduler saves and delivers the conclusion. End this turn now.",
+            memorySuggestions: suggestions,
+          };
         }
         case "ask":
         case "help":
@@ -960,51 +988,85 @@ export class Employee {
             next: "Saved; end this turn now. System resumes the same task/session; do not resubmit or poll.",
           };
         }
-        case "remember": {
-          const length = [...content].length;
-          assert(
-            length > 0 && length <= 200,
-            `记忆未保存：text 去除首尾空白后为 ${length} 字，要求 1–200 字。请提炼一条非空的稳定事实（建议 100 字以内），多件事分开保存；修改 text 后再试，不要原样重试或直接截断。`,
-          );
-          const importance = a.importance ?? 1;
-          assert(
-            Number.isInteger(importance) && importance >= 1 && importance <= 3,
-            "importance is 1–3",
-          );
-          let m = a.id
-            ? s.memories.find((m) => m.id === a.id)
-            : s.memories.find((m) => m.text === content);
-          if (a.id) assert(m, "Memory not found");
-          if (!m) {
-            if (s.memories.length >= 300) {
-              const weakest = s.memories
-                .filter((m) => m.importance < 3)
-                .sort((a, b) => retention(a) - retention(b))[0];
-              assert(
-                weakest,
-                "All memories are permanent; forget or merge one",
-              );
-              s.memories = s.memories.filter((m) => m.id !== weakest.id);
-            }
-            m = { id: id("m"), strength: 0 };
-            s.memories.push(m);
-          }
-          Object.assign(m, {
-            text: content,
-            importance: a.importance ?? m.importance ?? 1,
-            at: now,
-            usedAt: now,
-            strength: (m.strength || 0) + 1,
+        case "memory_search": {
+          const status = a.status || (a.pending ? "pending" : "all");
+          const rows = searchMemories(s.memories as MemoryRecord[], content || String(a.query || ""), {
+            status,
+            scene: a.memoryScene || a.scene,
+            limit: Math.min(50, Number(a.limit) || 12),
+            now,
           });
-          return { id: m.id };
+          return {
+            memories: rows.map((m) => ({
+              id: m.id,
+              kind: m.kind,
+              claim: m.claim,
+              scope: m.scope,
+              scene: m.scene,
+              status: m.status,
+              confidence: m.confidence,
+              usefulness: m.usefulness,
+              pinned: !!m.pinned,
+              lastUsedAt: m.lastUsedAt,
+            })),
+            tip: "仅注入相关短列表；写入请用 memory_propose，冲突/草稿用 memory_resolve。",
+          };
         }
-        case "forget":
-          assert(
-            s.memories.some((m) => m.id === a.id),
-            "Memory not found",
+        case "memory_propose":
+        case "remember": {
+          const claim = String(a.claim || content || "").trim();
+          const result = proposeMemory(
+            s.memories as MemoryRecord[],
+            {
+              claim,
+              kind: a.memoryKind || a.kind,
+              evidence: a.evidence,
+              scope: a.scope || (t?.cwd ? t.cwd : "global"),
+              scene: a.memoryScene || a.scene || (t ? (t.side === "computer" || t.profile === "computer" ? "computer" : "coding") : "chat"),
+              id: a.id,
+              pinned: a.pinned,
+              ttl: a.ttl,
+              source: a.source || (caller ? "model" : "user"),
+              highRisk: a.highRisk,
+            },
+            now,
           );
-          s.memories = s.memories.filter((m) => m.id !== a.id);
+          if (!result.ok) {
+            const err: any = Error(result.message);
+            err.code = result.code;
+            err.candidates = result.candidates;
+            throw err;
+          }
+          pruneMemories(s.memories as MemoryRecord[], now);
+          return {
+            id: result.memory.id,
+            status: result.memory.status,
+            action: result.action,
+            claim: result.memory.claim,
+            kind: result.memory.kind,
+          };
+        }
+        case "memory_resolve": {
+          const resolved = resolveMemory(s.memories as MemoryRecord[], {
+            action: a.resolveAction || a.op || a.mode || "confirm",
+            id: a.id,
+            ids: a.ids,
+            keepId: a.keepId,
+            claim: a.claim || (content || undefined),
+            signal: a.signal,
+          }, now);
+          pruneMemories(s.memories as MemoryRecord[], now);
+          return resolved;
+        }
+        case "memory_pin": {
+          const m = pinMemory(s.memories as MemoryRecord[], a.id, a.pinned !== false, now);
+          return { id: m.id, pinned: !!m.pinned, status: m.status };
+        }
+        case "memory_forget":
+        case "forget": {
+          removeMemory(s.memories as MemoryRecord[], a.id);
           return { ok: true };
+        }
         default:
           throw Error("Unknown employee action " + action);
       }
@@ -1446,8 +1508,7 @@ export class Employee {
         else task.workSession = session;
       }
       this.busy.get(task.id)!.session = session;
-      const memories = recallMemory(state, task.text),
-        duties = state.duties.filter((d) => d.enabled);
+      const duties = state.duties.filter((d) => d.enabled);
       state.runs.push({
         taskId: task.id,
         session,
@@ -1474,11 +1535,22 @@ export class Employee {
       const input = { answer: task.answer || "", handoff: computer ? task.handoff || "" : "", handoffRevision: computer ? task.handoffRevision || 0 : undefined, quoteSeq: cited ? source!.quote!.seq : undefined };
       // Delivery is acknowledged by the persisted input/result, never before the runtime actually appends it.
       const supplement = previous.answer !== undefined && input.answer.startsWith(previous.answer) ? input.answer.slice(previous.answer.length).trim() : input.answer;
+
       const snapshot = JSON.stringify({ plan: task.plan, planRevision: task.planRevision || 0, revision: task.revision || 0, progress: task.progress?.at(-1), checkpoint: task.checkpoint });
+      const memoryScene: MemoryScene = computer ? "computer" : scene === "coding" ? "coding" : "any";
+      const memoryQuery = [task.text, task.progress?.at(-1)?.text, task.checkpoint, supplement, continuing ? "续做" : ""].filter(Boolean).join("\n");
+      const memories = recallMemories(state.memories as MemoryRecord[], memoryQuery, {
+        scene: memoryScene,
+        scope: task.cwd || state.cwd || "global",
+        touchUsed: false,
+      });
+      task.recalledMemoryIds = memories.map((m) => m.id);
+      this.save(state);
+      const memoryBlock = formatMemoriesForPrompt(memories);
       const context = continuing
-        ? `[牛马任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n当前计划和恢复点：${snapshot}`
-        : `[牛马任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, fromDuty: task.fromDuty, triggerCondition: task.triggerCondition })}\n相关稳定记忆：${JSON.stringify(memories)}`;
-      const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
+        ? `[牛马任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n当前计划和恢复点：${snapshot}${memoryBlock}`
+        : `[牛马任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, fromDuty: task.fromDuty, triggerCondition: task.triggerCondition })}${memoryBlock}`;
+const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason })}\n先检查现场与历史回执，诊断根因并改变无效方法，最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用help等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
       const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用progress登记完整计划；续做保留已验证步骤，不清空计划，仅在状态或要求改变时用progress提交更新后的完整计划，验证成功才标completed。提交过的作业只检查原作业，不重复提交。ask/help/defer/relay后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才help，低风险执行细节自行决定，不等待轮询。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；连续失败≥2 次应 help 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次relay、不调用complete。" : "编码使用switch_scene（主会话共享历史），Chrome必须relay到独立computer会话。主任务交付前必须调用complete，text写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
@@ -1535,6 +1607,12 @@ export class Employee {
         }
         if (ended(t.status)) {
           t.finishedAt = Date.now();
+          if (t.status === "done" && Array.isArray(t.recalledMemoryIds)) {
+            for (const mid of t.recalledMemoryIds) {
+              const memory = (s.memories as MemoryRecord[]).find((item) => item.id === mid);
+              if (memory) applyFeedback(memory, "success", t.finishedAt);
+            }
+          }
           const d = s.duties.find((d) => d.id === t.dutyId);
           if (d) {
             d.lastRunAt = t.finishedAt;
