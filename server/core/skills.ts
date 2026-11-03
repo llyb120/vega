@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import { unzipSync } from "fflate";
 import type { Store } from "./store";
 import { assert, Mutex, type Obj } from "./util";
+export const skillKind = (employeeId?: string) => employeeId ? "skill:" + employeeId : "skill";
 export function skillMetadata(text: string, path: string) {
   let name = dirname(path).replaceAll("\\", "/").split("/").at(-1) || "skill",
     description = "";
@@ -160,6 +161,7 @@ export async function importSkill(
   input: string,
   key?: string,
   replace = false,
+  employeeId?: string,
 ) {
   const source = await realpath(input),
     info = await stat(source);
@@ -218,7 +220,8 @@ export async function importSkill(
     /^[\p{L}\p{N}_.-]{1,100}$/u.test(name) && name !== "." && name !== "..",
     "Invalid skill name",
   );
-  const old = store.object<any>("skill", name);
+  const kind = skillKind(employeeId), old = store.object<any>(kind, name);
+  if (employeeId) assert(employeeId === "default" ? !store.get("employee:default-deleted", false) : !!store.object("employee", employeeId), "Employee not found");
   assert(
     !old || replace,
     "Skill already exists; confirm replace=true to update it and its resources",
@@ -234,8 +237,9 @@ export async function importSkill(
         mode: file.mode,
       });
     }
-    store.save("skill", name, {
+    store.save(kind, name, {
       ...metadata,
+      employeeId,
       id: name,
       name,
       content,
@@ -258,7 +262,7 @@ export async function materializeSkill(store: Store, skill: Obj) {
   if (!skill.assets?.length)
     return { path: "sqlite:skill/" + skill.id, resourceRoot: undefined };
   const safe = createHash("sha256")
-      .update(skill.id + ":" + skill.digest)
+      .update((skill.employeeId || "") + ":" + skill.id + ":" + skill.digest)
       .digest("hex"),
     root = resolve(
       process.env.VEGA_SKILL_CACHE || join(tmpdir(), "vega-skill-cache"),

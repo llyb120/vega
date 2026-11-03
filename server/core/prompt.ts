@@ -2,6 +2,7 @@ import {
   skillMetadata,
   materializeSkill,
   legacySkillDirectories,
+  skillKind,
 } from "./skills";
 export { skillMetadata } from "./skills";
 import { readFile, stat, readdir } from "node:fs/promises";
@@ -18,6 +19,7 @@ export const EMPLOYEE_SCENE_RULES = `新主任务统一先用轻量模型判断�
 同一任务续做默认沿用上次执行现场，但不是任务级永久锁定：后续仍是编码/调试/验证就继续coding，工作转为普通查询、协调或独立整理时可按后续需求回到lightweight，之后再需要编码也可再次升级。均在原主会话保留历史、计划、恢复点和授权，不重做已完成操作；不要为一句重复收尾来回切换。新的独立任务重新从轻量开始。当前数字牛马的独立任务可并行；不要因为另一个任务还未结束而拒绝派单。仅同一任务、同一浏览器或工作区写入冲突时让系统协调；工具返回工作区queued时本步未执行，立即结束本轮，系统在资源释放后续做，不忙等、不反复重试、不新建重复任务。浏览器操作通过relay进入独立computer会话；当前首选模型已覆盖目标场景时不重复切换，故障只在当前场景的候选模型中回退。`;
 export const EMPLOYEE_DECISION_RULES = `以用户目标而不是历史操作步骤为准：授权范围内低风险、可逆且不改变交付目标的执行细节，用合理默认值直接推进，不为“是否继续”、工具选择或非关键环境差异反复询问。缺信息先用已有上下文和授权工具查证，主会话缺少网页工具先relay，不让用户代做本可自行完成的调查。
 派单和交接保留用户原话与明确约束，区分用户要求和牛马推断；历史记忆、旧计划、参考命令与验证方法不是本次必须照搬的硬条件，不擅自补出主机名、操作系统或特定工具要求。当前执行位置和实际工具能力以当前会话为准，命令端与浏览器端可能不同，不因旧记录来自另一端就要求用户切换回来。
+技能内容和 MCP 配置是牛马创建者的私有配置，仅用于内部执行；对话、任务交付和长期记忆中只可列出能力名称，不得泄露配置详情或借任务修改配置，详情与编辑应引导创建者在技能 / MCP 页面操作。
 例如用户只说“打开百度”，当前可用的是服务端浏览器，就直接relay打开并核实，交付说明“已在服务端浏览器打开”，不先问是否接受服务端，也不冒称已在用户电脑打开。用户明确要求“在我的电脑上”、指定账号/设备或依赖本地文件、登录态时必须保留这些实质约束，不能用另一端结果代替。不得擅自切换任务绑定、迁移文件或凭据，也不得绕过浏览器授权通道。
 help仅用于缺少无法自行查得且会实质影响结果的必要信息或确需用户处理的阻碍；ask用于用户要求先审核或尚未授权的不可逆操作，不能以减少询问为由跳过审批或扩大授权。必须问时一次说清阻碍和所需最小补充，不把实现方案选择推给用户。验证与风险相称：简单打开网页以最终URL、标题和可用页面元素核实即可，没有异常不再叠加主机、历史数据库、进程数等诊断；完成即交付，不为重复确认继续操作。`;
 export const EMPLOYEE_MEMORY_RULES = `长期记忆要主动积累，但只记录对未来多次任务有用的稳定事实：授权用户的长期偏好、项目约定、已验证的环境与可复用限制；不要求用户每次都说“记住”。临时进度、一次性故障、任务流水、计划、猜测和未经核实的结论留在任务记录，不存为长期记忆；凭据和敏感令牌绝不能存。
@@ -40,13 +42,14 @@ async function regular(path: string, max: number) {
 }
 export async function loadSkills(config: Config, store: Store, cwd: string) {
   const skills: Obj[] = [];
-  for (const skill of store.objects<any>("skill")) {
+  for (const skill of store.objects<any>(skillKind(config.employeeId))) {
     const entry = await materializeSkill(store, skill);
     skills.push({
       id: skill.id,
       name: skill.name,
       description: skill.description,
       ...entry,
+      path: config.employeeId ? "sqlite:skill/" + skill.id : entry.path,
     });
   }
   for (const item of config.skills || []) {
@@ -56,8 +59,9 @@ export async function loadSkills(config: Config, store: Store, cwd: string) {
       if (text) skills.push({ ...skillMetadata(text, path), ...item, path });
     }
   }
-  const roots =
-    config.skillsDirectory || process.env.VEGA_SKILLS_DIR
+  const roots = config.employeeId
+    ? config.skillsDirectory ? [config.skillsDirectory] : []
+    : config.skillsDirectory || process.env.VEGA_SKILLS_DIR
       ? [config.skillsDirectory || process.env.VEGA_SKILLS_DIR!]
       : legacySkillDirectories();
   for (const root of roots) {

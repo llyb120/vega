@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Store } from "./store";
 import { assert, type Obj } from "./util";
 import { importSkill } from "./skills";
-export async function uploadSkill(store: Store, args: Obj) {
+export async function uploadSkill(store: Store, args: Obj, employeeId?: string) {
   assert(
     typeof args.filename === "string" &&
       args.filename.toLowerCase().endsWith(".zip"),
@@ -22,7 +22,7 @@ export async function uploadSkill(store: Store, args: Obj) {
   try {
     const file = join(dir, "skill.zip");
     await writeFile(file, data, { flag: "wx", mode: 0o600 });
-    return await importSkill(store, file, undefined, args.replace === true);
+    return await importSkill(store, file, undefined, args.replace === true, employeeId);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

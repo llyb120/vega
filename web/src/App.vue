@@ -13,6 +13,7 @@ import EmployeeTasks from "./EmployeeTasks.vue";
 import EmployeeDuties from "./EmployeeDuties.vue";
 import EmployeeMemories from "./EmployeeMemories.vue";
 import EmployeeSettings from "./EmployeeSettings.vue";
+import EmployeeCapabilities from "./EmployeeCapabilities.vue";
 import WorkPanel from "./WorkPanel.vue";
 import AppSidebar from "./AppSidebar.vue";
 import PageHeader from "./PageHeader.vue";
@@ -357,7 +358,7 @@ const historyTasks = computed(() =>
 const attentionTasks = computed(() => activeTasks.value.filter((task) => ["waiting", "approval"].includes(task.status)));
 const visibleEmployeeTasks = computed(() => employeeTaskFilter.value === "history" ? historyTasks.value : employeeTaskFilter.value === "attention" ? attentionTasks.value : activeTasks.value);
 const employeeStatus = computed(() => attentionTasks.value.length ? "需要你处理" : activeTasks.value.some((task) => task.status === "running") ? "正在工作" : "随时待命");
-const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['duties', '职责'], ['memories', '记忆'], ...(employee.value.canManage ? [['settings', '设置']] : [])]);
+const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['duties', '职责'], ['memories', '记忆'], ['capabilities', '技能 / MCP'], ...(employee.value.canManage ? [['settings', '设置']] : [])]);
 const employeeTone = computed(() => attentionTasks.value.length ? "warn" : activeTasks.value.some((task) => task.status === "running") ? "info" : "ok");
 const employeeCounts = computed(() => ({ tasks: attentionTasks.value.length || activeTasks.value.length, attention: attentionTasks.value.length, duties: employee.value.duties?.length || 0, memories: employee.value.memories?.length || 0 }));
 const workPanelVisible = computed(() => wide.value ? !workPanelHidden.value : workRailOpen.value);
@@ -1539,6 +1540,7 @@ onBeforeUnmount(() => {
           />
           <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
           <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" /></div>
+          <EmployeeCapabilities v-if="employeeTab === 'capabilities'" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
           <EmployeeSettings
             v-if="employeeTab === 'settings' && employee.canManage"
             :employee="employee"

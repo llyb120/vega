@@ -1,7 +1,7 @@
 import { updateEmployeeAvatar } from "../../core/employee-avatar";
 import { chatHistory } from "../../core/chat-page";
 import { prepareDutyInput } from "../../core/duty-condition";
-import { uploadSkill } from "../../core/skill-upload";
+import { employeeCapabilities } from "../../core/employee-capabilities";
 import {
   browserTabs,
   browserScreenshot,
@@ -12,8 +12,6 @@ import { authRoute, bodyJSON } from "../../core/http-auth-routes";
 import { check } from "../../core/auth";
 import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { importSkill, materializeSkill } from "../../core/skills";
-import { skillMetadata } from "../../core/prompt";
 import {
   defineEventHandler,
   getRequestURL,
@@ -169,6 +167,8 @@ export default defineEventHandler(async (event) => {
       check(!employee.deleting, 409, "牛马正在删除，请稍候");
       const state = employee.state();
       if (method !== "GET") check(user.role !== "viewer", 403, "只读账号不能执行操作");
+      if (["capabilities", "skills", "mcp"].includes(path[2]))
+        return await employeeCapabilities(employee, user, method, path.slice(2), a);
       if (path[2] === "avatar") {
         if (method === "GET") {
           check(/^blob-[a-f\d]{32}$/.test(state.avatar || ""), 404, "Avatar not found");
@@ -482,31 +482,7 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
     }
-    if (path[0] === "skills") {
-      if (path[1] === "upload" && method === "POST")
-        return uploadSkill(store, a);
-      if (method === "GET") {
-        const rows = [];
-        for (const skill of store.objects<any>("skill"))
-          rows.push({
-            id: skill.id,
-            name: skill.name,
-            description: skill.description,
-            ...(await materializeSkill(store, skill)),
-            files: skill.assets?.map((a: Obj) => a.path) || ["SKILL.md"],
-          });
-        return rows;
-      }
-      if (method === "DELETE") {
-        assert(path[1], "Skill id required");
-        store.remove("skill", path[1]);
-        return { ok: true };
-      }
-      if (method === "POST") {
-        assert(typeof a.path === "string" && a.path, "Skill path required");
-        return importSkill(store, a.path, a.id, a.replace === true);
-      }
-    }
+    if (path[0] === "skills") check(false, 410, "Skill 配置已移至各牛马，请在牛马的技能 / MCP 页面管理");
     if (path[0] === "employee") {
       if (method === "GET")
         return {

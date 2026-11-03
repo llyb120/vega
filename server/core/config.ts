@@ -10,6 +10,7 @@ export type Config = {
   mcp?: Record<string, Obj>;
   relay?: Obj;
   skills?: Obj[];
+  employeeId?: string;
   skillsDirectory?: string;
   ponytail?: string;
 };

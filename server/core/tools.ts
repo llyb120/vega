@@ -18,7 +18,7 @@ import sharp from "sharp";
 import chromeDefinition from "../../shared/chrome-tool.json";
 import employeeDefinition from "../../shared/employee-tool.json";
 import { readPath, textSlice } from "./file-read";
-import { materializeSkill, skillEntry } from "./skills";
+import { materializeSkill, skillEntry, skillKind } from "./skills";
 import { isDeepStrictEqual } from "node:util";
 import { maskedConfig, mergeSecrets } from "./config";
 import type { Session, Call, Message } from "./store";
@@ -573,19 +573,25 @@ export class Tools {
       const [skillID, ...rest] = a.path
         .slice("sqlite:skill/".length)
         .split("/");
-      const skill = this.engine.store.object<any>("skill", skillID);
+      const skill = this.engine.store.object<any>(skillKind(this.session.employeeId), skillID);
       assert(skill, "Skill not found");
       const path = rest.length ? skillEntry(rest.join("/")) : "SKILL.md";
+      let result: Outcome;
       if (skill.assets?.length) {
         const cache = await materializeSkill(this.engine.store, skill);
         assert(
           skill.assets.some((asset: Obj) => asset.path === path),
           "Skill resource not found",
         );
-        return this.read({ ...a, path: resolve(cache.resourceRoot!, path) }, true);
+        result = await this.read({ ...a, path: resolve(cache.resourceRoot!, path) }, true);
+      } else {
+        assert(path === "SKILL.md", "Legacy skill has no archived resources");
+        result = { value: { path: a.path, text: skill.content } };
       }
-      assert(path === "SKILL.md", "Legacy skill has no archived resources");
-      return { value: { path: a.path, text: skill.content } };
+      // Shared task transcripts must not become a second endpoint for private skill instructions.
+      if (this.session.employeeId && typeof result.value?.text === "string")
+        return { value: { skill: skill.name, content: "[技能详情仅供本轮内部执行，不写入共享记录]" }, secret: JSON.stringify({ path: a.path, content: result.value.text }) };
+      return result;
     }
     if (a.path.startsWith("sqlite:")) {
       const match =

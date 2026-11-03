@@ -2,6 +2,7 @@ import { Fire } from "./fire";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
 import { builtinCommand, expandBuiltin } from "./builtins";
 import { maskedConfig, mergeSecrets } from "./config";
+import { employeeConfig, migrateEmployeeCapabilities } from "./employee-capabilities";
 import { createHash } from "node:crypto";
 import { MCP } from "./mcp";
 import { units, refName } from "./history";
@@ -92,7 +93,8 @@ export class Engine {
   executionSwitches = new Set<string>();
   mcpSessions = new Map<string, { key: string; client: MCP }>();
   mcpFor(session: Session, config: Config) {
-    const key = JSON.stringify({ cwd: session.cwd, config: config.mcp || {} }),
+    if (session.employeeId) config = this.config(session);
+    const key = JSON.stringify({ cwd: session.cwd, employeeId: session.employeeId, config: config.mcp || {} }),
       existing = this.mcpSessions.get(session.id);
     if (existing?.key === key) return existing.client;
     if (existing) void existing.client.close();
@@ -220,14 +222,16 @@ export class Engine {
     this.relay = new Relay(store, this.employee);
     this.relay.onStatus = (data) => this.emit({ type: "relay", data });
   }
-  config(): Config {
-    const { image, ...config } = this.store.get<Config & { image?: unknown }>(
+  config(session?: Session): Config {
+    migrateEmployeeCapabilities(this.store);
+    const { image, mcp, skills, skillsDirectory, employeeId, ...config } = this.store.get<Config & { image?: unknown }>(
       "config",
       { model: "", provider: {} },
     );
-    return config;
+    return session?.employeeId ? employeeConfig(this.store, config, session.employeeId) : config;
   }
   async saveConfig(next: Config) {
+    assert(next.mcp === undefined && next.skills === undefined && next.skillsDirectory === undefined && next.employeeId === undefined, "Skill 和 MCP 请在各牛马的能力配置中修改");
     delete (next as Obj).image;
     const previous = this.config();
     mergeSecrets(next, previous);
@@ -254,11 +258,7 @@ export class Engine {
       !next.contextMode || ["auto", "acp"].includes(next.contextMode),
       "Invalid contextMode",
     );
-    for (const entry of Object.values(next.mcp || {}))
-      assert(
-        !!entry.command !== !!entry.url,
-        "MCP requires exactly one command orURL",
-      );
+
     this.store.put("config", next);
     this.relay.restart();
     this.emit({ type: "config_changed" });
@@ -564,7 +564,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     try {
       session = this.store.session(key);
       original = { model: session.model, scene: session.scene };
-      const config = this.config();
+      const config = this.config(session);
       if (session.employeeId && !session.taskId) {
         session.scene = "lightweight";
         session.model = config.scenes?.lightweight?.[0] || config.model;

@@ -8,8 +8,9 @@ import { Vault } from "../server/core/vault";
 import { Store } from "../server/core/store";
 
 const settings = readFileSync("web/src/SettingsView.vue", "utf8");
+const capabilities = readFileSync("web/src/EmployeeCapabilities.vue", "utf8");
 function settingsFunction(name: string, scope: any) {
-  const source = settings.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
+  const source = (["saveMcp", "addMcp"].includes(name) ? capabilities : settings).match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
   assert(source, name);
   return runInNewContext(`(${source})`, scope);
 }
@@ -18,10 +19,10 @@ test("each MCP JSON keeps its complete config and stored secrets", async () => {
   const original = { model: "", provider: {}, mcp: { remote: { url: "https://example.com/mcp", headers: { Authorization: "Bearer secret" } }, local: { command: "node", args: ["service.mjs"], env: { TOKEN: "secret" }, cwd: "C:\\project", enabled: false } } };
   const masked = maskedConfig(original);
   let saved: any;
-  const scope = { props: { config: masked, api: async (_path: string, _method: string, next: any) => { saved = next; return next; } }, copy: structuredClone, mcp: { value: Object.fromEntries(Object.entries(masked.mcp!).map(([key, config]) => [key, JSON.stringify(config)])) }, run: async (fn: any) => fn(), validateMcpServer, emit: () => {} };
+  const scope = { canEdit: { value: true }, base: "/employees/fixture", disposed: false, props: { api: async (path: string, method: string, next: any) => { assert.equal(path, "/employees/fixture/mcp"); assert.equal(method, "PUT"); saved = next; return {}; } }, mcp: { value: Object.fromEntries(Object.entries(masked.mcp!).map(([key, config]) => [key, JSON.stringify(config)])) }, refreshSkills: async () => ({ mcp: Object.entries(saved.mcp).map(([name, config]) => ({ name, config })) }), run: async (fn: any) => fn(), validateMcpServer, emit: () => {} };
   await settingsFunction("saveMcp", scope)();
   mergeSecrets(saved, original);
-  assert.deepEqual(JSON.parse(JSON.stringify(saved)), original);
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.mcp)), original.mcp);
   scope.mcp.value.remote = "{invalid";
   saved = undefined;
   await assert.rejects(settingsFunction("saveMcp", scope)(), /remote.*JSON/);
@@ -29,15 +30,16 @@ test("each MCP JSON keeps its complete config and stored secrets", async () => {
   scope.mcp.value.remote = "[]";
   await assert.rejects(settingsFunction("saveMcp", scope)(), /JSON 对象/);
   const duplicate = { value: "local" }, events: any[] = [];
-  settingsFunction("addMcp", { mcpName: duplicate, mcp: scope.mcp, emit: (...args: any[]) => events.push(args) })();
+  settingsFunction("addMcp", { canEdit: { value: true }, mcpName: duplicate, mcp: scope.mcp, emit: (...args: any[]) => events.push(args) })();
   assert.match(events[0][1], /已存在/);
   assert.equal(JSON.parse(scope.mcp.value.local).command, "node");
 });
 
-test("redesigned settings retain the full MCP editor and global vault editing controls", () => {
+test("MCP and skill editors belong to the employee while the vault remains global", () => {
   assert.match(settings, /<PageHeader title="系统设置"/);
-  assert.match(settings, /v-model="mcp\[key\]"[^>]*:aria-label="key \+ ' JSON配置'"/);
-  assert(!settings.includes("mcpURL") && !settings.includes('v-model="server.url"'));
+  assert.match(capabilities, /v-model="mcp\[key\]"[^>]*:aria-label="key \+ ' JSON配置'"/);
+  assert(!settings.includes("saveMcp") && !settings.includes("/skills/upload"));
+  assert(capabilities.includes('v-if="canEdit"') && capabilities.includes("只有创建者可以查看和编辑详情"));
   assert.match(settings, /@click="editVault\(item\)"/);
   assert.match(settings, /@click="newVault"/);
   assert.match(settings, /v-model="vaultForm.content" :required="!vaultForm.id"/);
