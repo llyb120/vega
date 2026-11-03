@@ -35,8 +35,12 @@ export class LocalBrowsers {
     if (!agent) throw new LocalAgentUnavailable();
     let entry = this.sessions.get(session.id);
     if (!entry || entry.agent !== agent) {
+      if (entry) await this.release(session.id, true);
       const bridge = new LocalBridge(this.hub, agent);
       const chrome = new Chrome(this.store, bridge, this.pageScript, "experience:client:" + agent.clientId);
+      const shared = [...this.sessions.values()].find(value => value.agent === agent);
+      // Navigation affects every session on this browser; observation keys still isolate input ownership.
+      if (shared) chrome.observations = shared.chrome.observations;
       chrome.workspaceFile = async (cwd, path) => {
         const r = await bridge.request("workspace_file", { cwd, path });
         if (typeof r.path !== "string") throw Error("Invalid local upload path");
@@ -55,7 +59,11 @@ export class LocalBrowsers {
   peek(key: string) { return this.sessions.get(key)?.chrome; }
   async release(key: string, remove = false) {
     const entry = this.sessions.get(key);
-    if (remove) this.sessions.delete(key);
+    if (remove) {
+      this.sessions.delete(key);
+      if (entry) for (const observationKey of entry.chrome.observations.keys())
+        if (observationKey.startsWith(key + ":")) entry.chrome.observations.delete(observationKey);
+    }
     if (entry) entry.agent.browserLeases.delete((entry.chrome.bridge as LocalBridge).lease);
     if (!entry?.held) return;
     if (this.hub.active(entry.agent.userId, entry.agent.clientId) !== entry.agent) { entry.held = false; return; }

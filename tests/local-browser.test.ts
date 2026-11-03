@@ -51,6 +51,37 @@ test("local Chrome tools and employee tasks use only their selected native brows
   assert.equal(agent.browserLeases.size, 0);
 });
 
+test("local navigation invalidates other sessions on the same client without sharing their input context", async (t) => {
+  const { engine, store, session } = fixture(t);
+  const second = store.newSession({ localAgent: true, clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
+  const firstBrowser = await engine.chromeFor(session);
+  const observation = { id: "old", tabTag: "local-a", frames: [], pages: [], images: [], coverageGaps: [], captured: Date.now(), fullPage: false, screenshot: false };
+  firstBrowser.observations.set(session.id + ":local-a", observation);
+  firstBrowser.observations.set(session.id + ":unrelated", { ...observation, tabTag: "unrelated" });
+  await engine.localBrowsers.release(session.id);
+  const secondBrowser = await engine.chromeFor(second);
+  await assert.rejects(secondBrowser.execute(second.id, second.cwd, { operation: "act", tabTag: "local-a", action: { action: "press", key: "Enter" } }), /no observation/);
+  secondBrowser.observations.set(second.id + ":local-a", observation);
+  secondBrowser.observations.set(second.id + ":unrelated", { ...observation, tabTag: "unrelated" });
+
+  const otherClient = { ...client, instance: "b".repeat(32), clientId: "e".repeat(32) };
+  engine.localAgents.connect("alice", otherClient);
+  const request = engine.localAgents.request;
+  engine.localAgents.request = async (agent, ...args) => agent.clientId === otherClient.clientId ? { result: { connected: true } } : request(agent, ...args);
+  const other = store.newSession({ localAgent: true, clientId: otherClient.clientId, ownerId: "alice", cwd: client.cwd });
+  const otherBrowser = await engine.chromeFor(other);
+  otherBrowser.observations.set(other.id + ":local-a", observation);
+
+  await secondBrowser.execute(second.id, second.cwd, { operation: "goto", tabTag: "local-a", url: "https://example.test/next", observe: "none" });
+  assert(!firstBrowser.observations.has(session.id + ":local-a"));
+  assert(!secondBrowser.observations.has(second.id + ":local-a"));
+  assert(firstBrowser.observations.has(session.id + ":unrelated"));
+  assert(otherBrowser.observations.has(other.id + ":local-a"), "another client is a separate browser");
+  await engine.localBrowsers.release(second.id, true);
+  assert(!firstBrowser.observations.has(second.id + ":unrelated"), "closing a session discards only its input context");
+  assert(firstBrowser.observations.has(session.id + ":unrelated"));
+});
+
 test("employee relay keeps its task-bound local Chrome for new and legacy computer sessions", async (t) => {
   for (const legacy of [false, true]) await t.test(legacy ? "legacy session" : "new session", async (t) => {
     const { engine, store, calls } = fixture(t), employee = engine.employee;
