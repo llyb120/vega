@@ -149,6 +149,7 @@ export class Store {
   }
   /** Run fn atomically, serialized with other transactions; nested calls become savepoints. */
   transaction<T>(fn: () => Promise<T>) { return this.db.transaction(fn); }
+  afterCommit(fn: () => void) { this.db.afterCommit(fn); }
   // Raw statements in the portable SQL subset (see Db / Mysql.translate).
   all(sql: string, ...params: unknown[]) { return this.db.all(sql, params); }
   one(sql: string, ...params: unknown[]) { return this.db.get(sql, params); }

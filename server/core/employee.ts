@@ -6,6 +6,7 @@ import {
 import { BOT_AVATAR_COLORS, BOT_AVATAR_SHAPES, botAvatarPreset, defaultBotAvatar, isAvatarPreset, parseBotAvatar } from "../../shared/employee-avatars";
 import { systemPresence, type Presence } from "./presence";
 import type { Store, Session, Message } from "./store";
+import { outsideTransaction } from "./db";
 import { resolve, posix, win32 } from "node:path";
 import { realpath } from "node:fs/promises";
 import { assert, id, clone, clip, sleep, type Obj } from "./util";
@@ -582,13 +583,14 @@ export class Employee {
     if (root.closed || at >= root.wakeAt) return;
     clearTimeout(root.timer);
     root.wakeAt = at;
-    root.timer = setTimeout(() => {
+    // The scheduler never runs inside the transaction of whoever woke it.
+    root.timer = outsideTransaction(() => setTimeout(() => {
       root.wakeAt = Infinity;
       void root.drain().catch((error) => {
         root.runtime.emit("employee_error", { employeeId: root.employeeId, message: String(error?.message || error) });
         root.wake(Date.now() + 60000);
       });
-    }, Math.max(0, Math.min(at - Date.now(), 2147483647)));
+    }, Math.max(0, Math.min(at - Date.now(), 2147483647))));
     root.timer.unref?.();
   }
   async drain() {
@@ -725,8 +727,8 @@ export class Employee {
       await this.save(s);
       return value;
     });
-    void this.emitChanged();
-    this.schedule();
+    // After the outermost commit: listeners and the scheduler must see committed state, outside the caller's transaction.
+    this.store.afterCommit(() => { void this.emitChanged(); this.schedule(); });
     return result;
   }
   /** Like update, for changes to the record alone (tasks and runs are neither read nor written). */
@@ -738,8 +740,8 @@ export class Employee {
       await this.save(s);
       return value;
     });
-    void this.emitChanged();
-    this.schedule();
+    // After the outermost commit: listeners and the scheduler must see committed state, outside the caller's transaction.
+    this.store.afterCommit(() => { void this.emitChanged(); this.schedule(); });
     return result;
   }
   async start() {

@@ -6,7 +6,7 @@ export type Dialect = "sqlite" | "mysql";
 export type Op = "all" | "run" | "exec";
 /** One connection: SQLite's worker, or a MySQL pool connection (released after its transaction). */
 export type Conn = { query(op: Op, sql: string, params: unknown[]): Promise<any>; release?(): void };
-type Tx = { db: Db; conn: Conn; open: boolean; depth: number };
+type Tx = { db: Db; conn: Conn; open: boolean; depth: number; after: (() => void)[] };
 
 /** FIFO async lock. */
 export class Mutex {
@@ -20,6 +20,12 @@ export class Mutex {
 
 /** The transaction the current async flow runs in (AsyncLocalStorage, so callees need no handle). */
 const current = new AsyncLocalStorage<Tx>();
+
+/**
+ * Run fn outside any transaction. Timers and fire-and-forget work started inside a transaction inherit it otherwise,
+ * and would issue their own statements on its connection, interleaved with (or, once it ends, outside) its work.
+ */
+export const outsideTransaction = <T>(fn: () => T): T => current.exit(fn);
 
 /**
  * Async database access shared by both backends. Statements use a portable subset of SQL (see Mysql.translate).
@@ -45,6 +51,12 @@ export abstract class Db {
   run(sql: string, params: unknown[] = []): Promise<{ changes: number; lastId: number }> { return this.query("run", sql, params); }
   exec(sql: string): Promise<void> { return this.query("exec", sql, []); }
   get inTransaction() { const tx = current.getStore(); return tx?.db === this && tx.open; }
+  /** Run fn once the outermost transaction commits (dropped on rollback), or now when there is none; never inside it. */
+  afterCommit(fn: () => void) {
+    const tx = current.getStore();
+    if (tx?.db === this && tx.open) tx.after.push(fn);
+    else outsideTransaction(fn);
+  }
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
     const tx = current.getStore();
     if (tx?.db === this && tx.open) {
@@ -52,30 +64,43 @@ export abstract class Db {
       await tx.conn.query("exec", "SAVEPOINT " + name, []);
       try {
         const value = await fn();
+        // Only work the outer transaction awaits can nest; anything else must not outlive it.
+        if (!tx.open) throw Error("Nested transaction outlived its outer transaction");
         await tx.conn.query("exec", "RELEASE SAVEPOINT " + name, []);
         return value;
       } catch (e) {
-        await tx.conn.query("exec", "ROLLBACK TO SAVEPOINT " + name, []);
+        if (tx.open) await tx.conn.query("exec", "ROLLBACK TO SAVEPOINT " + name, []);
         throw e;
       } finally { tx.depth--; }
     }
     return this.writer.run(async () => {
-      const conn = await this.acquire(), next: Tx = { db: this, conn, open: true, depth: 0 };
+      const conn = await this.acquire(), next: Tx = { db: this, conn, open: true, depth: 0, after: [] };
+      let value: T;
       try {
-        await conn.query("exec", this.dialect === "sqlite" ? "BEGIN IMMEDIATE" : "START TRANSACTION", []);
+        await conn.query("exec", this.dialect === "sqlite" ? "BEGIN IMMEDIATE" : "START TRANSACTION", []).catch(async (e) => {
+          // Holding the writer lock, an open transaction on SQLite's one connection can only be a stray one: roll it
+          // back instead of failing every write until restart.
+          if (this.dialect !== "sqlite" || !/within a transaction/.test(String(e?.message))) throw e;
+          await conn.query("exec", "ROLLBACK", []);
+          await conn.query("exec", "BEGIN IMMEDIATE", []);
+        });
         try {
-          const value = await current.run(next, fn);
+          value = await current.run(next, fn);
+          // Closed before COMMIT is sent: work the transaction started but did not await can no longer reach its
+          // connection (a late SAVEPOINT there would silently open a stray transaction), it queues like any other.
+          next.open = false;
           await conn.query("exec", "COMMIT", []);
-          return value;
         } catch (e) {
+          next.open = false;
           await conn.query("exec", "ROLLBACK", []).catch(() => {});
           throw e;
         }
       } finally {
-        // Work the transaction started but did not await falls back to ordinary queries.
         next.open = false;
         conn.release?.();
       }
+      for (const fn of next.after) queueMicrotask(() => outsideTransaction(fn));
+      return value;
     });
   }
 }

@@ -58,3 +58,36 @@ test("a slow query does not block the event loop", async (t) => {
   assert(elapsed > 200, "the query should take a while (" + elapsed + "ms)");
   assert(ticks >= elapsed / 10 / 3, `timers kept firing during the query: ${ticks} ticks in ${elapsed}ms`);
 });
+
+test("work a transaction starts but does not await never runs inside it or leaves a stray transaction", async (t) => {
+  const store = await Store.open(":memory:");
+  t.after(() => store.close());
+  const db = store.db, seen: boolean[] = [];
+  let late: Promise<unknown> | undefined, timer: Promise<unknown> | undefined;
+  await db.transaction(async () => {
+    await db.exec("CREATE TABLE IF NOT EXISTS leak_probe (n INTEGER)");
+    // Fire-and-forget nested work still running when the outer transaction commits.
+    late = db.transaction(async () => { await new Promise((r) => setTimeout(r, 30)); await db.run("INSERT INTO leak_probe VALUES (1)"); });
+    late.catch(() => {});
+    // A timer started inside the transaction, firing after it ended.
+    timer = new Promise((resolve) => setTimeout(() => resolve(db.transaction(() => db.run("INSERT INTO leak_probe VALUES (2)"))), 10));
+    db.afterCommit(() => seen.push(db.inTransaction));
+  });
+  await timer;
+  await assert.rejects(late!, /outlived/);
+  assert.deepEqual(seen, [false]);
+  // The late write ran on its own after the commit (not inside a stray transaction), and the connection is clean.
+  await db.transaction(() => db.run("INSERT INTO leak_probe VALUES (3)"));
+  assert.deepEqual((await db.all("SELECT n FROM leak_probe ORDER BY n")).map((r) => Number(r.n)), [1, 2, 3]);
+});
+
+test("a stray open transaction on SQLite's connection does not wedge later writes", async (t) => {
+  const store = await Store.open(":memory:");
+  t.after(() => store.close());
+  const db = store.db as any;
+  if (db.dialect !== "sqlite") return;
+  await db.exec("CREATE TABLE IF NOT EXISTS wedge_probe (n INTEGER)");
+  await db.conn.query("exec", "BEGIN", []);
+  await db.transaction(() => db.run("INSERT INTO wedge_probe VALUES (1)"));
+  assert.equal((await db.all("SELECT n FROM wedge_probe")).length, 1);
+});
