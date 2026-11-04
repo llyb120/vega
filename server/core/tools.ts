@@ -105,7 +105,7 @@ export class Tools {
   /** Which employee/vault tools and branches this session may see; mirrors the runtime permission checks. */
   async toolContext(): Promise<ToolContext> {
     if (!this.session.employeeId && !this.session.taskId) return { kind: "normal" };
-    if (!this.session.taskId) return { kind: "chat", member: !!await this.guestRequest() };
+    if (!this.session.taskId) return { kind: "chat", member: !!await this.guestRequest(), group: !!this.session.groupId };
     let state: EmployeeState | undefined, task: Obj | undefined;
     try {
       const employee = await this.engine.employeeFor(this.session);

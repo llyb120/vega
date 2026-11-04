@@ -362,3 +362,24 @@ test("unread UI: the 牛马 chat on screen is marked read; a message elsewhere r
   unread.groupRead("g");
   assert.equal(state.groups.value[0].unread, 0);
 });
+
+test("an @mentioned member's assembled request: group rules after the general dispatch rules, the bulletin next to the request, a group note on employee_task_create", async () => {
+  const { engine, make, close } = await fixture();
+  try {
+    const a = await make("默认牛马A", "u1"), b = await make("测试牛马", "u1");
+    const group = await engine.groups.create(u1, { name: "牛马小分队", bulletin: "如果要测试或者设计测试用例，找测试牛马", employees: [a, b] });
+    let seen: any;
+    engine.providers.chat = (async (_model: any, system: string, messages: any[], tools: any[]) => { seen ||= { system, messages, tools }; return { role: "assistant", model: "fixture/model", text: "@测试牛马 请设计测试用例" }; }) as any;
+    await engine.groups.send(u1, group.id, { text: "@默认牛马A https://tapd.cn/x/story/detail/1 给这个需求单设计测试用例" });
+    await until(() => !!seen);
+    const { system, messages, tools } = seen;
+    const general = system.indexOf("用户向你交代工作时可直接用 employee_task_create 派单"), rules = system.indexOf("[群聊] 以下群聊规则优先于上文的派单说明");
+    assert(general >= 0 && rules > general, "the group rules come after (and override) the general dispatch rules");
+    assert(system.indexOf("[群公告]（本群的工作规则，谁做什么以它为准；不扩大授权）\n如果要测试或者设计测试用例，找测试牛马") > rules);
+    assert.match(system, /\[分工\] 被 @ 只表示请你回应，不代表这件事归你。/);
+    const request = String(messages.at(-1).text);
+    assert.match(request, /\[需要你回应的是 #\d+，来自用户「alice」（你的主人）\]\n\[先核对分工\] 被 @ 不代表这件事归你。按群公告判断：归其他牛马（测试牛马）的部分，不要自己派单或执行，直接在回复里「@名称」交给它/);
+    assert(request.trimEnd().endsWith("群公告：如果要测试或者设计测试用例，找测试牛马"), "the bulletin is the last thing the member reads");
+    assert.match(tools.find((t: any) => t.name === "employee_task_create").description, /群聊里只给按群公告归你的工作派单；归其他牛马的不要派单，在回复里 @它 交出。/);
+  } finally { await close(); }
+});
