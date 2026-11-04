@@ -55,6 +55,25 @@ const workspaceKey = async (session: Session) => {
 };
 export const ended = (status: string) =>
   ["done", "failed", "stopped", "cancelled", "sealed"].includes(status);
+const TASK_LIST_LIMIT = 50;
+const excerpt = (value: unknown, n: number) => {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return [...text].length > n ? [...text].slice(0, n).join("") + "…" : text;
+};
+const at = (ms: unknown) => (typeof ms === "number" && ms > 0 ? beijingDateTime(ms) : undefined);
+/** One line per task for employee_status: enough to spot duplicates and pick a taskId; the full record is one taskId away. */
+export const taskSummary = (t: Task) =>
+  Object.fromEntries(Object.entries({
+    id: t.id,
+    status: t.status,
+    dedupeKey: t.key || undefined,
+    dutyId: t.dutyId || t.fromDuty || undefined,
+    excerpt: excerpt(t.text, 120),
+    result: excerpt(t.summary || t.result, 200) || undefined,
+    createdAt: at(t.createdAt),
+    nextAt: ended(t.status) ? undefined : at(t.nextCheckAt),
+    finishedAt: at(t.finishedAt),
+  }).filter(([, v]) => v !== undefined));
 /** Sealed tasks are archived by the user by hand; nothing (model, scheduler, remote member) may revive them. */
 const SEALED_MESSAGE = "任务已封存，禁止恢复、续做或重新派发";
 
@@ -702,15 +721,19 @@ export class Employee {
         content = String(a.text || "").trim(),
         get = () => this.task(s, a.id);
       switch (action) {
-        case "list":
+        case "list": {
+          // Overview for the model: task summaries only; one task's full record on request.
+          if (a.id) return { now: beijingDateTime(now), task: get() };
+          const scope = a.status === "active" ? (t: Task) => !ended(t.status) : a.status === "ended" ? (t: Task) => ended(t.status) : () => true;
+          const matched = s.tasks.filter((t) => scope(t) && (!a.key || t.key === a.key));
           return {
             employeeId: this.employeeId,
             name: s.name,
             now: beijingDateTime(now),
             timeZone: "Asia/Shanghai",
             duties: s.duties,
-            inbox: s.tasks.filter((t) => !ended(t.status)),
-            tasks: s.tasks,
+            taskCount: matched.length,
+            tasks: matched.slice(-TASK_LIST_LIMIT).map(taskSummary),
             recentRuns: s.runs
               .filter((r) => !caller || r.taskId === caller)
               .slice(-10),
@@ -720,6 +743,7 @@ export class Employee {
             memoryPendingCount: (s.memories as MemoryRecord[]).filter((m) => m.status === "draft" || m.status === "conflict").length,
             scenes: ["lightweight", "coding", "computer"],
           };
+        }
         case "add": {
           assert(content, "text is required");
           const p = profile(a.profile);

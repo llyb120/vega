@@ -669,7 +669,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const skills = await loadSkills(config, this.store, session.cwd);
         const employeeState = worker?.state();
         const memories = employeeState ? formatMemoriesForPrompt(recallMemory(employeeState, memoryQuery, Date.now(), false) as any) : "";
-        const taskIndex = employeeState ? "\n当前任务索引（详情和证据用employee_status核对）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: task.text, status: task.status }))) : "";
+        const taskIndex = employeeState ? "\n当前任务索引（内容已节选；完整内容、进度和结果用employee_status传taskId查看）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: [...task.text].slice(0, 120).join(""), status: task.status, ...(task.key ? { dedupeKey: task.key } : {}) }))) : "";
         let system =
           stable + memories + taskIndex + "\n" + (await sessionPrompt(session, config, this.store, session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : ""));
         // Scene model edited while this run is in progress: switch on the next provider request.

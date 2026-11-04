@@ -53,7 +53,7 @@ async function devtoolsData(command, tab) {
     catch (error) { devtools.delete(tab.id); throw error; }
   }
   if (options.requestId) {
-    if (!log.network.has(options.requestId)) throw Error('requestId 不在已记录的网络请求中，请重新 devtools 查询');
+    if (!log.network.has(options.requestId)) throw Error('requestId 不在已记录的网络请求中，请重新用 chrome_devtools 查询');
     const {body, base64Encoded} = await debuggerCall(command,()=>chrome.debugger.sendCommand({tabId:tab.id},'Network.getResponseBody',{requestId:options.requestId}));
     return {tabTag:command.args.tabTag,requestId:options.requestId,base64Encoded,bodyLength:body.length,body:clip(body,65536)};
   }
@@ -61,7 +61,7 @@ async function devtoolsData(command, tab) {
   const keep = entry => (!query || [entry.text, entry.url].some(value => value?.toLowerCase().includes(query)))
     && (!options.level || entry.level === options.level || (options.level === 'error' && entry.failed) || (options.level === 'error' && entry.status >= 400));
   const pick = list => { const matched = list.filter(keep); return {total:matched.length,items:matched.slice(-limit).map(({start, ...entry}) => entry)}; };
-  const result = {tabTag:command.args.tabTag,recordingSince:log.since,notice:'console 含启用前 V8 已缓存的日志；网络只记录 recordingSince 之后的请求，需完整记录可先 devtools 再 reload。每类最多保留最新 500 条，不含跨进程 iframe。'};
+  const result = {tabTag:command.args.tabTag,recordingSince:log.since,notice:'console 含启用前 V8 已缓存的日志；网络只记录 recordingSince 之后的请求，需完整记录可先 chrome_devtools 再用 chrome_tab_control 的 reload 刷新。每类最多保留最新 500 条，不含跨进程 iframe。'};
   if (kind !== 'network') result.console = pick(log.console);
   if (kind !== 'console') result.network = pick([...log.network.values()]);
   if (options.clear === true) { log.console = []; log.network.clear(); }
@@ -90,9 +90,9 @@ async function inventory() {
 }
 async function resolveTag(tag) {
   await ready();
-  if (typeof tag !== 'string' || !tag) throw Error('缺少明确的 tabTag，请先 tabs 获取标签；不会使用当前激活页');
+  if (typeof tag !== 'string' || !tag) throw Error('缺少明确的 tabTag，请先用 chrome_tabs 获取标签；不会使用当前激活页');
   const entry = Object.entries(model.tabs).find(([,value])=>value.tag===tag);
-  if (!entry) throw Error('tabTag不存在或已失效，请重新 tabs');
+  if (!entry) throw Error('tabTag不存在或已失效，请重新用 chrome_tabs 获取');
   const tab = await chrome.tabs.get(Number(entry[0]));
   return tab;
 }
@@ -309,7 +309,7 @@ async function connect(origin, attempt = 0) {
       // past the command's deadline the reply goes out and the next command is taken.
       let deadline;
       const result = Promise.race([commands.then(()=>execute(command)), new Promise((_, reject)=>{
-        deadline = setTimeout(()=>reject(Error('Chrome 未在时限内完成该命令（页面可能卡在加载或无响应）；结果可能已执行，请先 tabs 观察再决定，不要直接重放')), Math.max(0, command.expiresAt - Date.now()) + 500);
+        deadline = setTimeout(()=>reject(Error('Chrome 未在时限内完成该命令（页面可能卡在加载或无响应）；结果可能已执行，请先用 chrome_tabs 观察再决定，不要直接重放')), Math.max(0, command.expiresAt - Date.now()) + 500);
       })]).finally(()=>clearTimeout(deadline));
       commands = result.catch(()=>{});
       try { reply={id:command.id,result:await result}; }

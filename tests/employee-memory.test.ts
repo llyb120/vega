@@ -53,6 +53,23 @@ test("gate rejects OTP passwords and ephemeral state", () => {
   assert.equal(gateMemoryClaim("交付用例默认用表格并支持导出").ok, true);
 });
 
+test("gate names the matched word and only treats countdowns with concrete values as one-off state", () => {
+  const countdown = gateMemoryClaim("验证码倒计时还剩 58 秒");
+  assert(!countdown.ok && countdown.code === "ephemeral" && countdown.message.includes("倒计时还剩 58"), JSON.stringify(countdown));
+  assert.equal(gateMemoryClaim("报名页倒计时 00:58 结束").ok, false);
+  assert.equal(gateMemoryClaim("60秒后重发验证码").ok, false);
+  assert.equal(gateMemoryClaim("恢复点：已提交构建 #42").ok, false);
+  assert.match((gateMemoryClaim("本轮已打开订单页") as any).message, /命中“本轮”/);
+  // The concept itself is a stable rule, not state.
+  assert.equal(gateMemoryClaim("用户偏好任务交付时附倒计时提醒").ok, true);
+  assert.equal(gateMemoryClaim("抢购页面有倒计时，结束前不要提交订单").ok, true);
+  assert.equal(gateMemoryClaim("临时文件统一放在项目 tmp 目录").ok, true);
+  assert.equal(gateMemoryClaim("长任务要记录 checkpoint 便于续做").ok, true);
+  assert.equal(gateMemoryClaim("验证码过期时点重新获取验证码再找用户要").ok, true);
+  assert.equal(gateMemoryClaim("后台登录需要一次性验证码，先找用户要").ok, true);
+  assert.equal(gateMemoryClaim("登录链接一次性有效 https://x.test/l/abc").ok, false);
+});
+
 test("propose merges similar claims and conflicts on contradiction", () => {
   const memories: MemoryRecord[] = [];
   const a = proposeMemory(memories, { claim: "项目银河统一使用 TypeScript", kind: "convention", source: "user" });

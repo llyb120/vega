@@ -132,15 +132,22 @@ const SECRET_PATTERNS: { re: RegExp; reason: string }[] = [
   { re: /\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|cookie|authorization)\b\s*[:=]/i, reason: "疑似凭据字段" },
   { re: /\b(sk-[a-zA-Z0-9]{16,}|ghp_[a-zA-Z0-9]{20,}|xox[baprs]-[a-zA-Z0-9-]{10,})\b/, reason: "疑似密钥/令牌" },
   { re: /(验证码|otp|one[-\s]?time|2fa|mfa)\s*[:：]?\s*\d{4,8}/i, reason: "验证码/OTP" },
-  { re: /(登录|login).{0,40}(一次性|临时|expire|expires|ttl)/i, reason: "一次性登录材料" },
+  { re: /(登录|login).{0,40}(一次性|临时|expire|ttl).{0,20}(链接|link|url|令牌|token|密码|口令)|(登录|login).{0,10}(链接|link|url|令牌|token).{0,30}(一次性|临时|expire|ttl)/i, reason: "一次性登录材料" },
   { re: /tabtag\s*[:=]/i, reason: "当次浏览器标签状态" },
   { re: /about:blank/i, reason: "当次浏览器空白页状态" },
   { re: /bearer\s+[a-z0-9\-._~+/]+=*/i, reason: "Bearer Token" },
 ];
 
-const EPHEMERAL_PATTERNS = [
-  /当前进度|本轮|这次任务|刚才失败|临时|checkpoint|恢复点|planRevision/i,
-  /倒计时|秒后重发|重新获取验证码/i,
+/**
+ * One-off state, not the concept: a countdown, a resend timer or a checkpoint only counts when it carries a concrete
+ * number, time or value ("倒计时 58 秒", "60秒后重发", "恢复点：…"); "页面有倒计时，到点前不要提交" is a stable procedure.
+ */
+const EPHEMERAL_PATTERNS: { re: RegExp; reason: string }[] = [
+  { re: /当前进度|本轮|这次任务|刚才失败|planRevision/i, reason: "当次任务的进度或状态" },
+  { re: /临时(?:进度|状态|结果|链接|地址|方案)/, reason: "临时状态" },
+  { re: /(?:恢复点|checkpoint)\s*[:：=]/i, reason: "当次恢复点" },
+  { re: /倒计时[^，。；,.;\n]{0,8}?\d[\d:：.]*\s*(?:秒|分钟?|s)?|\d+\s*(?:秒|s|分钟?)[^，。；,.;\n]{0,4}?倒计时|(?:剩余?|还剩)\s*\d+\s*(?:秒|分钟?)/i, reason: "带具体数值的倒计时" },
+  { re: /\d+\s*(?:秒|s)\s*后(?:可)?重(?:新)?发/i, reason: "当次重发计时" },
 ];
 
 export type GateResult =
@@ -171,12 +178,13 @@ export function gateMemoryClaim(claim: string, evidence = ""): GateResult {
       code: "secret",
       message: "记忆未保存：验证码/OTP。凭据与验证码只走密码本/任务状态，不能写入记忆。",
     };
-  for (const re of EPHEMERAL_PATTERNS) {
-    if (re.test(claim))
+  for (const { re, reason } of EPHEMERAL_PATTERNS) {
+    const hit = claim.match(re)?.[0];
+    if (hit)
       return {
         ok: false,
         code: "ephemeral",
-        message: "记忆未保存：这像当次进度或一次性状态，请写入任务进度/恢复点，不要记入长期记忆。",
+        message: `记忆未保存：命中“${hit}”（${reason}），这像当次进度或一次性状态，请写入任务进度或 task_wait 的恢复点，不要记入长期记忆。若这是长期成立的规则，去掉当次的具体数值或状态后重写。`,
       };
   }
   return { ok: true };

@@ -37,6 +37,31 @@ async function segment(employee: Employee, job: Task) {
   return employee.task(employee.state(), job.id);
 }
 
+test("employee_status lists task summaries, filters by dedupeKey and status, and returns one full task by id", async () => {
+  const { store, employee } = fixture();
+  try {
+    const long = "调查接口超时 " + "细节".repeat(3000);
+    const a = await task(employee, long, { key: "inv:1" });
+    const b = await task(employee, "已完成的事", { key: "inv:2" });
+    employee.update((s) => { Object.assign(s.tasks.find((t) => t.id === b.id)!, { status: "done", summary: "结论：已修复", finishedAt: Date.now() }); });
+    const all = (await employee.execute("", { action: "list" })).value;
+    assert.equal(all.taskCount, 2);
+    assert.equal(all.inbox, undefined);
+    const first = all.tasks.find((t: any) => t.id === a.id);
+    assert.deepEqual(Object.keys(first).sort(), ["createdAt", "dedupeKey", "excerpt", "id", "status"]);
+    assert(first.excerpt.length <= 121 && first.excerpt.endsWith("…"));
+    assert(JSON.stringify(all).length < 5000, "the overview no longer carries full task texts");
+    assert.equal(all.tasks.find((t: any) => t.id === b.id).result, "结论：已修复");
+    assert.deepEqual((await employee.execute("", { action: "list", key: "inv:2" })).value.tasks.map((t: any) => t.id), [b.id]);
+    assert.deepEqual((await employee.execute("", { action: "list", status: "active" })).value.tasks.map((t: any) => t.id), [a.id]);
+    assert.deepEqual((await employee.execute("", { action: "list", status: "ended" })).value.tasks.map((t: any) => t.id), [b.id]);
+    const one = (await employee.execute("", { action: "list", id: a.id })).value;
+    assert.equal(one.task.text, long);
+    assert.equal(one.tasks, undefined);
+    await assert.rejects(employee.execute("", { action: "list", id: "missing" }), /not found/);
+  } finally { store.close(); }
+});
+
 test("employees isolate state, business keys, conversations, owner access and credentials; legacy state stays default", async () => {
   const { store, employee, vault } = fixture();
   try {
@@ -202,7 +227,7 @@ test("employee chat delegates evidence-dependent questions, follows an existing 
     const result = JSON.parse(last.text!);
     if (result.tasks) {
       assert(result.tasks.some((task: any) => task.id === source.id && task.result.includes("timed out")));
-      const current = result.tasks.find((task: any) => task.key === "endpoint-investigation");
+      const current = result.tasks.find((task: any) => task.dedupeKey === "endpoint-investigation");
       return current
         ? follow("follow-up", { action: "resume", id: current.id, text: "优先核对实际请求 origin/path，保留只读范围。" })
         : follow("investigate", { action: "add", kind: "todo", profile: "lightweight", key: "endpoint-investigation", text: investigation });

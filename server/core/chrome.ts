@@ -706,7 +706,7 @@ export class Chrome {
     assert(frame, "Unknown credential input frame");
     const url = await this.evaluate(tag, frame, "location.href", signal);
     const site = vaultSite(url);
-    assert(origins.every((allowed) => allowed.has(site)), "凭据尚未针对当前页面核对或已切换认证页面，已阻止这次凭据写入；请先观察实际页面（含 SSO / 子框架）再重新 get 核对使用条件，无需补网站配置，不要跨系统试用账号。");
+    assert(origins.every((allowed) => allowed.has(site)), "凭据尚未针对当前页面核对或已切换认证页面，已阻止这次凭据写入；请先观察实际页面（含 SSO / 子框架）再重新 vault_get 核对使用条件，无需补网站配置，不要跨系统试用账号。");
   }
   private coordinateImage(o: Observation, imageId?: string) {
     const image = o.images.find((i) => i.imageId === imageId) || o.images[0];

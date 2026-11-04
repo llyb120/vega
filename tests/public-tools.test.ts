@@ -66,6 +66,9 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["chrome_devtools", { tabTag: "C1", kind: "network", requestId: "r1" }, { operation: "devtools", tabTag: "C1", devtools: { kind: "network", requestId: "r1" } }],
     ["employee_status", {}, { action: "list" }],
     ["employee_status", { memoryQuery: "部署" }, { action: "list", query: "部署" }],
+    ["employee_status", { taskId: "t1" }, { action: "list", id: "t1" }],
+    ["employee_status", { dedupeKey: "tapd:1", status: "active" }, { action: "list", key: "tapd:1", status: "active" }],
+    ["employee_status", { status: "all" }, { action: "list" }],
     ["employee_task_create", { instructions: "x", profile: "编码" }, { action: "add", kind: "todo", text: "x", profile: "编码" }],
     ["employee_task_manage", { taskId: "t1", request: { command: "update", instructions: "new", profile: "轻量化", delayMinutes: 5 } }, { action: "update", id: "t1", text: "new", profile: "轻量化", nextCheckInMinutes: 5 }],
     ["employee_task_manage", { taskId: "t1", request: { command: "update", profile: "coding", runAt: null } }, { action: "update", id: "t1", profile: "coding" }],
@@ -216,4 +219,14 @@ test("chrome tools appear only where the old chrome tool did", (t) => {
   assert.equal(visible(store.newSession({ scene: "coding" })), 0);
   assert.equal(visible(store.newSession({ scene: "coding" }), { selection: "p/x" }), 14);
   assert.equal(visible(store.newSession({ scene: "computer", readOnly: true })), 0);
+});
+
+test("dispatch and status descriptions steer away from copied tool names and redundant dedupe checks", () => {
+  const byName = Object.fromEntries(employeeTools({ kind: "chat" }).map((t) => [t.name, t]));
+  const create = byName.employee_task_create, status = byName.employee_status;
+  assert.match(create.description, /不要照抄历史任务或旧记录里的工具名、动作名/);
+  assert.match(create.description, /不必先查重/);
+  assert.match((create.parameters as any).properties.dedupeKey.description, /重做已完成的事时用新 key/);
+  assert.match(status.description, /自动去重/);
+  assert.deepEqual(Object.keys((status.parameters as any).properties), ["taskId", "dedupeKey", "status", "memoryQuery"]);
 });
