@@ -8,6 +8,7 @@ import { formatBeijing } from "../../shared/time";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
 import EmployeeChat from "./EmployeeChat.vue";
 import { clearChatCache, pruneChatCache } from "./chat-cache.js";
+import { mergeMessages } from "./chat-history.js";
 import EmployeeHeader from "./EmployeeHeader.vue";
 import EmployeeTasks from "./EmployeeTasks.vue";
 import EmployeeDuties from "./EmployeeDuties.vue";
@@ -989,16 +990,22 @@ async function scrollBottom() {
   if (transcript.value)
     transcript.value.scrollTop = transcript.value.scrollHeight;
 }
+/** Only messages after the newest one held are fetched; a shrunk history (cleared) reloads in full. */
 async function refreshCurrent() {
   if (!current.value) return;
   const id = current.value.id,
-    request = sessionRequest;
-  const data = await api(`/sessions/${id}`);
+    request = sessionRequest,
+    last = messages.value.at(-1)?.seq;
+  const data = await api(`/sessions/${id}` + (last ? `?after=${last}` : ""));
   if (current.value?.id !== id || request !== sessionRequest) return;
+  if (last && Number.isSafeInteger(data.lastSeq) && data.lastSeq < last) {
+    messages.value = [];
+    return refreshCurrent();
+  }
   current.value = data.session;
-  messages.value = data.messages || [];
+  messages.value = last ? mergeMessages(messages.value, data.messages || []) : data.messages || [];
   folds.value = data.folds || [];
-  contextBudget.value = data.context;
+  if (data.context) contextBudget.value = data.context;
   fireState.value = data.fire;
   running.value[current.value.id] = data.running;
 }

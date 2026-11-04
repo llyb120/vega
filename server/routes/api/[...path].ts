@@ -302,11 +302,16 @@ export default defineEventHandler(async (event) => {
             .map((r: any) => JSON.parse(r.data)),
           fire: engine.fire.forSession(key),
           running: engine.active.has(key),
-          context: new Context(
-            store,
-            key,
-            engine.config().contextMode === "acp" ? "acp" : "auto",
-          ).status(),
+          // Incremental refreshes (`after`) get the budget from context_budget events instead.
+          ...(query.has("after") && query.get("context") !== "1"
+            ? {}
+            : {
+                context: new Context(
+                  store,
+                  key,
+                  engine.config().contextMode === "acp" ? "acp" : "auto",
+                ).status(),
+              }),
         };
       }
       if (path.length === 2 && method === "DELETE") {

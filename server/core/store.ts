@@ -51,6 +51,7 @@ export type Session = {
 };
 export class Store {
   db: DatabaseSync;
+  private rowCache = new Map<string, { max: number; rows: Readonly<Message>[] }>();
   depth = 0;
   constructor(path = process.env.VEGA_DB || "vega.db") {
     if (path !== ":memory:")
@@ -243,6 +244,7 @@ export class Store {
   /** Keep the session row; drop messages, folds, blob grants and context ledger. */
   clearSessionHistory(key: string) {
     this.session(key);
+    this.rowCache.delete(key);
     this.transaction(() => {
       this.db.prepare("DELETE FROM messages WHERE session=?").run(key);
       this.db.prepare("DELETE FROM folds WHERE session=?").run(key);
@@ -267,6 +269,30 @@ export class Store {
       .prepare("SELECT seq,data FROM messages WHERE session=? ORDER BY seq")
       .all(key)
       .map((r: any) => ({ ...JSON.parse(r.data), seq: r.seq }));
+  }
+  /**
+   * Read-only rows shared across callers (frozen). Messages are append-only, so only rows after the cached maximum
+   * are parsed; any other change (clear, delete) is detected by the count/maximum and reloads the session.
+   */
+  sharedMessages(key: string): { rows: readonly Readonly<Message>[]; revision: string } {
+    const top = this.db
+      .prepare("SELECT COALESCE(MAX(seq),0) m, COUNT(*) n FROM messages WHERE session=?")
+      .get(key) as { m: number; n: number };
+    let cached = this.rowCache.get(key);
+    if (cached && top.m > cached.max) {
+      for (const r of this.db
+        .prepare("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq")
+        .all(key, cached.max) as any[])
+        cached.rows.push(Object.freeze({ ...JSON.parse(r.data), seq: r.seq }));
+      cached.max = top.m;
+    }
+    if (!cached || cached.max !== top.m || cached.rows.length !== top.n) {
+      cached = { max: top.m, rows: this.messages(key).map((m) => Object.freeze(m)) };
+    }
+    this.rowCache.delete(key);
+    this.rowCache.set(key, cached);
+    while (this.rowCache.size > 32) this.rowCache.delete(this.rowCache.keys().next().value!);
+    return { rows: cached.rows, revision: `${cached.max}:${cached.rows.length}` };
   }
   /** Chat history window: the newest `limit` messages before `before`, or every message after `after`. */
   messagePage(key: string, { before, after, limit }: { before?: number; after?: number; limit?: number }): { messages: Message[]; hasMore: boolean } {

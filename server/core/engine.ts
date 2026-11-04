@@ -1038,6 +1038,25 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       }
     }
   }
+  private budgets = new Map<string, { at: number; timer?: ReturnType<typeof setTimeout> }>();
+  /** context_budget is informational: at most one per session per second, the latest state always arrives. */
+  budget(key: string, context: { status(): Obj }, emit: Emit) {
+    const entry = this.budgets.get(key) || { at: 0 };
+    this.budgets.set(key, entry);
+    if (entry.timer) return;
+    const send = () => {
+      entry.timer = undefined;
+      entry.at = Date.now();
+      try { emit("context_budget", context.status()); } catch {}
+      if (!this.active.has(key)) this.budgets.delete(key);
+    };
+    const wait = entry.at + 1000 - Date.now();
+    if (wait <= 0) send();
+    else {
+      entry.timer = setTimeout(send, wait);
+      entry.timer.unref?.();
+    }
+  }
   outcome(key: string, call: Call, o: Outcome, emit: Emit, redact: Redactor) {
     const value = redact.value(o.value),
       raw = JSON.stringify(value);
@@ -1061,7 +1080,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       error: o.error,
     });
     const context = this.active.get(key)?.context;
-    if (context) emit("context_budget", context.status());
+    if (context) this.budget(key, context, emit);
     const { secret, ...publicResult } = o;
     emit("tool_end", { call, outcome: publicResult });
   }
