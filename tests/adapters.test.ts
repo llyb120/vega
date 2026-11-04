@@ -33,7 +33,7 @@ test("Chrome action validation rejects the whole invalid batch before any input"
     { action: "fill", ref: "r" },
     { action: "fill", ref: "r", text: 5 },
     { action: "scroll", delta: 1201 },
-    { action: "wait", ms: 3000 },
+    { action: "wait", ms: 10001 },
     { action: "press", key: "X" },
     { action: "click_at", x: NaN, y: 1 },
     { action: "drag", x: 1, y: 1, to_x: 2, to_y: 2, duration_ms: 2000 },
