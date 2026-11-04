@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { Store, type Message } from "../server/core/store";
-import { promptHistory } from "../server/core/history";
+import { promptHistory, archivedResult } from "../server/core/history";
 import { Providers, ProviderError, bodyFor, type Tool } from "../server/core/provider";
 import { resolveModel } from "../server/core/config";
 import { Subscriptions } from "../server/core/subscriptions";
@@ -281,13 +281,13 @@ test("wire history preserves tool-call IDs, images and signed reasoning without 
     assert(!JSON.stringify(body).includes("call|item"));
   }
 });
-test("Chrome history keeps two distinct images per stream through ACP and every provider", () => {
+test("Chrome history keeps only the latest two image results per tab through ACP and every provider", () => {
   const rows: Message[] = [];
-  const observe = (tab: string, images: { blobId: string; frameStream?: string; frame?: number; readOnlyImage?: boolean }[]) => {
+  const observe = (tab: string, images: { blobId: string; frameStream?: string; tile?: number; readOnlyImage?: boolean }[], name = "chrome_act") => {
     const callId = "shot-" + rows.length;
     rows.push(
-      { role: "assistant", calls: [{ id: callId, name: "chrome_inspect", arguments: {} }] },
-      { role: "tool", name: "chrome_inspect", callId,
+      { role: "assistant", calls: [{ id: callId, name, arguments: {} }] },
+      { role: "tool", name, callId,
         text: `[m${String(rows.length + 1).padStart(5, "0")}] ` + JSON.stringify({
           tabTag: tab, snapshotId: callId, pages: [{ text: callId }], completedActions: 1,
           documentPath: "sqlite:browser-observation/" + callId,
@@ -297,19 +297,23 @@ test("Chrome history keeps two distinct images per stream through ACP and every 
       },
     );
   };
-  observe("C1", [{ blobId: "view-old", frameStream: "C1:viewport" }]);
-  observe("C1", [{ blobId: "view-new", frameStream: "C1:viewport" }]);
-  observe("C1", [{ blobId: "view-new", frameStream: "C1:viewport" }]);
-  observe("C1", [{ blobId: "tile0-old", frameStream: "C1:document:0" }, { blobId: "tile1-old", frameStream: "C1:document:1" }]);
-  observe("C1", [{ blobId: "tile0-middle", frameStream: "C1:document:0" }, { blobId: "tile1-new", frameStream: "C1:document:1" }]);
-  observe("C1", [{ blobId: "tile0-new", frameStream: "C1:document:0" }]);
-  for (const blobId of ["crop1", "crop2", "crop3"]) observe("C1", [{ blobId }]);
-  observe("C1", [{ blobId: "export", frameStream: "C1:document:0", readOnlyImage: true }]);
-  observe("C1", [{ blobId: "scroll", frameStream: "C1:viewport", frame: 0 }]);
+  observe("C1", [{ blobId: "view-old", frameStream: "C1:viewport" }], "chrome_navigate");
+  observe("C1", [{ blobId: "tile0", frameStream: "C1:document:0", tile: 0 }, { blobId: "tile1", frameStream: "C1:document:1", tile: 1 }], "chrome_screenshot");
+  observe("C1", [{ blobId: "crop" }], "chrome_screenshot");
+  observe("C1", [{ blobId: "scroll", readOnlyImage: true }], "chrome_screenshot");
+  observe("C1", [{ blobId: "view-a", frameStream: "C1:viewport" }], "chrome_navigate");
+  observe("C1", [{ blobId: "tile0-new", frameStream: "C1:document:0", tile: 0 }, { blobId: "tile1-new", frameStream: "C1:document:1", tile: 1 }], "chrome_screenshot");
+  observe("C1", [{ blobId: "view-b", frameStream: "C1:viewport" }]);
+  observe("C1", [{ blobId: "view-b", frameStream: "C1:viewport" }]);
   observe("C2", [{ blobId: "other-tab", frameStream: "C2:viewport" }]);
-  observe("C3", [{ blobId: "third-tab", frameStream: "C3:viewport" }]);
+  rows.push(
+    { role: "assistant", calls: [{ id: "plain", name: "read", arguments: {} }] },
+    { role: "tool", name: "read", callId: "plain", text: "image file", images: [{ mime: "image/png", blobId: "plain-1" }, { mime: "image/png", blobId: "plain-2" }, { mime: "image/png", blobId: "plain-3" }] },
+  );
   const original = structuredClone(rows);
-  const expected = ["view-old", "view-new", "tile1-old", "tile0-middle", "tile1-new", "tile0-new", "crop1", "crop2", "crop3", "export", "scroll", "other-tab", "third-tab"];
+  // Older captures (viewport, tiles, crop, read-only scroll area) are stale; one capture's tiles stay together,
+  // an unchanged repeated frame counts once, other tabs and non-Chrome images are untouched.
+  const expected = ["tile0-new", "tile1-new", "view-b", "other-tab", "plain-1", "plain-2", "plain-3"];
   const projected = promptHistory(rows);
   assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.blobId)), expected);
   assert.deepEqual(promptHistory(projected), projected, "repeated projection must keep attachment/metadata alignment");
@@ -328,6 +332,37 @@ test("Chrome history keeps two distinct images per stream through ACP and every 
     }
   }
   assert.deepEqual(rows, original, "canonical history and image metadata remain archived intact");
+});
+
+test("oversized Chrome results stay prunable after archiving", () => {
+  const rows: Message[] = [];
+  const observe = (id: string, big: boolean) => {
+    const value = {
+      tabTag: "C1", snapshotId: id, documentPath: "sqlite:browser-observation/" + id,
+      images: [{ blobId: id, path: "sqlite:blob/" + id, frameStream: "C1:viewport" }],
+      pages: [{ text: (id + " ").repeat(big ? 20000 : 1) }],
+    };
+    const raw = JSON.stringify(value);
+    rows.push(
+      { role: "assistant", calls: [{ id, name: "chrome_inspect", arguments: {} }] },
+      { role: "tool", name: "chrome_inspect", callId: id, images: [{ mime: "image/png", blobId: id }],
+        text: big ? archivedResult("chrome_inspect", value, raw, "sqlite:tool-output/" + id) : raw },
+    );
+  };
+  observe("big", true);
+  const archived = JSON.parse(rows[1].text!);
+  assert.equal(archived.tabTag, "C1");
+  assert.equal(archived.archivePath, "sqlite:tool-output/big");
+  assert(archived.preview.length < 33000 && archived.preview.includes("big big"));
+  assert.equal(archived.images[0].frameStream, "C1:viewport");
+  assert(JSON.parse(archivedResult("read", { x: "y".repeat(40000) }, "z".repeat(40000), "sqlite:tool-output/r")).preview);
+  for (const id of ["a", "b"]) observe(id, false);
+  const projected = promptHistory(rows);
+  const old = JSON.parse(projected[1].text!);
+  assert.equal(old.preview, undefined);
+  assert(old.domOmitted && old.imagesOmitted);
+  assert.equal(old.archivePath, "sqlite:tool-output/big");
+  assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.blobId)), ["a", "b"]);
 });
 
 test("native reasoning is replayed only to its source model and remains untouched in history", () => {

@@ -7,7 +7,7 @@ import { employeeConfig, migrateEmployeeCapabilities } from "./employee-capabili
 import { credentialValues } from "./credentials";
 import { createHash } from "node:crypto";
 import { MCP } from "./mcp";
-import { units, refName } from "./history";
+import { units, refName, archivedResult } from "./history";
 import { CHROME_TOOLS, STANDALONE_TOOLS } from "./public-tools";
 import { EMPLOYEE_CHAT_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, sessionPrompt, loadSkills, expandSkillCommand } from "./prompt";
 import { EventEmitter } from "node:events";
@@ -1106,12 +1106,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     let text = raw;
     if (Buffer.byteLength(raw) > 32768) {
       this.store.save("tool-output", call.id, value);
-      text = JSON.stringify({
-        preview: clip(raw, 32000),
-        archivePath: "sqlite:tool-output/" + call.id,
-        truncated: true,
-        next: "完整结果用 read 按 offset/limit 分页读 archivePath，hasMore 时从 nextOffset 继续",
-      });
+      text = archivedResult(call.name, value, raw, "sqlite:tool-output/" + call.id);
     }
     this.store.append(key, {
       role: "tool",
