@@ -57,7 +57,7 @@ export async function employeeCapabilities(employee: Employee, user: { id: strin
     if (method === "GET" && path.length === 1) return { entries: (await employee.vault.list()).filter((entry) => !entry.tempFor) };
     if (method === "POST" && path.length === 1) {
       check(!body.id || !(await employee.vault.list()).find((entry) => entry.id === body.id)?.tempFor, 400, "任务临时条目不能编辑");
-      const saved = await employee.vault.save({ id: body.id, name: body.name, condition: body.condition, content: body.content, share: typeof body.share === "boolean" ? body.share : undefined });
+      const saved = await employee.vault.save({ id: body.id, type: body.type, name: body.name, condition: body.condition, content: body.content, share: typeof body.share === "boolean" ? body.share : undefined });
       await employee.emitChanged();
       return saved;
     }

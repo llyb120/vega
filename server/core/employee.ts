@@ -898,6 +898,7 @@ export class Employee {
         return {
           value: {
             id: value.id,
+            type: value.type,
             name: value.name,
             condition: value.condition,
             content:

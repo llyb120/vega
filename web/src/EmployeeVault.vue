@@ -5,7 +5,15 @@ const props = defineProps({ api: Function, employeeId: String });
 const emit = defineEmits(["error", "notice"]);
 const confirm = window.confirm.bind(window);
 const base = `/employees/${props.employeeId}/vault`;
-const busy = ref(false), entries = ref([]), form = ref({ name: "", condition: "", content: "", share: false });
+// Same types as the server (VAULT_TYPES); entries saved without one count as 万能.
+const types = [
+  { value: "login", label: "账号密码", placeholder: "例如：\n账号：name@example.com\n密码：……", hint: "用于网页登录等需要账号密码的场景。" },
+  { value: "token", label: "API 密钥/令牌", placeholder: "粘贴 API Key、Access Token 等", hint: "用于调用接口、命令行工具等。" },
+  { value: "ssh_key", label: "SSH 私钥", placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----\n……\n-----END OPENSSH PRIVATE KEY-----", hint: "牛马拿不到私钥原文：取用时系统在执行位置写一个只有自己能读的临时文件，给出 GIT_SSH_COMMAND 供 git clone / pull 使用，本轮结束即删除。不支持带口令的私钥，请先用 ssh-keygen -p 去掉口令。" },
+  { value: "general", label: "万能", placeholder: "任意文本，例如账号、密钥和使用说明的组合", hint: "不好归类的凭据选这一项，内容原样提供给牛马。" },
+];
+const typeOf = (value) => types.find((type) => type.value === value) || types[3];
+const busy = ref(false), entries = ref([]), form = ref({ type: "login", name: "", condition: "", content: "", share: false });
 let disposed = false;
 async function run(fn) {
   if (busy.value) return;
@@ -15,10 +23,10 @@ async function run(fn) {
   finally { busy.value = false; }
 }
 function reset() {
-  form.value = { name: "", condition: "", content: "", share: false };
+  form.value = { type: "login", name: "", condition: "", content: "", share: false };
 }
 function edit(item) {
-  form.value = { id: item.id, name: item.name, condition: item.condition, content: "", share: !!item.share };
+  form.value = { id: item.id, type: item.type, name: item.name, condition: item.condition, content: "", share: !!item.share };
 }
 async function load() {
   const value = await props.api(base);
@@ -52,9 +60,10 @@ onBeforeUnmount(() => { disposed = true; });
       <p class="hint">使用条件可写适用系统、账号角色、登录方式和限制，不必填写网站名；有网站名或地址会更容易判断。牛马会结合当前任务与页面核对条件，无法确定时询问，不混用其他系统的账号。</p>
       <p v-if="form.id" class="hint">正在编辑「{{ form.name }}」，凭据留空保留原内容。</p>
       <form class="form-grid two vault-form" @submit.prevent="save">
+        <label>类型<select v-model="form.type"><option v-for="type in types" :key="type.value" :value="type.value">{{ type.label }}</option></select></label>
         <label>名称<input v-model="form.name" required maxlength="100" placeholder="不要包含密钥内容" /></label>
-        <label>允许使用的条件<input v-model="form.condition" required maxlength="500" placeholder="例如：仅用于某系统的邮箱密码登录，不用于 OA 登录" /></label>
-        <label class="span-2">凭据<textarea v-model="form.content" :required="!form.id" :placeholder="form.id ? '凭据已加密，留空视为不修改凭据' : undefined" rows="3" maxlength="16000" autocomplete="off"></textarea></label>
+        <label class="span-2">允许使用的条件<input v-model="form.condition" required maxlength="500" placeholder="例如：仅用于某系统的邮箱密码登录，不用于 OA 登录" /></label>
+        <label class="span-2">凭据<textarea v-model="form.content" :required="!form.id" :class="{ mono: form.type === 'ssh_key' }" :placeholder="form.id ? '凭据已加密，留空视为不修改凭据' : typeOf(form.type).placeholder" :rows="form.type === 'ssh_key' ? 8 : 3" maxlength="16000" autocomplete="off" spellcheck="false"></textarea><small class="hint">{{ typeOf(form.type).hint }}</small></label>
         <label class="check span-2"><input v-model="form.share" type="checkbox" />允许在团队成员请求凭据支援时加密发送给对方</label>
         <div class="span-2 actions end"><button class="primary sm" :disabled="busy"><Icon name="lock" :size="14" />{{ form.id ? '保存修改' : '新增并加密保存' }}</button></div>
       </form>
@@ -62,7 +71,7 @@ onBeforeUnmount(() => { disposed = true; });
       <ul v-else class="item-list">
         <li v-for="item in entries" :key="item.id">
           <span class="item-icon" aria-hidden="true"><Icon name="key" :size="15" /></span>
-          <span class="item-text"><strong>{{ item.name }}</strong><small>{{ item.condition }}{{ item.share ? ' · 可加密共享' : '' }}</small></span>
+          <span class="item-text"><strong>{{ item.name }}</strong><small>{{ typeOf(item.type).label }} · {{ item.condition }}{{ item.share ? ' · 可加密共享' : '' }}</small></span>
           <button type="button" class="sm" :disabled="busy" @click="edit(item)">编辑</button>
           <button type="button" class="sm danger-text" :disabled="busy" @click="remove(item)">删除凭据</button>
         </li>
@@ -83,4 +92,5 @@ onBeforeUnmount(() => { disposed = true; });
 .item-text { display: grid; flex: 1; min-width: 0; gap: 1px; }
 .item-text strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
 .item-text small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.vault-form textarea.mono { white-space: pre; }
 </style>

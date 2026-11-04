@@ -12,7 +12,8 @@ import { units, refName, archivedResult } from "./history";
 import { CHROME_TOOLS, STANDALONE_TOOLS } from "./public-tools";
 import { EMPLOYEE_CHAT_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, sessionPrompt, loadSkills, expandSkillCommand } from "./prompt";
 import { EventEmitter } from "node:events";
-import { stat } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
+import { keyDir } from "./key-files";
 import { resolve } from "node:path";
 import type { Store, Session, Message, Call } from "./store";
 import type { Config, Model } from "./config";
@@ -213,6 +214,8 @@ export class Engine {
    */
   static async create(store: Store, catalog: Catalog, chrome: Chrome) {
     const engine = new Engine(store, catalog, chrome);
+    // Key files a crashed run left behind (KeyFiles removes them when a run ends).
+    await rm(keyDir(store.files.root), { recursive: true, force: true });
     await engine.vault.key();
     await engine.relay.deviceId();
     await engine.fire.recover();

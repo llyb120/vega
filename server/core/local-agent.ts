@@ -130,7 +130,7 @@ export class LocalAgents {
     if (!agent.transport) throw new LocalAgentUnavailable();
     agent.transport.send(job);
   }
-  request(agent: Agent, op: "exec" | "file" | "browser", args: Obj, signal: AbortSignal) {
+  request(agent: Agent, op: "exec" | "file" | "browser" | "key", args: Obj, signal: AbortSignal) {
     if (op === "exec") {
       assert(typeof args.command === "string" && args.command.trim(), "command required");
       assertShellCommand(args.command);

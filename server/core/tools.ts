@@ -20,6 +20,7 @@ import { materializeSkill, skillEntry, skillKind } from "./skills";
 import { credentialValues, vaultSite, type CredentialBinding } from "./credentials";
 import { verifyVaultUse } from "./vault-use";
 import { VAULT_USAGE } from "./vault";
+import { KeyFiles, gitSshCommand, keyDir } from "./key-files";
 import { isDeepStrictEqual } from "node:util";
 import { sceneModels, maskedConfig, mergeSecrets } from "./config";
 import { omitPlaceholders } from "./tool-args";
@@ -70,6 +71,7 @@ export class Tools {
   setupAccess?: "provider";
   actorId?: string;
   private credentials: CredentialBinding[] = [];
+  private keys: KeyFiles;
   private browserTab?: string;
   sceneStack: string[] = [];
   static async create(engine: Engine, session: Session, config: Config, signal: AbortSignal, emit: (type: string, data: any) => void) {
@@ -84,7 +86,9 @@ export class Tools {
     public emit: (type: string, data: any) => void,
     public context: Context,
     public mcp: MCP,
-  ) {}
+  ) {
+    this.keys = new KeyFiles(keyDir(engine.store.files.root), engine.localAgents);
+  }
   async canManageEmployee() {
     if (!this.actorId) return false;
     const user = await this.engine.store.one("SELECT id,role,disabled FROM web_users WHERE id=?", this.actorId) as { id: string; role: string; disabled: number } | undefined;
@@ -361,6 +365,18 @@ export class Tools {
     assert(latest?.name === entry.name && latest?.condition === entry.condition, "凭据使用条件已变化，请重新核对");
     return scope;
   }
+  /** An SSH key never reaches the model: it becomes a 0600 file where this run executes, removed when the run ends. */
+  private async sshKey(credential: Obj) {
+    // Redact it anyway, in case a command prints the file.
+    this.engine.redactors.get(this.session.id)?.add(credential.content);
+    const keyFile = await this.keys.write(credential.content, this.agent(), this.signal), command = gitSshCommand(keyFile);
+    return {
+      id: credential.id, type: credential.type, name: credential.name, condition: credential.condition,
+      keyFile, GIT_SSH_COMMAND: command,
+      example: `git -c core.sshCommand="${command}" clone git@<host>:<owner>/<repo>.git`,
+      next: "私钥原文不提供，已写成本轮专用的临时文件（仅当前用户可读），本轮结束自动删除；后续轮次需重新 vault_get。git 命令前设置环境变量 GIT_SSH_COMMAND 为上面的值，或按 example 用 git -c core.sshCommand。首次连接的主机自动信任，主机密钥变化会被拒绝。不要读取、复制或输出这个文件。",
+    };
+  }
   async execute(call: Call, model: Model): Promise<Outcome> {
     try {
       return await this.executeInner(call, model);
@@ -548,7 +564,11 @@ export class Tools {
       this.session.taskId || "",
       await prepareDutyInput(this.engine, employee, { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) }, this.session.taskId || "", this.signal),
     );
-    if (a.action === "vault_get" && result.secret) result.secret = JSON.stringify({ ...JSON.parse(result.secret), scopeSite: scope });
+    if (a.action === "vault_get" && result.secret) {
+      const credential = JSON.parse(result.secret);
+      if (credential.type === "ssh_key") return { value: await this.sshKey(credential) };
+      result.secret = JSON.stringify({ ...credential, scopeSite: scope });
+    }
     return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? await taskLink(result.value.id) : undefined };
   }
   private async chrome(a: Obj): Promise<Outcome> {
@@ -723,7 +743,8 @@ export class Tools {
     return { value: { path, ...textSlice(content, a.offset, a.limit) } };
   }
   async close() {
-    if (this.signal.aborted) await this.engine.releaseSession(this.session.id);
+    try { await this.keys.clear(); }
+    finally { if (this.signal.aborted) await this.engine.releaseSession(this.session.id); }
   }
 }
 export async function mutate(cwd: string, name: string, a: Obj) {

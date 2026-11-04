@@ -31,7 +31,7 @@ RUN npm run build
 FROM node:24-bookworm-slim AS runtime
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates chromium chromium-sandbox git ripgrep tini \
+        ca-certificates chromium chromium-sandbox git openssh-client ripgrep tini \
         fontconfig fonts-liberation fonts-croscore fonts-crosextra-carlito \
         fonts-crosextra-caladea fonts-dejavu-core fonts-noto-core fonts-noto-mono \
         fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei \
