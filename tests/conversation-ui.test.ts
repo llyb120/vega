@@ -15,9 +15,8 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
   const context: any = {
     console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
     props: { employeeId: "fixture", api, composer: reactive({ text: "", images: [], quote: undefined }) },
-    employeeChatMessages, continuesPrevious, frozen: [] as any[],
+    employeeChatMessages, continuesPrevious,
   };
-  context.easeIn = (seqs: number[]) => context.frozen.push(...seqs);
   const methods = vm.runInNewContext([
     "let turn = 0;",
     between("const draft = computed", "const visible ="),
@@ -199,7 +198,6 @@ test("the typing row turns into the reply in one tick: reply merged, typing clea
   assert.equal(state.running.value, false);
   assert.deepEqual(state.visible.value.map((message: any) => message.seq), [1, 2]);
   assert.equal(state.error.value, "");
-  assert.deepEqual(state.frozen, [2], "only the new reply eases in from the typing avatar");
   assert(!seen.some(([running, count]) => !running && count < 2), "no state where typing is gone but the reply is not shown: " + JSON.stringify(seen));
   assert(replies.slice(1).every((path) => /\?after=[12]$/.test(path)), "only messages after the newest known sequence are fetched: " + replies.join(", "));
 });
@@ -369,13 +367,16 @@ test("failed earlier messages stay before later server messages, and interrupted
   assert.equal(queued.sendStatus, "failed", "accepted but unprocessed messages can be resent after interruption");
 });
 
-test("reply avatars animate only while a linked task is live and actively in progress", async () => {
-  const { isInProgress } = await import("../web/src/task-status.js");
-  assert.deepEqual(["running", "recovering", "in_progress"].filter(isInProgress), ["running", "recovering", "in_progress"]);
-  for (const status of ["queued", "pending", "deferred", "waiting", "approval", "blocked", "done", "completed", "failed", "stopped", "cancelled", undefined]) assert.equal(isInProgress(status), false, String(status));
+test("chat avatars never animate; sidebar and header avatars animate only while a task is running", () => {
   const bubble = readFileSync("web/src/ChatMessage.vue", "utf8");
-  assert(bubble.includes("isInProgress(props.taskStatus?.[task.id])"), "only the live status (never the stored snapshot) can start the animation");
-  assert(chat.includes(':task-status="taskStatus"') && readFileSync("web/src/App.vue", "utf8").includes(':tasks="employee.tasks"'));
+  assert(!/animate/.test(bubble) && !/<EmployeeAvatar[^>]*animate/.test(chat), "reply and typing avatars in the chat stay still");
+  assert(readFileSync("web/src/AppSidebar.vue", "utf8").includes(':animate="!!entry.runningTasks"'));
+  assert(readFileSync("web/src/EmployeeHeader.vue", "utf8").includes(':animate="working"'));
+  const app = readFileSync("web/src/App.vue", "utf8");
+  assert(app.includes(`:working="activeTasks.some((task) => task.status === 'running')"`), "queued or waiting tasks do not count as running");
+  assert(app.includes("runningTasks: event.data.runningTasks"), "the sidebar row follows live task changes");
+  const route = readFileSync("server/routes/api/[...path].ts", "utf8");
+  assert(route.includes('runningTasks: s.tasks.filter((t) => t.status === "running").length'));
   const avatar = readFileSync("web/src/BotAvatar.vue", "utf8");
   assert(avatar.includes("IntersectionObserver"), "off-screen avatars pause");
 });
