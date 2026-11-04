@@ -302,12 +302,12 @@ test("removed image service is hidden and unavailable while reading image pixels
     assert.equal(archived.images?.[0].blobId, id);
     assert.equal(archived.value.url, "/api/blobs/" + id);
     // A large observation archive reads in pages that each fit one tool result, and reassemble losslessly.
-    const record = { id: "obs", text: "页".repeat(9000) + "x".repeat(5000), pages: Array.from({ length: 400 }, (_, i) => ({ ref: "r." + i, name: "item " + i })), images: [{ imageId: "obs-0", blobId: id }] };
-    store.save("browser-observation", "obs", record);
+    const record = { id: "obs", text: "页".repeat(9000) + "x".repeat(5000), pages: Array.from({ length: 400 }, (_, i) => ({ ref: "r." + i, name: "item " + i })), images: [{ imageId: "obs-0", path: "x.webp" }] };
+    const documentPath = store.files.write(session, "obs.json", JSON.stringify(record));
     const lines: string[] = [];
     for (let offset: number | undefined = 1, pages = 0; offset; pages++) {
       assert(pages < 200);
-      const page = await tools.read({ path: "sqlite:browser-observation/obs", offset });
+      const page = await tools.read({ path: documentPath, offset });
       assert(Buffer.byteLength(JSON.stringify(page.value)) < 32768, "a page is never clipped by the tool-result limit");
       assert.equal(page.value.wrappedAt, 2000);
       lines.push(...page.value.text.split("\n").map((line: string) => line.replace(/^\d+\|/, "")));
@@ -317,7 +317,7 @@ test("removed image service is hidden and unavailable while reading image pixels
     let at = 0;
     const rebuilt = pretty.map((line) => { let out = ""; do out += lines[at++]; while (out.length < line.length); return out; });
     assert.deepEqual(JSON.parse(rebuilt.join("\n")), record);
-    const limited = await tools.read({ path: "sqlite:browser-observation/obs", offset: 3, limit: 2 });
+    const limited = await tools.read({ path: documentPath, offset: 3, limit: 2 });
     assert.match(limited.value.text, /^3\|/);
     assert.equal(limited.value.nextOffset, 5);
     assert(tools.definitions(model).some((tool) => tool.name === "chrome_screenshot"));

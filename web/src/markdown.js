@@ -10,6 +10,8 @@ function imageURL(value) {
   if (hex) return "/api/blobs/" + hex[1];
   const archived = /^(?:\/api\/blobs\/|sqlite:blob\/)(blob-[\w-]+)$/.exec(value);
   if (archived) return "/api/blobs/" + archived[1];
+  // Archived Chrome screenshots (images[].url of a chrome result).
+  if (/^\/api\/files\/(?:[\w.%-]+\/)*[\w.%-]+\.(?:webp|png|jpe?g)$/i.test(value) && !/(^|\/)\.\.?(\/|$)/.test(value.slice(11))) return value;
   if (/^data:image\/(?:png|jpeg|gif|webp|bmp|avif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value))
     return value;
   if (!/^https?:\/\//i.test(value) || /[\u0000-\u001f\u007f\\]/.test(value)) return;

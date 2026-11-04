@@ -394,6 +394,14 @@ export class Auth {
       );
     return session;
   }
+  /** A file under Files.root by its path segments (employees/<id>/…, users/<id>/<session>/…, views/<user>/…). */
+  canFile(user: User, parts: string[]) {
+    const [kind, owner, bucket] = parts;
+    if (kind === "employees") return this.canRead(user, { employeeId: owner } as Session);
+    if (kind === "views") return owner === user.id;
+    if (kind !== "users") return false;
+    try { return this.canRead(user, this.store.session(bucket)); } catch { return false; }
+  }
   canBlob(user: User, id: string) {
     if (this.store.db.prepare("SELECT 1 FROM blob_user_access WHERE blob=? AND user=?").get(id, user.id)) return true;
     const rows = this.store.db

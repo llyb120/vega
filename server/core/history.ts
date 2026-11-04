@@ -105,8 +105,7 @@ export function promptHistory(
       dom.set(tab, n);
       if (n > 2) {
         const { pages: _pages, preview: _preview, ...rest } = value;
-        rest.domOmitted =
-          "Only the latest two DOM observations for this tab remain in context; original data is available at documentPath.";
+        rest.domOmitted = `[DOM 已移出上下文：${rest.documentPath}，需要时用 read 分页读回]`;
         m = rows[i] = { ...m, text: parsed!.prefix + JSON.stringify(rest) };
       }
     }
@@ -116,7 +115,7 @@ export function promptHistory(
 
 /** Text kept in context for an oversized result. Chrome results keep the fields history pruning relies on. */
 export function archivedResult(name: string, value: Obj, raw: string, archivePath: string) {
-  const tail = { archivePath, truncated: true, next: "完整结果用 read 按 offset/limit 分页读 archivePath，hasMore 时从 nextOffset 继续" };
+  const tail = { archivePath, truncated: true, next: "完整结果存为文件 archivePath，用 read 按 offset/limit 分页读，hasMore 时从 nextOffset 继续" };
   if (!CHROME_TOOLS.has(name) || !value || typeof value !== "object") return JSON.stringify({ preview: clip(raw, 32000), ...tail });
   const { tabTag, snapshotId, images, documentPath, ...rest } = value,
     head = { tabTag, snapshotId, images, documentPath };
@@ -125,7 +124,8 @@ export function archivedResult(name: string, value: Obj, raw: string, archivePat
 
 /**
  * Chrome images show a page state that later operations make stale: per tab only the images of the latest two
- * image-bearing results stay (all images of one result together, duplicate frames counted once). Other tools' images
+ * image-bearing results stay (all images of one result together, duplicate frames counted once); the rest become
+ * their file paths, readable with read. Other tools' images
  * may stay useful and are only trimmed beyond two when trimImages is set.
  */
 export function historyImages(
@@ -141,27 +141,26 @@ export function historyImages(
       parsed = chrome ? resultBody(m) : undefined;
     const keep = m.images.map(() => true);
     if (chrome) {
-      const metadata: Obj[] = Array.isArray(parsed?.value.images) ? parsed.value.images : [];
       const key = String(parsed?.value.tabTag ?? "");
       let tab = tabs.get(key);
       if (!tab) tabs.set(key, tab = { results: 0, paths: new Set() });
       const full = tab.results >= 2;
-      // Earlier projections may have removed sibling attachments; archive blob IDs keep the mapping stable.
-      const paths = m.images.map((image, j) => {
-        const meta = metadata.length === m.images!.length ? metadata[j] : metadata.find(v => image.blobId && v.blobId === image.blobId);
-        return meta?.path || image.blobId;
-      });
+      const paths = m.images.map((image) => image.path);
       paths.forEach((path, j) => { keep[j] = !full && !(path && tab.paths.has(path)); });
       paths.forEach((path, j) => { if (keep[j] && path) tab.paths.add(path); });
       if (keep.some(Boolean)) tab.results++;
     } else if (otherImages++ >= 2 && options.trimImages) keep.fill(false);
     if (keep.every(Boolean)) continue;
-    const notice = "Older tool images omitted from model view; original images/metadata remain archived in SQLite.";
+    const omitted = m.images.filter((_, j) => !keep[j]).map((image) => image.path).filter((path, j, all) => path && all.indexOf(path) === j);
+    const notice = chrome
+      ? `[截图已移出上下文：${omitted.join("，")}，需要时用 read 读回；看页面现状请重新截图]`
+      : "Older tool images omitted from model view; original images/metadata remain archived in SQLite.";
     rows[i] = {
       ...m,
       images: m.images.filter((_, j) => keep[j]),
       text: parsed
-        ? parsed.prefix + JSON.stringify({ ...parsed.value, imagesOmitted: notice })
+        // The notice stands in for the images; their metadata is dropped with them when none is left.
+        ? parsed.prefix + JSON.stringify({ ...parsed.value, images: keep.some(Boolean) ? parsed.value.images : undefined, imagesOmitted: notice })
         : (m.text || "") + "\n[" + notice + "]",
     };
   }

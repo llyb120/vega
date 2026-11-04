@@ -197,6 +197,7 @@ test(
     );
     const store = new Store(":memory:"),
       bridge = new FixtureBridge();
+    store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
     store.db.prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)").run("fixture", "fixture", "test-only", "admin", 0, Date.now(), 0);
     let submitted = 0, liveSubmitted = 0,
       live: BrowserLive | undefined;
@@ -301,7 +302,7 @@ test(
       assert.equal(preview.tabTag, tag);
       assert(preview.image.width > 0);
       assert.equal(preview.title, "Vega complete browser fixture");
-      assert(store.blobData(preview.image.url.split("/").at(-1)!));
+      assert(existsSync(store.files.fromUrl(preview.image.url.slice("/api/files/".length).split("/"))));
       assert.equal(
         engine.observations.get("owner:" + tag)!.id,
         shot.snapshotId,
@@ -358,7 +359,7 @@ test(
       });
       assert.equal(invalid.completedActions, 0);
       assert.equal(submitted, 1);
-      const archive = store.object<any>("browser-observation", shot.snapshotId);
+      const archive = JSON.parse(readFileSync(shot.documentPath, "utf8"));
       const remoteOwner = "browser-view:fixture";
       let remote = await browserScreenshot(engine, remoteOwner, tag);
       const remotePoint = async (selector: string) => {
@@ -715,7 +716,7 @@ test(
       live = undefined;
       assert(
         archive.images.length === 1,
-        "Observation not persisted in SQLite",
+        "Observation file not written",
       );
     } finally {
       await live?.close();
@@ -749,6 +750,7 @@ test(
     const dir = await mkdtemp(join(tmpdir(), "vega-chrome-")), profile = join(dir, "profile");
     const child = spawn(binary, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0", "--user-data-dir=" + profile, "--no-sandbox", "about:blank"], { windowsHide: true, stdio: "ignore" });
     const store = new Store(":memory:"), bridge = new FixtureBridge();
+    store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
     let verified = "", slowImage = 0;
     const server = createServer((req, res) => {
       if (req.url === "/slow.png") { slowImage++; setTimeout(() => { res.setHeader("Content-Type", "image/png"); res.end(); }, 1200); return; }
@@ -848,6 +850,7 @@ test(
     const dir = await mkdtemp(join(tmpdir(), "vega-chrome-")), profile = join(dir, "profile");
     const child = spawn(binary, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0", "--user-data-dir=" + profile, "--no-sandbox", "--window-size=1000,700", "about:blank"], { windowsHide: true, stdio: "ignore" });
     const store = new Store(":memory:"), bridge = new FixtureBridge();
+    store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
     const server = createServer((_req, res) => {
       res.setHeader("Content-Type", "text/html");
       res.end(`<!doctype html><title>Hover</title><body style="margin:0">

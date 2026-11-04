@@ -23,6 +23,8 @@ type Observation = {
   coverageGaps: string[];
   images: Obj[];
   captured: number;
+  /** File holding the full record (pages, images), written when the observation is returned. */
+  documentPath?: string;
   fullPage: boolean;
   screenshot: boolean;
 };
@@ -199,7 +201,9 @@ export class Chrome {
       screenshot: false,
     };
   }
-  async capture(o: Observation, a: Obj, prior?: Observation) {
+  /** Screenshot files go to the owner's directory: the session (task) or the user's browser view. */
+  private fileOwner(owner: string) { return owner.startsWith("browser-view:") ? owner : this.store.session(owner); }
+  async capture(owner: string, o: Observation, a: Obj, prior?: Observation) {
     const tag = o.tabTag,
       page = o.pages[0],
       vp = page.viewport;
@@ -319,10 +323,9 @@ export class Chrome {
         const { data, info } = await image
           .webp({ lossless: true })
           .toBuffer({ resolveWithObject: true });
-        const blob = this.store.blob("image/webp", data);
         let imageID = o.id + "-" + o.images.length,
           unchanged = false,
-          blobID = blob;
+          path = "";
         const imageX = full ? x : x - (vp.scrollX || 0), imageY = full ? y : y - (vp.scrollY || 0);
         const frameStream = !region && !a.expandScroll ? `${tag}:${full ? "document:" + i : "viewport"}` : undefined;
         const previous = prior?.images.find(
@@ -341,10 +344,11 @@ export class Chrome {
           prior.pages[0].document === page.document &&
           typeof page.stamp === "string" && prior.pages[0].stamp === page.stamp
         ) {
-          const old = this.store.blobData(previous.blobId);
+          let old: Buffer | undefined;
+          try { old = this.store.files.read(previous.path); } catch {}
           if (old) {
             const [a, b] = await Promise.all([
-              sharp(old.data).removeAlpha().raw().toBuffer(),
+              sharp(old).removeAlpha().raw().toBuffer(),
               sharp(data).removeAlpha().raw().toBuffer(),
             ]);
             if (
@@ -353,16 +357,16 @@ export class Chrome {
             ) {
               unchanged = true;
               imageID = previous.imageId;
-              blobID = previous.blobId;
+              path = previous.path;
             }
           }
         }
+        path ||= this.store.files.write(this.fileOwner(owner), imageID + ".webp", data);
         o.images.push({
           imageId: imageID,
           snapshotId: o.id,
-          blobId: blobID,
-          path: `sqlite:blob/${blobID}`,
-          url: `/api/blobs/${blobID}`,
+          path,
+          url: this.store.files.url(path),
           x: imageX,
           y: imageY,
           width: w,
@@ -464,19 +468,15 @@ export class Chrome {
     assert(mode === "screenshot" || (!a.ref && !a.region), "inspect does not accept region/ref; use screenshot");
     let shot: Obj = {};
     if (capture) {
-      try { shot = await this.capture(o, mode === "screenshot" ? a : { ...a, fullPage: false, expandScroll: false }, prior); }
+      try { shot = await this.capture(owner, o, mode === "screenshot" ? a : { ...a, fullPage: false, expandScroll: false }, prior); }
       catch (error: any) {
         if (mode === "screenshot" || a.feedback === "screenshot") throw error;
         o.screenshot = false; o.images = [];
         shot = { screenshotError: error.message };
       }
     }
+    o.documentPath = this.store.files.write(this.fileOwner(owner), o.id + ".json", JSON.stringify({ ...o, frames: undefined }));
     this.observations.set(key, o);
-    for (const image of o.images) {
-      if (owner.startsWith("browser-view:")) this.store.grantBlobUser(image.blobId, owner.slice("browser-view:".length));
-      else this.store.grantBlob(image.blobId, owner);
-    }
-    this.store.save("browser-observation", o.id, { ...o, frames: undefined });
     const origin = new URL(o.pages[0].url).origin;
     // Identifiers and images first: an oversized result is clipped from the end, never these.
     return {
@@ -485,7 +485,7 @@ export class Chrome {
       snapshotId: o.id,
       images: o.images,
       ...shot,
-      documentPath: `sqlite:browser-observation/${o.id}`,
+      documentPath: o.documentPath,
       coverageGaps: o.coverageGaps,
       experienceHint: this.experiences.hint(owner, origin),
       pages: this.summarize(o, a),
@@ -1517,7 +1517,7 @@ export class Chrome {
     // Identifiers and images first, pages last: an oversized result is clipped from the end.
     return {
       snapshotId: latest?.id, images: latest?.images || [],
-      documentPath: latest ? "sqlite:browser-observation/" + latest.id : undefined, tabTag: tag,
+      documentPath: latest?.documentPath, tabTag: tag,
       ...rest,
       altairRun: {
         status: done ? "completed" : "needs_review", history, checks, executedActions: executed,

@@ -1,6 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, statSync, chmodSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { Files } from "./files";
 import { assert, id } from "./util";
 export type Part = { type: string; [key: string]: any };
 export type Message = {
@@ -23,7 +25,8 @@ export type Message = {
   calls?: Call[];
   callId?: string;
   name?: string;
-  images?: { mime: string; data?: string; blobId?: string }[];
+  /** blobId: attachments and normal tool images in SQLite; path/url: a Chrome screenshot file (see Files). */
+  images?: { mime: string; data?: string; blobId?: string; path?: string; url?: string }[];
   error?: boolean;
   model?: string;
   usage?: any;
@@ -53,12 +56,17 @@ export type Session = {
 };
 export class Store {
   db: DatabaseSync;
+  /** Screenshots, DOM records and oversized tool results live in files next to the database (see Files). */
+  files: Files;
+  private memory: boolean;
   private rowCache = new Map<string, { max: number; rows: Readonly<Message>[] }>();
   depth = 0;
   constructor(path = process.env.VEGA_DB || "vega.db") {
     if (path !== ":memory:")
       mkdirSync(dirname(resolve(path)), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
+    this.memory = path === ":memory:";
+    this.files = new Files(this.memory ? mkdtempSync(join(tmpdir(), "vega-files-")) : join(dirname(resolve(path)), "files"));
     const app = Number(
         (this.db.prepare("PRAGMA application_id").get() as any).application_id,
       ),
@@ -101,6 +109,8 @@ export class Store {
   }
   close() {
     this.db.close();
+    // An in-memory database's files are as temporary as it is.
+    if (this.memory) rmSync(this.files.root, { recursive: true, force: true });
   }
   transaction<T>(fn: () => T) {
     const outer = this.depth === 0,
@@ -178,11 +188,15 @@ export class Store {
   // Resolve an image reference ({mime,blobId} or legacy {mime,data}) to the
   // {mime,data:base64} the model providers expect. Central lazy materialization
   // point: only images that survive history trimming reach here.
-  imageData(image: { mime: string; data?: string; blobId?: string }): {
+  imageData(image: { mime: string; data?: string; blobId?: string; path?: string }): {
     mime: string;
     data: string;
   } {
     if (typeof image.data === "string") return { mime: image.mime, data: image.data };
+    if (image.path) {
+      try { return { mime: image.mime, data: this.files.read(image.path).toString("base64") }; }
+      catch { return { mime: image.mime, data: "" }; }
+    }
     if (!image.blobId) return { mime: image.mime, data: "" };
     const blob = this.blobData(image.blobId);
     if (!blob) return { mime: image.mime, data: "" };
@@ -240,12 +254,14 @@ export class Store {
     return all.filter((s) => ids.has(s.id));
   }
   deleteSession(key: string) {
-    for (const s of this.sessionFamily(key))
+    for (const s of this.sessionFamily(key)) {
       this.db.prepare("DELETE FROM sessions WHERE id=?").run(s.id);
+      this.files.remove(this.files.dir(s));
+    }
   }
-  /** Keep the session row; drop messages, folds, blob grants and context ledger. */
+  /** Keep the session row; drop messages, folds, blob grants, context ledger and files. */
   clearSessionHistory(key: string) {
-    this.session(key);
+    this.files.remove(this.files.dir(this.session(key)));
     this.rowCache.delete(key);
     this.transaction(() => {
       this.db.prepare("DELETE FROM messages WHERE session=?").run(key);
@@ -346,7 +362,11 @@ export class Store {
         fireRoot: undefined,
         fireRole: undefined,
       });
-      for (const m of this.messages(key)) this.append(copy.id, m);
+      // The copy owns its files: copy the directory and point the copied history at it.
+      const from = this.files.dir(source), to = this.files.dir(copy);
+      if (existsSync(from)) cpSync(from, to, { recursive: true });
+      const moved = (text: string) => [[from, to], [JSON.stringify(from).slice(1, -1), JSON.stringify(to).slice(1, -1)]].reduce((t, [a, b]) => t.replaceAll(a, b), text);
+      for (const m of this.messages(key)) this.append(copy.id, JSON.parse(moved(JSON.stringify(m))));
       this.db.prepare("INSERT INTO blob_access SELECT blob,? FROM blob_access WHERE session=?").run(copy.id, key);
       for (const row of this.db
         .prepare("SELECT id,data FROM folds WHERE session=?")

@@ -9,7 +9,8 @@ import {
 } from "../../core/browser-preview";
 import { publicOrigin, principal } from "../../core/http-auth";
 import { authRoute, bodyJSON } from "../../core/http-auth-routes";
-import { check } from "../../core/auth";
+import { AuthError, check } from "../../core/auth";
+import { sep } from "node:path";
 import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import {
@@ -156,6 +157,15 @@ export default defineEventHandler(async (event) => {
           storage: "SQLite",
         },
       };
+    if (path[0] === "files" && method === "GET") {
+      const file = store.files.fromUrl(path.slice(1)), parts = file.slice(store.files.root.length + 1).split(sep), mime = store.files.mime(file);
+      check(mime && auth.canFile(user, parts), 404, "File not found");
+      let data: Buffer;
+      try { data = store.files.read(file); } catch { throw new AuthError(404, "File not found"); }
+      setHeader(event, "Content-Type", mime!);
+      setHeader(event, "Cache-Control", "private, max-age=31536000, immutable");
+      return send(event, data);
+    }
     if (path[0] === "blobs" && method === "GET") {
       check(auth.canBlob(user, path[1]), 404, "Blob not found");
       const blob = store.blobData(path[1]);

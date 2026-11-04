@@ -36,7 +36,7 @@ test("snapshot-only and inferred Chrome targets use the same mutex as explicit t
   store.close();
 });
 
-test("forked image grants survive deletion of the source and preview grants stay user-scoped", async () => {
+test("forked images survive deletion of the source and preview files stay user-scoped", async () => {
   const store = new Store(":memory:");
   for (const id of ["alice", "bob"])
     store.db.prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)").run(id, id, "fixture", "admin", 0, Date.now(), 0);
@@ -48,13 +48,26 @@ test("forked image grants survive deletion of the source and preview grants stay
   store.deleteSession(source.id);
   assert.equal(auth.canBlob(alice, store.messages(fork.id)[0].images![0].blobId!), true);
   assert.equal(auth.canBlob(bob, blob), false);
-  const preview = store.blob("image/png", Buffer.from("preview"));
   const chrome = new Chrome(store, {} as any, "");
   chrome.observe = async () => ({ id: "preview", tabTag: "C1", frames: [], pages: [{ url: "https://example.test" }], images: [], captured: Date.now() } as any);
-  chrome.capture = async (o) => { o.images = [{ blobId: preview }]; return { fullPage: false, scrollExpanded: undefined, fullPageFallback: undefined, documentSize: undefined, screenshotComplete: true, totalTiles: 1, nextTile: undefined }; };
-  await chrome.feedback("browser-view:alice", "C1", {}, "screenshot");
-  assert.equal(auth.canBlob(alice, preview), true);
-  assert.equal(auth.canBlob(bob, preview), false);
+  chrome.capture = async (owner, o) => { o.images = [{ path: store.files.write(owner, "preview-0.webp", "x") }]; return { fullPage: false, scrollExpanded: undefined, fullPageFallback: undefined, documentSize: undefined, screenshotComplete: true, totalTiles: 1, nextTile: undefined }; };
+  const shown = await chrome.feedback("browser-view:alice", "C1", {}, "screenshot");
+  const parts = (path: string) => path.slice(store.files.root.length + 1).split("/");
+  // The browser view's screenshot and DOM record are files of that user only.
+  assert.deepEqual(parts(shown.images[0].path).slice(0, 2), ["views", "alice"]);
+  assert.deepEqual(parts(shown.documentPath!).slice(0, 2), ["views", "alice"]);
+  assert.equal(auth.canFile(alice, parts(shown.images[0].path)), true);
+  assert.equal(auth.canFile(bob, parts(shown.images[0].path)), false);
+  // A fork owns copies of its files, so deleting the source keeps the fork's screenshots readable.
+  const owner = store.newSession({ ownerId: "alice" }), shot = store.files.write(owner, "a.webp", "pixels");
+  store.append(owner.id, { role: "tool", name: "chrome_screenshot", text: JSON.stringify({ images: [{ path: shot }] }), images: [{ mime: "image/webp", path: shot, url: store.files.url(shot) }] });
+  const copy = store.fork(owner.id), copied = store.messages(copy.id)[0];
+  store.deleteSession(owner.id);
+  assert(copied.images![0].path!.includes(copy.id) && copied.text!.includes(copy.id));
+  assert.equal(store.files.read(copied.images![0].path!).toString(), "pixels");
+  assert.equal(auth.canFile(alice, parts(copied.images![0].path!)), true);
+  assert.equal(auth.canFile(bob, parts(copied.images![0].path!)), false);
+  assert.throws(() => store.files.read(shot));
   store.close();
 });
 

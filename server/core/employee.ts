@@ -1447,6 +1447,7 @@ export class Employee {
           assert(ended(t.status), "Only ended task records may be deleted");
           s.tasks = s.tasks.filter((v) => v.id !== t.id);
           this.vault.dropTemp(t.id);
+          this.store.files.remove(this.store.files.task(this.employeeId, t.id));
           break;
         default:
           throw Error("Unknown task control");

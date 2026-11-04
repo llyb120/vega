@@ -198,9 +198,10 @@ onBeforeUnmount(() => { version++; });
           v-for="(image, n) in message.images || []"
           :key="n"
           :src="
-            image.blobId
+            image.url ||
+            (image.blobId
               ? '/api/blobs/' + image.blobId
-              : 'data:' + image.mime + ';base64,' + image.data
+              : 'data:' + image.mime + ';base64,' + image.data)
           "
           alt="工具返回的图片"
         />
@@ -227,9 +228,10 @@ onBeforeUnmount(() => { version++; });
           v-for="(image, n) in message.images || []"
           :key="n"
           :src="
-            image.blobId
+            image.url ||
+            (image.blobId
               ? '/api/blobs/' + image.blobId
-              : 'data:' + image.mime + ';base64,' + image.data
+              : 'data:' + image.mime + ';base64,' + image.data)
           "
           alt="任务附图"
       /></template>

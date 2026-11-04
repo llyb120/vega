@@ -283,29 +283,29 @@ test("wire history preserves tool-call IDs, images and signed reasoning without 
 });
 test("Chrome history keeps only the latest two image results per tab through ACP and every provider", () => {
   const rows: Message[] = [];
-  const observe = (tab: string, images: { blobId: string; frameStream?: string; tile?: number; readOnlyImage?: boolean }[], name = "chrome_act") => {
+  const observe = (tab: string, images: { path: string; frameStream?: string; tile?: number; readOnlyImage?: boolean }[], name = "chrome_act") => {
     const callId = "shot-" + rows.length;
     rows.push(
       { role: "assistant", calls: [{ id: callId, name, arguments: {} }] },
       { role: "tool", name, callId,
         text: `[m${String(rows.length + 1).padStart(5, "0")}] ` + JSON.stringify({
           tabTag: tab, snapshotId: callId, pages: [{ text: callId }], completedActions: 1,
-          documentPath: "sqlite:browser-observation/" + callId,
-          images: images.map(image => ({ ...image, path: "sqlite:blob/" + image.blobId })),
+          documentPath: "/files/" + callId + ".json",
+          images,
         }),
-        images: images.map(({ blobId }) => ({ mime: "image/png", blobId })),
+        images: images.map(({ path }) => ({ mime: "image/webp", path })),
       },
     );
   };
-  observe("C1", [{ blobId: "view-old", frameStream: "C1:viewport" }], "chrome_navigate");
-  observe("C1", [{ blobId: "tile0", frameStream: "C1:document:0", tile: 0 }, { blobId: "tile1", frameStream: "C1:document:1", tile: 1 }], "chrome_screenshot");
-  observe("C1", [{ blobId: "crop" }], "chrome_screenshot");
-  observe("C1", [{ blobId: "scroll", readOnlyImage: true }], "chrome_screenshot");
-  observe("C1", [{ blobId: "view-a", frameStream: "C1:viewport" }], "chrome_navigate");
-  observe("C1", [{ blobId: "tile0-new", frameStream: "C1:document:0", tile: 0 }, { blobId: "tile1-new", frameStream: "C1:document:1", tile: 1 }], "chrome_screenshot");
-  observe("C1", [{ blobId: "view-b", frameStream: "C1:viewport" }]);
-  observe("C1", [{ blobId: "view-b", frameStream: "C1:viewport" }]);
-  observe("C2", [{ blobId: "other-tab", frameStream: "C2:viewport" }]);
+  observe("C1", [{ path: "view-old", frameStream: "C1:viewport" }], "chrome_navigate");
+  observe("C1", [{ path: "tile0", frameStream: "C1:document:0", tile: 0 }, { path: "tile1", frameStream: "C1:document:1", tile: 1 }], "chrome_screenshot");
+  observe("C1", [{ path: "crop" }], "chrome_screenshot");
+  observe("C1", [{ path: "scroll", readOnlyImage: true }], "chrome_screenshot");
+  observe("C1", [{ path: "view-a", frameStream: "C1:viewport" }], "chrome_navigate");
+  observe("C1", [{ path: "tile0-new", frameStream: "C1:document:0", tile: 0 }, { path: "tile1-new", frameStream: "C1:document:1", tile: 1 }], "chrome_screenshot");
+  observe("C1", [{ path: "view-b", frameStream: "C1:viewport" }]);
+  observe("C1", [{ path: "view-b", frameStream: "C1:viewport" }]);
+  observe("C2", [{ path: "other-tab", frameStream: "C2:viewport" }]);
   rows.push(
     { role: "assistant", calls: [{ id: "plain", name: "read", arguments: {} }] },
     { role: "tool", name: "read", callId: "plain", text: "image file", images: [{ mime: "image/png", blobId: "plain-1" }, { mime: "image/png", blobId: "plain-2" }, { mime: "image/png", blobId: "plain-3" }] },
@@ -315,17 +315,23 @@ test("Chrome history keeps only the latest two image results per tab through ACP
   // an unchanged repeated frame counts once, other tabs and non-Chrome images are untouched.
   const expected = ["tile0-new", "tile1-new", "view-b", "other-tab", "plain-1", "plain-2", "plain-3"];
   const projected = promptHistory(rows);
-  assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.blobId)), expected);
+  assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.path || image.blobId)), expected);
   assert.deepEqual(promptHistory(projected), projected, "repeated projection must keep attachment/metadata alignment");
   const old = JSON.parse(projected[1].text!.replace(/^\[m\d+\]\s*/, ""));
   assert.equal(old.pages, undefined);
   assert.equal(old.completedActions, 1);
-  assert.equal(old.documentPath, "sqlite:browser-observation/shot-0");
+  assert.equal(old.documentPath, "/files/shot-0.json");
+  assert.equal(old.domOmitted, "[DOM 已移出上下文：/files/shot-0.json，需要时用 read 分页读回]");
+  // Omitted screenshots are replaced by their paths; metadata goes with them.
+  assert.equal(old.images, undefined);
+  assert.equal(old.imagesOmitted, "[截图已移出上下文：view-old，需要时用 read 读回；看页面现状请重新截图]");
+  const tiles = JSON.parse(projected[3].text!.replace(/^\[m\d+\]\s*/, ""));
+  assert.match(tiles.imagesOmitted, /截图已移出上下文：tile0，tile1，/);
   for (const api of ["openai-completions", "openai-responses", "anthropic-messages"]) {
     for (const history of [rows, projected]) {
       const resolved: string[] = [];
       bodyFor(model(api, "https://example.test/v1"), "", history, [], image => {
-        resolved.push(image.blobId!);
+        resolved.push(image.path || image.blobId!);
         return { mime: image.mime, data: "AA==" };
       });
       assert.deepEqual(resolved, expected, api);
@@ -338,31 +344,31 @@ test("oversized Chrome results stay prunable after archiving", () => {
   const rows: Message[] = [];
   const observe = (id: string, big: boolean) => {
     const value = {
-      tabTag: "C1", snapshotId: id, documentPath: "sqlite:browser-observation/" + id,
-      images: [{ blobId: id, path: "sqlite:blob/" + id, frameStream: "C1:viewport" }],
+      tabTag: "C1", snapshotId: id, documentPath: "/files/" + id + ".json",
+      images: [{ path: id, frameStream: "C1:viewport" }],
       pages: [{ text: (id + " ").repeat(big ? 20000 : 1) }],
     };
     const raw = JSON.stringify(value);
     rows.push(
       { role: "assistant", calls: [{ id, name: "chrome_inspect", arguments: {} }] },
-      { role: "tool", name: "chrome_inspect", callId: id, images: [{ mime: "image/png", blobId: id }],
-        text: big ? archivedResult("chrome_inspect", value, raw, "sqlite:tool-output/" + id) : raw },
+      { role: "tool", name: "chrome_inspect", callId: id, images: [{ mime: "image/webp", path: id }],
+        text: big ? archivedResult("chrome_inspect", value, raw, "/files/output-" + id + ".json") : raw },
     );
   };
   observe("big", true);
   const archived = JSON.parse(rows[1].text!);
   assert.equal(archived.tabTag, "C1");
-  assert.equal(archived.archivePath, "sqlite:tool-output/big");
+  assert.equal(archived.archivePath, "/files/output-big.json");
   assert(archived.preview.length < 33000 && archived.preview.includes("big big"));
   assert.equal(archived.images[0].frameStream, "C1:viewport");
-  assert(JSON.parse(archivedResult("read", { x: "y".repeat(40000) }, "z".repeat(40000), "sqlite:tool-output/r")).preview);
+  assert(JSON.parse(archivedResult("read", { x: "y".repeat(40000) }, "z".repeat(40000), "/files/output-r.json")).preview);
   for (const id of ["a", "b"]) observe(id, false);
   const projected = promptHistory(rows);
   const old = JSON.parse(projected[1].text!);
   assert.equal(old.preview, undefined);
   assert(old.domOmitted && old.imagesOmitted);
-  assert.equal(old.archivePath, "sqlite:tool-output/big");
-  assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.blobId)), ["a", "b"]);
+  assert.equal(old.archivePath, "/files/output-big.json");
+  assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.path)), ["a", "b"]);
 });
 
 test("native reasoning is replayed only to its source model and remains untouched in history", () => {

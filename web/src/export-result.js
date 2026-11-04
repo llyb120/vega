@@ -20,7 +20,7 @@ export function exportBasename(title = "任务结果", at = Date.now()) {
 
 function absoluteBlobSrc(html, origin = typeof location !== "undefined" ? location.origin : "") {
   return String(html || "").replace(
-    /(<img\b[^>]*\bsrc=")(\/api\/blobs\/[^"]+)(")/gi,
+    /(<img\b[^>]*\bsrc=")(\/api\/(?:blobs|files)\/[^"]+)(")/gi,
     (_, a, path, b) => a + origin + path + b,
   );
 }
@@ -59,7 +59,7 @@ blockquote{margin:0 0 8px;padding-left:12px;border-left:3px solid #c5cad8;color:
 @media print{body{margin:0;padding:0}}
 `;
 
-const ARCHIVED_IMG = /<img\b[^>]*\bsrc="(\/api\/blobs\/[^"]+)"[^>]*>/gi;
+const ARCHIVED_IMG = /<img\b[^>]*\bsrc="(\/api\/(?:blobs|files)\/[^"]+)"[^>]*>/gi;
 
 function base64(bytes) {
   let text = "";
@@ -68,7 +68,7 @@ function base64(bytes) {
 }
 
 /**
- * Fetch every archived image (/api/blobs/…) the result shows, while the signed-in page can still read it.
+ * Fetch every archived image (/api/blobs/…, /api/files/…) the result shows, while the signed-in page can still read it.
  * The exported file is opened elsewhere (file://, mail, another browser) where the strict session cookie is not
  * sent, so linked archive images would break; the map holds a data: URI, or null when the image is unavailable.
  */
@@ -283,7 +283,7 @@ function htmlToDocxParagraphs(markdown) {
       .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt, url) => {
         const src = /^(?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32}$/i.test(url)
           ? `${origin}/api/blobs/${url.replace(/^(?:\/api\/blobs\/|sqlite:blob\/)/, "")}`
-          : url.startsWith("/api/blobs/") ? origin + url : url;
+          : /^\/api\/(?:blobs|files)\//.test(url) ? origin + url : url;
         return `${alt || "图片"}（${src}）`;
       })
       .replace(/(^|[\s：:])((?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32})(?=$|[\s，。；！？、])/gi, (_, prefix, id) => {

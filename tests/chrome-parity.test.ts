@@ -10,6 +10,7 @@ import type { Obj } from "../server/core/util";
 function fixture(t: TestContext) {
   const store = new Store(":memory:"), chrome = new Chrome(store, new ChromeBridge(), "");
   t.after(() => store.close());
+  store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
   const sent: Obj[] = [], calls: Obj[] = [];
   const page: Obj = { url: "https://example.test/", title: "Fixture", document: "doc", stamp: "stamp", text: "ready", visibleText: "ready", frame: 0,
     viewport: { width: 800, height: 600, scrollX: 0, scrollY: 0, devicePixelRatio: 1 }, documentSize: { width: 800, height: 600 },
@@ -300,64 +301,68 @@ test("unchanged screenshots detect small pixel changes and keep frame streams se
   let pixels = white;
   const raw = f.chrome.cdp;
   f.chrome.cdp = async (...args) => args[1] === "Page.captureScreenshot" ? { data: pixels.toString("base64") } : raw(...args);
-  const first = await f.observe(); await f.chrome.capture(first, {});
-  const same = await f.observe(); await f.chrome.capture(same, {}, first);
+  const first = await f.observe(); await f.chrome.capture("owner", first, {});
+  // Screenshots are files in the owner session's directory, served under /api/files.
+  assert.equal(first.images[0].path, f.store.files.dir(f.store.session("owner")) + "/" + first.images[0].imageId + ".webp");
+  assert.equal(first.images[0].url, f.store.files.url(first.images[0].path));
+  assert.equal((await sharp(f.store.files.read(first.images[0].path)).metadata()).format, "webp");
+  const same = await f.observe(); await f.chrome.capture("owner", same, {}, first);
   assert.equal(same.images[0].unchanged, true);
-  assert.equal(same.images[0].blobId, first.images[0].blobId);
+  assert.equal(same.images[0].path, first.images[0].path);
   for (const [value, unchanged] of [[239, true], [238, false], [0, false]] as const) {
     const patch = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: value, g: value, b: value } } }).png().toBuffer();
     pixels = await sharp(white).composite([{ input: patch, left: 100, top: 100 }]).png().toBuffer();
-    const next = await f.observe(); await f.chrome.capture(next, {}, first);
+    const next = await f.observe(); await f.chrome.capture("owner", next, {}, first);
     assert.equal(next.images[0].unchanged, unchanged, `pixel delta ${255 - value}`);
-    assert.equal(next.images[0].blobId === first.images[0].blobId, unchanged);
+    assert.equal(next.images[0].path === first.images[0].path, unchanged);
   }
   pixels = white;
-  const full = await f.observe(); await f.chrome.capture(full, { fullPage: true }, first);
+  const full = await f.observe(); await f.chrome.capture("owner", full, { fullPage: true }, first);
   assert.equal(full.images[0].frameStream, "tab:document:0");
   assert.equal(full.images[0].unchanged, false);
-  const fullAgain = await f.observe(); await f.chrome.capture(fullAgain, { fullPage: true }, full);
+  const fullAgain = await f.observe(); await f.chrome.capture("owner", fullAgain, { fullPage: true }, full);
   assert.equal(fullAgain.images[0].unchanged, true);
   for (const args of [{ region: { x: 0, y: 0, width: 640, height: 480 } }, { expandScroll: true }]) {
-    const standalone = await f.observe(); await f.chrome.capture(standalone, args, first);
+    const standalone = await f.observe(); await f.chrome.capture("owner", standalone, args, first);
     assert.equal(standalone.images[0].frameStream, undefined);
     assert.equal(standalone.images[0].unchanged, false);
   }
   f.page.document = "new-document";
-  const navigated = await f.observe(); await f.chrome.capture(navigated, {}, first);
+  const navigated = await f.observe(); await f.chrome.capture("owner", navigated, {}, first);
   assert.equal(navigated.images[0].unchanged, false);
 });
 
 test("expanded scroll retains original pixels and remains read-only; ordinary images stay bounded", async (t) => {
   const f = await screenshotFixture(t);
   let o = await f.observe();
-  const result = await f.chrome.capture(o, { expandScroll: true });
+  const result = await f.chrome.capture("owner", o, { expandScroll: true });
   assert.equal(o.images[0].pixelHeight, 3000); assert.equal(o.images[0].pixelWidth, 800); assert.equal(o.images[0].readOnlyImage, true);
   assert(result.screenshotComplete); assert(f.layouts.includes("__novaWebview.captureLayout(false)"));
-  o = await f.observe(); await f.chrome.capture(o, { fullPage: true });
+  o = await f.observe(); await f.chrome.capture("owner", o, { fullPage: true });
   assert(o.images[0].pixelHeight <= 1568);
 });
 
 test("full-page screenshots paginate both axes and fall back before unsafe renderer capture", async (t) => {
   const f = await screenshotFixture(t, 5000, 9000), o = await f.observe();
-  const r = await f.chrome.capture(o, { fullPage: true });
+  const r = await f.chrome.capture("owner", o, { fullPage: true });
   assert.equal(r.totalTiles, 9); assert.equal(r.nextTile, 4); assert.equal(o.images.length, 4); assert.equal(r.screenshotComplete, false);
   assert.equal(o.images[1].x, 2048); assert.equal(o.images[3].y, 4096);
   f.page.documentSize = { width: 20000, height: 500 };
-  const unsafe = await f.observe(); const fallback = await f.chrome.capture(unsafe, { fullPage: true });
+  const unsafe = await f.observe(); const fallback = await f.chrome.capture("owner", unsafe, { fullPage: true });
   assert.equal(fallback.fullPage, false); assert.match(fallback.fullPageFallback!, /安全上限/);
   assert(f.captures.filter((c) => c.clip).every((c) => c.clip.width <= 2048));
 });
 
 test("viewport crops keep viewport coordinates after scrolling; restoration runs after failed capture", async (t) => {
   const f = await screenshotFixture(t); f.page.viewport.scrollY = 500;
-  const o = await f.observe(); await f.chrome.capture(o, { region: { x: 0, y: 0, width: 100, height: 100 } });
+  const o = await f.observe(); await f.chrome.capture("owner", o, { region: { x: 0, y: 0, width: 100, height: 100 } });
   assert.equal(o.images[0].y, 0); assert.equal(f.captures.find((c) => c.clip)!.clip.y, 500);
   const raw = f.chrome.cdp; let attempts = 0;
   f.chrome.cdp = async (...args) => {
     if (args[1] === "Page.captureScreenshot" && args[2]?.captureBeyondViewport) { attempts++; throw Error("capture failed"); }
     return raw(...args);
   };
-  await assert.rejects(f.chrome.capture(await f.observe(), { fullPage: true }), /capture failed/);
+  await assert.rejects(f.chrome.capture("owner", await f.observe(), { fullPage: true }), /capture failed/);
   assert.equal(attempts, 1); assert.equal(f.layouts.at(-1), "__novaWebview.captureLayout(false)");
   assert(f.captures.some((c) => c.method === "Page.captureScreenshot" && c.captureBeyondViewport === false));
 });
@@ -406,7 +411,7 @@ test("expanded layout restores the viewport and reports incomplete scroll expans
     return raw(...args);
   };
   f.chrome.evaluate = async (_tag, _frame, expression) => expression.includes("innerScrollOverflow") ? 900 : true;
-  const r = await f.chrome.capture(await f.observe(), { expandScroll: true });
+  const r = await f.chrome.capture("owner", await f.observe(), { expandScroll: true });
   assert.equal(height, 600); assert.equal(r.scrollExpanded?.complete, false);
   assert(f.captures.some((c) => c.method === "Emulation.setDeviceMetricsOverride"));
   assert(f.captures.some((c) => c.method === "Emulation.clearDeviceMetricsOverride"));

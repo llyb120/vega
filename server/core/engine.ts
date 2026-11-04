@@ -372,6 +372,7 @@ export class Engine {
         }
         employee.forget();
       });
+      this.store.files.remove(this.store.files.employee(key));
       this.employee.schedule();
     } catch (error) { employee.deleting = false; throw error; }
   }
@@ -405,6 +406,8 @@ export class Engine {
         }
         employee.clearWork();
       });
+      // Screenshots, DOM records and archived results of every task and the chat go with them.
+      this.store.files.remove(this.store.files.employee(key));
     } finally { employee.resetting = false; }
     this.clearEmployeeChat(key);
     employee.runtime.emit("employee_changed", { employeeId: key, reset: true, activeTasks: 0 });
@@ -1105,8 +1108,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       raw = JSON.stringify(value);
     let text = raw;
     if (Buffer.byteLength(raw) > 32768) {
-      this.store.save("tool-output", call.id, value);
-      text = archivedResult(call.name, value, raw, "sqlite:tool-output/" + call.id);
+      const path = this.store.files.write(this.store.session(key), "output-" + call.id.replace(/[^\w-]/g, "_") + ".json", raw);
+      text = archivedResult(call.name, value, raw, path);
     }
     this.store.append(key, {
       role: "tool",

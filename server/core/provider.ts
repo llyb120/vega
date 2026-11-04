@@ -84,7 +84,7 @@ export function bodyFor(
   system: string,
   input: Message[],
   tools: Tool[],
-  resolveImage?: (image: { mime: string; data?: string; blobId?: string }) => {
+  resolveImage?: (image: { mime: string; data?: string; blobId?: string; path?: string }) => {
     mime: string;
     data: string;
   },
@@ -444,12 +444,13 @@ type Checkpoint = {
 };
 export class Providers {
   checkpoints = new Map<string, Checkpoint>();
-  // Injected by the engine: resolves {mime,blobId} -> {mime,data:base64} lazily,
+  // Injected by the engine: resolves {mime,blobId|path} -> {mime,data:base64} lazily,
   // only for images that survived history trimming.
   resolveImage: (image: {
     mime: string;
     data?: string;
     blobId?: string;
+    path?: string;
   }) => { mime: string; data: string } = (im) => ({
     mime: im.mime,
     data: im.data || "",

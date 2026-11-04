@@ -43,7 +43,7 @@ import type { Config, Model } from "./config";
 import type { Tool } from "./provider";
 export type Outcome = {
   value: any;
-  images?: { mime: string; data?: string; blobId?: string }[];
+  images?: Message["images"];
   error?: boolean;
   stop?: boolean;
   pause?: string;
@@ -123,7 +123,7 @@ export class Tools {
     const defs: Tool[] = [
       schema(
         "read",
-        "Read numbered lines using 1-based offset/limit; images return their pixels. SQLite archives (documentPath sqlite:browser-observation/…, archivePath sqlite:tool-output/…) read as numbered pretty-JSON lines, lines over 2000 chars wrapped onto the next numbers, about 12KiB per call: continue from nextOffset while hasMore.",
+        "Read numbered lines using 1-based offset/limit; images return their pixels. Archived results (Chrome documentPath and images[].path, archivePath of oversized results, paths named in omitted-from-context notices) read from the server even in client sessions; JSON archives read as numbered pretty-JSON lines, lines over 2000 chars wrapped onto the next numbers, about 12KiB per call: continue from nextOffset while hasMore. Read an old screenshot only when it is really needed (e.g. as evidence or for comparison); for the current page take a new one.",
         { path: string, offset: positive, limit: positive },
         ["path"],
       ),
@@ -539,10 +539,7 @@ export class Tools {
     );
     this.browserTab = result.tabTag || a.tabTag || this.browserTab;
     const images: Outcome["images"] = [];
-    for (const im of result.images || []) {
-      this.engine.store.grantBlob(im.blobId, this.session.id);
-      images.push({ mime: im.mime, blobId: im.blobId });
-    }
+    for (const im of result.images || []) images.push({ mime: "image/webp", path: im.path, url: im.url });
     // not_executed/needs_review is a structured resumable state, not a tool
     // failure: the model must read status/reason/next and re-observe, not stop.
     // errors_first: on any non-executed act/evaluate, lift decision fields to
@@ -635,22 +632,25 @@ export class Tools {
       return result;
     }
     if (a.path.startsWith("sqlite:")) {
-      const match =
-        /^sqlite:(blob|browser-observation|tool-output)\/(.+)$/.exec(a.path);
+      const match = /^sqlite:blob\/(.+)$/.exec(a.path);
       assert(match, "Invalid SQLite archive path");
-      if (match[1] === "blob") {
-        const blob = this.engine.store.blobData(match[2]);
-        assert(blob, "Archived blob missing");
-        this.engine.store.grantBlob(match[2], this.session.id);
-        return {
-          value: { path: a.path, url: `/api/blobs/${match[2]}` },
-          images: [{ mime: blob.mime, blobId: match[2] }],
-        };
-      }
-      const value = this.engine.store.object(match[1], match[2]);
-      assert(value, "Archived observation missing");
+      const blob = this.engine.store.blobData(match[1]);
+      assert(blob, "Archived blob missing");
+      this.engine.store.grantBlob(match[1], this.session.id);
+      return {
+        value: { path: a.path, url: `/api/blobs/${match[1]}` },
+        images: [{ mime: blob.mime, blobId: match[1] }],
+      };
+    }
+    const files = this.engine.store.files;
+    if (files.own(a.path)) {
+      // Archived screenshots, DOM records and tool results: only this employee's (or user's) own, on the server.
+      const path = files.readable(this.session, a.path), mime = files.mime(path);
+      let data: Buffer;
+      try { data = files.read(path); } catch { throw Error("存档文件不存在（可能已随重置或清空聊天删除）：" + a.path); }
+      if (mime) return { value: { path, url: files.url(path) }, images: [{ mime, path, url: files.url(path) }] };
       // Paged like a text file so records larger than one tool result stay fully readable.
-      return { value: { path: a.path, ...archiveSlice(value, a.offset, a.limit) } };
+      return { value: { path, ...archiveSlice(JSON.parse(data.toString("utf8")), a.offset, a.limit) } };
     }
     const agent = serverOnly ? undefined : this.agent(),
       local = agent ? await localRead(this.engine.localAgents, agent, this.session.cwd, a.path, this.signal) : undefined,
