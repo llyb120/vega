@@ -11,6 +11,7 @@ export const TASK_LABELS = {
   stopped: "已停止",
   cancelled: "已取消",
   sealed: "已封存",
+  lost: "已失效",
   pending: "待执行",
   in_progress: "进行中",
   completed: "已完成",

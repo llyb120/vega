@@ -41,9 +41,7 @@ const history = createChatHistory({ api: (...args) => props.api(...args), path: 
 
 // Message avatars rest on one up-right glance. The reply that replaces the typing row starts from the typing
 // avatar's last glance and eases into it (in memory only; nothing is persisted).
-const typingPose = ref("center"), entering = ref({});
 const taskStatus = computed(() => Object.fromEntries((props.tasks || []).map((task) => [task.id, task.status])));
-function easeIn(seqs) { entering.value = Object.fromEntries(seqs.map((seq) => [seq, typingPose.value])); }
 async function onRemember(message) {
   if (!props.remember || !message?.text) return;
   const claim = String(message.displayText || message.text).replace(/\s+/g, " ").trim();
@@ -118,14 +116,12 @@ async function refresh(apply, syncRunning = true) {
 }
 /**
  * The turn is over. Keep the typing row on screen until the reply is in hand, then swap them in one tick:
- * merge the reply and clear `running` together so no frame shows neither; the reply avatar eases out of the typing glance.
+ * merge the reply and clear `running` together so no frame shows neither.
  */
 function finishTurn() {
   const current = turn;
-  const before = new Set(visible.value.map((message) => message.seq));
   return refresh(() => {
     if (current !== turn) return; // a new turn already started; it owns the typing row now
-    easeIn(employeeChatMessages(messages.value).filter((message) => message.role !== "user" && !before.has(message.seq)).map((message) => message.seq));
     running.value = false;
   });
 }
@@ -251,10 +247,10 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
             <button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><Icon name="tasks" :size="15" />看看工作进度</button>
           </div>
         </div>
-        <ChatMessage v-for="{ message, continued } in displayed" :key="message.clientMessageId || message.seq || message.liveKey" :message="message" :continued="continued" :name="name" :avatar="avatar" :employee-id="employeeId" :enter-from="entering[message.seq]" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        <ChatMessage v-for="{ message, continued } in displayed" :key="message.clientMessageId || message.seq || message.liveKey" :message="message" :continued="continued" :name="name" :avatar="avatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
         <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
           <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>
-          <span v-else class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" animate @pose="typingPose = $event" /></span>
+          <span v-else class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" /></span>
           <div class="chat-content">
             <div class="chat-heading"><strong v-if="!typingContinued">{{ name }}</strong><span>正在输入中</span></div>
             <div class="chat-bubble"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>

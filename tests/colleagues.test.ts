@@ -175,3 +175,42 @@ test("colleague tools: visible in chat and main task sessions, handoff hidden at
     a.busy.delete(id);
   } finally { await close(); }
 });
+
+test("handoff records self-heal: receiver deleted or reset, or the record vanished, ends them as lost and wakes the sender", async () => {
+  const { engine, store, make, close } = await fixture();
+  try {
+    const a = await make("A", "u1"), b = await make("B", "u1"), c = await make("C", "u1");
+    const origin = await todo(a, "整理");
+    await a.update((s) => { const t = a.task(s, origin); t.status = "deferred"; t.nextCheckAt = Date.now() + 3600_000; });
+    const toB = await colleagueHandoff(engine, a, { taskId: origin, session: "" }, { colleagueId: b.employeeId, instructions: "子任务 B" });
+    const chat = await a.chat("u1");
+    const toC = await colleagueHandoff(engine, a, { session: chat.id }, { colleagueId: c.employeeId, instructions: "子任务 C" });
+    // Deleting the receiver ends the sender's record and wakes its task.
+    b.deleting = true; await b.forget();
+    let t = await task(a, origin);
+    assert.equal(t.handoffs[0].status, "lost"); assert.equal(t.handoffs[0].result, "对方牛马已删除");
+    assert.equal(t.status, "queued"); assert.equal(t.supplementPending, true); assert.match(t.answer, /不会再有结果：对方牛马已删除/);
+    // Resetting the receiver: the chat-origin record ends and a notice lands in the chat.
+    c.resetting = true; await c.clearWork(); c.resetting = false;
+    assert.equal((await a.profile()).handoffs![0].status, "lost");
+    assert.match((await store.messages(chat.id)).at(-1)!.text!, /不会再有结果：对方任务已不存在/);
+    // Lazy path: a record whose target vanished without any hook (e.g. a crash) heals on the next status read.
+    const again = await colleagueHandoff(engine, a, { session: chat.id }, { colleagueId: c.employeeId, instructions: "再来" });
+    await store.dropEmployeeRows(c.employeeId);
+    await a.execute("", { action: "list" });
+    assert.equal((await a.profile()).handoffs!.find((h) => h.taskId === again.taskId)!.status, "lost");
+    // A target that ended without reporting is delivered as a normal result by the scheduler pass.
+    const origin2 = await todo(a, "第二个");
+    const toC2 = await colleagueHandoff(engine, a, { taskId: origin2, session: "" }, { colleagueId: c.employeeId, instructions: "x" });
+    await store.putEmployeeTask(c.employeeId, toC2.taskId, false, Date.now(), JSON.stringify({ ...(await task(c, toC2.taskId)), status: "done", summary: "做完了" }));
+    await a.tick();
+    assert.equal((await task(a, origin2)).handoffs[0].status, "done");
+    assert.match((await task(a, origin2)).answer, /做完了/);
+    // A lost handoff no longer blocks task_complete.
+    await a.update((s) => { a.task(s, origin).status = "running"; a.task(s, origin).supplementPending = false; });
+    a.busy.set(origin, { session: "x" } as any);
+    await assert.rejects(a.execute(origin, { action: "complete", text: "e" }), /settled plan/); // past the handoff check
+    a.busy.delete(origin);
+    assert.equal(toC.exists, undefined);
+  } finally { await close(); }
+});

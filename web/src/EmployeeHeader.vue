@@ -11,6 +11,8 @@ const props = defineProps({
   counts: Object,
   deleting: Boolean,
   busy: Boolean,
+  /** Some task is running right now: the avatar plays its working animation. */
+  working: Boolean,
   showWork: Boolean,
   workOpen: Boolean,
   workCount: Number,
@@ -28,7 +30,7 @@ function choose(localAgent, clientId) { close(place); emit("execution", localAge
   <header class="employee-header">
     <div class="identity">
       <button type="button" class="icon header-menu" data-nav-trigger aria-label="打开导航" @click="emit('menu')"><Icon name="menu" /></button>
-      <span class="identity-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employee.id" :name="employee.name" :avatar="employee.avatar" /></span>
+      <span class="identity-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employee.id" :name="employee.name" :avatar="employee.avatar" :animate="working" /></span>
       <div class="identity-text">
         <h2 class="truncate">{{ employee.name || "加载中…" }}</h2>
         <span :class="['identity-status', tone]" :title="employee.instruction || '把目标交给我，任务由我安排。'"><span class="dot" :class="[tone, { pulse: tone === 'info' }]" aria-hidden="true"></span>{{ status }}<span class="identity-scope"> · {{ employee.scope === 'personal' ? '个人牛马' : '团队牛马' }}</span></span>

@@ -65,6 +65,9 @@ const workspaceKey = async (session: Session) => {
 };
 export const ended = (status: string) =>
   ["done", "failed", "stopped", "cancelled", "sealed"].includes(status);
+/** A handoff record still waiting for its result ("lost": the target task is gone, see reconcileHandoffs). */
+export const handoffOpen = (h: Obj) => !ended(h.status) && h.status !== "lost";
+const handoffOutcome = (t: Task) => ({ status: t.status, result: excerpt(t.summary || t.result, 300), finishedAt: t.finishedAt || Date.now() });
 const TASK_LIST_LIMIT = 50;
 const excerpt = (value: unknown, n: number) => {
   const text = String(value || "").replace(/\s+/g, " ").trim();
@@ -424,6 +427,7 @@ export class Employee {
     this.takeovers.clear();
     (this.root || this).members.delete(this.employeeId);
     this.runtime.emit("employee_changed", { employeeId: this.employeeId, deleted: true, scope: state.scope, ownerId: state.ownerId });
+    await this.healHandoffs();
   }
   /**
    * Reset wipes tasks and runs. Duties are configuration and stay, but their clocks restart from now: a fixed-time
@@ -448,6 +452,7 @@ export class Employee {
       this.releaseWorkspace(taskId);
     }
     this.takeovers.clear();
+    await this.healHandoffs();
   }
   async chat(ownerId: string) {
     assert(!this.deleting, "Employee is being deleted");
@@ -478,30 +483,64 @@ export class Employee {
       for (const t of finished) await this.returnHandoff(s.name, t);
     });
   }
-  /** Deliver a finished handoff: a supplement that wakes the originating task, or a message in the origin chat. */
+  /** Deliver a finished handoff to the employee that made it. */
   private async returnHandoff(name: string, t: Task) {
     const from = t.handoffFrom, origin = (await this.all()).find((e) => e.employeeId === from.employeeId);
     if (!origin || origin.deleting) return;
-    const text = handoffResultText(name, t);
-    const outcome = { status: t.status, result: excerpt(t.summary || t.result, 300), finishedAt: t.finishedAt || Date.now() };
-    const mark = (list: Obj[] | undefined) => { const entry = list?.find((h) => h.taskId === t.id); if (entry) Object.assign(entry, outcome); };
     try {
-      if (from.taskId) await origin.update((s) => {
-        const task = s.tasks.find((x) => x.id === from.taskId);
-        if (!task) return;
-        mark(task.handoffs);
-        if (ended(task.status)) return;
-        task.answer = (task.answer || "") + "\n" + text;
-        task.supplementPending = true;
-        if (task.status === "deferred") { task.status = "queued"; task.nextCheckAt = 0; }
-      });
-      else {
-        await origin.updateProfile((s) => mark(s.handoffs));
-        if (from.session) await this.store.append(from.session, { role: "assistant", text });
-      }
+      await origin.handoffArrived(from.taskId, from.session, t.id, handoffOutcome(t), handoffResultText(name, t));
     } catch (error: any) {
       this.runtime.emit("employee_error", { employeeId: origin.employeeId, message: "转交结果送回失败：" + String(error?.message || error) });
     }
+  }
+  /** A handoff result (or loss notice) arrives: a supplement that wakes the originating task, or a message in the origin chat. */
+  async handoffArrived(taskId: string, session: string | undefined, handoffTaskId: string, outcome: Obj, text: string) {
+    const mark = (list: Obj[] | undefined) => { const entry = list?.find((h) => h.taskId === handoffTaskId); if (entry) Object.assign(entry, outcome); };
+    if (taskId) await this.update((s) => {
+      const task = s.tasks.find((x) => x.id === taskId);
+      if (!task) return;
+      mark(task.handoffs);
+      if (ended(task.status)) return;
+      task.answer = (task.answer || "") + "\n" + text;
+      task.supplementPending = true;
+      if (task.status === "deferred") { task.status = "queued"; task.nextCheckAt = 0; }
+    });
+    else {
+      await this.updateProfile((s) => mark(s.handoffs));
+      const chat = session || (await this.profile()).chatSession;
+      if (chat) await this.store.append(chat, { role: "assistant", text });
+    }
+  }
+  /**
+   * Self-heal handoffs this employee made whose target task ended without reporting or no longer exists
+   * (receiver deleted or reset, record removed, crash): deliver the result, or a "lost" notice, like a normal return.
+   */
+  async reconcileHandoffs(now = Date.now()) {
+    if (this.deleting || this.deleted) return;
+    await this.store.transaction(async () => {
+      const s = await this.state();
+      const open = [
+        ...s.tasks.flatMap((t) => (t.handoffs || []).filter(handoffOpen).map((h: Obj) => ({ h, taskId: t.id }))),
+        ...(s.handoffs || []).filter(handoffOpen).map((h) => ({ h, taskId: "" })),
+      ];
+      for (const { h, taskId } of open) {
+        const row = await this.store.employeeTask(h.taskId);
+        if (row && row.employee === h.employeeId && !ended(row.task.status)) continue;
+        if (row && row.employee === h.employeeId) { await this.handoffArrived(taskId, h.session, h.taskId, handoffOutcome(row.task), handoffResultText(h.name, row.task)); continue; }
+        const gone = !(await this.all()).some((e) => e.employeeId === h.employeeId && !e.deleting && !e.deleted);
+        const reason = gone ? "对方牛马已删除" : "对方任务已不存在（被删除或重置）";
+        await this.handoffArrived(taskId, h.session, h.taskId, { status: "lost", result: reason, finishedAt: now },
+          `转交给牛马「${h.name}」的任务 ${h.taskId} 不会再有结果：${reason}。请自己完成这部分，或重新转交。`);
+      }
+    });
+  }
+  /** After a deletion or reset, every sender reconciles at once instead of waiting for its next pass. */
+  async healHandoffs() {
+    for (const employee of await this.all())
+      if (employee !== this || !this.deleted)
+        try { await employee.reconcileHandoffs(); } catch (error: any) {
+          this.runtime.emit("employee_error", { employeeId: employee.employeeId, message: "转交记录自愈失败：" + String(error?.message || error) });
+        }
   }
   /** 转交 from a colleague: a new queued task; dedupeKey is scoped to the sending employee. */
   async receiveHandoff(a: { text: string; key: string; from: Obj }) {
@@ -731,9 +770,9 @@ export class Employee {
   /** Best-effort notification; a failed count (e.g. during shutdown) is not an error for the caller. */
   async emitChanged() {
     const runtime = this.runtime, emit = runtime.emit; // the listener at the time of the change
-    let activeTasks: number;
-    try { activeTasks = await this.store.activeTaskCount(this.employeeId); } catch { return; }
-    emit.call(runtime, "employee_changed", { employeeId: this.employeeId, activeTasks });
+    let activeTasks: number, runningTasks: number;
+    try { [activeTasks, runningTasks] = await Promise.all([this.store.activeTaskCount(this.employeeId), this.store.runningTaskCount(this.employeeId)]); } catch { return; }
+    emit.call(runtime, "employee_changed", { employeeId: this.employeeId, activeTasks, runningTasks });
   }
   schedule() {
     if (this.closed) return;
@@ -846,6 +885,7 @@ export class Employee {
       }
       throw Error("密码本增删改只能由牛马创建者在牛马配置的「密码本」里操作");
     }
+    if (action === "list") await this.reconcileHandoffs();
     let stop = false,
       pendingSend: { to: string; type: string; data: any } | undefined,
       pendingTell: { session: string; message: Message } | undefined;
@@ -1032,7 +1072,7 @@ export class Employee {
                 t.supplementPending = false;
                 return { ok: false, supplement: t.answer, next: "Apply the user's latest supplement (or a colleague's handoff result), update and verify the plan before completing." };
               }
-              const open = (t.handoffs || []).filter((h: Obj) => !ended(h.status));
+              const open = (t.handoffs || []).filter(handoffOpen);
               const openKey = open.map((h: Obj) => h.taskId).join(",");
               if (open.length && t.handoffWarned !== openKey) {
                 t.handoffWarned = openKey;
@@ -1617,7 +1657,11 @@ export class Employee {
   }
   async tick(now = Date.now()) {
     if (this.closed || this.deleting || this.deleted || this.resetting) return;
-    const initial = await this.state();
+    let initial = await this.state();
+    if (initial.tasks.some((t) => t.handoffs?.some(handoffOpen)) || initial.handoffs?.some(handoffOpen)) {
+      await this.reconcileHandoffs(now);
+      initial = await this.state();
+    }
     let desk: Presence | undefined;
     if (
       (initial.desktopAskAfter || 0) <= now &&

@@ -174,7 +174,7 @@ export default defineEventHandler(async (event) => {
       if (path.length === 1) {
         if (method === "GET") return Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
           const s = await employee.state();
-          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, publicSummary: s.publicSummary || "", acceptsColleagues: s.acceptsColleagues !== false, scope: s.scope, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
+          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, publicSummary: s.publicSummary || "", acceptsColleagues: s.acceptsColleagues !== false, scope: s.scope, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, runningTasks: s.tasks.filter((t) => t.status === "running").length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
         }));
         if (method === "POST") {
           check(user.role !== "viewer", 403, "Execution permission required");

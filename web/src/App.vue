@@ -1090,8 +1090,12 @@ function handleEvent(event) {
       if (event.data.employeeId === selectedEmployee.value) employeeSession.value = "";
     }
     if (!event.data?.employeeId || event.data.employeeId === selectedEmployee.value) employeeSessionVersion.value++;
-    if (typeof event.data?.activeTasks === "number")
-      activeTaskCount.value = event.data.activeTasks;
+    if (typeof event.data?.activeTasks === "number") {
+      // Keep the sidebar row live: its count and "working" avatar follow task status without a reload.
+      const entry = employees.value.find((e) => e.id === event.data.employeeId);
+      if (entry) Object.assign(entry, { activeTasks: event.data.activeTasks, runningTasks: event.data.runningTasks ?? entry.runningTasks });
+      activeTaskCount.value = employees.value.reduce((count, e) => count + (e.activeTasks || 0), 0);
+    }
     queueEmployeeRefresh();
     return;
   }
@@ -1562,6 +1566,7 @@ onBeforeUnmount(() => {
             :employee="employee"
             :status="employeeStatus"
             :tone="employeeTone"
+            :working="activeTasks.some((task) => task.status === 'running')"
             :tabs="employeeTabs"
             :tab="employeeTab"
             :counts="employeeCounts"

@@ -4,10 +4,10 @@ import UserMessage from "./UserMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { computed, ref } from "vue";
-import { taskLabel, taskTone, shortTime, isInProgress } from "./task-status";
+import { taskLabel, taskTone, shortTime } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
 import { exportResult, exportTitleOf } from "./export-result.js";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean });
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember"]);
 const exportOpen = ref(false), exportError = ref("");
 // Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
@@ -34,14 +34,11 @@ async function runExport(format) {
     exportError.value = error?.message || String(error);
   }
 }
-// While a linked task is actively running, this reply's bot keeps glancing around like the typing avatar.
-// Only live statuses count, so an old snapshot saying "running" never animates forever.
-const working = computed(() => !!props.message.tasks?.some((task) => isInProgress(props.taskStatus?.[task.id])));
 </script>
 <template>
   <article class="chat-message" :class="[message.role, { continued }]" :data-message-seq="message.seq" tabindex="-1">
     <span v-if="message.role !== 'user' && continued" class="chat-avatar spacer" aria-hidden="true"></span>
-    <span v-else-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="MESSAGE_POSE" :from="enterFrom" :animate="working" /></span>
+    <span v-else-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="MESSAGE_POSE" /></span>
     <div class="chat-content">
       <div class="chat-heading">
         <strong v-if="message.role !== 'user' && !continued">{{ name }}</strong>

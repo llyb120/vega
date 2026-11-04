@@ -53,7 +53,7 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
           :title="entry.name + ' · ' + employeeLine(entry)"
           @click="emit('choose', entry.id)"
         >
-          <span class="nav-avatar"><EmployeeAvatar :employee-id="entry.id" :name="entry.name" :avatar="entry.avatar" /><span v-if="employeeTone(entry)" :class="['avatar-dot', employeeTone(entry)]" aria-hidden="true"></span></span>
+          <span class="nav-avatar"><EmployeeAvatar :employee-id="entry.id" :name="entry.name" :avatar="entry.avatar" :animate="!!entry.runningTasks" /><span v-if="employeeTone(entry)" :class="['avatar-dot', employeeTone(entry)]" aria-hidden="true"></span></span>
           <span class="nav-text nav-label"><strong class="truncate">{{ entry.name }}</strong><small :class="employeeTone(entry)">{{ employeeLine(entry) }}</small></span>
           <span v-if="entry.attentionTasks" class="count warn nav-label">{{ entry.attentionTasks }}</span>
           <span v-else-if="entry.activeTasks" class="count nav-label">{{ entry.activeTasks }}</span>

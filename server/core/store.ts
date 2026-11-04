@@ -290,6 +290,11 @@ export class Store {
   async activeTaskCount(employee: string) {
     return Number((await this.one("SELECT count(*) n FROM employee_tasks WHERE employee=? AND active=1", employee))!.n);
   }
+  /** Unfinished tasks whose status is running right now (drives the "working" avatar animation). */
+  async runningTaskCount(employee: string) {
+    const rows = await this.all("SELECT data FROM employee_tasks WHERE employee=? AND active=1", employee);
+    return rows.filter((row: any) => JSON.parse(row.data).status === "running").length;
+  }
   async employeeRuns(employee: string) {
     return (await this.all("SELECT id,data FROM employee_runs WHERE employee=? ORDER BY id", employee)) as { id: number; data: string }[];
   }
