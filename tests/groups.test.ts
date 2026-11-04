@@ -106,9 +106,9 @@ test("an @ starts that member's turn with the group context; members @ each othe
     const group = await engine.groups.create(u1, { name: "发布群", bulletin: "小A 写代码，小B 测试", users: ["u2"], employees: [a] });
     await engine.groups.addEmployee(u2, group.id, b);
     const seen = script(engine, { [a]: ["写好了 @小B 请测一下"], [b]: ["测试通过"] });
-    await engine.groups.send(u1, group.id, { text: "大家好" });
+    await engine.groups.send(u1, group.id, { text: "@bob 大家好" });
     await settle(engine);
-    assert.equal(seen.length, 0, "nobody was @mentioned, nobody answers");
+    assert.equal(seen.length, 0, "no 牛马 was @mentioned (only a user): nobody answers");
     await engine.groups.send(u1, group.id, { text: "@小A 实现登录页" });
     await settle(engine);
     const messages = await groupMessages(engine, group.id);
@@ -127,7 +127,7 @@ test("an @ starts that member's turn with the group context; members @ each othe
     const privateChat = (await (await engine.employee.for(a)).state()).chatSession;
     assert(!privateChat || (await engine.store.messages(privateChat)).length === 0, "the private chat is separate");
     const hidden = (await engine.store.sessions()).filter((s: any) => s.groupId);
-    assert.equal(hidden.length, 4, "the group conversation, one session per member and the 旁白's (大家好 had no @)");
+    assert.equal(hidden.length, 3, "the group conversation plus one session per member");
   } finally { await close(); }
 });
 
@@ -334,7 +334,7 @@ test("unread: one read marker per user and conversation; others' visible message
 test("group avatars open the employee chat for its owner or an admin; unread badges in the sidebar", async () => {
   const { readFile } = await import("node:fs/promises");
   const bubble = await readFile("web/src/ChatMessage.vue", "utf8"), chat = await readFile("web/src/GroupChat.vue", "utf8"), sidebar = await readFile("web/src/AppSidebar.vue", "utf8"), app = await readFile("web/src/App.vue", "utf8");
-  assert.match(bubble, /<button v-else-if="!mine && openAuthor" type="button" class="chat-avatar author-link"[^>]*@click="press\.consumed\(\) \|\| emit\('author', sender\.id\)"/);
+  assert.match(bubble, /<button v-else-if="!mine && openAuthor" type="button" class="chat-avatar author-link"[^>]*@click="emit\('author', sender\.id\)"/);
   assert.match(bubble, /<button v-if="!mine && !continued && openAuthor" type="button" class="author-name" @click="emit\('author', sender\.id\)">/);
   assert.match(chat, /const canOpen = \(author\) => author\?\.kind === "employee" && \(props\.user\?\.role === "admin" \|\| !!group\.value\?\.employees\.find\(\(e\) => e\.id === author\.id\)\?\.mine\);/);
   assert.match(chat, /:open-author="canOpen\(message\.author\)"/);
@@ -427,13 +427,14 @@ test("旁白: a user message without @ goes to the member it is for; @ bypasses 
     await engine.groups.send(u1, group.id, { text: "@默认牛马A 看下" });
     await settle(engine);
     assert.deepEqual([narrated.length, direct.length], [0, 1]);
-    // An @ of a user is explicit too; casual chat routes to nobody (silently).
-    script(engine, { narrator: [{ targets: [], reason: "闲聊" }] });
+    // An @ of a user is explicit too. No choice is never nobody: the 牛马 that spoke last answers.
+    script(engine, { narrator: [{ targets: [], reason: "闲聊" }], [a]: ["不客气"] });
     await engine.groups.send(u1, group.id, { text: "@alice 你看看" });
     await engine.groups.send(u1, group.id, { text: "大家辛苦了" });
     await settle(engine);
     assert.equal(narrated.length, 1, "only the message without any @ is judged");
-    assert(!(await groupMessages(engine, group.id)).slice(-2).some((m) => m.notice), "nobody chosen: no notice");
+    const thanked = (await groupMessages(engine, group.id)).at(-1)!;
+    assert.deepEqual([thanked.author?.name, thanked.text], ["默认牛马A", "不客气"], "the last speaker answers when the 旁白 picks nobody");
     // A failing model leaves a short notice.
     script(engine, { narrator: [Error("model down")] });
     await engine.groups.send(u1, group.id, { text: "这个谁来看" });
@@ -449,7 +450,7 @@ test("旁白 session: append-only per group (cache-friendly); setup change or to
   try {
     const a = await make("小A", "u1"), b = await make("小B", "u1");
     const group = await engine.groups.create(u1, { name: "旁白会话", bulletin: "小A 写代码，小B 测试", employees: [a, b] });
-    script(engine, { narrator: [{ targets: ["小A"], reason: "写代码" }, { targets: [], reason: "闲聊" }, { targets: [], reason: "闲聊" }, { targets: [], reason: "闲聊" }, { targets: [], reason: "闲聊" }], [a]: ["写好了"] });
+    script(engine, { narrator: [{ targets: ["小A"], reason: "写代码" }, { targets: [], reason: "闲聊" }, { targets: [], reason: "闲聊" }, { targets: [], reason: "闲聊" }, { targets: [], reason: "闲聊" }], [a]: ["写好了", "嗯", "嗯", "嗯", "嗯"] });
     await engine.groups.send(u1, group.id, { text: "写个登录页" });
     await settle(engine);
     await engine.groups.send(u1, group.id, { text: "辛苦" });
@@ -471,7 +472,7 @@ test("旁白 session: append-only per group (cache-friendly); setup change or to
     assert(!await engine.store.hasSession(first.session), "the old session is gone");
     assert.equal(narrated[2].messages.length, 1, "a fresh session starts with one message");
     assert.equal(narrated[2].setup.群公告, "小B 也写代码");
-    assert.match(narrated[2].last, /\[此前的群消息\][\s\S]*辛苦\n\[新消息\]/, "it carries the last few messages");
+    assert.match(narrated[2].last, /\[此前的群消息\][\s\S]*辛苦[\s\S]*\n\[新消息\]/, "it carries the last few messages");
     // Too long: the next judgement starts over with only the last NARRATOR.carry messages.
     NARRATOR.tokens = 1; NARRATOR.carry = 2;
     await engine.groups.send(u1, group.id, { text: "再问一下" });
@@ -517,7 +518,7 @@ test("/new in a group: 旁白 and member sessions start over; members then see o
   try {
     const a = await make("小A", "u1");
     const group = await engine.groups.create(u1, { name: "重开", users: ["u2"], employees: [a] });
-    const seen = script(engine, { narrator: [{ targets: [], reason: "闲聊" }, { targets: ["小A"], reason: "点名" }], [a]: ["旧", "新"] });
+    const seen = script(engine, { narrator: [{ targets: [], reason: "闲聊" }, { targets: ["小A"], reason: "点名" }], [a]: ["旧", "旧闻", "新"] });
     await engine.groups.send(u1, group.id, { text: "旧话题 @小A" });
     await settle(engine);
     await engine.groups.send(u1, group.id, { text: "聊聊旧事" });
@@ -530,7 +531,7 @@ test("/new in a group: 旁白 and member sessions start over; members then see o
     const after = (await engine.groups.get(group.id))!;
     assert.deepEqual([after.memberSessions, after.narrator], [{}, undefined]);
     for (const id of oldSessions) assert(!await engine.store.hasSession(id), "old sessions deleted");
-    assert.deepEqual([narrated.length, seen.length], [1, 1], "the divider is not judged and wakes nobody");
+    assert.deepEqual([narrated.length, seen.length], [1, 2], "the divider is not judged and wakes nobody");
     const divider = (await groupMessages(engine, group.id)).at(-1)!;
     assert.deepEqual([divider.notice, divider.newSession, divider.text], [true, true, NEW_SESSION_NOTICE]);
     // /new <text>: the text follows in the new context; the 旁白 starts fresh with nothing carried over.
@@ -566,7 +567,7 @@ test("旁白 (reported: 「牛马们 起床啦」 got no reply): greetings go to
     const a = await make("默认牛马A", "u1"), b = await make("测试牛马", "u1");
     const group = await engine.groups.create(u1, { name: "牛马小分队", employees: [a, b] });
     assert.match(NARRATOR_SYSTEM, /打招呼、喊大家（如「起床啦」「有人吗」）[\s\S]*交给最合适的一个牛马/);
-    assert.match(NARRATOR_SYSTEM, /只有消息明确是说给群里的人（用户）听的，targets 才为空/);
+    assert.match(NARRATOR_SYSTEM, /每条消息至少交给一个牛马，不要没人理/);
     // The model follows the prompt for a greeting; a model answering in text instead of calling the tool is not silence.
     const seen = script(engine, { narrator: [{ targets: ["默认牛马A"], reason: "打招呼，交给默认牛马" }, { text: "没有人需要回应" }], [a]: ["早！我在"] });
     await engine.groups.send(u1, group.id, { text: "牛马们 起床啦" });

@@ -43,6 +43,8 @@ export const GROUP_NAME_MAX = 40, GROUP_BULLETIN_MAX = 4000, GROUP_USERS_MAX = 2
 /** The 工作面板 lists every open task and this many recent ended ones per member. */
 export const GROUP_TASKS_ENDED = 20;
 export const GROUP_HOPS_MAX = 6;
+/** A judgement (model call included, 30 s) that has not finished by then is reported as failed. */
+export const NARRATOR_TIMEOUT_MS = 60000;
 /** Group messages an employee is shown per turn (only those since its previous turn). */
 const CONTEXT_MESSAGES = 20, CONTEXT_CHARS = 1500;
 const KIND = "group";
@@ -438,11 +440,13 @@ export class Groups {
   /** 旁白: route a user message without @ to the members it is for (as if they were mentioned), or to nobody. */
   private async route(group: Group, people: Person[], message: Message) {
     const employees = people.filter((p) => p.kind === "employee");
-    if (!employees.length) return;
+    if (!employees.length) { console.info(`[Vega] 旁白 ${group.id} #${message.seq}：群里没有牛马，跳过`); return; }
     // One judgement at a time per group, so its session stays append-only and in message order.
     const previous = this.narrating.get(group.id) || Promise.resolve();
     // Any failure is visible: a log line and a one-line group notice.
-    const next = previous.then(() => this.judge(group.id, employees, message)).catch(async (error: any) => {
+    // Bounded, so one stuck judgement cannot hold up every later message in this group.
+    const bounded = () => Promise.race([this.judge(group.id, employees, message), new Promise((_, no) => setTimeout(() => no(Error("旁白超时")), NARRATOR_TIMEOUT_MS).unref?.())]);
+    const next = previous.then(bounded).catch(async (error: any) => {
       console.warn(`[Vega] 旁白 ${group.id} #${message.seq} 失败：${String(error?.stack || error)}`);
       await this.notice(group.id, `旁白没能判断这条消息该交给谁（${cut(String(error?.message || error), 120)}），需要牛马回应请直接 @ 它。`);
     });
@@ -487,11 +491,18 @@ export class Groups {
     });
     if (replaced) await this.dropSession(replaced);
     if (opened && opened !== result.session) await this.dropSession(opened);
-    const chosen = employees.filter((p) => result.targets.some((t) => t.id === p.id));
+    // Never nobody: without a (valid) choice, the member who spoke last since the divider, else the first member.
+    let chosen = employees.filter((p) => result.targets.some((t) => t.id === p.id)), fallback = "";
+    if (!chosen.length) {
+      const spoke = (await this.store.messagePage(group.session, { before: message.seq, limit: 30 })).messages
+        .filter((m) => m.seq! > floor && m.author?.kind === "employee").map((m) => m.author!.id);
+      chosen = [employees.find((p) => p.id === spoke.at(-1)) || employees[0]];
+      fallback = "（旁白没选人，按最近发言或成员顺序）";
+    }
     // The 旁白 only judges: nothing goes into the group; the decision is in its own session (and this log line).
-    console.info(`[Vega] 旁白 ${group.id} #${message.seq} → ${chosen.map((p) => p.name).join("、") || "（不交给牛马）"}${result.reason ? `（${result.reason}）` : ""}`);
+    console.info(`[Vega] 旁白 ${group.id} #${message.seq} → ${chosen.map((p) => p.name).join("、")}${fallback}${result.reason ? `（${result.reason}）` : ""}`);
     for (const member of chosen) {
-      try { await this.turn(group, member, message, result.reason || "按群公告和职责判断"); }
+      try { await this.turn(group, member, message, fallback ? "没有明确归属，由你先回应" : result.reason || "按群公告和职责判断"); }
       catch (error: any) { if (!error?.groupReported) await this.notice(group.id, `牛马「${member.name}」没能开始回复：${String(error?.message || error)}`); }
     }
   }
