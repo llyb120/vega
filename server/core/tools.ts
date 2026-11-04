@@ -521,7 +521,15 @@ export class Tools {
     return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? taskLink(result.value.id) : undefined };
   }
   private async chrome(a: Obj): Promise<Outcome> {
-    const browser = await this.engine.chromeFor(this.session, this.signal);
+    const employeeId = !this.session.localAgent && (this.session.employeeId || this.session.taskId) ? this.engine.employeeFor(this.session).employeeId : "";
+    let browser: Awaited<ReturnType<Engine["chromeFor"]>>;
+    try { browser = await this.engine.chromeFor(this.session, this.signal); }
+    catch (error) {
+      // chrome_connection reports why the private browser cannot start instead of failing opaquely.
+      const failure = employeeId && a.operation === "status" ? this.engine.browsers.failure(employeeId) : undefined;
+      if (!failure) throw error;
+      return { value: { connected: false, privateBrowser: "start_failed", ...failure } };
+    }
     const result = await browser.execute(
       this.session.id,
       this.session.cwd,

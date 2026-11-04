@@ -6,10 +6,14 @@ import { ChromeBridge } from "./chrome-bridge";
 import { HeadlessBrowser } from "./headless";
 import { assert, sleep } from "./util";
 
+type StartFailure = { count: number; error: string; at: number; retryAt: number };
+
 // One persistent profile and private, authenticated bridge per employee.
 export class EmployeeBrowsers {
-  entries = new Map<string, { chrome: Chrome; browser: HeadlessBrowser; starting?: Promise<Chrome>; stopping?: boolean; probedAt?: number }>();
+  entries = new Map<string, { chrome: Chrome; browser: HeadlessBrowser; starting?: Promise<Chrome>; stopping?: boolean; probedAt?: number; failure?: StartFailure }>();
   static PROBE_TTL_MS = 3000;
+  // After the 2nd consecutive failed launch, wait before respawning so each chrome_* call does not relaunch a dying Chromium.
+  static BACKOFF_MS = [5000, 15000, 60000];
   closed = false;
   removed = new Set<string>();
   constructor(public store: Store, public pageScript: string) {}
@@ -18,6 +22,11 @@ export class EmployeeBrowsers {
     return join(dirname(resolve(process.env.VEGA_DB || "vega.db")), "employee-browsers", id);
   }
   peek(id: string) { return this.entries.get(id)?.chrome; }
+  /** Last failed private-browser launch (cleared on success), for chrome_connection status. */
+  failure(id: string) {
+    const failure = this.entries.get(id)?.failure;
+    return failure && { error: failure.error, failures: failure.count, at: new Date(failure.at).toISOString(), retryAfterSeconds: Math.max(0, Math.ceil((failure.retryAt - Date.now()) / 1000)) };
+  }
   async get(id: string): Promise<Chrome> {
     assert(!this.closed && !this.removed.has(id), "Browser manager stopped or employee deleted");
     let entry = this.entries.get(id);
@@ -40,14 +49,28 @@ export class EmployeeBrowsers {
     const current = entry;
     current.starting = (async () => {
       if (!current.browser.child) {
+        const failure = current.failure;
+        if (failure && failure.retryAt > Date.now())
+          throw Error(`${failure.error}；已连续失败 ${failure.count} 次，${Math.ceil((failure.retryAt - Date.now()) / 1000)} 秒后才会再次尝试启动`);
         current.chrome.observations.clear();
         current.chrome.bridge.close();
         current.probedAt = undefined;
         assert(!this.closed && !current.stopping, "Browser manager stopped");
-        await current.chrome.bridge.start();
-        await current.browser.start(process.env.VEGA_DB || "vega.db", {
-          profile: this.profile(id), port: current.chrome.bridge.port, token: current.chrome.bridge.token,
-        });
+        try {
+          await current.chrome.bridge.start();
+          await current.browser.start(process.env.VEGA_DB || "vega.db", {
+            profile: this.profile(id), port: current.chrome.bridge.port, token: current.chrome.bridge.token,
+          });
+        } catch (error) {
+          if (this.closed || current.stopping) throw error;
+          const message = error instanceof Error ? error.message : String(error);
+          const count = (failure?.count || 0) + 1, delays = EmployeeBrowsers.BACKOFF_MS;
+          const wait = count < 2 ? 0 : delays[Math.min(count - 2, delays.length - 1)];
+          current.failure = { count, at: Date.now(), retryAt: Date.now() + wait,
+            error: message.startsWith("牛马浏览器") ? message : "牛马浏览器启动失败：" + message };
+          throw Error(current.failure.error + (wait ? `；已连续失败 ${count} 次，${wait / 1000} 秒后才会再次尝试启动` : ""));
+        }
+        current.failure = undefined;
       }
       const deadline = Date.now() + 30000;
       let failure = "扩展未连接";
@@ -80,6 +103,7 @@ export class EmployeeBrowsers {
     entry.chrome.bridge.close();
     entry.chrome.observations.clear();
     entry.probedAt = undefined;
+    entry.failure = undefined;
     entry.stopping = false;
   }
   async remove(id: string) {
