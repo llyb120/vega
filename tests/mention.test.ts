@@ -44,7 +44,7 @@ test("@名称 of known employees render as links; emails, code and unknown names
   const { renderMarkdown } = await import("../web/src/markdown.js");
   const people = [{ id: "e1", name: "测试牛马" }, { id: "e2", name: "测试" }, { id: "e3", name: "a.b" }];
   const { html } = renderMarkdown("转交给 @测试牛马处理，问 @测试 和 @a.b；邮件 x@测试 `@测试牛马` @路人", { mentions: people });
-  assert.match(html, /<a class="mention" href="\/employees\/e1" data-employee="e1">@测试牛马<\/a>处理/);
+  assert.match(html, /<a class="mention" href="#\/employees\/e1" data-employee="e1">@测试牛马<\/a>处理/);
   assert.match(html, /data-employee="e2">@测试<\/a> 和/);
   assert.match(html, /data-employee="e3">@a\.b<\/a>/);
   assert.match(html, /x@测试 /);
@@ -57,7 +57,7 @@ test("group mentions: own employees link to their chat, users and other people's
   const { renderMarkdown } = await import("../web/src/markdown.js");
   const group = { creatorId: "u1", users: [{ id: "u1", name: "alice" }, { id: "u2", name: "bob" }], employees: [{ id: "e1", name: "小A", mine: true }, { id: "e2", name: "小B", mine: false, ownerName: "bob" }] };
   const { html } = renderMarkdown("@小A 写代码，@小B 测试，@bob 看一下", { mentions: groupMentionPeople(group) });
-  assert.match(html, /<a class="mention" href="\/employees\/e1" data-employee="e1">@小A<\/a>/);
+  assert.match(html, /<a class="mention" href="#\/employees\/e1" data-employee="e1">@小A<\/a>/);
   assert.match(html, /<span class="mention">@小B<\/span>/);
   assert.match(html, /<span class="mention">@bob<\/span>/);
   // The picker lists employees first, then the other users (the writer excluded).

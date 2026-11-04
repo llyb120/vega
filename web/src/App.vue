@@ -26,7 +26,7 @@ import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 import { useUnread } from "./unread.js";
-import { ADMIN_PAGES, parseRoute, formatRoute } from "./router.js";
+import { ADMIN_PAGES, parseRoute, formatRoute, locationPath, canonicalPath } from "./router.js";
 import {
   computed,
   nextTick,
@@ -637,7 +637,7 @@ async function enter(result) {
   startLocalPairing();
   if (isAdmin.value) startPresence();
   // Open the page in the address bar: an employee link is checked against the visible list by loadEmployee.
-  const route = parseRoute(window.location.href);
+  const route = parseRoute(locationPath(window.location));
   routeReady = false;
   if (route.employee) selectedEmployee.value = route.employee;
   await Promise.all([loadModels(), refreshEmployee()]);
@@ -743,7 +743,7 @@ async function logout() {
   }
 }
 onMounted(() => {
-  window.addEventListener("popstate", routeChanged);
+  window.addEventListener("hashchange", routeChanged);
   void checkAuth();
 });
 async function checkAuth(delay = 1000) {
@@ -762,7 +762,7 @@ async function checkAuth(delay = 1000) {
     setTimeout(() => checkAuth(Math.min(delay * 2, 10000)), delay);
   }
 }
-onBeforeUnmount(() => window.removeEventListener("popstate", routeChanged));
+onBeforeUnmount(() => window.removeEventListener("hashchange", routeChanged));
 async function selectSession(session) {
   if (session.taskId) {
     openEmployee(session.id);
@@ -1424,7 +1424,8 @@ onBeforeUnmount(() => {
   localBridge?.close();
 });
 // 路由: the address bar mirrors the open page and its tab (router.js); refresh, links and back/forward restore it.
-// User navigation pushes; restoring a route and falling back from unknown or forbidden ids replace.
+// User navigation pushes (assigning location.hash); restoring a route, falling back from unknown or forbidden ids and
+// rewriting old path links replace (history.replaceState: no event, no reload).
 // Each page (each group) remembers its own tab for this visit, so returning to it lands on the same tab.
 const pageTabs = ref({});
 const pageKey = computed(() => view.value === "group" ? "group:" + selectedGroup.value : view.value);
@@ -1437,7 +1438,9 @@ const routePath = computed(() => user.value ? formatRoute({
 let routeReady = false, routing = 0;
 function syncRoute(replace) {
   const path = routePath.value;
-  if (routeReady && path && path !== window.location.pathname + window.location.search) window.history[replace ? "replaceState" : "pushState"](null, "", path);
+  if (!routeReady || !path || path === canonicalPath(window.location)) return;
+  if (replace || canonicalPath(window.location) === null) window.history.replaceState(null, "", "/#" + path);
+  else window.location.hash = path;
 }
 watch(routePath, () => syncRoute(routing > 0));
 async function applyRoute(route) {
@@ -1468,8 +1471,10 @@ async function applyRoute(route) {
     routing--;
   }
 }
+/** Back/forward or an edited hash; our own writes already match routePath and are ignored. */
 function routeChanged() {
-  if (user.value && routeReady) void applyRoute(parseRoute(window.location.href));
+  const path = locationPath(window.location);
+  if (user.value && routeReady && path !== routePath.value) void applyRoute(parseRoute(path));
 }
 // Last, once all the state it reads exists.
 const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, employeeTab, selectedEmployee, employees, employee, groups, background }));
