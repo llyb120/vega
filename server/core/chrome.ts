@@ -796,8 +796,8 @@ export class Chrome {
     const changed = () => { signal.throwIfAborted(); progress.attempted = true; };
     if (kind === "wait") {
       assert(
-        Number.isInteger(a.ms) && a.ms >= 0 && a.ms <= 2000,
-        "wait is 0–2000ms",
+        Number.isInteger(a.ms) && a.ms >= 0 && a.ms <= 10000,
+        "wait is 0–10000ms",
       );
       await sleep(a.ms, signal);
       return;

@@ -669,8 +669,8 @@
                   "milliseconds": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 2000,
-                    "description": "等待毫秒数 0–2000，默认 250"
+                    "maximum": 10000,
+                    "description": "等待毫秒数 0–10000，默认 250。只在确知页面需要时间（动画、倒计时、延迟出现的内容）时等，按需取最短；不要为保险空等或反复等，页面加载用 settleMs"
                   }
                 },
                 "required": [

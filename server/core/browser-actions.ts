@@ -86,8 +86,8 @@ export function normalizeAction(raw: Obj) {
   if (kind === "wait") {
     a.ms ??= 250;
     assert(
-      Number.isInteger(a.ms) && a.ms >= 0 && a.ms <= 2000,
-      "wait must be0–2000ms",
+      Number.isInteger(a.ms) && a.ms >= 0 && a.ms <= 10000,
+      "wait must be 0–10000ms",
     );
   }
   if (["scroll", "scroll_at"].includes(kind))
