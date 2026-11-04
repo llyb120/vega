@@ -654,3 +654,45 @@ test("live controls reject stale frames, changed focus, arbitrary scripts and du
   assert(other.closed.length);
   assert.equal(next.calls.filter((c) => c.method === "key").length, 1);
 });
+test("a still page sends its picture once, then tiny same-picture frames at 2 fps; a change or a resend request sends it again", async () => {
+  const f = await fixture(), s = await f.open();
+  const first = await s.wait("frame");
+  assert(first.data, "the first frame carries the picture");
+  await s.wait("frame", (m) => m.frameId > first.frameId);
+  const repeat = s.messages.filter((m) => m.type === "frame").slice(1);
+  assert(repeat.length >= 1 && repeat.every((m) => m.same === true && m.data === undefined), "unchanged frames carry no image");
+  assert(repeat.every((m) => m.width === first.width && m.height === first.height && m.url === first.url));
+  const session = f.hub.sessions.get(s.socket.id)!;
+  session.lastChange = session.lastInput = Date.now() - 5000;
+  const before = s.messages.filter((m) => m.type === "frame").length;
+  await sleep(1100);
+  const idleFrames = s.messages.filter((m) => m.type === "frame").length - before;
+  assert(idleFrames >= 1 && idleFrames <= 3, `idle page sampled ${idleFrames} times in 1.1s`);
+  const bytesPerFrame = JSON.stringify(s.messages.filter((m) => m.type === "frame").at(-1)).length;
+  console.log(`full frame ${JSON.stringify(first).length} B; unchanged frame ${bytesPerFrame} B`);
+  const changed = await sharp({ create: { width: 1000, height: 600, channels: 3, background: "#ff0000" } }).jpeg().toBuffer();
+  const cdp = f.chrome.cdp.bind(f.chrome);
+  f.chrome.cdp = async (...args: Parameters<Chrome["cdp"]>) =>
+    args[1] === "Page.captureScreenshot" ? { data: changed.toString("base64") } : cdp(...args);
+  const mark = s.messages.length;
+  const full = await s.wait("frame", (m) => s.messages.indexOf(m) >= mark && !!m.data);
+  assert(full.data && !full.same, "a changed screen sends the new picture");
+  const latest = () => s.messages.filter((m) => m.type === "frame").at(-1)!;
+  for (let i = 0; i < 100 && !latest().same; i++) await sleep(10);
+  s.message({ type: "frame_ack", frameId: latest().frameId, resend: true });
+  const mark2 = s.messages.length;
+  const resent = await s.wait("frame", (m) => s.messages.indexOf(m) >= mark2 && !!m.data);
+  assert(resent.data, "a viewer that lost its picture gets it again");
+});
+test("input brings the stream back to 10 fps immediately", async () => {
+  const f = await fixture(), s = await f.open();
+  await s.wait("frame");
+  const session = f.hub.sessions.get(s.socket.id)!;
+  session.lastChange = session.lastInput = Date.now() - 5000;
+  assert.equal(session.interval(), 500);
+  s.message({ type: "mode", mode: "control" });
+  await s.wait("mode", (m) => m.mode === "control");
+  s.message({ type: "input", seq: 1, frameId: s.frame().frameId, action: { action: "type", text: "x" } });
+  await s.wait("input_result");
+  assert.equal(session.interval(), 100);
+});

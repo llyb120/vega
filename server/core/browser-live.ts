@@ -22,6 +22,9 @@ const stateExpression =
 
 // shortcut: JPEG snapshot stream (at most 10 fps); use screencast/WebRTC for video-grade motion.
 // Frames are ephemeral and acknowledged one at a time; video must never fill SQLite or an input queue.
+// An unchanged screen is sent as a tiny "same" frame (fresh state, no image), and a page that has been still
+// for a while with no input is sampled at 2 fps instead of 10.
+const ACTIVE_MS = 100, IDLE_MS = 500, IDLE_AFTER = 2000;
 export class BrowserLive {
   tickets = new Map<string, Ticket>();
   sessions = new Map<string, LiveSession>();
@@ -144,6 +147,10 @@ class LiveSession {
   inputPending = false;
   lastMessage = Date.now();
   lastInput = Date.now();
+  lastChange = Date.now();
+  lastCapture = -Infinity;
+  lastShot = "";
+  lastSize?: { width: number; height: number };
   mouse?: { x: number; y: number; button: string; frame: Frame; seq: number };
   constructor(
     public hub: BrowserLive,
@@ -175,9 +182,10 @@ class LiveSession {
             Date.now() - this.pendingFrame.at < 10000,
             "画面传输超时，请重新连接",
           );
-        } else if (!this.stopping && (!this.wantsControl || this.locked)) {
+        } else if (!this.stopping && (!this.wantsControl || this.locked) && performance.now() - this.lastCapture >= this.interval()) {
           const capture = () => this.io.run(async () => {
             if (this.inputPending || this.pointerTask) return;
+            this.lastCapture = performance.now(); // monotonic: pacing must not depend on wall-clock jumps
             try {
               await this.capture();
               captureFailedAt = 0;
@@ -196,12 +204,16 @@ class LiveSession {
               if (this.active && !this.wantsControl) await capture();
             });
         }
-        await sleep(100);
+        await sleep(ACTIVE_MS);
       }
     } catch (e: any) {
       this.send({ type: "error", reason: e.message });
       await this.close(1011, "实时浏览器连接已停止");
     }
+  }
+  interval() {
+    const now = Date.now();
+    return now - this.lastChange > IDLE_AFTER && now - this.lastInput > IDLE_AFTER ? IDLE_MS : ACTIVE_MS;
   }
   async pageState() {
     const chrome = this.hub.chrome;
@@ -253,23 +265,32 @@ class LiveSession {
     const after = await this.pageState();
     if (before.stamp !== after.stamp || before.document !== after.document)
       return;
-    const { data, info } = await sharp(Buffer.from(shot.data, "base64"), {
-      limitInputPixels: 64000000,
-    })
-      .resize({
-        width: 1568,
-        height: 1200,
-        fit: "inside",
-        withoutEnlargement: true,
+    // Identical capture bytes mean an identical picture: skip the re-encode and the image payload.
+    const same = shot.data === this.lastShot && !!this.lastSize;
+    let data: Buffer | undefined;
+    if (!same) {
+      const out = await sharp(Buffer.from(shot.data, "base64"), {
+        limitInputPixels: 64000000,
       })
-      .jpeg({ quality: 70 })
-      .toBuffer({ resolveWithObject: true });
+        .resize({
+          width: 1568,
+          height: 1200,
+          fit: "inside",
+          withoutEnlargement: true,
+        })
+        .jpeg({ quality: 70 })
+        .toBuffer({ resolveWithObject: true });
+      data = out.data;
+      this.lastShot = shot.data;
+      this.lastSize = { width: out.info.width, height: out.info.height };
+      this.lastChange = Date.now();
+    }
     if (!this.active) return;
     const frame: Frame = {
       id: ++this.frameNumber,
       at: Date.now(),
-      width: info.width,
-      height: info.height,
+      width: this.lastSize!.width,
+      height: this.lastSize!.height,
       state: after,
       observation: this.observation!,
     };
@@ -285,7 +306,7 @@ class LiveSession {
       editable: after.focus.editable,
       width: frame.width,
       height: frame.height,
-      data: data.toString("base64"),
+      ...(data ? { data: data.toString("base64") } : { same: true }),
     });
   }
   message(message: Obj) {
@@ -300,6 +321,8 @@ class LiveSession {
       return;
     }
     if (message.type === "frame_ack") {
+      // The viewer could not show its last image; the next frame carries a full picture again.
+      if (message.resend === true) this.lastShot = "";
       if (this.pendingFrame && this.pendingFrame.id === message.frameId) {
         this.presented = this.pendingFrame;
         this.acknowledged.set(this.presented.id, this.presented);
