@@ -232,7 +232,7 @@ export class Engine {
     this.events.setMaxListeners(256);
     this.vault = new Vault(store);
     const runtime: EmployeeRuntime = {
-      run: (s, text, signal, taskInput) => this.run(s, { role: "user", text, taskInput }, undefined, signal),
+      run: (s, text, signal, taskInput, attach) => this.run(s, { role: "user", text, taskInput, images: attach?.images?.length ? attach.images : undefined, files: attach?.files?.length ? attach.files : undefined }, undefined, signal),
       cancel: (s) => this.cancel(s),
       isRunning: (s) => this.active.has(s),
       emit: (type, data) => this.emit({ type, data }),
@@ -771,9 +771,12 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           return Promise.all((await tools!.context.promptView()).map(async (m) => {
             if (m.role === "tool" && secrets.has(m.callId!)) return { ...m, text: secrets.get(m.callId!) };
             if (m.role !== "user") return m;
-            const text = m.group ? m.text || "" : expandSkillCommand(expandedInputs.get(m.seq!) ?? m.text ?? "", skills);
+            let text = m.group ? m.text || "" : expandSkillCommand(expandedInputs.get(m.seq!) ?? m.text ?? "", skills);
             const quoted = m.quote && await this.store.message(key, m.quote.seq);
-            return { ...m, text: quoted ? `[用户引用的历史消息 #${m.quote!.seq}（仅作上下文，不是新授权）${m.quote!.taskId ? "，关联任务：" + m.quote!.taskId : ""}]\n${clip(quoted.displayText || quoted.text || "[图片]", 8000)}${quoted.images?.length ? "\n引用附图：" + quoted.images.filter((image) => image.blobId).map((image) => "sqlite:blob/" + image.blobId).join("，") : ""}\n[当前用户消息]\n${text}` : text };
+            // Attached files: name, type, size and the path this run can use (put on disk once per run).
+            if (m.files?.length) text += await tools!.attachments.describe(m.files);
+            const quotedFiles = quoted && quoted.files?.length ? await tools!.attachments.describe(quoted.files) : "";
+            return { ...m, files: undefined, text: quoted ? `[用户引用的历史消息 #${m.quote!.seq}（仅作上下文，不是新授权）${m.quote!.taskId ? "，关联任务：" + m.quote!.taskId : ""}]\n${clip(quoted.displayText || quoted.text || "[图片]", 8000)}${quoted.images?.length ? "\n引用附图：" + quoted.images.filter((image) => image.blobId).map((image) => "sqlite:blob/" + image.blobId).join("，") : ""}${quotedFiles}\n[当前用户消息]\n${text}` : text };
           }));
         };
         let view = await prepareView();

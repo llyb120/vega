@@ -21,6 +21,7 @@ import { credentialValues, vaultSite, type CredentialBinding } from "./credentia
 import { verifyVaultUse } from "./vault-use";
 import { VAULT_USAGE } from "./vault";
 import { KeyFiles, gitSshCommand, keyDir } from "./key-files";
+import { AttachmentFiles } from "./attachments";
 import { isDeepStrictEqual } from "node:util";
 import { sceneModels, maskedConfig, mergeSecrets } from "./config";
 import { omitPlaceholders } from "./tool-args";
@@ -71,6 +72,8 @@ export class Tools {
   actorId?: string;
   private credentials: CredentialBinding[] = [];
   private keys: KeyFiles;
+  /** Message attachments put on disk for this run (see attachments.ts). */
+  attachments: AttachmentFiles;
   private browserTab?: string;
   sceneStack: string[] = [];
   static async create(engine: Engine, session: Session, config: Config, signal: AbortSignal, emit: (type: string, data: any) => void) {
@@ -87,6 +90,8 @@ export class Tools {
     public mcp: MCP,
   ) {
     this.keys = new KeyFiles(keyDir(engine.store.files.root), engine.localAgents);
+    // Employee chats have no shell: their files stay on the server, readable with `read`.
+    this.attachments = new AttachmentFiles(engine.store, engine.localAgents, () => this.session, () => this.agent(), signal, !(session.employeeId && !session.taskId));
   }
   /**
    * In a group chat, a message from anyone but the employee's owner (another user or another employee) is a guest
@@ -133,7 +138,7 @@ export class Tools {
     const defs: Tool[] = [
       schema(
         "read",
-        "Read numbered lines using 1-based offset/limit; images return their pixels. Archived results (Chrome documentPath and images[].path, archivePath of oversized results, paths named in omitted-from-context notices) read from the server even in client sessions; JSON archives read as numbered pretty-JSON lines, lines over 2000 chars wrapped onto the next numbers, about 12KiB per call: continue from nextOffset while hasMore. Read an old screenshot only when it is really needed (e.g. as evidence or for comparison); for the current page take a new one.",
+        "Read numbered lines using 1-based offset/limit; images return their pixels. Archived results (Chrome documentPath and images[].path, archivePath of oversized results, paths named in omitted-from-context notices) and the server paths of message attachments ([附件文件]) read from the server even in client sessions; binary attachments cannot be read as text; JSON archives read as numbered pretty-JSON lines, lines over 2000 chars wrapped onto the next numbers, about 12KiB per call: continue from nextOffset while hasMore. Read an old screenshot only when it is really needed (e.g. as evidence or for comparison); for the current page take a new one.",
         { path: string, offset: positive, limit: positive },
         ["path"],
       ),
@@ -523,6 +528,12 @@ export class Tools {
               if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
               // Work started from a group message reports back to that group (Employee.toChat), as asked by its sender.
               if (source.group && (replace || !task.group)) task.group = { groupId: source.group.groupId, name: source.group.name, hop: source.hop || 0, requester: source.group.from, byOwner: source.group.byOwner };
+              // The message's images and files go with the work (its next run receives the ones it has not seen).
+              const images = (source.images || []).filter((x) => x.blobId), files = source.files || [];
+              if (images.length || files.length) {
+                const known = task.attachments || { images: [], files: [] }, seen = new Set([...known.images, ...known.files].map((x: { blobId?: string }) => x.blobId));
+                task.attachments = { images: [...known.images, ...images.filter((x) => !seen.has(x.blobId)).map(({ mime, blobId }) => ({ mime, blobId }))], files: [...known.files, ...files.filter((x) => !seen.has(x.blobId))] };
+              }
             });
       const task = employee.task(await employee.state(), id);
       return { id, title: task.text.slice(0, 80), status: task.status };
@@ -675,18 +686,21 @@ export class Tools {
       };
     }
     const files = this.engine.store.files;
+    let attachment: string | undefined;
     if (files.own(a.path)) {
       // Archived screenshots, DOM records and tool results: only this employee's (or user's) own, on the server.
       const path = files.readable(this.session, a.path), mime = files.mime(path);
       let data: Buffer;
       try { data = await files.read(path); } catch { throw Error("存档文件不存在（可能已随重置或清空聊天删除）：" + a.path); }
       if (mime) return { value: { path, url: files.url(path) }, images: [{ mime, path, url: files.url(path) }] };
+      // An attached file (server copy) reads like any server file below.
+      if (files.attachment(path)) attachment = path;
       // Paged like a text file so records larger than one tool result stay fully readable.
-      return { value: { path, ...archiveSlice(JSON.parse(data.toString("utf8")), a.offset, a.limit) } };
+      else return { value: { path, ...archiveSlice(JSON.parse(data.toString("utf8")), a.offset, a.limit) } };
     }
-    const agent = serverOnly ? undefined : this.agent(),
+    const agent = serverOnly || attachment ? undefined : this.agent(),
       local = agent ? await localRead(this.engine.localAgents, agent, this.session.cwd, a.path, this.signal) : undefined,
-      path = local?.path || await readPath(this.session.cwd, a.path),
+      path = attachment || local?.path || await readPath(this.session.cwd, a.path),
       st = local ? { size: local.data.length, isFile: () => true } : await stat(path);
     assert(st.isFile(), "Regular file required");
     const extension = extname(path).toLowerCase();

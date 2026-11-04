@@ -54,6 +54,8 @@ export class Files {
     return full;
   }
   read(path: string) { return readFile(path); }
+  /** A message attachment saved for a run (attachments.ts): read like an ordinary file, not as an archive record. */
+  attachment(path: string) { return relative(this.root, path).split(sep).includes("attachments"); }
   mime(path: string) { return IMAGE_TYPES[extname(path).toLowerCase()]; }
   async remove(dir: string) {
     assert(this.inside(dir, this.root), "Invalid file directory");

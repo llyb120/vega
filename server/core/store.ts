@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Db, Sqlite, type Dialect } from "./db";
 import { Files } from "./files";
+import type { FileRef } from "./attachments";
 import { assert, id } from "./util";
 export type Part = { type: string; [key: string]: any };
 export type Message = {
@@ -37,6 +38,8 @@ export type Message = {
   name?: string;
   /** blobId: attachments and normal tool images in SQLite; path/url: a Chrome screenshot file (see Files). */
   images?: { mime: string; data?: string; blobId?: string; path?: string; url?: string }[];
+  /** Attached non-image files (stored as blobs; see attachments.ts for how a run gets them on disk). */
+  files?: FileRef[];
   error?: boolean;
   model?: string;
   usage?: any;

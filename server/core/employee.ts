@@ -26,6 +26,8 @@ export type Task = Obj & {
   owner: Owner;
   /** Set when the task was started from a group chat (groups.ts): where its notices go and who asked for it. */
   group?: TaskGroup;
+  /** Images and files of the messages that started or supplemented the task; each run passes on the new ones. */
+  attachments?: { images: NonNullable<Message["images"]>; files: NonNullable<Message["files"]> };
 };
 /** Who said something in a group chat: a user or an employee. */
 export type GroupAuthor = { kind: "user" | "employee"; id: string; name: string };
@@ -312,7 +314,7 @@ export function workSlot(start: string, end: string, now: number) {
   return next;
 }
 export type EmployeeRuntime = {
-  run: (session: string, text: string, signal?: AbortSignal, input?: Message["taskInput"]) => Promise<void>;
+  run: (session: string, text: string, signal?: AbortSignal, input?: Message["taskInput"], attach?: Pick<Message, "images" | "files">) => Promise<void>;
   cancel: (session: string) => void;
   isRunning: (session: string) => boolean;
   emit: (type: string, data?: any) => void;
@@ -1793,7 +1795,11 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
       const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用task_progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。task_request_approval/task_ask_user/task_wait/task_relay_computer后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。验证码/访问码/2FA 属于必须 task_ask_user 的用户阻碍，不得自行认定无法获取后降级。task_relay_computer交接须继承当前交付类型与完成标准，不得擅自改成另一种目标。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后用 chrome_connection 检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。浏览器/扩展连续失败≥2 次（非验证码场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码使用switch_scene（主会话共享历史），Chrome必须用task_relay_computer交给独立computer会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时用deliverableRefs引用这些正文的消息编号（牛马工具回执的textRef即本条回复编号；不确定时task_complete会列出候选），系统按引用原文连同summary交付，不必复制进evidence；无单独正文传deliverableRefs=[]；evidence写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
-      await this.runtime.run(session, prompt, undefined, input);
+      // Attachments the work session has not been given yet.
+      const given = new Set(rowsBefore.flatMap((m) => [...(m.images || []), ...(m.files || [])].map((x: { blobId?: string }) => x.blobId)));
+      const attach = { images: (task.attachments?.images || []).filter((x) => !given.has(x.blobId)), files: (task.attachments?.files || []).filter((x) => !given.has(x.blobId)) };
+      for (const x of [...attach.images, ...attach.files]) if (x.blobId) await this.store.grantBlob(x.blobId, session);
+      await this.runtime.run(session, prompt, undefined, input, attach);
       const last = await this.store.lastMessage(session);
       if (last?.role === "assistant" && !last.calls?.length && last.seq! > after) {
         lastReply = last;

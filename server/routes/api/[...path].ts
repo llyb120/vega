@@ -23,6 +23,7 @@ import {
   send,
 } from "h3";
 import { app, employeeLive } from "../../core/application";
+import { safeFileName, storeAttachments } from "../../core/attachments";
 import { CLIENT_BODY_LIMIT } from "../../core/client-socket";
 import { assert, filterAsync, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
@@ -33,40 +34,12 @@ async function inputMessage(
   store: ReturnType<typeof app>["store"],
   sessionId: string,
 ) {
-  assert(
-    typeof a.text === "string" || Array.isArray(a.images),
-    "Message required",
-  );
-  assert((a.text || "").trim() || a.images?.length, "Empty message");
-  assert(
-    (a.text || "").length <= 2 << 20 && (!a.images || a.images.length <= 16),
-    "Message too large",
-  );
+  assert(typeof a.text === "string" || Array.isArray(a.images) || Array.isArray(a.files), "Message required");
+  assert((a.text || "").trim() || a.images?.length || a.files?.length, "Empty message");
+  assert((a.text || "").length <= 2 << 20, "Message too large");
   const quote = a.quoteSeq === undefined ? undefined : await store.quote(sessionId, a.quoteSeq);
-  const images: { mime: string; blobId?: string; data?: string }[] = [];
-  let total = 0;
-  for (const image of a.images || []) {
-    assert(
-      [
-        "image/png",
-        "image/jpeg",
-        "image/gif",
-        "image/webp",
-        "image/bmp",
-      ].includes(image.mime) && typeof image.data === "string",
-      "Invalid image",
-    );
-    const data = Buffer.from(image.data, "base64");
-    total += data.length;
-    assert(
-      data.length <= 25 << 20 && total <= 64 << 20,
-      "Image attachment limit exceeded",
-    );
-    const blobId = await store.blob(image.mime, data);
-    await store.grantBlob(blobId, sessionId);
-    images.push({ mime: image.mime, blobId });
-  }
-  return { role: "user", text: a.text || "", images, quote };
+  const { images, files } = await storeAttachments(store, sessionId, a);
+  return { role: "user" as const, text: a.text || "", images, files: files.length ? files : undefined, quote };
 }
 export default defineEventHandler(async (event) => {
   const { store, engine, auth } = app(),
@@ -167,7 +140,13 @@ export default defineEventHandler(async (event) => {
       check(await auth.canBlob(user, path[1]), 404, "Blob not found");
       const blob = await store.blobData(path[1]);
       assert(blob, "Blob not found");
-      setHeader(event, "Content-Type", blob.mime);
+      setHeader(event, "X-Content-Type-Options", "nosniff");
+      // Only known image types render inline; any other attachment is a download, never same-origin HTML or script.
+      if (/^image\/[\w.+-]+$/.test(blob.mime) && !blob.mime.startsWith("image/svg")) setHeader(event, "Content-Type", blob.mime);
+      else {
+        setHeader(event, "Content-Type", "application/octet-stream");
+        setHeader(event, "Content-Disposition", `attachment; filename="file"; filename*=UTF-8''${encodeURIComponent(safeFileName(getRequestURL(event).searchParams.get("name")))}`);
+      }
       return send(event, Buffer.from(blob.data));
     }
     if (path[0] === "employees") {
@@ -240,7 +219,7 @@ export default defineEventHandler(async (event) => {
         const message = {
           ...await inputMessage(a, store, session.id), actorId: user.id,
           clientMessageId: a.clientMessageId,
-          clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.quoteSeq ?? null])).digest("hex") : undefined,
+          clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.files || [], a.quoteSeq ?? null])).digest("hex") : undefined,
         };
         check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
         await engine.submitChat(session.id, message);
@@ -382,6 +361,7 @@ export default defineEventHandler(async (event) => {
           /^\s*\/fire(?:\s|$)/i.test(message.text)
         ) {
           assert(!engine.active.has(key), "Session already running");
+          assert(!message.files?.length, "/fire does not support attachments");
           return await engine.fire.start(key, message.text, message.images);
         }
         if (
@@ -395,7 +375,7 @@ export default defineEventHandler(async (event) => {
         let target = key;
         if (stage) {
           assert(
-            !message.images?.length,
+            !message.images?.length && !message.files?.length,
             "/stage does not support attachments",
           );
           if (stage.current)
@@ -627,7 +607,10 @@ async function groupRoute(path: string[], method: string, a: Obj, user: { id: st
   if (path[2] === "messages" && path.length === 3) {
     const group = await groups.mine(user, id);
     if (method === "GET") return { ...await chatHistory(store, group.session, query), group: await groups.view(group, user) };
-    if (method === "POST") return await groups.send(user, id, a);
+    if (method === "POST") {
+      const input = await inputMessage({ text: typeof a.text === "string" ? a.text : "", images: a.images, files: a.files }, store, group.session);
+      return await groups.send(user, id, { text: input.text, clientMessageId: a.clientMessageId, images: input.images, files: input.files });
+    }
   }
   if (path[2] === "users") {
     if (path.length === 3 && method === "POST") { await groups.addUsers(user, id, Array.isArray(a.userIds) ? a.userIds : []); return { ok: true }; }
