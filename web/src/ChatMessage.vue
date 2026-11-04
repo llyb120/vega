@@ -8,9 +8,13 @@ import FileCard from "./FileCard.vue";
 import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
+import { longPress } from "./long-press.js";
 import { exportResult, exportTitleOf } from "./export-result.js";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean });
-const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author"]);
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean });
+const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author", "mention"]);
+// In a group, long-pressing an employee's avatar @mentions it in the composer (mentionAuthor); a tap still opens it.
+const press = longPress((name) => emit("mention", name));
+const pressable = computed(() => props.mentionAuthor && sender.value.kind === "employee");
 const exportOpen = ref(false), exportError = ref("");
 // Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
 // In a group every message carries its author (a user or an employee, avatar filled in by the group view); only the
@@ -44,8 +48,8 @@ async function runExport(format) {
 <template>
   <article class="chat-message" :class="[mine ? 'user' : 'assistant', { continued, authored: !!message.author }]" :data-message-seq="message.seq" tabindex="-1">
     <span v-if="!mine && continued" class="chat-avatar spacer" aria-hidden="true"></span>
-    <button v-else-if="!mine && openAuthor" type="button" class="chat-avatar author-link" :aria-label="'打开和 ' + sender.name + ' 的聊天'" :title="'打开和 ' + sender.name + ' 的聊天'" @click="emit('author', sender.id)"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></button>
-    <span v-else-if="!mine" class="chat-avatar" aria-hidden="true"><UserAvatar v-if="sender.kind === 'user'" :user-id="sender.id" :name="sender.name" :avatar="sender.avatar" /><EmployeeAvatar v-else :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></span>
+    <button v-else-if="!mine && openAuthor" type="button" class="chat-avatar author-link" :aria-label="'打开和 ' + sender.name + ' 的聊天'" :title="'打开和 ' + sender.name + ' 的聊天'" @click="press.consumed() || emit('author', sender.id)" @pointerdown="pressable && press.down($event, sender.name)" @pointermove="press.move" @pointerup="press.cancel" @pointercancel="press.cancel" @pointerleave="press.cancel" @contextmenu="pressable && $event.preventDefault()" :class="{ 'press-mention': pressable }"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></button>
+    <span v-else-if="!mine" class="chat-avatar" :class="{ 'press-mention': pressable }" aria-hidden="true" @pointerdown="pressable && press.down($event, sender.name)" @pointermove="press.move" @pointerup="press.cancel" @pointercancel="press.cancel" @pointerleave="press.cancel" @contextmenu="pressable && $event.preventDefault()"><UserAvatar v-if="sender.kind === 'user'" :user-id="sender.id" :name="sender.name" :avatar="sender.avatar" /><EmployeeAvatar v-else :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></span>
     <div class="chat-content">
       <div class="chat-heading">
         <button v-if="!mine && !continued && openAuthor" type="button" class="author-name" @click="emit('author', sender.id)">{{ sender.name }}</button>
@@ -116,6 +120,7 @@ async function runExport(format) {
 .chat-bubble :deep(.message-text) { font-size: 14px; }
 .chat-bubble :deep(.code-block) { margin-left: -4px; margin-right: -4px; }
 .author-link { padding: 0; border: 0; cursor: pointer; }
+.press-mention { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
 .author-link:hover:not(:disabled) { background: var(--accent-soft); filter: brightness(1.05); }
 .author-name { height: auto; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--text-2); font-size: 12px; font-weight: 600; }
 .author-name:hover:not(:disabled) { background: transparent; color: var(--accent-text); text-decoration: underline; }

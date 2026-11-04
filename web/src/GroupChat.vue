@@ -11,6 +11,7 @@ import GroupWork from "./GroupWork.vue";
 import { continuesPrevious } from "./conversation";
 import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
+import { longPress } from "./long-press.js";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
 const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number, tab: String });
 const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel", "read", "tab"]);
@@ -35,6 +36,9 @@ const noEmployeesHint = computed(() => props.myEmployees?.length ? "你的牛马
 // A member employee's avatar and name open its chat for whoever may open it: its owner, or an admin.
 const canOpen = (author) => author?.kind === "employee" && (props.user?.role === "admin" || !!group.value?.employees.find((e) => e.id === author.id)?.mine);
 const canStop = (e) => e.mine || group.value?.isCreator;
+// Long-press a member's avatar: "@name " goes into the composer (the same mention the picker inserts).
+function mentionMember(name) { if (!readonly.value && name) input.value?.mention(name); }
+const press = longPress(mentionMember);
 
 async function run(fn) {
   error.value = "";
@@ -176,10 +180,10 @@ watch(() => work.value ? "work" : panel.value ? "members" : "", (tab) => { if (t
               <div v-if="group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
               <template v-for="{ message, continued } in shown" :key="message.seq">
                 <p v-if="message.notice" class="group-notice">{{ message.text }}</p>
-                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :open-author="canOpen(message.author)" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" @author="emit('open-employee', $event)" />
+                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
               </template>
               <article v-for="e in runningMembers" :key="'typing-' + e.id" class="chat-message assistant chat-typing" role="status" :aria-label="e.name + ' 正在回复'">
-                <span class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></span>
+                <span class="chat-avatar press-mention" aria-hidden="true" @pointerdown="press.down($event, e.name)" @pointermove="press.move" @pointerup="press.cancel" @pointercancel="press.cancel" @pointerleave="press.cancel" @contextmenu.prevent><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></span>
                 <div class="chat-content">
                   <div class="chat-heading"><strong>{{ e.name }}</strong><span>正在回复</span><button v-if="canStop(e) && !readonly" type="button" class="ghost sm stop-reply" @click="stop(e)"><Icon name="stop" :size="12" />停止</button></div>
                   <div class="chat-bubble"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
@@ -222,7 +226,7 @@ watch(() => work.value ? "work" : panel.value ? "members" : "", (tab) => { if (t
           <section>
             <h3>牛马 · {{ group.employees.length }}</h3>
             <ul class="member-list">
-              <li v-for="e in group.employees" :key="e.id"><span class="member-avatar"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></span>
+              <li v-for="e in group.employees" :key="e.id"><span class="member-avatar press-mention" title="长按 @ 它" @pointerdown="press.down($event, e.name)" @pointermove="press.move" @pointerup="press.cancel" @pointercancel="press.cancel" @pointerleave="press.cancel" @contextmenu.prevent><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></span>
                 <button v-if="e.mine" type="button" class="link member-name truncate" :title="'打开 ' + e.name" @click="emit('open-employee', e.id)">{{ e.name }}<small>我的</small></button>
                 <span v-else class="member-name truncate">{{ e.name }}<small>{{ e.ownerName || '其他用户' }}的</small></span>
                 <button v-if="(e.mine || group.isCreator) && !readonly" type="button" class="icon sm" :aria-label="'移出 ' + e.name" title="移出群聊" @click="removeEmployee(e)"><Icon name="close" :size="14" /></button></li>
@@ -279,6 +283,7 @@ watch(() => work.value ? "work" : panel.value ? "members" : "", (tab) => { if (t
 .bulletin-text { white-space: pre-wrap; color: var(--text-2); font-size: 12px; }
 .member-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
 .member-list li { display: flex; align-items: center; gap: 8px; min-height: 32px; }
+.press-mention { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
 .member-avatar { display: grid; flex: none; width: 26px; height: 26px; overflow: hidden; border-radius: 8px; background: var(--accent-soft); font-size: 12px; }
 .member-name { display: flex; align-items: center; justify-content: flex-start; gap: 6px; flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--text); font-size: 13px; font-weight: 500; text-align: left; }
 .member-name small { color: var(--muted); font-size: 11px; font-weight: 400; }

@@ -1,6 +1,7 @@
 <script setup vapor>
 import { computed, nextTick, ref } from "vue";
 import { caretOffset, filterMembers, insertMention, mentionQuery, moveActive } from "./mention.js";
+import { withMention } from "./long-press.js";
 // A textarea with an @member picker. `members`: [{ id, name, hint? }] (the writer already excluded).
 // Keys the picker does not use are re-emitted as `keydown` (e.g. Enter to send).
 const props = defineProps({ modelValue: String, members: { type: Array, default: () => [] }, rows: [Number, String], maxlength: [Number, String], placeholder: String, disabled: Boolean });
@@ -43,7 +44,16 @@ function keydown(event) {
     mention.value = null;
   } else emit("keydown", event);
 }
-defineExpose({ focus: () => box.value?.focus() });
+/** Insert "@name " at the caret (when the box has focus) or at the end, then focus it. */
+function mentionMember(name) {
+  const el = box.value;
+  if (!el) return;
+  const focused = document.activeElement === el;
+  const next = withMention(el.value, name, focused ? el.selectionStart : el.value.length, focused ? el.selectionEnd : el.value.length);
+  emit("update:modelValue", next.text);
+  void nextTick(() => { el.value = next.text; el.focus(); el.setSelectionRange(next.caret, next.caret); });
+}
+defineExpose({ focus: () => box.value?.focus(), mention: mentionMember });
 </script>
 <template>
   <div class="mention-wrap">

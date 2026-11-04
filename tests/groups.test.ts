@@ -334,7 +334,7 @@ test("unread: one read marker per user and conversation; others' visible message
 test("group avatars open the employee chat for its owner or an admin; unread badges in the sidebar", async () => {
   const { readFile } = await import("node:fs/promises");
   const bubble = await readFile("web/src/ChatMessage.vue", "utf8"), chat = await readFile("web/src/GroupChat.vue", "utf8"), sidebar = await readFile("web/src/AppSidebar.vue", "utf8"), app = await readFile("web/src/App.vue", "utf8");
-  assert.match(bubble, /<button v-else-if="!mine && openAuthor" type="button" class="chat-avatar author-link"[^>]*@click="emit\('author', sender\.id\)"/);
+  assert.match(bubble, /<button v-else-if="!mine && openAuthor" type="button" class="chat-avatar author-link"[^>]*@click="press\.consumed\(\) \|\| emit\('author', sender\.id\)"/);
   assert.match(bubble, /<button v-if="!mine && !continued && openAuthor" type="button" class="author-name" @click="emit\('author', sender\.id\)">/);
   assert.match(chat, /const canOpen = \(author\) => author\?\.kind === "employee" && \(props\.user\?\.role === "admin" \|\| !!group\.value\?\.employees\.find\(\(e\) => e\.id === author\.id\)\?\.mine\);/);
   assert.match(chat, /:open-author="canOpen\(message\.author\)"/);
