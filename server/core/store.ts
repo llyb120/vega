@@ -17,6 +17,11 @@ export type Message = {
   quote?: { seq: number; role: string; text: string; taskId?: string };
   tasks?: { id: string; title: string; status: string }[];
   delivery?: boolean;
+  /**
+   * A colleague employee's message. In the receiver's chat (role user): the handoff origin (HandoffOrigin in
+   * colleagues.ts) and the sender's name. In the sender's chat (role assistant): who replied ({ employeeId, name }).
+   */
+  colleague?: { employeeId: string; name: string; [key: string]: any };
   /** A task milestone the executing session chose to tell the user (task_progress tellUser). */
   progress?: boolean;
   thinking?: string;
@@ -310,8 +315,8 @@ export class Store {
   }
   private parseMessage(row: any): Message { return { ...JSON.parse(row.data), seq: Number(row.seq) }; }
   /** Newest message of a session, optionally only an assistant message or one with images. */
-  async lastMessage(key: string, only?: "assistant" | "images"): Promise<Message | undefined> {
-    const where = only === "assistant" ? ` AND ${this.json("$.role")}='assistant'` : only === "images" ? ` AND ${this.jsonLength("$.images")}>0` : "";
+  async lastMessage(key: string, only?: "assistant" | "user" | "images"): Promise<Message | undefined> {
+    const where = only === "assistant" || only === "user" ? ` AND ${this.json("$.role")}='${only}'` : only === "images" ? ` AND ${this.jsonLength("$.images")}>0` : "";
     const row = await this.one(`SELECT seq,data FROM messages WHERE session=?${where} ORDER BY seq DESC LIMIT 1`, key);
     return row && this.parseMessage(row);
   }

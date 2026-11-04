@@ -29,9 +29,9 @@ export function employeeChatMessages(messages) {
     (message.role === "assistant" && !!(message.text?.trim() || message.images?.length)));
 }
 
-/** A bubble continues the previous one (no repeated avatar/name) inside one reply run; deliveries and progress notices stand alone. */
+/** A bubble continues the previous one (no repeated avatar/name) inside one reply run; deliveries, progress notices and colleague messages stand alone. */
 export function continuesPrevious(previous, message) {
-  const standalone = (m) => m.delivery || m.progress;
+  const standalone = (m) => m.delivery || m.progress || m.colleague;
   return !!previous && previous.role !== "user" && message.role !== "user" && !standalone(previous) && !standalone(message);
 }
 

@@ -9,6 +9,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Tools } from "../server/core/tools";
 import { colleagueAsk, colleagueHandoff, colleaguePrompt, colleaguesOf, parseMentions } from "../server/core/colleagues";
 import type { Employee } from "../server/core/employee";
+import { sleep } from "../server/core/util";
 
 async function fixture() {
   const store = await Store.open(":memory:");
@@ -26,6 +27,31 @@ const task = async (employee: Employee, id: string) => employee.task(await emplo
 const finish = (employee: Employee, id: string, status: string, summary = "") =>
   employee.update((s) => { const t = employee.task(s, id); t.status = status; t.summary = summary; t.finishedAt = Date.now(); });
 const todo = async (employee: Employee, text: string) => (await employee.execute("", { action: "add", kind: "todo", text })).value.id as string;
+const until = async (ready: () => boolean | Promise<boolean>) => {
+  for (let i = 0; i < 400 && !await ready(); i++) await sleep(5);
+  assert(await ready());
+};
+const deferred = (employee: Employee, id: string) => employee.update((s) => { const t = employee.task(s, id); t.status = "deferred"; t.nextCheckAt = Date.now() + 3600_000; });
+/** Deliver handoffs into the receiver's chat without running a model turn. */
+const quietChats = (engine: Engine) => { engine.submitChat = async (session, message) => { await engine.store.append(session, message); }; };
+/** The scripted model of each chat: a list of replies, one per model request, by session. */
+function script(engine: Engine, replies: Record<string, any[]>) {
+  const seen: { key: string; system: string; messages: any[] }[] = [];
+  engine.providers.chat = (async (_model: any, system: string, messages: any[], _tools: any, _signal: any, _emit: any, key: string) => {
+    seen.push({ key, system, messages });
+    const next = replies[key]?.shift();
+    assert(next, "unexpected model request in " + key);
+    return { role: "assistant", model: "fixture/model", ...next };
+  }) as any;
+  return seen;
+}
+/** The colleague message last delivered into a chat (delivery runs after commit, so wait for it). */
+async function delivered(engine: Engine, chat: string, count = 1) {
+  const all = async () => (await engine.store.messages(chat)).filter((m) => m.colleague);
+  await until(async () => (await all()).length >= count);
+  return (await all()).at(-1)!;
+}
+const idle = (engine: Engine, session: string) => until(() => !engine.active.has(session));
 
 test("reach rule: personal employees reach the owner's other personal employees and the team; team employees reach the team", async () => {
   const { make, close } = await fixture();
@@ -74,58 +100,118 @@ test("@mentions in instructions must name a reachable colleague, and follow rena
   } finally { await close(); }
 });
 
-test("handoff from a task: dedupe, source on the new task, result wakes the waiting task, cycles and depth are refused", async () => {
-  const { engine, make, close } = await fixture();
+test("handoff from a task: a colleague message in B's chat starts B's turn; B's task carries the origin; reply, progress, question and result return to A's task", async () => {
+  const { engine, store, make, close } = await fixture();
   try {
-    const a = await make("A", "u1", "personal"), b = await make("B", "u1"), c = await make("C", "u1"), d = await make("D", "u1");
-    await settings(b, { publicSummary: "负责发布" });
+    const a = await make("A", "u1"), b = await make("B", "u1");
     const origin = await todo(a, "整理发布");
-    await a.update((s) => { const t = a.task(s, origin); t.status = "deferred"; t.nextCheckAt = Date.now() + 3600_000; });
-    const sent = await colleagueHandoff(engine, a, { taskId: origin, session: "" }, { colleagueId: b.employeeId, instructions: "发布 1.2", dedupeKey: "rel-1.2" });
-    assert.equal(sent.exists, undefined);
-    const again = await colleagueHandoff(engine, a, { taskId: origin, session: "" }, { colleagueId: b.employeeId, instructions: "发布 1.2", dedupeKey: "rel-1.2" });
-    assert.equal(again.taskId, sent.taskId); assert.equal(again.exists, true);
-    const received = await task(b, sent.taskId);
-    assert.equal(received.text, "发布 1.2");
-    assert.deepEqual({ ...received.handoffFrom, at: 0 }, { employeeId: a.employeeId, name: "A", taskId: origin, session: "", chain: [a.employeeId], at: 0 });
+    await deferred(a, origin);
+    const chatB = await b.chat("u1");
+    const seen = script(engine, { [chatB.id]: [
+      { text: "", calls: [{ id: "c1", name: "employee_task_create", arguments: { instructions: "发布 1.2 到预发" } }] },
+      { text: "已安排发布任务" },
+      { text: "收到，已转给任务" },
+    ] });
+    const sent = await colleagueHandoff(engine, a, { taskId: origin, session: "", chain: [] }, { colleagueId: b.employeeId, instructions: "发布 1.2", dedupeKey: "rel-1.2" });
+    assert.equal(sent.status, "sent");
+    await until(() => seen.length >= 2); await idle(engine, chatB.id);
+    // B's chat holds the colleague message (labelled, not the human), and its model was told who asked.
+    const asked = (await store.messages(chatB.id)).find((m) => m.role === "user")!;
+    assert.equal(asked.text, "发布 1.2"); assert.equal(asked.colleague!.name, "A"); assert.equal(asked.colleague!.taskId, origin);
+    assert.match(seen[0].messages.at(-1).text, /同事牛马「A」.*转交请求.*rel-1\.2[\s\S]*发布 1\.2$/);
+    // The task B's chat created inherits the origin; A's record follows it and keeps B's reply as progress.
+    const created = (await b.state()).tasks.find((t) => t.handoffFrom)!;
+    assert.equal(created.text, "发布 1.2 到预发");
+    assert.deepEqual(created.handoffFrom.chain, [a.employeeId]); assert.equal(created.chatSource.seq, asked.seq);
+    let record = (await task(a, origin)).handoffs[0];
+    assert.equal(record.taskId, created.id); assert.equal(record.status, "queued"); assert.match(record.progress, /已安排发布任务/);
+    assert.equal((await task(a, origin)).status, "deferred", "progress does not wake the sender");
+    // tellUser progress is recorded without waking A.
+    await b.update((s) => { b.task(s, created.id).status = "running"; });
+    b.busy.set(created.id, { session: "x" } as any);
+    await b.execute(created.id, { action: "progress", text: "预发构建中", tellUser: true });
+    assert.equal((await task(a, origin)).handoffs[0].progress, "预发构建中");
+    assert.equal((await task(a, origin)).status, "deferred");
+    // B asks: the question shows in B's chat and wakes A with the thread to answer on.
+    await b.execute(created.id, { action: "help", text: "发哪个区域？" });
+    b.busy.delete(created.id);
+    let woken = await task(a, origin);
+    assert.equal(woken.status, "queued"); assert.equal(woken.supplementPending, true);
+    assert.match(woken.answer, /需要答复[\s\S]*发哪个区域？[\s\S]*dedupeKey=rel-1\.2/);
+    assert.equal(woken.handoffs[0].status, "waiting");
+    // A answers on the same thread: a follow-up in B's chat with the same handoff; the identical text again is a retry.
+    const reply = await colleagueHandoff(engine, a, { taskId: origin, session: "", chain: [] }, { colleagueId: b.employeeId, instructions: "华东区", dedupeKey: "rel-1.2" });
+    assert.equal((reply as any).followUp, true);
+    assert.equal((await colleagueHandoff(engine, a, { taskId: origin, session: "", chain: [] }, { colleagueId: b.employeeId, instructions: "华东区", dedupeKey: "rel-1.2" }) as any).duplicate, true);
+    await until(() => seen.length >= 3); await idle(engine, chatB.id);
+    const followUps = (await store.messages(chatB.id)).filter((m) => m.colleague?.handoffId === record.id);
+    assert.deepEqual(followUps.map((m) => m.text), ["发布 1.2", "华东区"]);
     assert.equal((await task(a, origin)).handoffs.length, 1);
-    // B hands to C, C to D: depth 3 reached, D cannot hand on; C cannot hand back to A (cycle).
-    const toC = await colleagueHandoff(engine, b, { taskId: sent.taskId, session: "" }, { colleagueId: c.employeeId, instructions: "子任务" });
-    await assert.rejects(colleagueHandoff(engine, c, { taskId: toC.taskId, session: "" }, { colleagueId: a.employeeId, instructions: "回去" }), /循环/);
-    const toD = await colleagueHandoff(engine, c, { taskId: toC.taskId, session: "" }, { colleagueId: d.employeeId, instructions: "孙任务" });
-    assert.deepEqual((await task(d, toD.taskId)).handoffFrom.chain, [a.employeeId, b.employeeId, c.employeeId]);
-    await assert.rejects(colleagueHandoff(engine, d, { taskId: toD.taskId, session: "" }, { colleagueId: (await engine.employee.profile()).id, instructions: "再转" }), /最多 3 层/);
-    assert.match(await colleaguePrompt(d, await task(d, toD.taskId)), /已达转交层数上限/);
-    // B finishes: the result is a supplement on A's task, which wakes up.
-    await finish(b, sent.taskId, "done", "已发布 1.2");
-    const woken = await task(a, origin);
-    assert.equal(woken.status, "queued"); assert.equal(woken.nextCheckAt, 0); assert.equal(woken.supplementPending, true);
-    assert.match(woken.answer, /牛马「B」处理转交任务 .* 已完成[\s\S]*已发布 1\.2/);
-    assert.equal(woken.handoffs[0].status, "done");
-    // Saving B again does not deliver twice; a resumed and re-finished task reports again.
+    // B finishes: the result wakes A once; saving B again does not deliver twice; a re-finish reports again.
+    await deferred(a, origin);
+    await finish(b, created.id, "done", "已发布 1.2");
+    woken = await task(a, origin);
+    assert.equal(woken.status, "queued"); assert.match(woken.answer, /牛马「B」处理转交（编号 rel-1\.2）的任务 .* 已完成[\s\S]*已发布 1\.2/);
+    record = woken.handoffs[0];
+    assert.equal(record.status, "done"); assert.equal(record.result, "已发布 1.2");
     await b.update(() => {});
-    assert.equal((await task(a, origin)).answer.match(/已发布/g).length, 1);
-    await b.update((s) => { b.task(s, sent.taskId).status = "queued"; });
-    await finish(b, sent.taskId, "failed", "回滚了");
+    assert.equal((await task(a, origin)).answer.match(/已发布 1\.2/g).length, 1);
+    await b.update((s) => { b.task(s, created.id).status = "queued"; });
+    await finish(b, created.id, "failed", "回滚了");
     assert.match((await task(a, origin)).answer, /已失败[\s\S]*回滚了/);
+    // A's chat shows the whole exchange: A's handoff and follow-up, then B's reply, progress, question and results,
+    // each from B and linked to A's task.
+    const chatA = (await store.messages((await a.profile()).chatSession!)).map((m) => ({ from: m.colleague?.name || "", text: m.text!.split("（")[0], task: m.tasks?.[0]?.id }));
+    assert.deepEqual(chatA.map((m) => [m.from, m.text]), [
+      ["", "转交给牛马「B」"], ["B", "牛马「B」关于转交"], ["B", "牛马「B」关于转交"], ["B", "牛马「B」处理转交"],
+      ["", "回复牛马「B」"], ["B", "牛马「B」关于转交"], ["B", "牛马「B」处理转交"], ["B", "牛马「B」处理转交"],
+    ]);
+    assert(chatA.every((m) => m.task === origin));
   } finally { await close(); }
 });
 
-test("handoff from chat posts the result to the chat; colleagues who turned requests off are hidden and refused", async () => {
+test("handoff from chat: B answering directly goes back to A's chat as B's message; colleagues may only work on tasks; refused when requests are off", async () => {
   const { engine, store, make, close } = await fixture();
   try {
     const a = await make("A", "u1"), b = await make("B", "u1"), c = await make("C", "u1");
-    const chat = await a.chat("u1");
-    const sent = await colleagueHandoff(engine, a, { session: chat.id }, { colleagueId: b.employeeId, instructions: "查一下" });
-    assert.equal((await a.profile()).handoffs![0].taskId, sent.taskId);
-    await finish(b, sent.taskId, "cancelled");
-    assert.match((await store.messages(chat.id)).at(-1)!.text!, /牛马「B」处理转交任务 .* 已被取消/);
-    assert.equal((await a.profile()).handoffs![0].status, "cancelled");
+    const chatA = await a.chat("u1"), chatB = await b.chat("u1");
+    script(engine, { [chatB.id]: [
+      { text: "", calls: [{ id: "d1", name: "employee_duty_create", arguments: { instructions: "每天汇报", trigger: { kind: "manual" } } }] },
+      { text: "生产库在 db-7，不需要派任务" },
+    ] });
+    const sent = await colleagueHandoff(engine, a, { session: chatA.id, chain: [] }, { colleagueId: b.employeeId, instructions: "查一下生产库在哪" });
+    assert.ok(sent.dedupeKey, "a generated thread key comes back");
+    await until(async () => (await store.messages(chatA.id)).some((m) => m.colleague));
+    // A colleague's message may not change B's duties, memories or credentials.
+    assert.match((await store.messages(chatB.id)).find((m) => m.role === "tool")!.text!, /来自同事牛马「A」.*只能派单/);
+    assert.equal((await b.state()).duties.length, 0);
+    const back = (await store.messages(chatA.id)).at(-1)!;
+    assert.equal(back.role, "assistant"); assert.equal(back.colleague!.name, "B");
+    assert.match(back.text!, /牛马「B」答复了转交[\s\S]*db-7/);
+    const record = (await a.profile()).handoffs![0];
+    assert.equal(record.status, "replied"); assert.match(record.result, /db-7/);
     await settings(c, { acceptsColleagues: false });
     assert.doesNotMatch(await colleaguePrompt(a), /C（id=/);
-    await assert.rejects(colleagueHandoff(engine, a, { session: chat.id }, { colleagueId: c.employeeId, instructions: "x" }), /未开启接受/);
+    await assert.rejects(colleagueHandoff(engine, a, { session: chatA.id, chain: [] }, { colleagueId: c.employeeId, instructions: "x" }), /未开启接受/);
     await assert.rejects(colleagueAsk(engine, a, { colleagueId: c.employeeId, question: "x" }, new AbortController().signal), /未开启接受/);
     await assert.rejects(settings(c, { publicSummary: "长".repeat(301) }), /最多 300 字/);
+  } finally { await close(); }
+});
+
+test("a failed colleague turn and an undeliverable handoff still answer the sender", async () => {
+  const { engine, store, make, close } = await fixture();
+  try {
+    const a = await make("A", "u1"), b = await make("B", "u1"), c = await make("C", "u1");
+    const chatA = await a.chat("u1"), chatB = await b.chat("u1");
+    engine.providers.chat = (async () => { throw Object.assign(Error("模型不可用"), { status: 400 }); }) as any;
+    await colleagueHandoff(engine, a, { session: chatA.id, chain: [] }, { colleagueId: b.employeeId, instructions: "帮忙" });
+    await until(async () => (await store.messages(chatA.id)).some((m) => m.colleague));
+    await idle(engine, chatB.id);
+    assert.match((await store.messages(chatA.id)).at(-1)!.text!, /这轮对话出错：.*模型不可用/);
+    engine.submitChat = async () => { throw Error("执行位置正在切换"); };
+    await colleagueHandoff(engine, a, { session: chatA.id, chain: [] }, { colleagueId: c.employeeId, instructions: "帮忙" });
+    await until(async () => (await a.profile()).handoffs!.some((h) => h.employeeId === c.employeeId && h.status === "lost"));
+    assert.match((await store.messages(chatA.id)).at(-1)!.text!, /没能送到牛马「C」.*执行位置正在切换/);
   } finally { await close(); }
 });
 
@@ -146,63 +232,98 @@ test("ask is one tool-less model call on the colleague's side, built from its su
   } finally { await close(); }
 });
 
-test("colleague tools: visible in chat and main task sessions, handoff hidden at the depth limit, complete warns about open handoffs", async () => {
+test("depth and cycles follow the chain through chats; colleague tools hide handoff at the limit; complete warns about open handoffs", async () => {
   const { engine, store, make, close } = await fixture();
   try {
-    const a = await make("A", "u1"), b = await make("B", "u1");
-    const chat = await a.chat("u1");
-    const model = { supportsImages: false } as any;
-    const chatTools = await Tools.create(engine, chat, await engine.config(chat), new AbortController().signal, () => {});
-    const visible = (await chatTools.definitions(model)).map((d) => d.name);
+    quietChats(engine);
+    const a = await make("A", "u1"), b = await make("B", "u1"), c = await make("C", "u1"), d = await make("D", "u1");
+    const chatA = await a.chat("u1"), model = { supportsImages: false } as any;
+    const chatTools = await Tools.create(engine, chatA, await engine.config(chatA), new AbortController().signal, () => {});
+    const visible = (await chatTools.definitions(model)).map((x) => x.name);
     assert(visible.includes("colleague_handoff") && visible.includes("colleague_ask"));
     const result = await chatTools.execute({ id: "h", name: "colleague_handoff", arguments: { colleagueId: b.employeeId, instructions: "帮忙核对", dedupeKey: "k1" } }, model);
     assert.equal(result.value.colleague.name, "B");
-    assert.equal((await task(b, result.value.taskId)).handoffFrom.session, chat.id);
+    // B's chat now answers A's message: its own handoffs carry the chain [A, B].
+    const chatB = await b.chat("u1");
+    assert.equal((await delivered(engine, chatB.id)).colleague!.session, chatA.id);
+    const toolsB = await Tools.create(engine, chatB, await engine.config(chatB), new AbortController().signal, () => {});
+    await toolsB.execute({ id: "h2", name: "colleague_handoff", arguments: { colleagueId: c.employeeId, instructions: "子工作" } }, model);
+    const chatC = await c.chat("u1"), toC = (await delivered(engine, chatC.id)).colleague!;
+    assert.deepEqual(toC.chain, [a.employeeId, b.employeeId]);
+    await assert.rejects(colleagueHandoff(engine, c, { session: chatC.id, chain: toC.chain }, { colleagueId: a.employeeId, instructions: "回去" }), /循环/);
+    await colleagueHandoff(engine, c, { session: chatC.id, chain: toC.chain }, { colleagueId: d.employeeId, instructions: "孙工作" });
+    const chatD = await d.chat("u1"), toD = (await delivered(engine, chatD.id)).colleague!;
+    assert.deepEqual(toD.chain, [a.employeeId, b.employeeId, c.employeeId]);
+    await assert.rejects(colleagueHandoff(engine, d, { session: chatD.id, chain: toD.chain }, { colleagueId: (await engine.employee.profile()).id, instructions: "再转" }), /最多 3 层/);
+    assert.match(await colleaguePrompt(d, toD as any), /已达层数上限/);
+    const toolsD = await Tools.create(engine, chatD, await engine.config(chatD), new AbortController().signal, () => {});
+    const deep = (await toolsD.definitions(model)).map((x) => x.name);
+    assert(!deep.includes("colleague_handoff") && deep.includes("colleague_ask"));
+    // A task created for the deep message inherits the chain, so its task session cannot hand on either.
+    await toolsD.execute({ id: "t1", name: "employee_task_create", arguments: { instructions: "做孙工作" } }, model);
+    const deepTask = (await d.state()).tasks.at(-1)!;
+    assert.deepEqual(deepTask.handoffFrom.chain, toD.chain);
+    assert.match(await colleaguePrompt(d, deepTask.handoffFrom, true), /本任务来自牛马「C」的转交请求/);
 
     const id = await todo(a, "主任务");
     await a.update((s) => { a.task(s, id).status = "running"; });
     const session = await store.newSession({ cwd: ".", employeeId: a.employeeId, taskId: id });
     a.busy.set(id, { session: session.id } as any);
     const taskTools = await Tools.create(engine, session, await engine.config(session), new AbortController().signal, () => {});
-    const handed = await taskTools.execute({ id: "t", name: "colleague_handoff", arguments: { colleagueId: b.employeeId, instructions: "子工作" } }, model);
-    assert.equal((await task(b, handed.value.taskId)).handoffFrom.taskId, id);
+    await taskTools.execute({ id: "t", name: "colleague_handoff", arguments: { colleagueId: b.employeeId, instructions: "子工作", dedupeKey: "sub" } }, model);
+    assert.equal((await delivered(engine, chatB.id, 2)).colleague!.taskId, id);
     const blocked = (await a.execute(id, { action: "complete", text: "done" })).value;
-    assert.match(blocked.error, /1 项转交未返回结果/);
-    assert.match(JSON.stringify((await a.execute(id, { action: "list" })).value.handoffs), new RegExp(handed.value.taskId));
-    await a.update((s) => { a.task(s, id).handoffFrom = { employeeId: "x", name: "X", taskId: "", session: "", chain: ["x", "y", "z"] }; });
-    const deep = (await taskTools.definitions(model)).map((d) => d.name);
-    assert(!deep.includes("colleague_handoff") && deep.includes("colleague_ask"));
+    assert.match(blocked.error, /1 项转交未返回结果（B（编号 sub，等待对方答复））/);
+    assert.match(JSON.stringify((await a.execute(id, { action: "list" })).value.handoffs), /"key":"sub"/);
+    await a.update((s) => { a.task(s, id).handoffFrom = { handoffId: "h", key: "k", employeeId: "x", name: "X", taskId: "", session: "", chain: ["x", "y", "z"] }; });
+    const capped = (await taskTools.definitions(model)).map((x) => x.name);
+    assert(!capped.includes("colleague_handoff") && capped.includes("colleague_ask"));
     a.busy.delete(id);
   } finally { await close(); }
 });
 
-test("handoff records self-heal: receiver deleted or reset, or the record vanished, ends them as lost and wakes the sender", async () => {
+test("handoff records self-heal: receiver deleted, its task gone, its chat cleared, or a result never reported", async () => {
   const { engine, store, make, close } = await fixture();
   try {
+    quietChats(engine);
     const a = await make("A", "u1"), b = await make("B", "u1"), c = await make("C", "u1");
+    const link = async (receiver: Employee, text: string, handedOff: string) => {
+      // What B's chat does for the colleague message: create a task linked to it.
+      const chat = await receiver.chat("u1");
+      await until(async () => (await store.lastMessage(chat.id, "user"))?.text === handedOff);
+      const tools = await Tools.create(engine, chat, await engine.config(chat), new AbortController().signal, () => {});
+      await tools.execute({ id: "x" + text, name: "employee_task_create", arguments: { instructions: text } }, { supportsImages: false } as any);
+      return (await receiver.state()).tasks.at(-1)!;
+    };
     const origin = await todo(a, "整理");
-    await a.update((s) => { const t = a.task(s, origin); t.status = "deferred"; t.nextCheckAt = Date.now() + 3600_000; });
-    const toB = await colleagueHandoff(engine, a, { taskId: origin, session: "" }, { colleagueId: b.employeeId, instructions: "子任务 B" });
-    const chat = await a.chat("u1");
-    const toC = await colleagueHandoff(engine, a, { session: chat.id }, { colleagueId: c.employeeId, instructions: "子任务 C" });
+    await deferred(a, origin);
+    await colleagueHandoff(engine, a, { taskId: origin, session: "", chain: [] }, { colleagueId: b.employeeId, instructions: "子任务 B" });
+    await link(b, "B 的任务", "子任务 B");
     // Deleting the receiver ends the sender's record and wakes its task.
     b.deleting = true; await b.forget();
     let t = await task(a, origin);
     assert.equal(t.handoffs[0].status, "lost"); assert.equal(t.handoffs[0].result, "对方牛马已删除");
     assert.equal(t.status, "queued"); assert.equal(t.supplementPending, true); assert.match(t.answer, /不会再有结果：对方牛马已删除/);
-    // Resetting the receiver: the chat-origin record ends and a notice lands in the chat.
+    // Resetting the receiver drops its linked task: the chat-origin record ends with a notice in A's chat.
+    const chatA = await a.chat("u1");
+    await colleagueHandoff(engine, a, { session: chatA.id, chain: [] }, { colleagueId: c.employeeId, instructions: "子任务 C" });
+    const linked = await link(c, "C 的任务", "子任务 C");
+    assert.equal((await a.profile()).handoffs![0].taskId, linked.id);
     c.resetting = true; await c.clearWork(); c.resetting = false;
     assert.equal((await a.profile()).handoffs![0].status, "lost");
-    assert.match((await store.messages(chat.id)).at(-1)!.text!, /不会再有结果：对方任务已不存在/);
-    // Lazy path: a record whose target vanished without any hook (e.g. a crash) heals on the next status read.
-    const again = await colleagueHandoff(engine, a, { session: chat.id }, { colleagueId: c.employeeId, instructions: "再来" });
-    await store.dropEmployeeRows(c.employeeId);
-    await a.execute("", { action: "list" });
-    assert.equal((await a.profile()).handoffs!.find((h) => h.taskId === again.taskId)!.status, "lost");
-    // A target that ended without reporting is delivered as a normal result by the scheduler pass.
+    assert.match((await store.messages(chatA.id)).at(-1)!.text!, /不会再有结果：对方任务已不存在/);
+    // A handoff still waiting in C's chat (no task yet) is lost once that chat is cleared (after the delivery grace).
+    await colleagueHandoff(engine, a, { session: chatA.id, chain: [] }, { colleagueId: c.employeeId, instructions: "再来", dedupeKey: "again" });
+    const waiting = () => a.profile().then((p) => p.handoffs!.find((h) => h.key === "again")!);
+    await engine.clearEmployeeChat(c.employeeId);
+    assert.equal((await waiting()).status, "sent", "still inside the delivery grace");
+    await a.reconcileHandoffs(Date.now() + 61_000);
+    assert.equal((await waiting()).status, "lost"); assert.match((await waiting()).result, /聊天被清空或重置/);
+    // A target that ended without reporting (e.g. a crash) is delivered as a normal result by the scheduler pass.
     const origin2 = await todo(a, "第二个");
-    const toC2 = await colleagueHandoff(engine, a, { taskId: origin2, session: "" }, { colleagueId: c.employeeId, instructions: "x" });
-    await store.putEmployeeTask(c.employeeId, toC2.taskId, false, Date.now(), JSON.stringify({ ...(await task(c, toC2.taskId)), status: "done", summary: "做完了" }));
+    await colleagueHandoff(engine, a, { taskId: origin2, session: "", chain: [] }, { colleagueId: c.employeeId, instructions: "x" });
+    const toC2 = await link(c, "C 的第二个任务", "x");
+    await store.putEmployeeTask(c.employeeId, toC2.id, false, Date.now(), JSON.stringify({ ...toC2, status: "done", summary: "做完了" }));
     await a.tick();
     assert.equal((await task(a, origin2)).handoffs[0].status, "done");
     assert.match((await task(a, origin2)).answer, /做完了/);
@@ -211,6 +332,5 @@ test("handoff records self-heal: receiver deleted or reset, or the record vanish
     a.busy.set(origin, { session: "x" } as any);
     await assert.rejects(a.execute(origin, { action: "complete", text: "e" }), /settled plan/); // past the handoff check
     a.busy.delete(origin);
-    assert.equal(toC.exists, undefined);
   } finally { await close(); }
 });

@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import MessageText from "./MessageText.vue";
 import { formatBeijing } from "../../shared/time";
-import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
+import { handoffLabel, taskLabel, taskTone, isEnded, planProgress } from "./task-status";
 import { exportResult, exportTitleOf } from "./export-result.js";
 const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function });
 const emit = defineEmits(["inspect", "back", "open-task"]);
@@ -64,7 +64,7 @@ async function run(action) {
       </div>
       <h2 class="sr-only">任务详情</h2>
       <MessageText :text="task.text" />
-      <p v-if="task.handoffs?.length" class="detail-note handoffs">已转交给：<button v-for="h in task.handoffs" :key="h.taskId" type="button" class="ghost sm handoff-link" @click="emit('open-task', { employeeId: h.employeeId, taskId: h.taskId })">{{ h.name }} · {{ taskLabel(h.status) }}</button></p>
+      <p v-if="task.handoffs?.length" class="detail-note handoffs">已转交给：<template v-for="h in task.handoffs" :key="h.id"><button v-if="h.taskId" type="button" class="ghost sm handoff-link" @click="emit('open-task', { employeeId: h.employeeId, taskId: h.taskId })">{{ h.name }} · {{ handoffLabel(h.status) }}</button><span v-else class="badge" :title="h.result || ''">{{ h.name }} · {{ handoffLabel(h.status) }}</span></template></p>
       <p v-if="task.status === 'queued' && task.queueReason" class="detail-note" role="status"><Icon name="clock" :size="14" />{{ task.queueReason }}</p>
     </header>
 

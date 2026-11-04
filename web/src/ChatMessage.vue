@@ -11,6 +11,9 @@ const props = defineProps({ message: Object, name: String, avatar: String, emplo
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember"]);
 const exportOpen = ref(false), exportError = ref("");
 // Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
+// A colleague employee's message sits on the employee side with its own name and avatar, never as "me".
+const mine = computed(() => props.message.role === "user" && !props.message.colleague);
+const sender = computed(() => props.message.colleague ? { id: props.message.colleague.employeeId, name: `牛马「${props.message.colleague.name}」`, avatar: props.message.colleague.avatar || "" } : { id: props.employeeId, name: props.name, avatar: props.avatar });
 const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
 const linkedTask = computed(() => {
   const id = props.message.tasks?.[0]?.id;
@@ -36,15 +39,16 @@ async function runExport(format) {
 }
 </script>
 <template>
-  <article class="chat-message" :class="[message.role, { continued }]" :data-message-seq="message.seq" tabindex="-1">
-    <span v-if="message.role !== 'user' && continued" class="chat-avatar spacer" aria-hidden="true"></span>
-    <span v-else-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="MESSAGE_POSE" /></span>
+  <article class="chat-message" :class="[mine ? 'user' : 'assistant', { continued, colleague: !!message.colleague }]" :data-message-seq="message.seq" tabindex="-1">
+    <span v-if="!mine && continued" class="chat-avatar spacer" aria-hidden="true"></span>
+    <span v-else-if="!mine" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></span>
     <div class="chat-content">
       <div class="chat-heading">
-        <strong v-if="message.role !== 'user' && !continued">{{ name }}</strong>
+        <strong v-if="!mine && !continued">{{ sender.name }}</strong>
+        <span v-if="message.colleague" class="colleague-tag">{{ message.role === 'user' ? '同事转交' : '同事回复' }}</span>
         <time v-if="message.at">{{ shortTime(message.at) }}</time>
         <button v-if="quotable && message.seq" type="button" class="chat-reply" aria-label="引用这条消息" title="引用" @click="emit('quote', message)"><Icon name="reply" :size="13" /><span class="reply-label">引用</span></button>
-        <button v-if="rememberable && message.role !== 'user' && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
+        <button v-if="rememberable && !mine && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
       </div>
       <div class="chat-bubble" :class="{ failed: message.error }" :role="message.error ? 'alert' : undefined">
         <button v-if="message.quote" type="button" class="chat-quote" :aria-label="'跳转到引用的消息：' + message.quote.text" @click="emit('jump', message.quote.seq)"><strong>{{ message.quote.role === 'user' ? '我' : name }}</strong><span>{{ message.quote.text }}</span></button>
@@ -90,6 +94,8 @@ async function runExport(format) {
 .user .chat-content > * { max-width: 100%; }
 .chat-heading { display: flex; align-items: center; gap: 8px; min-height: 20px; color: var(--muted); font-size: 11px; }
 .chat-heading strong { color: var(--text-2); font-size: 12px; font-weight: 600; }
+.colleague-tag { padding: 0 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; }
+.colleague .chat-bubble { box-shadow: inset 2px 0 var(--accent); }
 .chat-send-status { color: var(--muted); font-size: 11px; }
 .chat-send-status > span { display: flex; align-items: center; gap: 5px; }
 .chat-send-status .spinner { width: 11px; height: 11px; }

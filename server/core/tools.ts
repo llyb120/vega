@@ -90,13 +90,19 @@ export class Tools {
     const user = await this.engine.store.one("SELECT id,role,disabled FROM web_users WHERE id=?", this.actorId) as { id: string; role: string; disabled: number } | undefined;
     return !!user && !user.disabled && await (await this.engine.employeeFor(this.session)).manageable(user);
   }
+  /** Employees already on the handoff chain this session works under: its task's origin, or the colleague message chat answers. */
+  async handoffChain(): Promise<string[]> {
+    if (this.session.taskId) return (await (await this.engine.employeeFor(this.session)).findTask(this.session.taskId))?.handoffFrom?.chain || [];
+    if (!this.session.employeeId) return [];
+    return (await this.engine.store.lastMessage(this.session.id, "user"))?.colleague?.chain || [];
+  }
   /** Which employee/vault tools and branches this session may see; mirrors the runtime permission checks. */
   async toolContext(): Promise<ToolContext> {
     if (!this.session.employeeId && !this.session.taskId) return { kind: "normal" };
     if (!this.session.taskId) {
       const employee = await this.engine.employeeFor(this.session);
       const colleagues = (await colleaguesOf(employee)).some((c) => accepts(c.profile));
-      return { kind: "chat", member: (await employee.profile()).scope === "team" && !await this.canManageEmployee(), colleagues, handoff: colleagues };
+      return { kind: "chat", member: (await employee.profile()).scope === "team" && !await this.canManageEmployee(), colleagues, handoff: colleagues && (await this.handoffChain()).length < HANDOFF_DEPTH };
     }
     let state: EmployeeState | undefined, task: Obj | undefined, colleagues = false;
     try {
@@ -492,7 +498,7 @@ export class Tools {
     if (a.action === "ask") return { value: await colleagueAsk(this.engine, employee, a as any, this.signal) };
     const taskId = this.session.taskId || "";
     if (taskId) employee.authorize(await employee.state(), taskId, { action: "list" });
-    return { value: await colleagueHandoff(this.engine, employee, { taskId, session: this.session.id }, a as any) };
+    return { value: await colleagueHandoff(this.engine, employee, { taskId, session: this.session.id, chain: await this.handoffChain() }, a as any) };
   }
   private refuseSecrets(tool: string, guarded: Obj, publicArgs: Obj) {
     const redactor = this.engine.redactors.get(this.session.id);
@@ -517,14 +523,19 @@ export class Tools {
       if (source?.seq) await employee.update((state) => {
               const task = employee.task(state, id);
               if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
+              // Work done for a colleague's message reports back to it (status, questions, result: Employee.save).
+              if (source.colleague && (replace || !task.handoffFrom)) task.handoffFrom = { ...source.colleague, at: Date.now() };
             });
       const task = employee.task(await employee.state(), id);
       return { id, title: task.text.slice(0, 80), status: task.status };
     };
     if (internal.target === "task") assert(await employee.findTask(a.id), "taskId 不是当前牛马的任务；职责请用 employee_duty_manage");
     if (internal.target === "duty") assert((await employee.state()).duties.some((d) => d.id === a.id), "dutyId 不是当前牛马的职责；任务请用 employee_task_manage");
-    if (this.session.employeeId && !this.session.taskId && (await employee.state()).scope === "team" && !await this.canManageEmployee())
-      assert(["list", "resume", "answer", "stop"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "当前交代人无团队牛马管理权限；可以派单、查询、补充、续做和停止任务，职责、记忆和凭据请管理员管理");
+    const memberOnly = (action: string, kind?: string) => ["list", "resume", "answer", "stop"].includes(action) || (action === "add" && kind === "todo");
+    // A colleague's request is delegation, not management: it may start and steer tasks, nothing else.
+    if (source?.colleague) assert(memberOnly(a.action, a.kind), `这条消息来自同事牛马「${source.colleague.name}」：同事的转交只能派单、查询、补充、续做和停止任务；职责、记忆和凭据只有用户能改`);
+    else if (this.session.employeeId && !this.session.taskId && (await employee.state()).scope === "team" && !await this.canManageEmployee())
+      assert(memberOnly(a.action, a.kind), "当前交代人无团队牛马管理权限；可以派单、查询、补充、续做和停止任务，职责、记忆和凭据请管理员管理");
     if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
       const task = employee.task(await employee.state(), a.id);
       assert(!task.owner.token, "Remote tasks require their assigning member");
