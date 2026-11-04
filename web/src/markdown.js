@@ -54,7 +54,7 @@ export function renderInline(text) {
       /(^|[\s：:])((?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32})(?=$|[\s，。；！？、]|[.,;!?](?=\s|$))/gi,
       (_, prefix, url) => prefix + protect(`<img src="${escape(imageURL(url))}" alt="存档图片" loading="lazy" decoding="async" referrerpolicy="no-referrer">`, url),
     )
-    .replace(mentionPattern || /$^/, (match, prefix, name) => {
+    .replace(mentionPattern || /(?!)()()/gu, (match, prefix, name) => {
       const id = mentionIds.get(name);
       return prefix + protect(`<a class="mention" href="?employee=${encodeURIComponent(id)}" data-employee="${escape(id)}">@${escape(name)}</a>`, "@" + name);
     });
