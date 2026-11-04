@@ -9,7 +9,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Tools } from "../server/core/tools";
 import { Auth } from "../server/core/auth";
 import { GROUP_HOPS_MAX } from "../server/core/groups";
-import { NARRATOR_SYSTEM } from "../server/core/narrator";
+import { NARRATOR, NARRATOR_SYSTEM } from "../server/core/narrator";
 import { parseMentions } from "../server/core/names";
 import { sleep } from "../server/core/util";
 
@@ -34,9 +34,10 @@ function script(engine: Engine, replies: Record<string, any[]>) {
   const seen: { employeeId: string; system: string; messages: any[] }[] = [];
   narrated.length = 0;
   engine.providers.chat = (async (_model: any, system: string, messages: any[], _tools: any, _signal: any, _emit: any, key: string) => {
-    // The 旁白 (no session): scripted under "narrator"; by default it routes to nobody.
+    // The 旁白 (its own hidden session): scripted under "narrator"; by default it routes to nobody.
     if (system === NARRATOR_SYSTEM) {
-      narrated.push(JSON.parse(messages[0].text));
+      const last = String(messages.at(-1).text), setup = /^\[本群设定\]\n(.*)$/m.exec(last)?.[1];
+      narrated.push({ session: key, messages: JSON.parse(JSON.stringify(messages)), last, setup: setup && JSON.parse(setup) });
       const next = replies.narrator?.shift();
       if (next instanceof Error) throw next;
       return { role: "assistant", calls: [{ id: "n", name: "route_message", arguments: next ?? { targets: [], reason: "闲聊" } }] };
@@ -123,7 +124,7 @@ test("an @ starts that member's turn with the group context; members @ each othe
     const privateChat = (await (await engine.employee.for(a)).state()).chatSession;
     assert(!privateChat || (await engine.store.messages(privateChat)).length === 0, "the private chat is separate");
     const hidden = (await engine.store.sessions()).filter((s: any) => s.groupId);
-    assert.equal(hidden.length, 3, "the group conversation plus one session per member");
+    assert.equal(hidden.length, 4, "the group conversation, one session per member and the 旁白's (大家好 had no @)");
   } finally { await close(); }
 });
 
@@ -404,10 +405,11 @@ test("旁白: a user message without @ goes to the member it is for; @ bypasses 
     await engine.groups.send(u1, group.id, { text: "https://tapd.cn/x/story/detail/1 给这个需求单设计测试用例" });
     await settle(engine);
     assert.equal(narrated.length, 1);
-    const input = narrated[0];
+    const input = narrated[0].setup;
+    assert.equal(narrated[0].session, undefined, "the first judgement opens the session afterwards");
     assert.equal(input.群公告, "如果要测试或者设计测试用例，找测试牛马");
     assert.deepEqual(input.牛马.map((m: any) => [m.名称, m.守则]), [["默认牛马A", "（无）"], ["测试牛马", "负责测试与测试用例设计"]]);
-    assert.match(input.新消息.内容, /设计测试用例/);
+    assert.match(narrated[0].last, /\[新消息\] #\d+ 用户「alice」：https:\S+ 给这个需求单设计测试用例/);
     assert.deepEqual(seen.map((s) => s.employeeId), [b], "only the real member it named answers");
     assert.match(JSON.stringify(seen[0].messages), /\[旁白\] 这条消息没有 @ 谁，旁白判断交给你：公告：测试用例找测试牛马/);
     const messages = await groupMessages(engine, group.id);
@@ -435,6 +437,48 @@ test("旁白: a user message without @ goes to the member it is for; @ bypasses 
     assert.match(String((await groupMessages(engine, group.id)).at(-1)?.text), /旁白没能判断这条消息该交给谁（model down）/);
     void store;
   } finally { await close(); }
+});
+
+test("旁白 session: append-only per group (cache-friendly); setup change or too long history starts fresh; deleted with the group", async () => {
+  const { engine, make, close } = await fixture();
+  const limits = { ...NARRATOR };
+  try {
+    const a = await make("小A", "u1"), b = await make("小B", "u1");
+    const group = await engine.groups.create(u1, { name: "旁白会话", bulletin: "小A 写代码，小B 测试", employees: [a, b] });
+    script(engine, { narrator: [{ targets: ["小A"], reason: "写代码" }, { targets: [], reason: "闲聊" }, { targets: [], reason: "闲聊" }, { targets: [], reason: "闲聊" }, { targets: [], reason: "闲聊" }], [a]: ["写好了"] });
+    await engine.groups.send(u1, group.id, { text: "写个登录页" });
+    await settle(engine);
+    await engine.groups.send(u1, group.id, { text: "辛苦" });
+    await settle(engine);
+    const first = (await engine.groups.get(group.id))!.narrator!;
+    assert.equal(narrated[1].session, first.session, "the second judgement continues the same session");
+    const sent = (m: any) => ({ role: m.role, text: m.text, calls: m.calls, callId: m.callId });
+    assert.deepEqual(narrated[1].messages.slice(0, narrated[0].messages.length).map(sent), narrated[0].messages.map(sent), "append-only: the earlier call is a prefix");
+    assert.deepEqual(narrated[1].messages.slice(narrated[0].messages.length, -1).map((m: any) => m.role), ["assistant", "tool"], "its route_message call and result follow");
+    assert.equal(narrated[1].setup, undefined, "the setup is not repeated");
+    assert.match(narrated[1].last, /\[上次判断之后的群消息\]\n#\d+ 牛马「小A」：写好了\n\[新消息\] #\d+ 用户「alice」：辛苦/, "it learns who has been talking since");
+    assert((await engine.store.session(first.session)).groupId === group.id, "hidden, tied to the group");
+    // A changed bulletin starts a fresh session (no stale routing precedent); the old one is deleted.
+    await engine.groups.update(u1, group.id, { bulletin: "小B 也写代码" });
+    await engine.groups.send(u1, group.id, { text: "在吗" });
+    await settle(engine);
+    const second = (await engine.groups.get(group.id))!.narrator!;
+    assert.notEqual(second.session, first.session);
+    assert(!await engine.store.hasSession(first.session), "the old session is gone");
+    assert.equal(narrated[2].messages.length, 1, "a fresh session starts with one message");
+    assert.equal(narrated[2].setup.群公告, "小B 也写代码");
+    assert.match(narrated[2].last, /\[此前的群消息\][\s\S]*辛苦\n\[新消息\]/, "it carries the last few messages");
+    // Too long: the next judgement starts over with only the last NARRATOR.carry messages.
+    NARRATOR.tokens = 1; NARRATOR.carry = 2;
+    await engine.groups.send(u1, group.id, { text: "再问一下" });
+    await settle(engine);
+    const third = (await engine.groups.get(group.id))!.narrator!;
+    assert.notEqual(third.session, second.session);
+    assert.equal(narrated[3].messages.length, 1);
+    assert.equal(narrated[3].last.match(/^#\d+ /gm)?.length, 2, "carried: the last 2 messages");
+    await engine.groups.remove(u1, group.id);
+    assert(!await engine.store.hasSession(third.session), "dissolving the group deletes the 旁白's session");
+  } finally { Object.assign(NARRATOR, limits); await close(); }
 });
 
 test("旁白 without a lightweight model: one notice, then quiet; nothing runs", async () => {

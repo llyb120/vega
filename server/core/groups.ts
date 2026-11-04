@@ -4,7 +4,8 @@ import type { Message, Session } from "./store";
 import { nameKey, parseMentions } from "./names";
 import { assert, id } from "./util";
 import { ATTACHMENTS_MAX } from "./attachments";
-import { narrate } from "./narrator";
+import { narrate, narratorSetup, NARRATOR } from "./narrator";
+import { createHash } from "node:crypto";
 
 /**
  * 群聊: users and their employees working together. Any user in a group can talk to and @ any employee in it; each
@@ -30,6 +31,8 @@ export type Group = {
   createdAt: number;
   /** The 旁白 could not run for want of a lightweight model and said so once (cleared when it runs again). */
   narratorWarned?: boolean;
+  /** The 旁白's hidden session: the setup it was opened with (hash) and the last group message it judged. */
+  narrator?: { session: string; basis: string; seq: number; from: number };
 };
 type Viewer = { id: string; role: string };
 type Person = { kind: "user" | "employee"; id: string; name: string; avatar: string; ownerId?: string };
@@ -38,8 +41,6 @@ export const GROUP_NAME_MAX = 40, GROUP_BULLETIN_MAX = 4000, GROUP_USERS_MAX = 2
 /** Employee turns handed on by @mentions after one user message before the relay stops for a human to step in. */
 /** The 工作面板 lists every open task and this many recent ended ones per member. */
 export const GROUP_TASKS_ENDED = 20;
-/** Messages before the new one the 旁白 sees. */
-export const NARRATOR_CONTEXT = 8;
 export const GROUP_HOPS_MAX = 6;
 /** Group messages an employee is shown per turn (only those since its previous turn). */
 const CONTEXT_MESSAGES = 20, CONTEXT_CHARS = 1500;
@@ -269,7 +270,7 @@ export class Groups {
   }
   private async dissolve(group: Group) {
     this.assertIdle(group, group.employees.map((e) => e.id));
-    const sessions = [group.session, ...Object.values(group.memberSessions)];
+    const sessions = [group.session, ...Object.values(group.memberSessions), ...(group.narrator ? [group.narrator.session] : [])];
     await this.store.transaction(async () => {
       for (const session of sessions) if (await this.store.hasSession(session)) await this.store.deleteSession(session);
       await this.store.remove(KIND, group.id);
@@ -413,16 +414,38 @@ export class Groups {
   private async route(group: Group, people: Person[], message: Message) {
     const employees = people.filter((p) => p.kind === "employee");
     if (!employees.length) return;
+    // One judgement at a time per group, so its session stays append-only and in message order.
+    const previous = this.narrating.get(group.id) || Promise.resolve();
+    const next = previous.then(() => this.judge(group.id, employees, message));
+    this.narrating.set(group.id, next.catch(() => {}));
+    try { return await next; } finally { if (this.narrating.get(group.id) === next) this.narrating.delete(group.id); }
+  }
+  private narrating = new Map<string, Promise<unknown>>();
+  private async judge(groupId: string, employees: Person[], message: Message) {
+    const group = await this.get(groupId);
+    if (!group) return;
     const members = [];
     for (const person of employees) {
       const profile = await (await this.employee(person.id))?.profile();
       members.push({ id: person.id, name: person.name, instruction: cut(profile?.instruction || "", 600), duties: (profile?.duties || []).filter((d) => d.enabled).slice(0, 8).map((d) => cut(String(d.text || ""), 160)) });
     }
-    const label = (m: Message) => m.notice ? "系统" : m.author?.kind === "employee" ? `牛马「${m.author.name}」` : `用户「${m.author?.name || "?"}」`;
-    const recent = (await this.store.messagePage(group.session, { before: message.seq, limit: NARRATOR_CONTEXT })).messages.filter((m) => !m.notice).map((m) => `${label(m)}：${cut(String(m.text || ""), 300)}`);
-    let result;
+    const setup = narratorSetup(group.name, group.bulletin, members), basis = createHash("sha256").update(setup).digest("hex").slice(0, 16);
+    const known = group.narrator;
+    const label = (m: Message) => m.author?.kind === "employee" ? `牛马「${m.author.name}」` : `用户「${m.author?.name || "?"}」`;
+    const line = (m: Message, n = 300) => `#${m.seq} ${label(m)}：${cut(String(m.text || ""), n)}${m.files?.length || m.images?.length ? "（带附件）" : ""}`;
+    // Earlier group messages after `after` (never before a /new divider), newest `limit`, one line each.
+    const floor = known?.from || 0;
+    const earlier = async (after: number, limit: number) => {
+      const page = after > floor ? await this.store.messagePage(group.session, { after }) : await this.store.messagePage(group.session, { before: message.seq, limit: limit * 3 });
+      return page.messages.filter((m) => m.seq! > Math.max(after, floor) && m.seq! < message.seq! && !m.notice).slice(-limit).map((m) => line(m));
+    };
+    let opened = "", result;
     try {
-      result = await narrate(this.engine, { group: group.name, bulletin: group.bulletin, members, recent, message: cut(String(message.text || ""), 4000) + (message.files?.length || message.images?.length ? "（带附件）" : ""), from: message.author?.name || "用户" });
+      result = await narrate(this.engine, {
+        session: known?.session || "", current: known?.basis === basis, setup, members, message: line(message, 4000),
+        notes: async () => ({ since: known?.session ? await earlier(known.seq, NARRATOR.notes) : [], carry: await earlier(0, NARRATOR.carry) }),
+        open: async () => (opened = (await this.store.newSession({ title: "旁白：" + group.name, ownerId: group.creatorId, groupId: group.id })).id),
+      });
     } catch (error: any) {
       await this.notice(group.id, `旁白没能判断这条消息该交给谁（${cut(String(error?.message || error), 120)}），需要牛马回应请直接 @ 它。`);
       return;
@@ -434,7 +457,14 @@ export class Groups {
       }
       return;
     }
-    if (group.narratorWarned) await this.change(group.id, async (g) => { g.narratorWarned = false; });
+    const replaced = await this.change(group.id, async (g) => {
+      g.narratorWarned = false;
+      const old = g.narrator?.session;
+      g.narrator = { session: result.session, basis, seq: message.seq!, from: g.narrator?.from || 0 };
+      return old && old !== result.session ? old : "";
+    });
+    if (replaced) await this.dropSession(replaced);
+    if (opened && opened !== result.session) await this.dropSession(opened);
     if (!result.targets.length) return;
     const chosen = employees.filter((p) => result.targets.some((t) => t.id === p.id));
     await this.notice(group.id, `旁白：交给 ${chosen.map((p) => "@" + p.name).join(" ")}${result.reason ? `（${result.reason}）` : ""}`);
@@ -442,6 +472,10 @@ export class Groups {
       try { await this.turn(group, member, message, result.reason || "按群公告和职责判断"); }
       catch (error: any) { if (!error?.groupReported) await this.notice(group.id, `牛马「${member.name}」没能开始回复：${String(error?.message || error)}`); }
     }
+  }
+  private async dropSession(session: string) {
+    if (await this.store.hasSession(session)) await this.store.deleteSession(session);
+    this.engine.providers.reset(session);
   }
   /** The member's session in this group, created on first use (or again after its owner reset it). */
   private async memberSession(groupId: string, member: Person) {
