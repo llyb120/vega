@@ -4,7 +4,7 @@ import Icon from "./Icon.vue";
 import MessageText from "./MessageText.vue";
 import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
-import { exportResult } from "./export-result.js";
+import { exportResult, exportTitleOf } from "./export-result.js";
 const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function });
 const emit = defineEmits(["inspect", "back"]);
 const busy = ref(false), answer = ref(""), exportOpen = ref(false), exportError = ref(""), settleSelected = ref([]), settling = ref(false);
@@ -37,7 +37,7 @@ const canExport = computed(() => !!exportMarkdown.value);
 async function runExport(format) {
   exportError.value = "";
   try {
-    await exportResult(format, { title: props.task.text || "任务结果", markdown: exportMarkdown.value });
+    await exportResult(format, { title: exportTitleOf(props.task.text), request: props.task.text, markdown: exportMarkdown.value });
     exportOpen.value = false;
   } catch (error) {
     exportError.value = error?.message || String(error);

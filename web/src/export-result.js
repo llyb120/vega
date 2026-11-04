@@ -25,19 +25,38 @@ function absoluteBlobSrc(html, origin = typeof location !== "undefined" ? locati
   );
 }
 
+// Mirrors the app's .markdown-body styles (style.css) so exports read like the result did on screen.
 const PRINT_CSS = `
-body{font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1b1f2a;margin:24px;max-width:960px}
-h1,h2,h3,h4{line-height:1.35;margin:14px 0 6px}
+body{font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#1b1f2a;margin:24px auto;padding:0 24px;max-width:960px;overflow-wrap:anywhere}
+.doc-title{font-size:20px;line-height:1.4;margin:0 0 12px}
+.markdown-body>:first-child{margin-top:0}
+.markdown-body>:last-child{margin-bottom:0}
 p{margin:0 0 8px}
-table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}
+h1,h2,h3,h4{line-height:1.35;margin:14px 0 6px}
+.markdown-body h1{font-size:18px}
+.markdown-body h2{font-size:16px}
+.markdown-body h3,.markdown-body h4{font-size:14px}
+ul,ol{margin:0 0 8px;padding-left:20px}
+li{margin:2px 0}
+hr{margin:14px 0;border:0;border-top:1px solid #e3e6ee}
+a{color:#2860e1}
+table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{border:1px solid #d0d5e0;padding:6px 10px;text-align:left;vertical-align:top}
-th{background:#f3f5fa}
-img{max-width:100%;height:auto;display:block;margin:8px 0}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef0f7;padding:1px 5px;border-radius:4px}
-pre{background:#1b1f2a;color:#e3e7f2;padding:10px 12px;overflow:auto;border-radius:8px}
+th{background:#f3f5fa;font-weight:600}
+img{max-width:100%;height:auto;display:block;margin:8px 0;border-radius:8px}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88em}
+:is(p,li,h3,h4,td,th,blockquote) code{background:#eef0f7;color:#3a3f8f;padding:1px 5px;border-radius:4px}
+pre{background:#1b1f2a;color:#e3e7f2;padding:10px 12px;margin:0;overflow:auto;border-radius:0 0 8px 8px;white-space:pre-wrap}
+.code-block{margin:8px 0;break-inside:avoid}
+.code-head{background:#2a2f3d;color:#aab1c4;font-size:12px;padding:4px 12px;border-radius:8px 8px 0 0}
+.code-copy{display:none}
+.code-fold>summary{display:none}
 blockquote{margin:0 0 8px;padding-left:12px;border-left:3px solid #c5cad8;color:#4b5568}
-.markdown-table{overflow-x:auto;margin:8px 0}
+.markdown-table{overflow-x:auto;margin:8px 0 10px}
+.request{margin:0 0 20px;padding:10px 14px;border-left:3px solid #c5cad8;background:#f6f7fb;border-radius:0 8px 8px 0;color:#3b4354}
+.request-label{font-size:12px;font-weight:600;color:#6b7385;margin-bottom:4px}
 .missing-image{display:block;margin:8px 0;padding:8px 10px;border:1px dashed #c5cad8;color:#8a4b00;background:#fff8ec}
+@media print{body{margin:0;padding:0}}
 `;
 
 const ARCHIVED_IMG = /<img\b[^>]*\bsrc="(\/api\/blobs\/[^"]+)"[^>]*>/gi;
@@ -78,12 +97,30 @@ function inlineArchivedImages(html, images, origin) {
   });
 }
 
-/** images: from fetchArchivedImages, to embed archived images; without it they stay absolute links to this server. */
-export function buildResultHtmlDocument({ title, markdown, origin, images } = {}) {
-  const { html } = renderMarkdown(markdown || "");
+/** A short document title from a task's request: its first line without Markdown markers, at most 60 chars. */
+export function exportTitleOf(text, fallback = "任务结果") {
+  const line = String(text || "").split(/\r?\n/).map((row) => row.replace(/^\s*(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)/, "").replace(/[*_`]/g, "").trim()).find(Boolean) || "";
+  return line ? (line.length > 60 ? line.slice(0, 60) + "…" : line) : fallback;
+}
+
+// Exports are static: collapsed code folds open (print would hide them) and archived images are inlined or absolute.
+function exportBody(markdown, images, base) {
+  const html = renderMarkdown(markdown || "").html.replace(/<details class="code-fold">/g, '<details class="code-fold" open>');
+  return images ? inlineArchivedImages(html, images, base) : absoluteBlobSrc(html, base);
+}
+
+/**
+ * title: a short heading; request: the task's original request (Markdown), shown as a quoted block under it;
+ * images: from fetchArchivedImages, to embed archived images; without it they stay absolute links to this server.
+ */
+export function buildResultHtmlDocument({ title, request, markdown, origin, images } = {}) {
   const base = origin || (typeof location !== "undefined" ? location.origin : "");
-  const body = images ? inlineArchivedImages(html, images, base) : absoluteBlobSrc(html, base);
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title || "任务结果")}</title><style>${PRINT_CSS}</style></head><body><h1>${escapeXml(title || "任务结果")}</h1>${body}</body></html>`;
+  const heading = escapeXml(title || "任务结果");
+  const asked = String(request || "").trim()
+    ? `<section class="request markdown-body"><div class="request-label">原始要求</div>${exportBody(request, images, base)}</section>`
+    : "";
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>${heading}</title><style>${PRINT_CSS}</style></head>` +
+    `<body><h1 class="doc-title">${heading}</h1>${asked}<main class="markdown-body">${exportBody(markdown, images, base)}</main></body></html>`;
 }
 
 function downloadBlob(blob, filename) {
@@ -98,14 +135,14 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export async function downloadHtml({ title, markdown, filename } = {}) {
-  const doc = buildResultHtmlDocument({ title, markdown, images: await fetchArchivedImages(markdown) });
+export async function downloadHtml({ title, request, markdown, filename } = {}) {
+  const doc = buildResultHtmlDocument({ title, request, markdown, images: await fetchArchivedImages(`${request || ""}\n\n${markdown || ""}`) });
   downloadBlob(new Blob([doc], { type: "text/html;charset=utf-8" }), (filename || exportBasename(title)) + ".html");
 }
 
-export async function printPdf({ title, markdown } = {}) {
+export async function printPdf({ title, request, markdown } = {}) {
   // Embedded images are already decoded when print runs; lazy archive links in a hidden frame may never load.
-  const doc = buildResultHtmlDocument({ title, markdown, images: await fetchArchivedImages(markdown) });
+  const doc = buildResultHtmlDocument({ title, request, markdown, images: await fetchArchivedImages(`${request || ""}\n\n${markdown || ""}`) });
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
   Object.assign(frame.style, { position: "fixed", right: "0", bottom: "0", width: "0", height: "0", border: "0" });
@@ -258,8 +295,8 @@ function htmlToDocxParagraphs(markdown) {
   return paras.join("");
 }
 
-export function buildDocxBytes({ title, markdown } = {}) {
-  const body = htmlToDocxParagraphs(markdown);
+export function buildDocxBytes({ title, request, markdown } = {}) {
+  const body = (String(request || "").trim() ? htmlToDocxParagraphs(`原始要求：\n${request}\n`) : "") + htmlToDocxParagraphs(markdown);
   const document = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
     `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
     `<w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>${escapeXml(title || "任务结果")}</w:t></w:r></w:p>${body}` +
@@ -280,17 +317,17 @@ export function buildDocxBytes({ title, markdown } = {}) {
   return zipSync(files);
 }
 
-export function downloadDocx({ title, markdown, filename } = {}) {
-  const bytes = buildDocxBytes({ title, markdown });
+export function downloadDocx({ title, request, markdown, filename } = {}) {
+  const bytes = buildDocxBytes({ title, request, markdown });
   downloadBlob(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }), (filename || exportBasename(title)) + ".docx");
 }
 
 /** HTML and PDF fetch archived images first, so this returns a promise for every format. */
-export async function exportResult(format, { title, markdown } = {}) {
+export async function exportResult(format, { title, request, markdown } = {}) {
   const filename = exportBasename(title);
-  if (format === "html") return downloadHtml({ title, markdown, filename });
-  if (format === "pdf") return printPdf({ title, markdown });
-  if (format === "docx") return downloadDocx({ title, markdown, filename });
+  if (format === "html") return downloadHtml({ title, request, markdown, filename });
+  if (format === "pdf") return printPdf({ title, request, markdown });
+  if (format === "docx") return downloadDocx({ title, request, markdown, filename });
   if (format === "xlsx") return downloadXlsx({ title, markdown, filename });
   throw Error("不支持的导出格式");
 }

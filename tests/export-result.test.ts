@@ -6,6 +6,7 @@ import {
   buildResultHtmlDocument,
   buildXlsxBytes,
   exportBasename,
+  exportTitleOf,
   fetchArchivedImages,
 } from "../web/src/export-result.js";
 
@@ -30,7 +31,7 @@ test("HTML export renders tables and absolute blob images", () => {
   assert.match(html, /<table>/);
   assert.match(html, /TC-01/);
   assert.match(html, new RegExp(`src="https://vega\.test/api/blobs/${bare}"`));
-  assert.match(html, /<h1>测试结果<\/h1>/);
+  assert.match(html, /<h1 class="doc-title">测试结果<\/h1>/);
 });
 
 test("XLSX export prefers markdown tables and falls back to plain lines", () => {
@@ -73,4 +74,38 @@ test("HTML export embeds archived images and marks unavailable ones instead of d
   assert.match(html, new RegExp(`\\[图片无法导出：登录页；原地址 https://vega\\.test/api/blobs/${notImage}\\]`));
   assert.match(html, /src="https:\/\/example\.com\/a\.png"/, "external images stay links");
   assert.doesNotMatch(html.replace(/https:\/\/example[^>]+>/, ""), /<img[^>]*loading="lazy"/, "embedded images are not lazy");
+});
+
+test("HTML export shows the request as a structured quoted block under a short title, not one bold run-on heading", () => {
+  const request = [
+    "目标：针对 TAPD 需求单设计测试用例。",
+    "需求单地址：https://tapd.test/1",
+    "（TAPD 地址 https://tapd.test）",
+    "",
+    "要做的事：",
+    "1. 打开并完整阅读需求单。",
+    "2. 定位到对应页面。",
+    "3. 设计测试用例，要求：",
+    "- 按功能点分组；",
+    "- 截图要求：关键步骤各配一张。",
+    "4. 交付：结构化测试用例清单。",
+    "",
+    "约束：",
+    "- 只做只读查看。",
+  ].join("\n");
+  const title = exportTitleOf(request);
+  assert.equal(title, "目标：针对 TAPD 需求单设计测试用例。");
+  assert.equal(exportTitleOf("## **很长**" + "字".repeat(80)).length, 61);
+  const markdown = "## 测试用例文档\n\n> 说明\n\n```js\n" + "x\n".repeat(20) + "```";
+  const html = buildResultHtmlDocument({ title, request, markdown, origin: "https://vega.test" });
+  assert.match(html, /<h1 class="doc-title">目标：针对 TAPD 需求单设计测试用例。<\/h1>/);
+  const block = /<section class="request markdown-body">(.*?)<\/section>/.exec(html)?.[1] || "";
+  assert.match(block, /^<div class="request-label">原始要求<\/div><p>目标：.*<br>需求单地址：.*<br>（TAPD 地址.*<\/p><p>要做的事：<\/p>/);
+  assert.match(block, /<ol><li>打开并完整阅读需求单。<\/li><li>定位到对应页面。<\/li><li>设计测试用例，要求：<\/li><\/ol><ul><li>按功能点分组；<\/li><li>截图要求：关键步骤各配一张。<\/li><\/ul><ol start="4"><li>交付：结构化测试用例清单。<\/li><\/ol>/);
+  assert.match(block, /<p>约束：<\/p><ul><li>只做只读查看。<\/li><\/ul>$/);
+  assert.match(html, /<main class="markdown-body"><h2>测试用例文档<\/h2><blockquote>说明<\/blockquote>/);
+  assert.match(html, /<details class="code-fold" open>/, "long code is expanded for print");
+  assert.match(html, /\.code-copy\{display:none\}/);
+  const doc = strFromU8(unzipSync(buildDocxBytes({ title, request, markdown: "结论" }))["word/document.xml"]);
+  assert.match(doc, /原始要求：.*1\. 打开并完整阅读需求单。.*结论/);
 });

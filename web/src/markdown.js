@@ -130,13 +130,15 @@ export function renderMarkdown(text) {
       continue;
     }
     const unordered = line.match(/^\s*[-*+]\s+(.+)$/),
-      ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+      ordered = line.match(/^\s*(\d+)[.)]\s+(.+)$/);
     if (unordered || ordered) {
       const tag = unordered ? "ul" : "ol",
-        item = (unordered || ordered)[1];
+        item = unordered ? unordered[1] : ordered[2];
       if (paragraph.length || quote.length || (list && list !== tag)) flush();
       if (!list) {
-        html.push(`<${tag}>`);
+        // Keep the author's numbering when a list resumes after other blocks ("4. …" after bullets).
+        const start = ordered ? Number(ordered[1]) : 1;
+        html.push(start !== 1 ? `<ol start="${start}">` : `<${tag}>`);
         list = tag;
       }
       html.push(`<li>${renderInline(item)}</li>`);

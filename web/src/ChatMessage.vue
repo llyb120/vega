@@ -6,7 +6,7 @@ import Icon from "./Icon.vue";
 import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime, isInProgress } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
-import { exportResult } from "./export-result.js";
+import { exportResult, exportTitleOf } from "./export-result.js";
 const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember"]);
 const exportOpen = ref(false), exportError = ref("");
@@ -24,11 +24,11 @@ const exportMarkdown = computed(() => {
   return String(task.result || task.completion || "").trim();
 });
 const canExport = computed(() => props.message.delivery && !!exportMarkdown.value);
-const exportTitle = computed(() => linkedTask.value?.text || props.message.tasks?.[0]?.title || "任务结果");
+const exportTitle = computed(() => exportTitleOf(linkedTask.value?.text || props.message.tasks?.[0]?.title));
 async function runExport(format) {
   exportError.value = "";
   try {
-    await exportResult(format, { title: exportTitle.value, markdown: exportMarkdown.value });
+    await exportResult(format, { title: exportTitle.value, request: linkedTask.value?.text, markdown: exportMarkdown.value });
     exportOpen.value = false;
   } catch (error) {
     exportError.value = error?.message || String(error);
