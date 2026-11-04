@@ -1,17 +1,29 @@
-// Long-press (touch or mouse, ~500 ms) on an element; a normal tap keeps its click. Bind down/move/cancel to the
-// pointer events, prevent contextmenu, and guard the element's click with consumed() so a long-press does not also tap.
+// Long-press (~500 ms) by touch or mouse; a normal tap keeps its click. Touch events, not pointer events: mobile
+// browsers cancel pointers (pointercancel) once they consider the touch a scroll or a long-press. Android also
+// reports the long-press as contextmenu, which counts as one too (whichever comes first fires, once per press).
 export const LONG_PRESS_MS = 500;
 export function longPress(fire, ms = LONG_PRESS_MS) {
-  let timer = 0, fired = false, x = 0, y = 0;
+  let timer = 0, fired = false, x = 0, y = 0, touched = 0;
   const cancel = () => { clearTimeout(timer); timer = 0; };
+  const go = () => { cancel(); if (fired) return; fired = true; navigator.vibrate?.(10); fire(); };
+  const point = (event) => event.touches?.[0] || event;
   return {
-    down(event, value) {
-      if (event.button > 0) return;
-      fired = false; x = event.clientX; y = event.clientY; cancel();
-      timer = setTimeout(() => { timer = 0; fired = true; navigator.vibrate?.(10); fire(value); }, ms);
+    /** touchstart / mousedown (left button). */
+    down(event) {
+      // The mouse events a browser synthesizes after a touch are not a second press.
+      if (event.touches) touched = Date.now();
+      else if (event.button > 0 || Date.now() - touched < 1000) return;
+      fired = false; ({ clientX: x, clientY: y } = point(event)); cancel();
+      timer = setTimeout(go, ms);
     },
-    move(event) { if (timer && Math.hypot(event.clientX - x, event.clientY - y) > 10) cancel(); },
+    /** touchmove / mousemove: a drag (scroll) is not a press. */
+    move(event) { const p = point(event); if (timer && Math.hypot(p.clientX - x, p.clientY - y) > 10) cancel(); },
+    /** touchend / touchcancel / mouseup / mouseleave: before the delay, a plain tap. */
     cancel,
+    /** touchend: after a long-press, no synthesized click follows. */
+    end(event) { cancel(); if (fired && event.cancelable) event.preventDefault(); },
+    /** contextmenu: the browser's own long-press. */
+    menu: go,
     /** True once right after a long-press: the click that follows it is swallowed. */
     consumed() { const was = fired; fired = false; return was; },
   };
