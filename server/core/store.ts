@@ -30,6 +30,8 @@ export type Message = {
   group?: { groupId: string; name: string; seq: number; from: { kind: "user" | "employee"; id: string; name: string }; byOwner: boolean };
   /** A group notice from the system (member joined/left, relay limit reached). */
   notice?: boolean;
+  /** /new divider: the model context of this session starts after it (context.ts sinceNewSession). */
+  newSession?: boolean;
   /** A task milestone the executing session chose to tell the user (task_progress tellUser). */
   progress?: boolean;
   thinking?: string;

@@ -235,7 +235,10 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
             <button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><Icon name="tasks" :size="15" />看看工作进度</button>
           </div>
         </div>
-        <ChatMessage v-for="{ message, continued } in displayed" :key="message.clientMessageId || message.seq || message.liveKey" :message="message" :continued="continued" :name="name" :avatar="avatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        <template v-for="{ message, continued } in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
+        <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
+        <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        </template>
         <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
           <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>
           <span v-else class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" /></span>
@@ -257,7 +260,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         <button v-if="running" type="button" class="stop" title="停止本轮" @click="stop"><Icon name="stop" :size="14" /><span>停止本轮</span></button>
         <button class="primary send" :disabled="!draft.trim() && !files.length" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
       </div>
-      <p class="composer-hint">Enter 发送 · Shift + Enter 换行</p>
+      <p class="composer-hint">/new 开启新会话（不再参考之前的对话） · Enter 发送 · Shift + Enter 换行</p>
     </form>
   </section>
 </template>
@@ -297,6 +300,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
 .attach { width: 36px; min-height: 36px; color: var(--muted); }
 .send { width: 36px; min-height: 36px; padding: 0; border-radius: 10px; }
 .stop { min-height: 36px; padding: 0 10px; border-color: var(--border); color: var(--danger); font-size: 12px; }
+.chat-notice { margin: 4px auto 14px; max-width: 80%; color: var(--muted); font-size: 11px; text-align: center; }
 .composer-hint { padding: 0 8px 0 44px; color: var(--faint); font-size: 11px; }
 .composer-quote { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 4px 4px 4px 10px; border-left: 3px solid var(--accent); border-radius: 4px var(--r-md) var(--r-md) 4px; background: var(--surface-2); color: var(--muted); }
 .composer-quote > button:nth-child(2) { display: grid; justify-content: stretch; flex: 1; gap: 1px; min-width: 0; height: auto; min-height: 0; padding: 2px 0; border: 0; background: transparent; font-weight: 400; text-align: left; }

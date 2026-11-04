@@ -10,6 +10,8 @@ import { Tools } from "../server/core/tools";
 import { Auth } from "../server/core/auth";
 import { GROUP_HOPS_MAX } from "../server/core/groups";
 import { NARRATOR, NARRATOR_SYSTEM } from "../server/core/narrator";
+import { NEW_SESSION_NOTICE, newCommand } from "../server/core/new-session";
+import { readFileSync } from "node:fs";
 import { parseMentions } from "../server/core/names";
 import { sleep } from "../server/core/util";
 
@@ -479,6 +481,65 @@ test("旁白 session: append-only per group (cache-friendly); setup change or to
     await engine.groups.remove(u1, group.id);
     assert(!await engine.store.hasSession(third.session), "dissolving the group deletes the 旁白's session");
   } finally { Object.assign(NARRATOR, limits); await close(); }
+});
+
+test("/new parsing: alone or with text; anything else is an ordinary message", () => {
+  assert.deepEqual(newCommand("/new"), { rest: "" });
+  assert.deepEqual(newCommand("  /new  帮我看下\n第二行 "), { rest: "帮我看下\n第二行" });
+  for (const text of ["/news", "说 /new", "/New", "", undefined]) assert.equal(newCommand(text), undefined, String(text));
+  const route = readFileSync("server/routes/api/[...path].ts", "utf8");
+  assert(route.includes("newCommand(a.text)") && route.includes("engine.newChatContext(session.id"), "the private chat route handles /new");
+});
+
+test("/new in a private chat: the visible history stays, the model only sees what follows the divider", async () => {
+  const { engine, make, close } = await fixture();
+  try {
+    const a = await make("小A", "u1");
+    const session = await (await engine.employee.for(a)).chat("u1");
+    const seen = script(engine, { [a]: ["旧的回答", "新的回答"] });
+    await engine.submitChat(session.id, { role: "user", text: "旧的问题", actorId: "u1" });
+    await settle(engine);
+    await engine.newChatContext(session.id);
+    await engine.submitChat(session.id, { role: "user", text: "新的问题", actorId: "u1" });
+    await settle(engine);
+    const second = JSON.stringify(seen[1].messages);
+    assert(second.includes("新的问题") && !second.includes("旧的问题") && !second.includes(NEW_SESSION_NOTICE), "context starts after the divider");
+    const rows = await engine.store.messages(session.id);
+    assert.deepEqual(rows.filter((m) => m.role === "user").map((m) => m.text), ["旧的问题", "新的问题"], "the history is kept");
+    assert(rows.some((m) => m.notice && m.newSession && m.text === NEW_SESSION_NOTICE));
+  } finally { await close(); }
+});
+
+test("/new in a group: 旁白 and member sessions start over; members then see only messages after the divider", async () => {
+  const { engine, make, close } = await fixture();
+  try {
+    const a = await make("小A", "u1");
+    const group = await engine.groups.create(u1, { name: "重开", users: ["u2"], employees: [a] });
+    const seen = script(engine, { narrator: [{ targets: [], reason: "闲聊" }, { targets: ["小A"], reason: "点名" }], [a]: ["旧", "新"] });
+    await engine.groups.send(u1, group.id, { text: "旧话题 @小A" });
+    await settle(engine);
+    await engine.groups.send(u1, group.id, { text: "聊聊旧事" });
+    await settle(engine);
+    const before = (await engine.groups.get(group.id))!;
+    const oldSessions = [before.memberSessions[a], before.narrator!.session];
+    // Any member user may use it; /new alone wakes nobody.
+    await engine.groups.send(u2 as any, group.id, { text: "/new" });
+    await settle(engine);
+    const after = (await engine.groups.get(group.id))!;
+    assert.deepEqual([after.memberSessions, after.narrator], [{}, undefined]);
+    for (const id of oldSessions) assert(!await engine.store.hasSession(id), "old sessions deleted");
+    assert.deepEqual([narrated.length, seen.length], [1, 1], "the divider is not judged and wakes nobody");
+    const divider = (await groupMessages(engine, group.id)).at(-1)!;
+    assert.deepEqual([divider.notice, divider.newSession, divider.text], [true, true, NEW_SESSION_NOTICE]);
+    // /new <text>: the text follows in the new context; the 旁白 starts fresh with nothing carried over.
+    await engine.groups.send(u1, group.id, { text: "/new 小A 来一下" });
+    await settle(engine);
+    const last = narrated.at(-1);
+    assert(last.setup && !/此前的群消息/.test(last.last) && /\[新消息\] #\d+ 用户「alice」：小A 来一下$/.test(last.last), last.last);
+    const turn = JSON.stringify(seen.at(-1)!.messages);
+    assert(turn.includes("小A 来一下") && !turn.includes("旧话题") && !turn.includes("聊聊旧事") && !turn.includes("旧\""), "the member sees only what follows");
+    assert.equal(seen.at(-1)!.messages.filter((m: any) => m.role === "user").length, 1, "in a new member session");
+  } finally { await close(); }
 });
 
 test("旁白 without a lightweight model: one notice, then quiet; nothing runs", async () => {

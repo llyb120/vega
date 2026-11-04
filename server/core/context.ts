@@ -96,6 +96,11 @@ const short = (s: string, n: number) =>
     : [...s].slice(0, n).join("") + "… [clipped; recall original]";
 const STATUS_CACHE_SESSIONS = 64;
 const statusCache = new Map<string, { key: string; value: Awaited<ReturnType<Context["computeStatus"]>> }>();
+/** /new: the model context starts after the last divider (the visible history before it stays). */
+export const sinceNewSession = (rows: Message[]) => {
+  const i = rows.findLastIndex((m) => m.newSession);
+  return i < 0 ? rows : rows.slice(i + 1);
+};
 export class Context {
   window = 200000;
   reserved = 32000;
@@ -115,6 +120,8 @@ export class Context {
     public session: string,
     public mode: "auto" | "acp" = "acp",
   ) {}
+  /** This session's rows the model sees: those after the last /new divider. */
+  async messages() { return sinceNewSession(await this.store.messages(this.session)); }
   async state(): Promise<State> {
     return {
       ...fresh(),
@@ -166,7 +173,7 @@ export class Context {
       .sort((a, b) => a.start - b.start || a.end - b.end);
   }
   async live(rows?: Message[]) {
-    rows ??= await this.store.messages(this.session);
+    rows ??= await this.messages();
     const out: Fold[] = [];
     for (const f of await this.folds()) {
       const span = rows.filter((m) => m.seq! >= f.start && m.seq! <= f.end);
@@ -183,7 +190,7 @@ export class Context {
     return out;
   }
   async protectedStart(rows?: Message[]) {
-    rows ??= await this.store.messages(this.session);
+    rows ??= await this.messages();
     return protectedStart(rows);
   }
   block(f: Fold, rows: Message[]): Message {
@@ -222,7 +229,7 @@ export class Context {
     return m;
   }
   async view(rows?: Message[]) {
-    rows ??= await this.store.messages(this.session);
+    rows ??= await this.messages();
     const live = await this.live(rows),
       s = await this.state(),
       refs = new Set(
@@ -243,7 +250,7 @@ export class Context {
     return out;
   }
   async promptView(rows?: Message[]) {
-    rows ??= await this.store.messages(this.session);
+    rows ??= await this.messages();
     return promptHistory(await this.view(rows), {
       trimImages: (await this.state()).trimImages,
     });
@@ -316,7 +323,7 @@ export class Context {
     start = true,
   ) {
     folds ??= await this.live();
-    rows ??= await this.store.messages(this.session);
+    rows ??= await this.messages();
     const value = String(ref)
       .trim()
       .replace(/^\[|\]$/g, "");
@@ -370,7 +377,7 @@ export class Context {
     const rejected: Obj[] = [];
     for (const [index, r] of ranges.entries()) {
       try {
-        const rows = await this.store.messages(this.session),
+        const rows = await this.messages(),
           live = await this.live(rows),
           summary = String(r.summary || "").trim();
         assert(
@@ -447,7 +454,7 @@ export class Context {
     return applied;
   }
   async decompress(key: string | number) {
-    const rows = await this.store.messages(this.session),
+    const rows = await this.messages(),
       folds = await this.folds(),
       name =
         typeof key === "number"
@@ -473,7 +480,7 @@ export class Context {
     };
   }
   async runs(rows?: Message[]) {
-    rows ??= await this.store.messages(this.session);
+    rows ??= await this.messages();
     const limit = await this.protectedStart(rows),
       blocks = await this.live(rows),
       all = units(rows),
@@ -508,7 +515,7 @@ export class Context {
     return out;
   }
   async groups(tier: number, rows?: Message[]) {
-    rows ??= await this.store.messages(this.session);
+    rows ??= await this.messages();
     const out: Obj[] = [];
     let cur: Fold[] = [];
     const flush = () => {
@@ -530,7 +537,7 @@ export class Context {
     return out;
   }
   async nudge() {
-    const rows = await this.store.messages(this.session),
+    const rows = await this.messages(),
       used = await this.promptTokens(),
       ratio = used / this.window,
       s = await this.state(),
@@ -607,7 +614,7 @@ export class Context {
     return true;
   }
   async emergency(force = false) {
-    const rows = await this.store.messages(this.session),
+    const rows = await this.messages(),
       used = await this.promptTokens(),
       target = this.window * 0.75,
       need = force ? Math.max(used - target, used / 4) : used - target;
@@ -760,7 +767,7 @@ export class Context {
   }
   /** Uncached status over the given rows; `status()` must always equal this on fresh rows. */
   async computeStatus(rows?: Message[], s?: State) {
-    rows ??= await this.store.messages(this.session);
+    rows ??= await this.messages();
     s ??= await this.state();
     const view = await this.promptView(rows),
       used = await this.promptTokens(view);
@@ -808,7 +815,7 @@ export class Context {
       .trim()
       .toLowerCase();
     assert(needle, "search_context requires query");
-    const rows = await this.store.messages(this.session),
+    const rows = await this.messages(),
       hits: Obj[] = [];
     let more = false;
     for (const b of await this.live(rows)) {
@@ -852,7 +859,7 @@ export class Context {
         ),
       );
     assert(query || positions.size, "recall needs positions or query");
-    const rows = await this.store.messages(this.session),
+    const rows = await this.messages(),
       folds = await this.folds(),
       truncated = (await this.state()).truncated,
       selected = rows.filter(
@@ -937,7 +944,7 @@ export class Context {
     return await this.status();
   }
   async stage() {
-    const rows = await this.store.messages(this.session),
+    const rows = await this.messages(),
       turns: Obj[] = [];
     for (const row of rows) {
       if (row.role === "user")

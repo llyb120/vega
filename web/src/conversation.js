@@ -25,7 +25,7 @@ export function groupTurns(messages) {
 
 /** Chat page: everything the employee wrote is shown as soon as it exists, including text written alongside tool calls; tool calls, results and thinking stay hidden. */
 export function employeeChatMessages(messages) {
-  return messages.filter((message) => message.role === "user" || message.delivery ||
+  return messages.filter((message) => message.role === "user" || message.delivery || message.notice ||
     (message.role === "assistant" && !!(message.text?.trim() || message.images?.length)));
 }
 

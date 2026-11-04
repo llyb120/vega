@@ -1,3 +1,4 @@
+import { NEW_SESSION_NOTICE } from "./new-session";
 import { Fire } from "./fire";
 import { Groups } from "./groups";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
@@ -438,6 +439,14 @@ export class Engine {
     employee.schedule();
     return { ok: true };
   }
+  /** /new in a chat: a divider after which the model context starts over; the visible history stays. */
+  async newChatContext(session: string, mark: Partial<Message> = {}) {
+    assert(!this.active.has(session), "对话仍在进行，请先停止后再开启新会话");
+    const saved = await this.store.append(session, { ...mark, role: "assistant", notice: true, newSession: true, text: NEW_SESSION_NOTICE });
+    this.providers.reset(session);
+    this.emit({ type: "compacted", session, data: { newSession: true } });
+    return saved;
+  }
   async clearEmployeeChat(key: string) {
     const employee = await this.employee.for(key), chatId = (await employee.state()).chatSession;
     assert(!employee.deleting && !this.closing, "牛马正在删除或服务正在停止，请稍候");
@@ -495,7 +504,7 @@ export class Engine {
       }
       return receipt;
     }
-    const rows = await this.store.messages(tools.session.id),
+    const rows = await ctx.messages(),
       view = await ctx.promptView(),
       used = await ctx.promptTokens(view);
     if (

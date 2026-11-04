@@ -24,6 +24,7 @@ import {
 } from "h3";
 import { app, employeeLive } from "../../core/application";
 import { safeFileName, storeAttachments } from "../../core/attachments";
+import { newCommand } from "../../core/new-session";
 import { CLIENT_BODY_LIMIT } from "../../core/client-socket";
 import { assert, filterAsync, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
@@ -218,6 +219,17 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "messages" && method === "POST") {
         check(a.clientMessageId === undefined || (typeof a.clientMessageId === "string" && /^[a-zA-Z0-9_-]{16,80}$/.test(a.clientMessageId)), 400, "Invalid message ID");
         const session = await employee.chat(user.id);
+        // /new [text]: a new model context first; the rest (or attachments), if any, is the first message in it.
+        const command = newCommand(a.text);
+        if (command) {
+          check(!engine.active.has(session.id), 409, "对话仍在进行，请先停止后再开启新会话");
+          check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
+          if (a.clientMessageId && await store.clientMessage(session.id, user.id, a.clientMessageId)) return { id: session.id };
+          const alone = !command.rest && !a.images?.length && !a.files?.length;
+          await engine.newChatContext(session.id, alone ? { actorId: user.id, clientMessageId: a.clientMessageId } : {});
+          if (alone) return { id: session.id, newSession: true };
+          a = { ...a, text: command.rest };
+        }
         const message = {
           ...await inputMessage(a, store, session.id), actorId: user.id,
           clientMessageId: a.clientMessageId,

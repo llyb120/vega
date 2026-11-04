@@ -6,6 +6,7 @@ import { assert, id } from "./util";
 import { ATTACHMENTS_MAX } from "./attachments";
 import { narrate, narratorSetup, NARRATOR } from "./narrator";
 import { createHash } from "node:crypto";
+import { NEW_SESSION_NOTICE, newCommand } from "./new-session";
 
 /**
  * 群聊: users and their employees working together. Any user in a group can talk to and @ any employee in it; each
@@ -32,7 +33,9 @@ export type Group = {
   /** The 旁白 could not run for want of a lightweight model and said so once (cleared when it runs again). */
   narratorWarned?: boolean;
   /** The 旁白's hidden session: the setup it was opened with (hash) and the last group message it judged. */
-  narrator?: { session: string; basis: string; seq: number; from: number };
+  narrator?: { session: string; basis: string; seq: number };
+  /** The last /new divider: the 旁白 and member turns see only group messages after it. */
+  newSessionAt?: number;
 };
 type Viewer = { id: string; role: string };
 type Person = { kind: "user" | "employee"; id: string; name: string; avatar: string; ownerId?: string };
@@ -312,9 +315,33 @@ export class Groups {
       if (previous) return { seq: previous.seq, duplicate: true };
     }
     const name = (await this.userRows([viewer.id])).get(viewer.id)?.name || "用户";
-    const saved = await this.append(group, { role: "user", text, images: a.images?.length ? a.images : undefined, files: a.files?.length ? a.files : undefined, actorId: viewer.id, clientMessageId, author: { kind: "user", id: viewer.id, name }, hop: 0 });
+    // /new [text]: the 旁白 and every member start new sessions here; the rest (or attachments), if any, follows.
+    const command = newCommand(text);
+    if (command) {
+      const alone = !command.rest && !a.images?.length && !a.files?.length;
+      const divider = await this.newSessions(group, alone ? { actorId: viewer.id, clientMessageId } : {});
+      if (alone) return { seq: divider.seq };
+    }
+    const saved = await this.append(group, { role: "user", text: command ? command.rest : text, images: a.images?.length ? a.images : undefined, files: a.files?.length ? a.files : undefined, actorId: viewer.id, clientMessageId, author: { kind: "user", id: viewer.id, name }, hop: 0 });
     this.store.afterCommit(() => void this.dispatch(group.id, saved).catch((error) => this.report(group.id, error)));
     return { seq: saved.seq };
+  }
+  /** /new: a divider; members' and the 旁白's sessions here are deleted (recreated on next use) and see only what follows. */
+  private async newSessions(group: Group, mark: Partial<Message>) {
+    this.assertIdle(group, group.employees.map((e) => e.id));
+    const { divider, old } = await this.store.transaction(async () => {
+      const divider = await this.store.append(group.session, { ...mark, role: "assistant", notice: true, newSession: true, text: NEW_SESSION_NOTICE });
+      const old = await this.change(group.id, (g) => {
+        const old = [...Object.values(g.memberSessions), ...(g.narrator?.session ? [g.narrator.session] : [])];
+        g.memberSessions = {};
+        delete g.narrator;
+        g.newSessionAt = divider.seq;
+        return old;
+      });
+      return { divider, old };
+    });
+    for (const session of old) { await this.dropSession(session); await this.engine.releaseSession(session); }
+    return divider;
   }
   /** A member's turn ended: its reply goes into the group (empty turns that started tasks still show them). */
   async replied(session: Session, employeeId: string, text: string, tasks: NonNullable<Message["tasks"]>, hop: number, failed = false) {
@@ -434,7 +461,7 @@ export class Groups {
     const label = (m: Message) => m.author?.kind === "employee" ? `牛马「${m.author.name}」` : `用户「${m.author?.name || "?"}」`;
     const line = (m: Message, n = 300) => `#${m.seq} ${label(m)}：${cut(String(m.text || ""), n)}${m.files?.length || m.images?.length ? "（带附件）" : ""}`;
     // Earlier group messages after `after` (never before a /new divider), newest `limit`, one line each.
-    const floor = known?.from || 0;
+    const floor = group.newSessionAt || 0;
     const earlier = async (after: number, limit: number) => {
       const page = after > floor ? await this.store.messagePage(group.session, { after }) : await this.store.messagePage(group.session, { before: message.seq, limit: limit * 3 });
       return page.messages.filter((m) => m.seq! > Math.max(after, floor) && m.seq! < message.seq! && !m.notice).slice(-limit).map((m) => line(m));
@@ -460,7 +487,7 @@ export class Groups {
     const replaced = await this.change(group.id, async (g) => {
       g.narratorWarned = false;
       const old = g.narrator?.session;
-      g.narrator = { session: result.session, basis, seq: message.seq!, from: g.narrator?.from || 0 };
+      g.narrator = { session: result.session, basis, seq: message.seq! };
       return old && old !== result.session ? old : "";
     });
     if (replaced) await this.dropSession(replaced);
@@ -491,7 +518,7 @@ export class Groups {
   private async turn(group: Group, member: Person, trigger: Message, routed?: string) {
     const session = await this.memberSession(group.id, member);
     // Only what this member has not seen yet: messages after the one its previous turn answered.
-    const seen = (await this.store.lastMessage(session, "user"))?.group?.seq || 0;
+    const seen = Math.max((await this.store.lastMessage(session, "user"))?.group?.seq || 0, group.newSessionAt || 0);
     const recent = (await this.store.messagePage(group.session, { after: seen })).messages.filter((m) => m.seq! <= trigger.seq!).slice(-CONTEXT_MESSAGES);
     const label = (m: Message) => m.notice ? "系统" : m.author?.kind === "employee" ? (m.author.id === member.id ? "你" : `牛马「${m.author.name}」`) : `用户「${m.author?.name || "?"}」`;
     const attached = (m: Message) => [m.images?.length ? `${m.images.length} 张图片` : "", m.files?.length ? "文件 " + m.files.map((f) => f.name).join("、") : ""].filter(Boolean).join("，");
