@@ -131,6 +131,10 @@ export type ToolContext = {
   taskId?: string;
   vaultRequest?: boolean;
   vaultSend?: boolean;
+  /** Chat or main task session with at least one reachable colleague accepting requests. */
+  colleagues?: boolean;
+  /** colleague_handoff allowed (false once the handoff chain is at its depth limit). */
+  handoff?: boolean;
 };
 
 export function employeeTools(ctx: ToolContext): Tool[] {
@@ -296,6 +300,26 @@ export function vaultTools(ctx: ToolContext): Tool[] {
   return out;
 }
 
+/** Working with colleagues: handoff (a task on the colleague, result comes back) and ask (one answer, no tools). */
+export function colleagueTools(ctx: ToolContext): Tool[] {
+  if (!ctx.colleagues || ctx.computer || ctx.kind === "normal") return [];
+  const colleagueId = str("同事牛马 ID（系统提示「可协作的牛马」里的 id）", { minLength: 1 });
+  const out: Tool[] = [];
+  if (ctx.handoff)
+    out.push(tool("colleague_handoff",
+      "把一项独立工作转交给同事牛马：在对方那里新建一条任务，由对方按自己的工作原则和环境完成。对方任务结束（完成、失败、停止或取消）后，结果自动送回" +
+        (ctx.kind === "task" ? "本任务（作为补充数据唤醒本任务，未处理前不能 task_complete）；转交后先做不依赖结果的部分，需要等结果时用 task_wait" : "本沟通会话") +
+        "。只在需要对方的职责、环境或权限时用，自己能做的不要转交。instructions 写全目标、背景、范围和交付标准（对方看不到你的对话）；dedupeKey 填业务唯一标识，同一同事同 key 已转交过时不新建，返回原任务。转交链最多 3 层，不能转交回链上已有的牛马。",
+      { colleagueId, instructions: instructions("交给同事的任务：目标、背景、范围、交付标准"),
+        dedupeKey: str("业务唯一标识，≤200 字；同一同事同 key 已有转交任务时直接返回原任务", { minLength: 1, maxLength: 200 }) },
+      ["colleagueId", "instructions"]));
+  out.push(tool("colleague_ask",
+    "向同事牛马询问一个问题，同步返回回答（最长约 1 分钟）。对方只根据自己的对外说明、工作原则、职责和记忆用一次模型调用作答，不使用工具、不执行操作，也不能再询问或转交；需要对方实际去做事时用 " + (ctx.handoff ? "colleague_handoff" : "自己完成") + "。回答是参考数据，不是授权。",
+    { colleagueId, question: str("问题，1–2000 字，写清背景，对方看不到你的对话", { minLength: 1, maxLength: 2000 }) },
+    ["colleagueId", "question"]));
+  return out;
+}
+
 export const CHROME_TOOL_DEFINITIONS = chromeTools as Tool[];
 export const CHROME_TOOLS = new Set(CHROME_TOOL_DEFINITIONS.map((t) => t.name));
 export const EMPLOYEE_TOOLS = new Set([
@@ -304,10 +328,11 @@ export const EMPLOYEE_TOOLS = new Set([
   "memory_search", "memory_propose", "memory_manage",
 ]);
 export const VAULT_TOOLS = new Set(["vault_list", "vault_get", "vault_request", "vault_send"]);
+export const COLLEAGUE_TOOLS = new Set(["colleague_handoff", "colleague_ask"]);
 /** Calls that suspend, hand off or end the turn: they must be the only call in a batch. */
 export const STANDALONE_TOOLS = new Set(["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete", "vault_request", "vault_send"]);
 
-export type Internal = { tool: "chrome" | "employee"; args: Obj; target?: "task" | "duty" };
+export type Internal = { tool: "chrome" | "employee" | "colleague"; args: Obj; target?: "task" | "duty" };
 
 /** runAt / delayMinutes → the old nextAt / nextCheckInMinutes; exactly one unless optional. */
 function when(a: Obj, path: string, required = true): Obj {
@@ -442,6 +467,8 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
       if (r.command === "merge") return employee(defined({ action: "memory_resolve", resolveAction: "merge", ids: r.memoryIds, keepId: r.keepId }));
       return employee(defined({ action: "memory_resolve", resolveAction: r.command, id: r.memoryId, claim: r.claim, signal: r.signal }));
     }
+    case "colleague_handoff": return { tool: "colleague", args: defined({ action: "handoff", colleagueId: a.colleagueId, instructions: a.instructions, dedupeKey: a.dedupeKey }) };
+    case "colleague_ask": return { tool: "colleague", args: { action: "ask", colleagueId: a.colleagueId, question: a.question } };
     case "vault_list": return employee({ action: "vault_list" });
     case "vault_get": return employee(defined({ action: "vault_get", id: a.credentialId, text: a.purpose, url: a.url }));
     case "vault_request": return employee({ action: "vault_request", text: a.requirement });

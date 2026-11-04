@@ -102,7 +102,7 @@ test("new employees automatically get an unused shape/color pair without changin
     }));
     const created = [];
     while ((await root.all()).length < 50) {
-      const state = await root.create({ name: "Automatic", ...(created.length % 2 ? { avatar: "" } : {}) }, "owner");
+      const state = await root.create({ name: `Automatic ${created.length}`, ...(created.length % 2 ? { avatar: "" } : {}) }, "owner");
       assert(parseBotAvatar(state.avatar), "persist an explicit preset, not a hash-only default");
       assert(!used.has(state.avatar!), state.avatar);
       used.add(state.avatar!);
