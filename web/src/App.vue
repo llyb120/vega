@@ -222,7 +222,7 @@ const employee = ref({
   employeeTaskFilter = ref("active"),
   employeeTaskFocus = ref(""),
   employeeSaving = ref(false),
-  employeeDeleting = ref(false), employeeClearing = ref(false),
+  employeeDeleting = ref(false), employeeResetting = ref(""),
   employeeExecutionBusy = ref(false),
   employeeExecutionOpen = ref(false),
   workRailOpen = ref(false),
@@ -1067,6 +1067,11 @@ function handleEvent(event) {
   const selected = event.session === current.value?.id;
   if (event.type === "started") running.value[event.session] = true;
   if (event.type === "employee_changed") {
+    // Another page reset this employee: its cached chat and any open task session are gone.
+    if (event.data?.reset) {
+      void clearChatCache(user.value?.id, event.data.employeeId);
+      if (event.data.employeeId === selectedEmployee.value) employeeSession.value = "";
+    }
     if (!event.data?.employeeId || event.data.employeeId === selectedEmployee.value) employeeSessionVersion.value++;
     if (typeof event.data?.activeTasks === "number")
       activeTaskCount.value = event.data.activeTasks;
@@ -1221,7 +1226,7 @@ async function createEmployee() {
 async function deleteEmployee() {
   if (employeeDeleting.value || !employee.value.id) return;
   const id = employee.value.id, name = employee.value.name, owner = user.value.id;
-  if (!confirm(`永久删除「${name}」？\n\n将删除该牛马的职责、记忆、所有任务和执行会话，并清除其浏览器登录数据。项目文件和共享密码本不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
+  if (!confirm(`永久删除「${name}」？\n\n将删除该牛马的职责、记忆、密码本、所有任务和执行会话，并清除其浏览器登录数据。项目文件不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
   employeeDeleting.value = true;
   try {
     await api(`/employees/${id}?confirmed=true`, "DELETE");
@@ -1239,19 +1244,25 @@ async function deleteEmployee() {
   } catch (error) { employeeError.value = error.message; }
   finally { employeeDeleting.value = false; }
 }
-async function clearEmployeeChat() {
-  if (employeeClearing.value || employeeDeleting.value || !employee.value.id) return;
-  const id = employee.value.id, name = employee.value.name, owner = user.value.id;
-  if (!confirm(`清空「${name}」的全部聊天记录？\n\n对话消息将永久删除，任务、职责和记忆不受影响。此操作不可撤销。`)) return;
-  employeeClearing.value = true;
+const EMPLOYEE_RESETS = {
+  chat: { path: "chat/clear", ask: (name) => `清空「${name}」的全部聊天记录？\n\n对话消息将永久删除，任务、职责和记忆不受影响。此操作不可撤销。`, done: (name) => `已清空「${name}」的聊天记录` },
+  all: { path: "reset", ask: (name) => `重置「${name}」？\n\n将停止正在进行的对话和任务，并永久删除：全部聊天记录、所有任务记录及其执行会话、任务交付与进度。\n\n保留：记忆、职责（定时从现在起重新计时）、牛马设置、密码本和浏览器登录。已提交的外部作业不会自动撤销。此操作不可撤销。`, done: (name) => `已重置「${name}」` },
+};
+/** 清空聊天 (scope chat) and 重置牛马 (scope all) share one flow: confirm, call, drop this employee's cached chat. */
+async function resetEmployee(scope) {
+  if (employeeResetting.value || employeeDeleting.value || !employee.value.id) return;
+  const id = employee.value.id, name = employee.value.name, owner = user.value.id, reset = EMPLOYEE_RESETS[scope];
+  if (!confirm(reset.ask(name))) return;
+  employeeResetting.value = scope;
   try {
-    await api(`/employees/${id}/chat/clear?confirmed=true`, "POST");
+    await api(`/employees/${id}/${reset.path}?confirmed=true`, "POST");
     await clearChatCache(owner, id);
     employeeSessionVersion.value++;
     employeeEvent.value = null;
-    toast(`已清空「${name}」的聊天记录`);
+    if (scope === "all") await loadEmployee();
+    toast(reset.done(name));
   } catch (error) { employeeError.value = error.message; }
-  finally { employeeClearing.value = false; }
+  finally { employeeResetting.value = ""; }
 }
 async function employeeTaskAction(task, action, text) {
   return attempt(async () => {
@@ -1577,11 +1588,11 @@ onBeforeUnmount(() => {
             :api="api"
             :saving="employeeSaving"
             :deleting="employeeDeleting"
-            :clearing="employeeClearing"
+            :resetting="employeeResetting"
             :busy="employeeExecutionBusy"
             @save="saveEmployeeSettings"
             @delete="deleteEmployee"
-            @clear-chat="clearEmployeeChat"
+            @reset="resetEmployee"
             @execution="changeEmployeeExecution"
             @avatar="selectedEmployee === $event.employeeId && (employee.avatar = $event.avatar)"
             @cancel="employeeTab = 'chat'"

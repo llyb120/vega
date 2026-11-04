@@ -433,6 +433,9 @@ test(
       const beforeDutyCalls = triggerRequests;
       for (const login of [a, b, v]) assert.equal((await req(`/employees/${team.id}`, "POST", { action: "add", kind: "duty", condition: "每天23:59", text: "两框职责" }, login)).r.status, 403);
       assert.equal(triggerRequests, beforeDutyCalls, "unauthorized writes do not invoke the trigger interpreter");
+      for (const login of [a, b, v]) assert.equal((await req(`/employees/${team.id}/reset?confirmed=true`, "POST", {}, login)).r.status, 403, "only managers may reset an employee");
+      assert.equal((await req(`/employees/${workerA.id}/reset?confirmed=true`, "POST", {}, b)).r.status, 404);
+      assert.equal((await req(`/employees/${workerA.id}/reset`, "POST", {}, a)).r.status, 400, "reset needs explicit confirmation");
       const duty = await ok(`/employees/${team.id}`, "POST", { action: "add", kind: "duty", condition: "每天23:59", text: "两框职责内容" }, admin);
       let savedDuty = (await ok(`/employees/${team.id}`, "GET", undefined, admin)).duties.find((entry: any) => entry.id === duty.id);
       assert.equal(savedDuty.condition, "每天23:59"); assert.deepEqual(savedDuty.times, ["23:59"]);

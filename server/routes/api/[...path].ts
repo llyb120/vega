@@ -210,6 +210,11 @@ export default defineEventHandler(async (event) => {
         });
         return { ok: true };
       }
+      if (path[2] === "reset" && path.length === 3 && method === "POST") {
+        check(employee.manageable(user), 403, "只有牛马管理者可以重置牛马");
+        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认清空该牛马的全部会话和任务");
+        return await engine.resetEmployee(employee.employeeId);
+      }
       if (path[2] === "chat" && path[3] === "clear" && method === "POST") {
         check(employee.manageable(user), 403, "只有牛马管理者可以清空聊天记录");
         check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认清空该牛马的聊天记录");
@@ -228,7 +233,7 @@ export default defineEventHandler(async (event) => {
           clientMessageId: a.clientMessageId,
           clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.quoteSeq ?? null])).digest("hex") : undefined,
         };
-        check(!employee.deleting, 409, "牛马正在删除，请稍候");
+        check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
         await engine.submitChat(session.id, message);
         return { id: session.id };
       }

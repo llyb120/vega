@@ -2,8 +2,8 @@
 import { computed } from "vue";
 import Icon from "./Icon.vue";
 import EmployeeAvatarPicker from "./EmployeeAvatarPicker.vue";
-const props = defineProps({ employee: Object, api: Function, saving: Boolean, deleting: Boolean, clearing: Boolean, busy: Boolean });
-const emit = defineEmits(["save", "delete", "clear-chat", "execution", "avatar", "cancel"]);
+const props = defineProps({ employee: Object, api: Function, saving: Boolean, deleting: Boolean, resetting: String, busy: Boolean });
+const emit = defineEmits(["save", "delete", "reset", "execution", "avatar", "cancel"]);
 const clients = computed(() => props.employee.executionClients || []);
 const local = computed(() => !!props.employee.execution?.localAgent);
 </script>
@@ -31,10 +31,11 @@ const local = computed(() => !!props.employee.execution?.localAgent);
           <p v-if="!clients.length" class="hint">无在线客户端；连接后可切换。</p>
         </section>
         <section class="card danger-zone">
-          <div class="card-head"><h3>危险操作</h3><p class="hint">清空聊天只影响本牛马的对话记录；删除会连同职责、记忆、任务和浏览器登录一并清除。项目文件和共享密码本不会删除。</p></div>
+          <div class="card-head"><h3>危险操作</h3><p class="hint">清空聊天只删除对话记录；重置会停止并删除全部会话和任务，保留记忆、职责、设置、密码本和浏览器登录；删除会连同职责、记忆、密码本、任务和浏览器登录一并清除。项目文件不会删除。</p></div>
           <div class="danger-actions">
-            <button type="button" class="danger" :disabled="clearing || deleting" @click="emit('clear-chat')"><Icon name="trash" :size="15" />{{ clearing ? '正在清空…' : '清空聊天记录' }}</button>
-            <button type="button" class="danger" :disabled="deleting || clearing" @click="emit('delete')"><Icon name="trash" :size="15" />{{ deleting ? '正在删除…' : '永久删除牛马' }}</button>
+            <button type="button" class="danger" :disabled="!!resetting || deleting" @click="emit('reset', 'chat')"><Icon name="trash" :size="15" />{{ resetting === 'chat' ? '正在清空…' : '清空聊天记录' }}</button>
+            <button type="button" class="danger" :disabled="!!resetting || deleting" @click="emit('reset', 'all')"><Icon name="trash" :size="15" />{{ resetting === 'all' ? '正在重置…' : '重置牛马' }}</button>
+            <button type="button" class="danger" :disabled="deleting || !!resetting" @click="emit('delete')"><Icon name="trash" :size="15" />{{ deleting ? '正在删除…' : '永久删除牛马' }}</button>
           </div>
         </section>
       </div>

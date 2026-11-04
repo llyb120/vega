@@ -375,6 +375,42 @@ export class Engine {
       this.employee.schedule();
     } catch (error) { employee.deleting = false; throw error; }
   }
+  /**
+   * 重置牛马: stop everything it is running, then drop every task (records, runs, task sessions, task-scoped temp
+   * credentials) and the chat history. Memories, settings, duties, the vault and the browser profile stay.
+   */
+  async resetEmployee(key: string) {
+    const employee = this.employee.for(key);
+    assert(!employee.deleting && !employee.resetting && !this.closing && !this.executionSwitches.has("employee:" + key), "牛马正在删除、重置或切换执行位置，请稍候");
+    employee.resetting = true;
+    try {
+      const sessions = () => {
+        const state = employee.state(), taskIds = new Set(state.tasks.map((task) => task.id));
+        return this.store.sessions().filter((session) => session.employeeId === key || (session.taskId && taskIds.has(session.taskId)) || session.id === state.chatSession);
+      };
+      // Same abort as 停止; keep cancelling until every run (including one that was just starting) has exited.
+      for (const deadline = Date.now() + 15000; employee.busy.size || sessions().some((session) => this.active.has(session.id));) {
+        for (const run of employee.busy.values()) if (run.session) this.cancel(run.session);
+        for (const session of sessions()) this.cancel(session.id);
+        assert(Date.now() < deadline, "牛马仍在停止执行，请稍后再重置");
+        await sleep(25);
+      }
+      const chatId = employee.state().chatSession, work = sessions().filter((session) => session.id !== chatId);
+      for (const session of work) await this.releaseSession(session.id);
+      this.store.transaction(() => {
+        for (const session of work) {
+          this.store.db.prepare("DELETE FROM sessions WHERE id=?").run(session.id);
+          this.store.remove("context-state", session.id);
+          this.providers.reset(session.id);
+        }
+        employee.clearWork();
+      });
+    } finally { employee.resetting = false; }
+    this.clearEmployeeChat(key);
+    employee.runtime.emit("employee_changed", { employeeId: key, reset: true, activeTasks: 0 });
+    employee.schedule();
+    return { ok: true };
+  }
   clearEmployeeChat(key: string) {
     const employee = this.employee.for(key), chatId = employee.state().chatSession;
     assert(!employee.deleting && !this.closing, "牛马正在删除或服务正在停止，请稍候");

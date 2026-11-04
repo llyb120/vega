@@ -412,6 +412,68 @@ test("clearEmployeeChat refuses while the chat turn is still running", async () 
   }
 });
 
+test("resetEmployee drops all sessions and tasks but keeps memories, settings, duties and the vault", async () => {
+  const { store, engine, employee, chat } = fixture();
+  try {
+    store.append(chat.id, { role: "user", text: "hello" });
+    const old = Date.now() - 3 * 86400000;
+    employee.update((state) => {
+      state.instruction = "keep instruction";
+      state.duties.push({ id: "duty-daily", text: "daily", enabled: true, times: ["09:00"], firedAt: old }, { id: "duty-every", text: "interval", enabled: true, everyMinutes: 60, lastRunAt: old });
+      for (const id of ["task-done", "task-waiting"]) state.tasks.push({ id, text: id, status: id === "task-done" ? "done" : "waiting", createdAt: old, profile: "coding", cwd: state.cwd, owner: { token: "", name: "owner" }, dutyId: "duty-daily" });
+      state.runs.push({ taskId: "task-done", status: "done" });
+    });
+    const work = store.newSession({ cwd: process.cwd(), taskId: "task-done", employeeId: employee.employeeId });
+    store.append(work.id, { role: "assistant", text: "task transcript" });
+    store.save("context-state", work.id, { ledger: ["x"] });
+    employee.update((state) => { state.tasks[0].workSession = work.id; });
+    const memory = await employee.execute("", { action: "memory_propose", claim: "回复一律用中文，结论先行", memoryKind: "preference", source: "ui" });
+    const credential = employee.vault.save({ name: "keep", condition: "authorized", content: "secret" });
+    employee.vault.request("task-waiting");
+    const events: any[] = [];
+    engine.events.on("event", (event) => events.push(event));
+    assert.deepEqual(await engine.resetEmployee(employee.employeeId), { ok: true });
+    const state = employee.state();
+    assert.deepEqual(state.tasks, []);
+    assert.deepEqual(state.runs, []);
+    assert.throws(() => store.session(work.id), /not found/);
+    assert.equal(store.object("context-state", work.id), undefined);
+    assert.equal(store.object("vault-request", "task-waiting"), undefined, "task-scoped credential requests go with their task");
+    assert.equal(store.messages(chat.id).length, 0);
+    assert.equal(state.chatSession, chat.id, "the chat session itself stays so open pages keep their subscription");
+    assert.equal(state.instruction, "keep instruction");
+    assert.ok(state.memories.some((entry: any) => entry.id === memory.value.id));
+    assert.deepEqual(employee.vault.list().map((entry) => entry.id), [credential.id]);
+    assert.deepEqual(state.duties.map((duty) => duty.id), ["duty-daily", "duty-every"]);
+    assert.ok(state.duties[0].firedAt > old && state.duties[1].lastRunAt > old, "duty clocks restart from the reset");
+    employee.closed = false;
+    await employee.tick();
+    assert.deepEqual(employee.state().tasks, [], "no backlog fires right after a reset");
+    assert.ok(events.some((event) => event.type === "employee_changed" && event.data?.employeeId === employee.employeeId && event.data?.reset));
+  } finally { employee.closed = true; await engine.close(); store.close(); }
+});
+
+test("resetEmployee first aborts running chat and task turns, then wipes", async () => {
+  const { store, engine, employee, chat } = fixture();
+  try {
+    employee.update((state) => { state.tasks.push({ id: "task-live", text: "live", status: "running", createdAt: Date.now(), profile: "coding", cwd: state.cwd, owner: { token: "", name: "owner" } }); });
+    const work = store.newSession({ cwd: process.cwd(), taskId: "task-live", employeeId: employee.employeeId });
+    const aborted: string[] = [];
+    for (const session of [chat.id, work.id]) {
+      const control = new AbortController();
+      // Runs exit a moment after the abort, as real turns do.
+      control.signal.addEventListener("abort", () => setTimeout(() => { aborted.push(session); engine.active.delete(session); if (session === work.id) employee.busy.delete("task-live"); }, 50));
+      engine.active.set(session, { control, steer: [] } as any);
+    }
+    employee.busy.set("task-live", { computer: false, session: work.id });
+    assert.deepEqual(await engine.resetEmployee(employee.employeeId), { ok: true });
+    assert.deepEqual(aborted.sort(), [chat.id, work.id].sort());
+    assert.deepEqual(employee.state().tasks, []);
+    assert.throws(() => store.session(work.id), /not found/);
+    assert.equal(employee.resetting, false);
+  } finally { engine.active.clear(); employee.busy.clear(); await engine.close(); store.close(); }
+});
+
 test("complete delivers the cited deliverable body verbatim instead of only the summary", async () => {
   const { store, engine, employee, chat } = fixture();
   let calls = 0;

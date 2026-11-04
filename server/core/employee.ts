@@ -322,6 +322,8 @@ export class Employee {
   cursor = 0;
   stopping = false;
   deleting = false;
+  /** 重置牛马 in progress: the scheduler starts nothing new until the reset has wiped the task list. */
+  resetting = false;
   deleted = false;
   timer?: ReturnType<typeof setTimeout>;
   closed = false;
@@ -406,6 +408,30 @@ export class Employee {
     this.takeovers.clear();
     (this.root || this).members.delete(this.employeeId);
     this.runtime.emit("employee_changed", { employeeId: this.employeeId, deleted: true, scope: state.scope, ownerId: state.ownerId });
+  }
+  /**
+   * Reset wipes tasks and runs. Duties are configuration and stay, but their clocks restart from now: a fixed-time
+   * duty waits for its next slot, an interval duty for one full interval, so wiping history never fires a backlog.
+   */
+  clearWork(now = Date.now()) {
+    assert(this.resetting && !this.busy.size, "Reset requires an idle employee");
+    const taskIds = this.update((s) => {
+      const ids = s.tasks.map((task) => task.id);
+      s.tasks = [];
+      s.runs = [];
+      for (const duty of s.duties) {
+        duty.pending = [];
+        duty.eventAt = 0;
+        if (duty.times?.length) duty.firedAt = now;
+        if (duty.everyMinutes) duty.lastRunAt = now;
+      }
+      return ids;
+    });
+    for (const taskId of taskIds) {
+      this.vault.dropTemp(taskId);
+      this.releaseWorkspace(taskId);
+    }
+    this.takeovers.clear();
   }
   chat(ownerId: string) {
     assert(!this.deleting, "Employee is being deleted");
@@ -1473,7 +1499,7 @@ export class Employee {
     return t;
   }
   async tick(now = Date.now()) {
-    if (this.closed || this.deleting || this.deleted) return;
+    if (this.closed || this.deleting || this.deleted || this.resetting) return;
     const initial = this.state();
     let desk: Presence | undefined;
     if (
@@ -1498,7 +1524,7 @@ export class Employee {
         this.emitChanged(initial);
     }
     const s = this.state();
-    if (this.deleting || this.deleted) return;
+    if (this.deleting || this.deleted || this.resetting) return;
     let next = Infinity,
       changed = false;
     for (const task of s.tasks) {
