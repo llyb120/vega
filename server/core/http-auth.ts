@@ -113,6 +113,10 @@ export async function gate(event: H3Event, path: string) {
   )
     return;
   if (/^\/api\/blobs\/[^/]+$/.test(path) && event.method === "GET") return;
+  // Group chats check membership (and read-only accounts) themselves; everyone has an avatar of their own.
+  if (/^\/api\/groups(?:\/|$)/.test(path)) return;
+  if (path === "/api/me/avatar" && event.method === "POST") return;
+  if (/^\/api\/avatars\/users\/[^/]+$/.test(path) && event.method === "GET") return;
   if (/^\/api\/sessions\//.test(path) && event.method === "GET") return;
   if (
     role === "operator" &&

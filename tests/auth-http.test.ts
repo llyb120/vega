@@ -428,12 +428,31 @@ test(
       assert.equal((await req("/employees/" + workerA.id, "GET", undefined, b)).r.status, 404);
       assert.equal((await req("/employees", "GET", undefined, v)).r.status, 200);
       assert.deepEqual((await ok("/employees", "GET", undefined, a)).map((employee: any) => employee.id), [workerA.id]);
+      // 群聊 over HTTP: operators create groups, invite users, bring only their own employees; viewers read only; non-members see nothing.
+      const idOf = async (login: Login) => (await ok("/bootstrap", "GET", undefined, login)).user.id;
+      const [idA, idB, idV] = [await idOf(a), await idOf(b), await idOf(v)];
+      const room = await ok("/groups", "POST", { name: "HTTP 群", bulletin: "分工", users: [idB, idV], employees: [workerA.id] }, a);
+      assert.equal((await req(`/groups/${room.id}/employees`, "POST", { employeeId: workerA.id }, b)).r.status, 400, "only your own employees");
+      await ok(`/groups/${room.id}/employees`, "POST", { employeeId: workerB.id }, b);
+      assert.equal((await ok(`/groups/${room.id}`, "GET", undefined, v)).employees.length, 2);
+      assert.equal((await req(`/groups/${room.id}/messages`, "POST", { text: "viewer cannot post" }, v)).r.status, 403);
+      assert.equal((await req(`/groups/${room.id}`, "PATCH", { bulletin: "not the creator" }, b)).r.status, 400);
+      assert.equal((await req(`/groups/${room.id}`, "GET", undefined, admin)).r.status, 400, "administrators are not members either");
+      assert((await ok("/groups/directory", "GET", undefined, b)).some((u: any) => u.id === idA));
+      assert.equal((await req(`/employees/${workerA.id}/avatar`, "GET", undefined, b)).r.status, 404, "a group member may load the avatar route (no avatar uploaded yet)");
+      assert.equal((await req(`/employees/${workerA.id}`, "GET", undefined, b)).r.status, 404, "but not the employee itself");
+      assert.equal((await req(`/avatars/users/${idA}`, "GET", undefined, admin)).r.status, 404);
+      await ok(`/groups/${room.id}/users/${idV}`, "DELETE", undefined, v);
+      await ok(`/groups/${room.id}/users/${idB}`, "DELETE", undefined, b);
+      assert.deepEqual((await ok(`/groups/${room.id}`, "GET", undefined, a)).employees.map((e: any) => e.id), [workerA.id], "bob's employee left with him");
+      await ok(`/groups/${room.id}`, "DELETE", undefined, a);
+      assert.deepEqual(await ok("/groups", "GET", undefined, a), []);
       // No team employees: an admin's employee is just that admin's own (others work with it only through a group chat).
       const team = await ok("/employees", "POST", { name: "Team worker", cwd: dir }, admin);
       const beforeDutyCalls = triggerRequests;
-      for (const login of [a, b, v]) assert.equal((await req(`/employees/${team.id}`, "POST", { action: "add", kind: "duty", condition: "每天23:59", text: "两框职责" }, login)).r.status, 404);
+      for (const login of [a, b, v]) assert.equal((await req(`/employees/${team.id}`, "POST", { action: "add", kind: "duty", condition: "每天23:59", text: "两框职责" }, login)).r.status, login === v ? 403 : 404);
       assert.equal(triggerRequests, beforeDutyCalls, "unauthorized writes do not invoke the trigger interpreter");
-      for (const login of [a, b, v]) assert.equal((await req(`/employees/${team.id}/reset?confirmed=true`, "POST", {}, login)).r.status, 404, "only its owner (or an admin) may reset an employee");
+      for (const login of [a, b, v]) assert.equal((await req(`/employees/${team.id}/reset?confirmed=true`, "POST", {}, login)).r.status, login === v ? 403 : 404, "only its owner (or an admin) may reset an employee");
       assert.equal((await req(`/employees/${workerA.id}/reset?confirmed=true`, "POST", {}, b)).r.status, 404);
       assert.equal((await req(`/employees/${workerA.id}/reset`, "POST", {}, a)).r.status, 400, "reset needs explicit confirmation");
       const duty = await ok(`/employees/${team.id}`, "POST", { action: "add", kind: "duty", condition: "每天23:59", text: "两框职责内容" }, admin);
@@ -457,13 +476,13 @@ test(
       assert.equal((await req(`/blobs/${customAvatar.avatar}`, "GET", undefined, a)).r.status, 404, "custom avatars are not granted through an unrelated conversation");
       assert.equal((await req(`/employees/${workerA.id}/avatar`, "POST", { mime: "image/png", data: avatarData }, b)).r.status, 404);
       assert.equal((await req(`/employees/${team.id}/avatar`, "POST", { preset: "zodiac:leo" }, a)).r.status, 404);
-      assert.equal((await req(`/employees/${team.id}/avatar`, "POST", { preset: "zodiac:leo" }, v)).r.status, 404);
+      assert.equal((await req(`/employees/${team.id}/avatar`, "POST", { preset: "zodiac:leo" }, v)).r.status, 403);
       assert.equal((await req(`/employees/${workerA.id}/avatar`, "POST", { preset: "https://tracker.example/pixel" }, a)).r.status, 400);
       assert.equal((await ok(`/employees/${workerA.id}`, "GET", undefined, a)).avatar, customAvatar.avatar);
       await ok(`/employees/${team.id}/avatar`, "POST", { mime: "image/png", data: avatarData }, admin);
       for (const login of [a, b, v]) {
         const image = await fetch(base + `/api/employees/${team.id}/avatar`, { headers: { Cookie: login.cookie } });
-        assert.equal(image.status, login === a || login === b || login === v ? 404 : 200); await image.arrayBuffer();
+        assert.equal(image.status, 404, "only its owner and administrators see an employee outside a shared group"); await image.arrayBuffer();
       }
       await ok(`/employees/${team.id}/avatar`, "POST", { preset: "zodiac:pisces" }, admin);
       assert.equal((await ok(`/employees/${team.id}`, "GET", undefined, admin)).avatar, "zodiac:pisces");
@@ -472,7 +491,7 @@ test(
       for (const login of [a, b, v]) {
         assert(!(await ok("/employees", "GET", undefined, login)).some((employee: any) => employee.id === team.id));
         assert.equal((await req(`/employees/${team.id}`, "GET", undefined, login)).r.status, 404);
-        assert.equal((await req(`/employees/${team.id}?confirmed=true`, "DELETE", undefined, login)).r.status, 404);
+        assert.equal((await req(`/employees/${team.id}?confirmed=true`, "DELETE", undefined, login)).r.status, login === v ? 403 : 404);
       }
       const teamChat = await ok(`/employees/${team.id}/chat`, "GET", undefined, admin);
       for (const login of [a, b, v]) assert.equal((await req('/debug/sessions', 'GET', undefined, login)).r.status, 403);
@@ -480,7 +499,7 @@ test(
       assert(debugSessions.some((session: any) => session.id === teamChat.session.id && session.kind === 'chat' && session.employeeName === 'Team worker'));
       assert(debugSessions.some((session: any) => session.id === employeeSession.id && session.taskId === 'employee-test-task'));
       assert.equal((await req(`/sessions/${teamChat.session.id}`, "GET", undefined, b)).r.status, 404);
-      assert.equal((await req(`/employees/${team.id}/messages`, "POST", { text: "must not execute" }, v)).r.status, 404);
+      assert.equal((await req(`/employees/${team.id}/messages`, "POST", { text: "must not execute" }, v)).r.status, 403);
       assert.equal((await req(`/employees/${team.id}/control`, "POST", { action: "settings", name: "unauthorized" }, a)).r.status, 404);
       for (const [login, marker] of [[admin, 'team-memory-fixture-admin']] as const) {
         await ok(`/employees/${team.id}/messages`, 'POST', { text: marker, actorId: admin.id }, login);
@@ -530,8 +549,8 @@ test(
       assert.equal((await ok(`/employees/${workerA.id}`, "GET", undefined, admin)).canConfigure, false);
       for (const login of [a, b, v]) {
         assert.equal((await req(`/employees/${team.id}/vault`, "GET", undefined, login)).r.status, 404);
-        assert.equal((await req(`/employees/${team.id}/vault`, "POST", { name: "forbidden", condition: "test", content: "must not save" }, login)).r.status, 404);
-        assert.equal((await req(`/employees/${team.id}/vault/${own[team.id]}`, "DELETE", undefined, login)).r.status, 404);
+        assert.equal((await req(`/employees/${team.id}/vault`, "POST", { name: "forbidden", condition: "test", content: "must not save" }, login)).r.status, login === v ? 403 : 404);
+        assert.equal((await req(`/employees/${team.id}/vault/${own[team.id]}`, "DELETE", undefined, login)).r.status, login === v ? 403 : 404);
       }
       assert.equal((await req("/vault", "GET", undefined, admin)).r.status, 404, "the global vault route is gone");
       await ok(`/employees/${workerA.id}/vault/${own[workerA.id]}`, "DELETE", undefined, a);
@@ -549,7 +568,7 @@ test(
       const teamSource = teamChat.messages?.[0]?.seq || 1;
       assert.equal((await req(`/employees/${workerA.id}/messages`, "POST", { text: "cannot quote another employee", quoteSeq: teamSource, quote: { session: teamChat.session.id, text: "forged quote" } }, a)).r.status, 400);
       const source = failedChat.messages.find((message: any) => message.role === "user")!;
-      assert.equal((await req(`/employees/${team.id}/messages`, "POST", { text: "viewer quote must not execute", quoteSeq: source.seq }, v)).r.status, 404);
+      assert.equal((await req(`/employees/${team.id}/messages`, "POST", { text: "viewer quote must not execute", quoteSeq: source.seq }, v)).r.status, 403);
       await ok(`/employees/${team.id}/messages`, "POST", { text: "explain the quoted finding", quoteSeq: source.seq, quote: { text: "forged content" } }, admin);
       let quotedChat: any;
       for (let index = 0; index < 100; index++) {

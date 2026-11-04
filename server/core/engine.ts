@@ -1100,6 +1100,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         answered = true;
         const note = control.signal.aborted ? "（这轮回复被停止）" : `（这轮回复出错：${safe}）`;
         await this.groups.replied(session, session.employeeId, (said ? said + "\n\n" : "") + note, [...groupTasks.values()], hop, true);
+        (error as any).groupReported = true; // Groups.dispatch must not report it a second time
       } catch { /* best effort */ }
       emit("error", safe);
       throw error;

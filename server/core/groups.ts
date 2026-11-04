@@ -352,7 +352,7 @@ export class Groups {
     }
     for (const member of members) {
       try { await this.turn(group, member, message); }
-      catch (error: any) { await this.notice(groupId, `牛马「${member.name}」没能开始回复：${String(error?.message || error)}`); }
+      catch (error: any) { if (!error?.groupReported) await this.notice(groupId, `牛马「${member.name}」没能开始回复：${String(error?.message || error)}`); }
     }
   }
   /** The member's session in this group, created on first use (or again after its owner reset it). */
