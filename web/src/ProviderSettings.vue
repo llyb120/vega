@@ -457,10 +457,10 @@ onBeforeUnmount(() => {
               <div>
                 <p>请在新窗口完成登录，完成后这里会自动更新。</p>
                 <a :href="login.url" target="_blank" rel="noopener noreferrer">未打开窗口？点击继续登录 ↗</a>
-                <details v-if="login.source === 'devin'">
-                  <summary>没有自动返回？</summary>
-                  <p class="hint">复制登录后浏览器最后跳转的完整地址到这里。</p>
-                  <button type="button" class="sm" @click="begin(true)">改用手动回调登录</button>
+                <details v-if="login.source === 'devin'" :open="login.manual">
+                  <summary>{{ login.manual ? "登录后粘贴回调地址" : "没有自动返回？" }}</summary>
+                  <p class="hint">{{ login.manual ? "Devin 只允许跳回本机地址。登录完成后浏览器会跳到 127.0.0.1 开头的地址（页面打不开是正常的），把地址栏里的完整地址复制到这里。" : "复制登录后浏览器最后跳转的完整地址到这里。" }}</p>
+                  <button v-if="!login.manual" type="button" class="sm" @click="begin(true)">改用手动回调登录</button>
                   <div class="inline-form"><input v-model="pasted" placeholder="粘贴本次登录的回调地址" autocomplete="off" /><button type="button" class="sm" @click="poll(true)">完成登录</button></div>
                 </details>
                 <p v-if="loginError" class="error" role="alert">{{ loginError }}</p>

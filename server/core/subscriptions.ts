@@ -193,9 +193,12 @@ export class Subscriptions {
         callback: undefined as string | undefined,
         close: undefined as (() => void) | undefined,
       };
-      if (context.callbackOrigin) {
-        const base = httpURL(context.callbackOrigin, true);
-        pending.callback = base.origin + "/api/providers/callback/devin";
+      // Devin only accepts loopback redirect URIs ("Invalid redirect URI" otherwise), so the site's own
+      // callback works only when Vega itself is opened on localhost; anywhere else use the manual loopback flow.
+      const base = context.callbackOrigin ? httpURL(context.callbackOrigin, true) : undefined;
+      const local = !!base && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname);
+      if (local) {
+        pending.callback = base!.origin + "/api/providers/callback/devin";
       } else {
         const server = createServer((req, res) => {
           const u = new URL(req.url || "/", "http://127.0.0.1");
@@ -237,7 +240,7 @@ export class Subscriptions {
         code_challenge_method: "S256",
       }))
         url.searchParams.set(k, v);
-      return { state, url: url.href };
+      return { state, url: url.href, manual: !local };
     }
     const origin = this.origin(source, site);
     const data = await this.loginRequest(

@@ -61,14 +61,27 @@ test("remote Devin PKCE returns to the website, is state/owner-bound and never b
     return { token: "session-secret-fixture" };
   };
   try {
+    const publicStart = await auth.loginStart("devin", "global", {
+      callbackOrigin: "https://vega.example",
+      owner: "admin-one",
+    });
+    // Devin rejects non-loopback redirect URIs, so a public origin falls back to the manual loopback flow.
+    assert.equal(publicStart.manual, true);
+    assert.match(
+      new URL(publicStart.url).searchParams.get("redirect_uri")!,
+      /^http:\/\/127\.0\.0\.1:\d+\/callback$/,
+    );
+    auth.pending.get(publicStart.state)?.close?.();
+    auth.pending.delete(publicStart.state);
     const start = await auth.loginStart("devin", "global", {
-        callbackOrigin: "https://vega.example",
+        callbackOrigin: "http://localhost:3000",
         owner: "admin-one",
       }),
       url = new URL(start.url);
+    assert.equal(start.manual, false);
     assert.equal(
       url.searchParams.get("redirect_uri"),
-      "https://vega.example/api/providers/callback/devin",
+      "http://localhost:3000/api/providers/callback/devin",
     );
     assert.equal(url.searchParams.get("code_challenge_method"), "S256");
     assert.throws(() =>
