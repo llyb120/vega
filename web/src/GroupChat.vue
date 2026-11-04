@@ -190,7 +190,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
               <MentionTextarea ref="input" v-model="draft" class="composer-input" :members="members" rows="1" maxlength="20000" placeholder="输入消息，@ 牛马让它干活…" @keydown="keydown" />
               <button class="primary send" :disabled="(!draft.trim() && !files.length) || sending" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
             </div>
-            <p class="composer-hint">@ 牛马才会回复 · Enter 发送 · Shift + Enter 换行</p>
+            <p class="composer-hint">@ 牛马让它回复，不 @ 时旁白判断交给谁 · Enter 发送 · Shift + Enter 换行</p>
           </form>
         </section>
         <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" @open="emit('open-task', $event)" @close="work = false" />

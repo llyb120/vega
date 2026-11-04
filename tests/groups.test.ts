@@ -9,6 +9,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Tools } from "../server/core/tools";
 import { Auth } from "../server/core/auth";
 import { GROUP_HOPS_MAX } from "../server/core/groups";
+import { NARRATOR_SYSTEM } from "../server/core/narrator";
 import { parseMentions } from "../server/core/names";
 import { sleep } from "../server/core/util";
 
@@ -28,9 +29,18 @@ const until = async (ready: () => boolean | Promise<boolean>) => {
   assert(await ready());
 };
 /** Scripted model replies, by employee id (each group member has its own hidden session). */
-function script(engine: Engine, replies: Record<string, (string | object)[]>) {
+const narrated: any[] = [];
+function script(engine: Engine, replies: Record<string, any[]>) {
   const seen: { employeeId: string; system: string; messages: any[] }[] = [];
+  narrated.length = 0;
   engine.providers.chat = (async (_model: any, system: string, messages: any[], _tools: any, _signal: any, _emit: any, key: string) => {
+    // The 旁白 (no session): scripted under "narrator"; by default it routes to nobody.
+    if (system === NARRATOR_SYSTEM) {
+      narrated.push(JSON.parse(messages[0].text));
+      const next = replies.narrator?.shift();
+      if (next instanceof Error) throw next;
+      return { role: "assistant", calls: [{ id: "n", name: "route_message", arguments: next ?? { targets: [], reason: "闲聊" } }] };
+    }
     const employeeId = (await engine.store.session(key)).employeeId!;
     seen.push({ employeeId, system, messages });
     const next = replies[employeeId]?.shift();
@@ -381,5 +391,64 @@ test("an @mentioned member's assembled request: group rules after the general di
     assert.match(request, /\[需要你回应的是 #\d+，来自用户「alice」（你的主人）\]\n\[先核对分工\] 被 @ 不代表这件事归你。按群公告判断：归其他牛马（测试牛马）的部分，不要自己派单或执行，直接在回复里「@名称」交给它/);
     assert(request.trimEnd().endsWith("群公告：如果要测试或者设计测试用例，找测试牛马"), "the bulletin is the last thing the member reads");
     assert.match(tools.find((t: any) => t.name === "employee_task_create").description, /群聊里只给按群公告归你的工作派单；归其他牛马的不要派单，在回复里 @它 交出。/);
+  } finally { await close(); }
+});
+
+test("旁白: a user message without @ goes to the member it is for; @ bypasses it; employees never trigger it; nonmembers ignored", async () => {
+  const { store, engine, make, close } = await fixture();
+  try {
+    const a = await make("默认牛马A", "u1"), b = await make("测试牛马", "u1");
+    await (await engine.employee.for(b)).control({ action: "settings", instruction: "负责测试与测试用例设计" });
+    const group = await engine.groups.create(u1, { name: "小分队", bulletin: "如果要测试或者设计测试用例，找测试牛马", employees: [a, b] });
+    const seen = script(engine, { narrator: [{ targets: ["测试牛马", "不存在的牛马"], reason: "公告：测试用例找测试牛马" }], [b]: ["好的，我来设计测试用例"] });
+    await engine.groups.send(u1, group.id, { text: "https://tapd.cn/x/story/detail/1 给这个需求单设计测试用例" });
+    await settle(engine);
+    assert.equal(narrated.length, 1);
+    const input = narrated[0];
+    assert.equal(input.群公告, "如果要测试或者设计测试用例，找测试牛马");
+    assert.deepEqual(input.牛马.map((m: any) => [m.名称, m.守则]), [["默认牛马A", "（无）"], ["测试牛马", "负责测试与测试用例设计"]]);
+    assert.match(input.新消息.内容, /设计测试用例/);
+    assert.deepEqual(seen.map((s) => s.employeeId), [b], "only the real member it named answers");
+    assert.match(JSON.stringify(seen[0].messages), /\[旁白\] 这条消息没有 @ 谁，旁白判断交给你：公告：测试用例找测试牛马/);
+    const messages = await groupMessages(engine, group.id);
+    const notice = messages.find((m) => m.notice && /^旁白：/.test(String(m.text)))!;
+    assert.equal(notice.text, "旁白：交给 @测试牛马（公告：测试用例找测试牛马）");
+    assert.deepEqual(messages.at(-1)?.[ "author" as "author"]?.name, "测试牛马");
+    assert.equal(messages.at(-1)?.hop, 1, "a routed turn is one hop from the user message, as a mention would be");
+    // An @ goes straight to that member; the 旁白 is not asked. The reply (no @) does not reach the 旁白 either.
+    narrated.length = 0;
+    const direct = script(engine, { [a]: ["收到"] });
+    await engine.groups.send(u1, group.id, { text: "@默认牛马A 看下" });
+    await settle(engine);
+    assert.deepEqual([narrated.length, direct.length], [0, 1]);
+    // An @ of a user is explicit too; casual chat routes to nobody (silently).
+    script(engine, { narrator: [{ targets: [], reason: "闲聊" }] });
+    await engine.groups.send(u1, group.id, { text: "@alice 你看看" });
+    await engine.groups.send(u1, group.id, { text: "大家辛苦了" });
+    await settle(engine);
+    assert.equal(narrated.length, 1, "only the message without any @ is judged");
+    assert(!(await groupMessages(engine, group.id)).slice(-2).some((m) => m.notice), "nobody chosen: no notice");
+    // A failing model leaves a short notice.
+    script(engine, { narrator: [Error("model down")] });
+    await engine.groups.send(u1, group.id, { text: "这个谁来看" });
+    await settle(engine);
+    assert.match(String((await groupMessages(engine, group.id)).at(-1)?.text), /旁白没能判断这条消息该交给谁（model down）/);
+    void store;
+  } finally { await close(); }
+});
+
+test("旁白 without a lightweight model: one notice, then quiet; nothing runs", async () => {
+  const { store, engine, make, close } = await fixture();
+  try {
+    const a = await make("小A", "u1");
+    const group = await engine.groups.create(u1, { name: "无模型", employees: [a] });
+    await store.put("config", { ...(await store.get<any>("config", {})), scenes: { coding: ["fixture/model"] } });
+    const seen = script(engine, {});
+    await engine.groups.send(u1, group.id, { text: "帮我看看" });
+    await engine.groups.send(u1, group.id, { text: "在吗" });
+    await settle(engine);
+    assert.deepEqual([narrated.length, seen.length], [0, 0]);
+    const notices = (await groupMessages(engine, group.id)).filter((m) => m.notice && /未配置轻量模型/.test(String(m.text)));
+    assert.equal(notices.length, 1, "said once");
   } finally { await close(); }
 });

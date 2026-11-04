@@ -9,6 +9,7 @@ import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Auth } from "../server/core/auth";
 import { safeFileName, storeAttachments } from "../server/core/attachments";
+import { NARRATOR_SYSTEM } from "../server/core/narrator";
 import { sleep } from "../server/core/util";
 import { employeeCall } from "./public-call";
 
@@ -105,7 +106,7 @@ test("a task created from a message with attachments carries them into its first
 test("group messages take images and files; group users download them; the @mentioned member's turn receives them", async () => {
   const { store, engine, employee, close, auth } = await fixture();
   const seen: any[] = [];
-  engine.providers.chat = (async (_model: any, _system: string, messages: any[]) => { seen.push(JSON.stringify(messages)); return { role: "assistant", text: "收到" }; }) as any;
+  engine.providers.chat = (async (_model: any, system: string, messages: any[]) => { if (system === NARRATOR_SYSTEM) return { role: "assistant", text: "" }; seen.push(JSON.stringify(messages)); return { role: "assistant", text: "收到" }; }) as any;
   try {
     const group = await engine.groups.create(owner as any, { name: "附件群", users: ["u2"], employees: [employee.employeeId] });
     const session = (await engine.groups.get(group.id))!.session;
