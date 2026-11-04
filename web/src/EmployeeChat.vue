@@ -3,7 +3,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue"
 import ChatMessage from "./ChatMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
-import { employeeChatMessages } from "./conversation";
+import { employeeChatMessages, continuesPrevious } from "./conversation";
 import { createChatHistory } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
 const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array, remember: Function });
@@ -27,30 +27,21 @@ watch([messages, running], ([rows, active]) => {
     return true;
   });
 });
-// While a turn runs, its own assistant output stays hidden until `done`. When we saw the turn start we know exactly
-// where it begins, so earlier replies stay put instead of being hidden as "the last turn" until the new user message loads.
-const runningFrom = ref(null);
-watch(running, (value) => { if (!value) runningFrom.value = null; }, { flush: "sync" });
-const visible = computed(() => {
-  if (!running.value || runningFrom.value === null) return employeeChatMessages(messages.value, running.value);
-  const settled = messages.value.filter((message) => message.seq <= runningFrom.value);
-  return [...employeeChatMessages(settled, false), ...messages.value.filter((message) => message.seq > runningFrom.value && (message.role === "user" || message.delivery))];
-});
+const visible = computed(() => employeeChatMessages(messages.value));
 const displayed = computed(() => {
   const rows = [...visible.value];
   for (const message of outbox.value) {
     const next = rows.findIndex((row) => !row.sendStatus && row.seq > message.afterSeq);
     rows.splice(next < 0 ? rows.length : next, 0, message);
   }
-  return rows;
+  return rows.map((message, index) => ({ message, continued: continuesPrevious(rows[index - 1], message) }));
 });
+const typingContinued = computed(() => continuesPrevious(displayed.value.at(-1)?.message, { role: "assistant" }));
 const history = createChatHistory({ api: (...args) => props.api(...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore, cache: createChatCache(props.userId, props.employeeId) });
 
 // Message avatars rest on one up-right glance. The reply that replaces the typing row starts from the typing
 // avatar's last glance and eases into it (in memory only; nothing is persisted).
-const typingPose = ref("center"), entering = ref({});
 const taskStatus = computed(() => Object.fromEntries((props.tasks || []).map((task) => [task.id, task.status])));
-function easeIn(seqs) { entering.value = Object.fromEntries(seqs.map((seq) => [seq, typingPose.value])); }
 async function onRemember(message) {
   if (!props.remember || !message?.text) return;
   const claim = String(message.displayText || message.text).replace(/\s+/g, " ").trim();
@@ -125,14 +116,12 @@ async function refresh(apply, syncRunning = true) {
 }
 /**
  * The turn is over. Keep the typing row on screen until the reply is in hand, then swap them in one tick:
- * merge the reply and clear `running` together so no frame shows neither; the reply avatar eases out of the typing glance.
+ * merge the reply and clear `running` together so no frame shows neither.
  */
 function finishTurn() {
   const current = turn;
-  const before = new Set(visible.value.map((message) => message.seq));
   return refresh(() => {
     if (current !== turn) return; // a new turn already started; it owns the typing row now
-    easeIn(employeeChatMessages(messages.value, false).filter((message) => message.role !== "user" && !before.has(message.seq)).map((message) => message.seq));
     running.value = false;
   });
 }
@@ -212,7 +201,6 @@ function handleEvent(event) {
   switch (event.type) {
     case "started":
       turn++;
-      if (!running.value) runningFrom.value = history.lastSeq();
       running.value = true;
       error.value = "";
       break;
@@ -228,6 +216,9 @@ function handleEvent(event) {
       void finishTurn();
       break;
     case "message_end":
+      // No streaming here: each reply appears whole once it is persisted; the typing dots cover the wait.
+      void refresh(undefined, false);
+      break;
     case "compacted":
     case "user":
     case "steer":
@@ -256,11 +247,12 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
             <button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><Icon name="tasks" :size="15" />看看工作进度</button>
           </div>
         </div>
-        <ChatMessage v-for="message in displayed" :key="message.clientMessageId || message.seq" :message="message" :name="name" :avatar="avatar" :employee-id="employeeId" :enter-from="entering[message.seq]" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
-        <article v-if="running" class="chat-message assistant chat-typing" role="status" aria-label="正在输入中">
-          <span class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" animate @pose="typingPose = $event" /></span>
+        <ChatMessage v-for="{ message, continued } in displayed" :key="message.clientMessageId || message.seq || message.liveKey" :message="message" :continued="continued" :name="name" :avatar="avatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
+          <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>
+          <span v-else class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" /></span>
           <div class="chat-content">
-            <div class="chat-heading"><strong>{{ name }}</strong><span>正在输入中</span></div>
+            <div class="chat-heading"><strong v-if="!typingContinued">{{ name }}</strong><span>正在输入中</span></div>
             <div class="chat-bubble"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
           </div>
         </article>
@@ -295,6 +287,8 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
 .chat-older .spinner { width: 14px; height: 14px; }
 /* The typing row mirrors ChatMessage's assistant row (same avatar slot, heading and bubble) so the reply replaces it in place. */
 .chat-typing { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 16px; min-width: 0; }
+.chat-typing.continued { margin-top: -10px; }
+.chat-typing .chat-avatar.spacer { height: 0; background: none; }
 .chat-typing .chat-avatar { display: grid; place-items: center; flex: none; width: var(--chat-avatar); height: var(--chat-avatar); border-radius: 12px; background: var(--accent-soft); }
 .chat-typing .chat-content { display: grid; gap: 4px; min-width: 0; max-width: min(100% - var(--chat-avatar) - var(--chat-gap), 680px); }
 .chat-typing .chat-heading { display: flex; align-items: center; gap: 8px; min-height: 20px; color: var(--muted); font-size: 11px; }

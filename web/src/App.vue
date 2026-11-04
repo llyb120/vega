@@ -8,12 +8,15 @@ import { formatBeijing } from "../../shared/time";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
 import EmployeeChat from "./EmployeeChat.vue";
 import { clearChatCache, pruneChatCache } from "./chat-cache.js";
+import { mergeMessages } from "./chat-history.js";
 import EmployeeHeader from "./EmployeeHeader.vue";
 import EmployeeTasks from "./EmployeeTasks.vue";
 import EmployeeDuties from "./EmployeeDuties.vue";
 import EmployeeMemories from "./EmployeeMemories.vue";
 import EmployeeSettings from "./EmployeeSettings.vue";
+import MentionTextarea from "./MentionTextarea.vue";
 import EmployeeCapabilities from "./EmployeeCapabilities.vue";
+import EmployeeVault from "./EmployeeVault.vue";
 import WorkPanel from "./WorkPanel.vue";
 import AppSidebar from "./AppSidebar.vue";
 import PageHeader from "./PageHeader.vue";
@@ -83,6 +86,7 @@ async function openNavigation() {
   (navigation.value?.querySelector(".close-navigation") || navigation.value?.querySelector("button"))?.focus();
 }
 provide("openNavigation", openNavigation);
+provide("mentions", { people: computed(() => employees.value.map((e) => ({ id: e.id, name: e.name }))), open: (id) => { if (employees.value.some((e) => e.id === id)) void chooseEmployee(id); } });
 function navigationKey(event) {
   if (!navigationOpen.value) return;
   if (event.key === "Escape") {
@@ -150,7 +154,9 @@ const user = ref(null),
   username = ref(""),
   password = ref(""),
   setupToken = ref(""),
-  authBusy = ref(false);
+  authBusy = ref(false),
+  // Until /auth/me answers, show neither login nor shell so a refresh doesn't flash the login page.
+  authChecking = ref(true);
 const isAdmin = computed(() => user.value?.role === "admin"),
   canExecute = computed(() => !!user.value && user.value.role !== "viewer");
 const canWriteCurrent = computed(
@@ -220,7 +226,7 @@ const employee = ref({
   employeeTaskFilter = ref("active"),
   employeeTaskFocus = ref(""),
   employeeSaving = ref(false),
-  employeeDeleting = ref(false), employeeClearing = ref(false),
+  employeeDeleting = ref(false), employeeResetting = ref(""),
   employeeExecutionBusy = ref(false),
   employeeExecutionOpen = ref(false),
   workRailOpen = ref(false),
@@ -251,14 +257,14 @@ let eventsSocket,
   eventGeneration = 0,
   eventReconnect,
   eventRetryDelay = 500,
-  eventsHeartbeat,
+  eventsWatchdog,
+  eventCursor = "",
+  lastEventAt = 0,
   eventQueue = Promise.resolve(),
-  wsRequestSerial = 0,
   closed = false,
   sessionRequest = 0,
   employeeRefreshTimer;
-const wsRequests = new Map(),
-  WS_BODY_LIMIT = 240 * 1024;
+const EVENT_SILENCE_MS = 75000;
 function emptyDuty() {
   return {
     id: "",
@@ -358,7 +364,7 @@ const historyTasks = computed(() =>
 const attentionTasks = computed(() => activeTasks.value.filter((task) => ["waiting", "approval"].includes(task.status)));
 const visibleEmployeeTasks = computed(() => employeeTaskFilter.value === "history" ? historyTasks.value : employeeTaskFilter.value === "attention" ? attentionTasks.value : activeTasks.value);
 const employeeStatus = computed(() => attentionTasks.value.length ? "需要你处理" : activeTasks.value.some((task) => task.status === "running") ? "正在工作" : "随时待命");
-const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['duties', '职责'], ['memories', '记忆'], ['capabilities', '技能 / MCP'], ...(employee.value.canManage ? [['settings', '设置']] : [])]);
+const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['duties', '职责'], ['memories', '记忆'], ['capabilities', '技能 / MCP'], ...(employee.value.canConfigure ? [['vault', '密码本']] : []), ...(employee.value.canManage ? [['settings', '设置']] : [])]);
 const employeeTone = computed(() => attentionTasks.value.length ? "warn" : activeTasks.value.some((task) => task.status === "running") ? "info" : "ok");
 const employeeCounts = computed(() => ({ tasks: attentionTasks.value.length || activeTasks.value.length, attention: attentionTasks.value.length, duties: employee.value.duties?.length || 0, memories: employee.value.memories?.length || 0 }));
 const workPanelVisible = computed(() => wide.value ? !workPanelHidden.value : workRailOpen.value);
@@ -372,6 +378,8 @@ function showTasks(filter = "active") {
   workRailOpen.value = false;
   employeeTab.value = "tasks";
 }
+// A new employee is a team employee when an admin creates it (reaches the team), else the user's personal one (reaches the list: team + own).
+const newEmployeeColleagues = computed(() => employees.value.filter((entry) => !isAdmin.value || entry.scope === "team"));
 const employeeGroups = computed(() => [['team', '团队牛马'], ['personal', isAdmin.value ? '个人牛马' : '我的牛马']].map(([scope, label]) => ({ scope, label, entries: employees.value.filter((employee) => employee.scope === scope) })).filter((group) => group.entries.length));
 const labels = {
   queued: "排队中",
@@ -435,96 +443,13 @@ async function httpApi(path, method = "GET", data) {
     ), { status: response.status });
   return result;
 }
-async function api(path, method = "GET", data) {
-  const size = data === undefined ? 0 : new Blob([JSON.stringify(data)]).size;
-  if (
-    size > WS_BODY_LIMIT ||
-    /^\/(auth|blobs)(\/|$)/.test(path) ||
-    path === "/chrome/live" ||
-    isChatSend(path, method, data)
-  )
-    return httpApi(path, method, data);
-  if (eventsReady && eventsSocket?.readyState === WebSocket.OPEN)
-    return new Promise((resolve, reject) => {
-      const id = String(++wsRequestSerial).padStart(8, "0"),
-        timer = setTimeout(() => {
-          wsRequests.delete(id);
-          if (method === "GET") { resolve(httpApi(path, method, data)); return; }
-          reject(
-            Error(
-              method === "GET"
-                ? "实时请求超时"
-                : "操作结果不确定，请核对后再操作，不要重复提交",
-            ),
-          );
-        }, 60000);
-      wsRequests.set(id, { resolve, reject, timer, path, method, data });
-      try {
-        eventsSocket.send(
-          JSON.stringify({ type: "request", id, method, path, data }),
-        );
-      } catch (e) {
-        clearTimeout(timer);
-        wsRequests.delete(id);
-        reject(e);
-      }
-    });
-  if (eventsWasConnected && method !== "GET")
-    throw Error("实时连接中断，请等待重连后再操作，不要重复提交");
+// Token streams and per-tool detail are pushed only for the conversations on screen.
+const subscribedSessions = computed(() => [...new Set([current.value?.id, employee.value?.chatSession, employeeSession.value].filter(Boolean))]);
+// All API calls are plain HTTP; the WebSocket only pushes events.
+function api(path, method = "GET", data) {
   return httpApi(path, method, data);
 }
-function rejectSocketRequests(reason) {
-  for (const request of wsRequests.values()) {
-    clearTimeout(request.timer);
-    if (request.method === "GET" && !closed && authenticated.value) {
-      request.resolve(httpApi(request.path));
-      continue;
-    }
-    request.reject(
-      Error(
-        request.method === "GET"
-          ? reason
-          : "连接中断，操作结果可能已提交，请核对后再操作",
-      ),
-    );
-  }
-  wsRequests.clear();
-}
-function socketMessage(value) {
-  if (value.type === "response") {
-    const request = wsRequests.get(value.id);
-    if (!request) return;
-    wsRequests.delete(value.id);
-    clearTimeout(request.timer);
-    if (value.httpFallback) {
-      request.resolve(httpApi(request.path, request.method, request.data));
-      return;
-    }
-    if (!value.status) {
-      request.reject(Error(value.error || "实时请求失败"));
-      return;
-    }
-    try {
-      const result = value.body ? JSON.parse(value.body) : null;
-      if (value.status === 401 && authenticated.value) resetLogin();
-      if (value.status < 200 || value.status >= 300)
-        throw Object.assign(Error(
-          result?.data?.error ||
-            result?.statusMessage ||
-            result?.message ||
-            (typeof result?.error === "string" ? result.error : "") ||
-            value.statusText,
-        ), { status: value.status });
-      request.resolve(result);
-    } catch (e) {
-      request.reject(e);
-    }
-    return;
-  }
-  if (value.type === "error") {
-    error.value = value.reason;
-    return;
-  }
+function dispatchEvent(value) {
   eventQueue = eventQueue
     .then(() => handleEvent(value))
     .catch((e) => { if (!e.network) error.value = e.message; });
@@ -542,16 +467,17 @@ function connectEvents() {
   if (closed || !authenticated.value || navigator.onLine === false) return;
   const generation = ++eventGeneration;
   clearTimeout(eventReconnect);
-  clearInterval(eventsHeartbeat);
+  clearTimeout(eventsWatchdog);
   eventsReady = false;
   eventsSocket?.close();
-  rejectSocketRequests("实时连接正在恢复");
   void httpApi("/events", "POST", {})
     .then(({ ticket }) => {
       if (generation !== eventGeneration) return;
       const url = new URL("/api/events", window.location.href);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("ticket", ticket);
+      if (eventCursor) url.searchParams.set("since", eventCursor);
+      if (subscribedSessions.value.length) url.searchParams.set("sessions", subscribedSessions.value.join(","));
       openEventSocket(url, generation);
     })
     .catch((e) => {
@@ -563,64 +489,88 @@ function connectEvents() {
       reconnectEvents(generation);
     });
 }
+/**
+ * Armed from network handlers only: background tabs throttle chained timers to once a minute, but a timer set
+ * by a message handler is not chained. The server sends a heartbeat every 20s and pings at protocol level.
+ */
+function watchSilence(ws, generation) {
+  clearTimeout(eventsWatchdog);
+  eventsWatchdog = setTimeout(() => {
+    if (generation === eventGeneration) ws.close();
+  }, EVENT_SILENCE_MS);
+}
 function openEventSocket(url, generation) {
   const ws = new WebSocket(url);
   eventsSocket = ws;
-  let lastMessage = Date.now(), readyAt = 0;
-  eventsHeartbeat = setInterval(() => {
-    if (generation !== eventGeneration) return;
-    if (Date.now() - lastMessage > 30000) { ws.close(); return; }
-    if (readyAt && Date.now() - readyAt >= 30000) eventRetryDelay = 500;
-    if (ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: "ping" })); }
-      catch { ws.close(); }
-    }
-  }, 10000);
+  let readyAt = 0;
+  watchSilence(ws, generation);
   ws.onmessage = ({ data }) => {
     if (generation !== eventGeneration) return;
+    let value;
     try {
-      const value = JSON.parse(data);
-      lastMessage = Date.now();
-      if (value.type === "ready") {
-        const reconnect = eventsWasConnected;
-        eventsReady = true;
-        eventsWasConnected = true;
-        readyAt = Date.now();
-        if (reconnect)
-          void (async () => {
-            await bootstrap();
-            if (generation !== eventGeneration) return;
-            if (current.value) await refreshCurrent();
-            if (view.value === "employee" && !employeeSession.value) await loadEmployee();
-            employeeSessionVersion.value++;
-          })().catch((e) => {
-            if (generation !== eventGeneration) return;
-            if (e.network) ws.close();
-            else error.value = e.message;
-          });
-        return;
-      }
-      if (value.type !== "pong") socketMessage(value);
+      value = JSON.parse(data);
     } catch (e) {
       error.value = `实时消息无效：${e.message}`;
+      return;
     }
+    lastEventAt = Date.now();
+    watchSilence(ws, generation);
+    if (typeof value.epoch === "string" && Number.isSafeInteger(value.seq)) eventCursor = value.epoch + ":" + value.seq;
+    else if (Number.isSafeInteger(value.seq) && eventCursor) eventCursor = eventCursor.split(":")[0] + ":" + value.seq;
+    if (value.type === "ready") {
+      const reconnect = eventsWasConnected;
+      eventsReady = true;
+      eventsWasConnected = true;
+      readyAt = Date.now();
+      if (subscribedSessions.value.join(",") !== (url.searchParams.get("sessions") || ""))
+        ws.send(JSON.stringify({ type: "subscribe", sessions: subscribedSessions.value }));
+      // Missed events were replayed in order; only a page outside the replay window reloads its state.
+      if (reconnect && !value.replayed)
+        void (async () => {
+          await bootstrap();
+          if (generation !== eventGeneration) return;
+          if (current.value) await refreshCurrent();
+          if (view.value === "employee" && !employeeSession.value) await loadEmployee();
+          employeeSessionVersion.value++;
+        })().catch((e) => {
+          if (generation !== eventGeneration) return;
+          if (e.network) ws.close();
+          else error.value = e.message;
+        });
+      return;
+    }
+    if (value.type === "heartbeat" || value.type === "pong") {
+      if (readyAt && Date.now() - readyAt >= 30000) eventRetryDelay = 500;
+      return;
+    }
+    if (value.type === "error") {
+      error.value = value.reason;
+      return;
+    }
+    dispatchEvent(value);
   };
   ws.onerror = () => { if (generation === eventGeneration) ws.close(); };
   ws.onclose = (event) => {
     if (generation !== eventGeneration) return;
     eventsReady = false;
-    clearInterval(eventsHeartbeat);
+    clearTimeout(eventsWatchdog);
     if (event.code === 4401) {
       resetLogin();
       error.value = "登录已过期或被撤销，请重新登录";
       return;
     }
-    rejectSocketRequests("实时连接正在恢复");
+    if (event.code === 4429) eventRetryDelay = 30000;
     reconnectEvents(generation);
   };
 }
+watch(subscribedSessions, (ids, previous) => {
+  if (ids.join(",") === previous?.join(",")) return;
+  if (eventsReady && eventsSocket?.readyState === WebSocket.OPEN)
+    eventsSocket.send(JSON.stringify({ type: "subscribe", sessions: ids }));
+});
 function recoverEvents() {
-  if (!document.hidden && !eventsReady && authenticated.value && !closed) connectEvents();
+  if (document.hidden || !authenticated.value || closed) return;
+  if (!eventsReady || Date.now() - lastEventAt > EVENT_SILENCE_MS) connectEvents();
 }
 onMounted(() => {
   window.addEventListener("online", recoverEvents);
@@ -709,12 +659,12 @@ function resetLogin() {
   closed = true;
   eventGeneration++;
   clearTimeout(eventReconnect);
-  clearInterval(eventsHeartbeat);
+  clearTimeout(eventsWatchdog);
   eventsSocket?.close();
   eventsSocket = null;
   eventsReady = false;
   eventsWasConnected = false;
-  rejectSocketRequests("连接已关闭");
+  eventCursor = "";
   authenticated.value = false;
   user.value = null;
   csrfToken.value = "";
@@ -762,12 +712,24 @@ async function logout() {
 }
 onMounted(() => {
   window.addEventListener("popstate", employeeLocationChanged);
-  void attempt(async () => {
+  void checkAuth();
+});
+async function checkAuth(delay = 1000) {
+  try {
     const result = await api("/auth/me");
     setupRequired.value = result.setupRequired;
-    if (result.user) await enter(result);
-  });
-});
+    if (result.user) await attempt(() => enter(result));
+    authChecking.value = false;
+  } catch (e) {
+    // Network failure is not "logged out": keep the splash and retry instead of showing login.
+    if (!e.network) {
+      error.value = e.message;
+      authChecking.value = false;
+      return;
+    }
+    setTimeout(() => checkAuth(Math.min(delay * 2, 10000)), delay);
+  }
+}
 onBeforeUnmount(() => window.removeEventListener("popstate", employeeLocationChanged));
 async function selectSession(session) {
   if (session.taskId) {
@@ -784,8 +746,7 @@ async function selectSession(session) {
   folds.value = [];
   contextBudget.value = null;
   fireState.value = null;
-  live.value = "";
-  thinking.value = "";
+  resetLive();
   activeTools.value = [];
   restoreDraft();
   view.value = "chat";
@@ -865,8 +826,7 @@ async function removeSession(s) {
       folds.value = [];
       contextBudget.value = null;
       fireState.value = null;
-      live.value = "";
-      thinking.value = "";
+      resetLive();
       activeTools.value = [];
       restoreDraft();
     }
@@ -988,37 +948,94 @@ async function scrollBottom() {
   if (transcript.value)
     transcript.value.scrollTop = transcript.value.scrollHeight;
 }
+/** Only messages after the newest one held are fetched; a shrunk history (cleared) reloads in full. */
 async function refreshCurrent() {
   if (!current.value) return;
   const id = current.value.id,
-    request = sessionRequest;
-  const data = await api(`/sessions/${id}`);
+    request = sessionRequest,
+    last = messages.value.at(-1)?.seq;
+  const data = await api(`/sessions/${id}` + (last ? `?after=${last}` : ""));
   if (current.value?.id !== id || request !== sessionRequest) return;
+  if (last && Number.isSafeInteger(data.lastSeq) && data.lastSeq < last) {
+    messages.value = [];
+    return refreshCurrent();
+  }
   current.value = data.session;
-  messages.value = data.messages || [];
+  messages.value = last ? mergeMessages(messages.value, data.messages || []) : data.messages || [];
   folds.value = data.folds || [];
-  contextBudget.value = data.context;
+  if (data.context) contextBudget.value = data.context;
   fireState.value = data.fire;
   running.value[current.value.id] = data.running;
 }
-async function handleEvent(event) {
+/** Runs fn at most once at a time; calls made meanwhile collapse into one trailing run. */
+function coalesced(fn) {
+  let running = null, again = false;
+  return function run() {
+    if (running) { again = true; return running; }
+    running = (async () => {
+      try { do { again = false; await fn(); } while (again); }
+      finally { running = null; }
+    })();
+    return running;
+  };
+}
+function background(promise) {
+  promise.catch((e) => { if (!e?.network) error.value = e.message; });
+}
+const refreshCurrentSoon = coalesced(() => refreshCurrent()),
+  bootstrapSoon = coalesced(() => bootstrap()),
+  refreshEmployeeSoon = coalesced(() => refreshEmployee());
+/** Streamed tokens are buffered and painted once per frame (hidden tabs: every 250ms). */
+let pendingLive = "", pendingThinking = "", liveFrame = 0, liveTimer, liveEpoch = 0;
+function nearBottom() {
+  const el = transcript.value;
+  return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+}
+function flushLive() {
+  if (liveFrame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(liveFrame);
+  clearTimeout(liveTimer);
+  liveFrame = 0;
+  liveTimer = undefined;
+  if (!pendingLive && !pendingThinking) return;
+  const follow = nearBottom();
+  if (pendingLive) live.value += pendingLive;
+  if (pendingThinking) thinking.value += pendingThinking;
+  pendingLive = pendingThinking = "";
+  if (follow) void scrollBottom();
+}
+function scheduleLive() {
+  if (liveFrame || liveTimer) return;
+  if (typeof requestAnimationFrame === "function" && document.visibilityState !== "hidden")
+    liveFrame = requestAnimationFrame(flushLive);
+  // rAF never fires in a hidden tab; the timer also covers a frame that is dropped.
+  liveTimer = setTimeout(flushLive, 250);
+}
+function resetLive() {
+  pendingLive = pendingThinking = "";
+  flushLive();
+  live.value = "";
+  thinking.value = "";
+  liveEpoch++;
+}
+/** Event handlers never wait for the network: refreshes are coalesced and run in the background. */
+function handleEvent(event) {
   if (view.value === "debug" && ["started", "message_end", "tool_end", "done", "employee_changed"].includes(event.type)) debugRevision.value++;
   if (event.session && event.session === employee.value.chatSession) {
     employeeEvent.value = event;
     return;
   }
   if (event.type === "clients_changed") {
-    await bootstrap();
-    if (view.value === "employee") await refreshEmployee();
+    background(bootstrapSoon());
+    if (view.value === "employee") background(refreshEmployeeSoon());
     return;
   }
   if (event.type === "execution_changed") {
-    await bootstrap();
-    if (event.session === current.value?.id) await refreshCurrent();
+    background(bootstrapSoon());
+    if (event.session === current.value?.id) background(refreshCurrentSoon());
     return;
   }
   if (event.type === "config_changed") {
-    await Promise.all([bootstrap(), loadModels()]);
+    background(Promise.all([bootstrapSoon(), loadModels()]));
     return;
   }
   if (event.type === "fire") {
@@ -1028,14 +1045,16 @@ async function handleEvent(event) {
       (current.value.id === state.root || current.value.fireRoot === state.root)
     ) {
       fireState.value = state;
-      await bootstrap();
-      if (state.latest !== current.value.id) {
-        const text = draft.value,
-          files = attachments.value;
-        await selectSession({ id: state.latest });
-        draft.value = text;
-        attachments.value = files;
-      } else await refreshCurrent();
+      background((async () => {
+        await bootstrapSoon();
+        if (state.latest !== current.value?.id) {
+          const text = draft.value,
+            files = attachments.value;
+          await selectSession({ id: state.latest });
+          draft.value = text;
+          attachments.value = files;
+        } else await refreshCurrentSoon();
+      })());
     }
     return;
   }
@@ -1044,16 +1063,11 @@ async function handleEvent(event) {
     return;
   }
   if (event.type === "employee_takeover") {
-    if (confirm(`数字牛马申请控制 Chrome：\n${event.data.text}\n允许吗？`))
-      await api("/employee/takeover", "POST", {
-        id: event.data.id,
-        accepted: true,
-      });
-    else
-      await api("/employee/takeover", "POST", {
-        id: event.data.id,
-        accepted: false,
-      });
+    // confirm() blocks; deferring it keeps later events flowing while the dialog is open.
+    setTimeout(() => background(api("/employee/takeover", "POST", {
+      id: event.data.id,
+      accepted: confirm(`数字牛马申请控制 Chrome：\n${event.data.text}\n允许吗？`),
+    })));
     return;
   }
   if (event.taskId) {
@@ -1071,9 +1085,18 @@ async function handleEvent(event) {
   const selected = event.session === current.value?.id;
   if (event.type === "started") running.value[event.session] = true;
   if (event.type === "employee_changed") {
+    // Another page reset this employee: its cached chat and any open task session are gone.
+    if (event.data?.reset) {
+      void clearChatCache(user.value?.id, event.data.employeeId);
+      if (event.data.employeeId === selectedEmployee.value) employeeSession.value = "";
+    }
     if (!event.data?.employeeId || event.data.employeeId === selectedEmployee.value) employeeSessionVersion.value++;
-    if (typeof event.data?.activeTasks === "number")
-      activeTaskCount.value = event.data.activeTasks;
+    if (typeof event.data?.activeTasks === "number") {
+      // Keep the sidebar row live: its count and "working" avatar follow task status without a reload.
+      const entry = employees.value.find((e) => e.id === event.data.employeeId);
+      if (entry) Object.assign(entry, { activeTasks: event.data.activeTasks, runningTasks: event.data.runningTasks ?? entry.runningTasks });
+      activeTaskCount.value = employees.value.reduce((count, e) => count + (e.activeTasks || 0), 0);
+    }
     queueEmployeeRefresh();
     return;
   }
@@ -1084,22 +1107,23 @@ async function handleEvent(event) {
   if (!selected) {
     if (event.type === "done") {
       running.value[event.session] = false;
-      await bootstrap();
+      background(bootstrapSoon());
     }
     return;
   }
+  if (event.type === "text_delta") {
+    pendingLive += event.data;
+    return scheduleLive();
+  }
+  if (event.type === "thinking_delta") {
+    pendingThinking += event.data;
+    return scheduleLive();
+  }
+  flushLive();
   switch (event.type) {
     case "message_start":
-      live.value = "";
-      thinking.value = "";
+      resetLive();
       model.value = event.data.model;
-      break;
-    case "text_delta":
-      live.value += event.data;
-      await scrollBottom();
-      break;
-    case "thinking_delta":
-      thinking.value += event.data;
       break;
     case "tool_start":
       activeTools.value.push(event.data);
@@ -1119,21 +1143,30 @@ async function handleEvent(event) {
       toast(`当前场景：${event.data.scene} · ${event.data.model || ""}`);
       break;
     case "message_end":
-    case "compacted":
-      await refreshCurrent();
-      live.value = "";
-      thinking.value = "";
-      await scrollBottom();
+    case "compacted": {
+      // The streamed text stays until the stored message replaces it, unless a new message started meanwhile.
+      const epoch = liveEpoch, follow = nearBottom();
+      background(refreshCurrentSoon().then(() => {
+        if (epoch !== liveEpoch || !selectedNow(event.session)) return;
+        resetLive();
+        if (follow) return scrollBottom();
+      }));
       break;
-    case "done":
+    }
+    case "done": {
       running.value[event.session] = false;
-      live.value = "";
-      thinking.value = "";
+      resetLive();
       activeTools.value = [];
-      await Promise.all([refreshCurrent(), bootstrap()]);
-      await scrollBottom();
+      const follow = nearBottom();
+      background(Promise.all([refreshCurrentSoon(), bootstrapSoon()]).then(() => {
+        if (follow && selectedNow(event.session)) return scrollBottom();
+      }));
       break;
+    }
   }
+}
+function selectedNow(session) {
+  return current.value?.id === session;
 }
 let employeeLoadVersion = 0;
 function employeeLocationChanged() {
@@ -1215,7 +1248,7 @@ async function createEmployee() {
 async function deleteEmployee() {
   if (employeeDeleting.value || !employee.value.id) return;
   const id = employee.value.id, name = employee.value.name, owner = user.value.id;
-  if (!confirm(`永久删除「${name}」？\n\n将删除该牛马的职责、记忆、所有任务和执行会话，并清除其浏览器登录数据。项目文件和共享密码本不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
+  if (!confirm(`永久删除「${name}」？\n\n将删除该牛马的职责、记忆、密码本、所有任务和执行会话，并清除其浏览器登录数据。项目文件不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
   employeeDeleting.value = true;
   try {
     await api(`/employees/${id}?confirmed=true`, "DELETE");
@@ -1233,19 +1266,25 @@ async function deleteEmployee() {
   } catch (error) { employeeError.value = error.message; }
   finally { employeeDeleting.value = false; }
 }
-async function clearEmployeeChat() {
-  if (employeeClearing.value || employeeDeleting.value || !employee.value.id) return;
-  const id = employee.value.id, name = employee.value.name, owner = user.value.id;
-  if (!confirm(`清空「${name}」的全部聊天记录？\n\n对话消息将永久删除，任务、职责和记忆不受影响。此操作不可撤销。`)) return;
-  employeeClearing.value = true;
+const EMPLOYEE_RESETS = {
+  chat: { path: "chat/clear", ask: (name) => `清空「${name}」的全部聊天记录？\n\n对话消息将永久删除，任务、职责和记忆不受影响。此操作不可撤销。`, done: (name) => `已清空「${name}」的聊天记录` },
+  all: { path: "reset", ask: (name) => `重置「${name}」？\n\n将停止正在进行的对话和任务，并永久删除：全部聊天记录、所有任务记录及其执行会话、任务交付与进度。\n\n保留：记忆、职责（定时从现在起重新计时）、牛马设置、密码本和浏览器登录。已提交的外部作业不会自动撤销。此操作不可撤销。`, done: (name) => `已重置「${name}」` },
+};
+/** 清空聊天 (scope chat) and 重置牛马 (scope all) share one flow: confirm, call, drop this employee's cached chat. */
+async function resetEmployee(scope) {
+  if (employeeResetting.value || employeeDeleting.value || !employee.value.id) return;
+  const id = employee.value.id, name = employee.value.name, owner = user.value.id, reset = EMPLOYEE_RESETS[scope];
+  if (!confirm(reset.ask(name))) return;
+  employeeResetting.value = scope;
   try {
-    await api(`/employees/${id}/chat/clear?confirmed=true`, "POST");
+    await api(`/employees/${id}/${reset.path}?confirmed=true`, "POST");
     await clearChatCache(owner, id);
     employeeSessionVersion.value++;
     employeeEvent.value = null;
-    toast(`已清空「${name}」的聊天记录`);
+    if (scope === "all") await loadEmployee();
+    toast(reset.done(name));
   } catch (error) { employeeError.value = error.message; }
-  finally { employeeClearing.value = false; }
+  finally { employeeResetting.value = ""; }
 }
 async function employeeTaskAction(task, action, text) {
   return attempt(async () => {
@@ -1280,6 +1319,12 @@ async function openEmployeeTask(id) {
   employeeTaskFilter.value = ended(task.status) ? "history" : "active";
   employeeTaskFocus.value = id;
   employeeTab.value = "tasks";
+}
+/** 转交 links: open a task on another employee (only one the current user can see). */
+async function openColleagueTask({ employeeId, taskId }) {
+  if (!employees.value.some((entry) => entry.id === employeeId)) { toast("你没有权限查看这个牛马"); return; }
+  if (selectedEmployee.value !== employeeId) await chooseEmployee(employeeId);
+  if (selectedEmployee.value === employeeId) await openEmployeeTask(taskId);
 }
 async function employeeTabChanged(id) {
   employeeTab.value = id;
@@ -1353,6 +1398,8 @@ async function saveEmployeeSettings() {
       action: "settings",
       name: employee.value.name,
       instruction: employee.value.instruction,
+      publicSummary: employee.value.publicSummary || "",
+      acceptsColleagues: employee.value.acceptsColleagues !== false,
       cwd: employee.value.cwd,
     });
     toast("牛马设置已保存");
@@ -1365,14 +1412,15 @@ onBeforeUnmount(() => {
   closed = true;
   eventGeneration++;
   clearTimeout(eventReconnect);
-  clearInterval(eventsHeartbeat);
+  clearTimeout(eventsWatchdog);
   eventsSocket?.close();
   localBridge?.close();
 });
 </script>
 
 <template>
-  <main v-if="!authenticated" class="login">
+  <div v-if="authChecking" class="auth-splash" aria-busy="true"></div>
+  <main v-else-if="!authenticated" class="login">
     <aside class="login-aside" aria-hidden="true">
       <div class="login-brand"><span class="brand-mark">V</span>Vega</div>
       <div class="login-pitch">
@@ -1504,7 +1552,7 @@ onBeforeUnmount(() => {
               <div class="create-head"><span class="create-icon" aria-hidden="true"><Icon name="users" :size="22" /></span><div><h3>你想把什么交给他？</h3><p class="hint">{{ isAdmin ? '团队牛马 · 所有成员可见' : '个人牛马 · 仅本人和管理员可见' }}</p></div></div>
               <div class="form-grid">
                 <label>牛马名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
-                <label>工作方向<textarea v-model="newEmployeeInstruction" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
+                <label>工作方向<MentionTextarea v-model="newEmployeeInstruction" :colleagues="newEmployeeColleagues" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果；发布相关的工作转交给 @发布助手。" /></label>
               </div>
               <ul class="create-facts">
                 <li><Icon name="check" :size="14" />创建后即可接活，无需设置启用或工作时间</li>
@@ -1519,6 +1567,7 @@ onBeforeUnmount(() => {
             :employee="employee"
             :status="employeeStatus"
             :tone="employeeTone"
+            :working="activeTasks.some((task) => task.status === 'running')"
             :tabs="employeeTabs"
             :tab="employeeTab"
             :counts="employeeCounts"
@@ -1560,21 +1609,23 @@ onBeforeUnmount(() => {
             @select="employeeTaskFocus = $event"
             @inspect="openEmployee($event)"
             @chat="employeeTab = 'chat'"
+            @open-task="openColleagueTask"
           />
           <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
           <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" /></div>
           <EmployeeCapabilities v-if="employeeTab === 'capabilities'" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
+          <EmployeeVault v-if="employeeTab === 'vault' && employee.canConfigure" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
           <EmployeeSettings
             v-if="employeeTab === 'settings' && employee.canManage"
             :employee="employee"
             :api="api"
             :saving="employeeSaving"
             :deleting="employeeDeleting"
-            :clearing="employeeClearing"
+            :resetting="employeeResetting"
             :busy="employeeExecutionBusy"
             @save="saveEmployeeSettings"
             @delete="deleteEmployee"
-            @clear-chat="clearEmployeeChat"
+            @reset="resetEmployee"
             @execution="changeEmployeeExecution"
             @avatar="selectedEmployee === $event.employeeId && (employee.avatar = $event.avatar)"
             @cancel="employeeTab = 'chat'"

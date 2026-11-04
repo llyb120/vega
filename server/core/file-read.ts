@@ -24,7 +24,7 @@ export async function readPath(cwd: string, input: string) {
   }
   throw Error("File not found: " + input);
 }
-export function textSlice(content: string, offset = 1, limit = 2000) {
+export function textSlice(content: string, offset = 1, limit = 2000, maxBytes = 50 * 1024) {
   assert(
     Number.isInteger(offset) &&
       offset >= 1 &&
@@ -44,13 +44,13 @@ export function textSlice(content: string, offset = 1, limit = 2000) {
   for (let at = offset - 1; at < end; at++) {
     const line = `${at + 1}|${lines[at]}`,
       size = Buffer.byteLength(line) + 1;
-    if (bytes + size > 50 * 1024) break;
+    if (bytes + size > maxBytes) break;
     selected.push(line);
     bytes += size;
   }
   if (!selected.length)
     return {
-      text: `[Line ${offset} exceeds50KiB. Use bounded shell extraction; no line was skipped.]`,
+      text: `[Line ${offset} exceeds${Math.round(maxBytes / 1024)}KiB. Use bounded shell extraction; no line was skipped.]`,
       firstLineExceedsLimit: true,
       truncated: true,
       hasMore: true,
@@ -65,4 +65,19 @@ export function textSlice(content: string, offset = 1, limit = 2000) {
     totalLines: lines.length,
     truncated: nextOffset - 1 < end,
   };
+}
+
+/** Archive lines longer than this are split across consecutive numbered lines. */
+export const ARCHIVE_WRAP = 2000;
+/**
+ * A SQLite archive (observation, tool output) as numbered pretty-JSON lines, paged like a text file.
+ * Pages stay under ~12KiB so the JSON-escaped page fits one tool result (32KiB) and is never clipped.
+ */
+export function archiveSlice(value: unknown, offset?: number, limit?: number) {
+  const lines = JSON.stringify(value, null, 1).split("\n").flatMap((line) => {
+    const parts: string[] = [];
+    for (let at = 0; at < line.length; at += ARCHIVE_WRAP) parts.push(line.slice(at, at + ARCHIVE_WRAP));
+    return parts.length ? parts : [""];
+  });
+  return { ...textSlice(lines.join("\n"), offset, limit, 12 * 1024), wrappedAt: ARCHIVE_WRAP };
 }

@@ -7,6 +7,11 @@ import { dispatcher as proxyDispatcher } from "./proxy";
 export type Obj = Record<string, any>;
 export const id = (prefix = "") => prefix + randomUUID().replaceAll("-", "");
 export const clone = <T>(v: T): T => structuredClone(v);
+/** Array.filter with an async predicate: checks run concurrently, order is kept. */
+export async function filterAsync<T>(items: readonly T[], keep: (item: T) => boolean | Promise<boolean>) {
+  const flags = await Promise.all(items.map(keep));
+  return items.filter((_, i) => flags[i]);
+}
 export const object = (v: any): Obj =>
   v && typeof v === "object" && !Array.isArray(v) ? v : {};
 export function assert(condition: unknown, message: string): asserts condition {

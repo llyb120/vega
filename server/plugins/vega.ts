@@ -1,10 +1,10 @@
 import { defineNitroPlugin, useStorage } from "nitropack/runtime";
 import { initialize } from "../core/application";
-import { CLIENT_BODY_LIMIT } from "../core/client-socket";
+import { CLIENT_SOCKET_LIMIT } from "../core/client-socket";
 export default defineNitroPlugin(async (nitro) => {
   Object.assign(nitro.h3App.websocket, {
     serverOptions: {
-      maxPayload: CLIENT_BODY_LIMIT,
+      maxPayload: CLIENT_SOCKET_LIMIT,
       perMessageDeflate: false,
     },
   });
@@ -23,6 +23,6 @@ export default defineNitroPlugin(async (nitro) => {
     await Promise.all([...employeeLives.values()].map((live) => live.close()));
     await headless.close();
     await engine.close();
-    store.close();
+    await store.close();
   });
 });

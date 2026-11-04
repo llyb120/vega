@@ -1,6 +1,6 @@
 // CDP isolated world: references are never recovered by text or a page-supplied selector.
 (() => {
-  if (globalThis.__novaWebview?.apiVersion === 26) return;
+  if (globalThis.__novaWebview?.apiVersion === 28) return;
   const compact = (text, max = 160) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
   // Icon-only controls (sort carets, filter funnels, close ×) carry their meaning in class names.
   const iconHint = e => {
@@ -43,10 +43,11 @@
       // A row's text identifies its record. A form's transient validation/status
       // text must not invalidate every other field in a safe fill batch.
       const heading=compact(scope.querySelector('legend,h1,h2,h3,[role=heading]')?.textContent,200);
-      const info={region:key.replace(/\|/g,'') ? key+' '+text : text,identity:[scope.tagName,key,row?text:heading].join('|')};
+      // Only a list/table row's own text identifies a record (recycled rows of virtual lists).
+      const info={region:key.replace(/\|/g,'') ? key+' '+text : text,row:row?[scope.tagName,key,text].join('|'):''};
       cache?.set(scope,info);return info;
     }
-    return {region:'',identity:''};
+    return {region:'',row:''};
   };
   const fieldContext = e => {
     // ponytail: six ancestors, single fields or a two-date range; other compound forms need real labels.
@@ -63,8 +64,6 @@
     }
     return '';
   };
-  const fingerprint = (e, name=label(e), context=contextInfo(e).identity) => JSON.stringify([e.tagName, name, ...['id','name','type','role','href','data-testid','aria-controls','aria-sort','data-column-key','data-field'].map(a => e.getAttribute(a)), context,
-    e.type!=='password' && e.matches('input,textarea,select,[contenteditable=true]') ? fieldContext(e) : '']);
   const disabled = e => !!e.disabled || e.matches(':disabled') || ancestors(e).some(p => p.inert || p.getAttribute('aria-disabled') === 'true');
   const editable = (e, isDisabled=disabled(e)) => (e.matches('textarea,input:not([type]),input[type=text],input[type=search],input[type=email],input[type=url],input[type=tel],input[type=number],input[type=password]') || e.isContentEditable)
     && !e.readOnly && !ancestors(e).some(p=>p.getAttribute('aria-readonly')==='true') && !isDisabled;
@@ -93,8 +92,47 @@
     if(key!==layoutKey) {layoutKey=key;revision++;}
   };
 
-  const identities = new WeakMap(); let nextIdentity = 0;
-  const identity = e => { if (!e) return null; if (!identities.has(e)) identities.set(e, ++nextIdentity); return identities.get(e); };
+  // A target's identity is the DOM node itself: surrounding text, labels or countdowns never change it.
+  // A stable, unique id additionally survives a framework replacing the node; generated ids do not count.
+  const identities = new WeakMap(), owners = new Map(), idNumbers = new WeakMap(); let nextIdentity = 0;
+  const generatedId = id => /\d{3,}|[0-9a-f]{8,}|^:r|^(ember|ext-|yui_|gwt-|mui-|rc[-_]|el-id-|headlessui-|radix-|react-select-|downshift-)|[-_:]\d+$/i.test(id);
+  const stableId = e => {
+    const id=e.getAttribute?.('id');
+    if (!id || id.length>100 || generatedId(id)) return '';
+    const root=e.getRootNode();
+    try { return root.querySelectorAll('#'+CSS.escape(id)).length===1 ? id : ''; } catch { return ''; }
+  };
+  const ownerOf = n => owners.get(n)?.deref();
+  const claim = (e, n) => { identities.set(e, n); owners.set(n, new WeakRef(e)); return n; };
+  const identity = e => {
+    if (!e) return null;
+    if (identities.has(e)) return identities.get(e);
+    const id=stableId(e), root=e.getRootNode();
+    if (id) {
+      let ids=idNumbers.get(root); if (!ids) idNumbers.set(root, ids=new Map());
+      const n=ids.get(id), previous=n&&ownerOf(n);
+      // Same id replacing a removed node of the same kind keeps the ref; a live previous owner never shares it.
+      if (n && (!previous || (!previous.isConnected && previous.tagName===e.tagName))) return claim(e, n);
+      const fresh=claim(e, ++nextIdentity); ids.set(id, fresh); return fresh;
+    }
+    return claim(e, ++nextIdentity);
+  };
+  const forget = e => {
+    const id=stableId(e), ids=id?idNumbers.get(e.getRootNode()):undefined;
+    if (ids && ids.get(id)===identities.get(e)) ids.delete(id);
+    owners.delete(identities.get(e)); identities.delete(e);
+  };
+  const rowOf = (e, cache) => contextInfo(e, cache).row;
+  const reattach = entry => {
+    // The observed node was removed: follow its stable id to the single live replacement of the same kind.
+    if (!entry.id) return false;
+    let found;
+    try { found=Array.from(entry.root.querySelectorAll('#'+CSS.escape(entry.id))); } catch { return false; }
+    const e=found.length===1&&found[0].isConnected&&found[0].tagName===entry.e.tagName?found[0]:null;
+    if (!e || (identities.has(e) && identities.get(e)!==entry.n)) return false;
+    claim(e, entry.n); entry.e=e; return true;
+  };
+  const entry = (e, cache) => ({e, n:identities.get(e), id:stableId(e), root:e.getRootNode(), row:rowOf(e, cache)});
   const active = () => { let e = document.activeElement; while (e?.shadowRoot?.activeElement) e = e.shadowRoot.activeElement; return e; };
   const hitAt = (x, y) => {
     let hit = document.elementFromPoint(x, y);
@@ -148,11 +186,13 @@
   });
   const entryFor = ref => {
     const entry = entries.get(ref);
-    if (!entry || !entry.e.isConnected || fingerprint(entry.e) !== entry.fingerprint) {revision++;throw Error('目标引用已失效（节点、名称或所属行已变化），请重新观察');}
+    if (!entry) {revision++;throw Error('目标引用不在最新观察中，请重新观察');}
+    if (!entry.e.isConnected && !reattach(entry)) {revision++;throw Error('目标节点已从页面移除，请重新观察');}
+    if (entry.row && rowOf(entry.e) !== entry.row) {revision++;throw Error('目标所在行已显示另一条记录（列表行被复用），请重新观察');}
     return entry;
   };
   const api = {
-    apiVersion: 26,
+    apiVersion: 28,
     stamp,
     async evaluate(expression, expectedDocument, expectedUrl) {
       // Check and start in the same JS turn: navigation must never redirect a script to a new document.
@@ -191,8 +231,7 @@
       return {identity:identity(e),editable:!!e && editable(e),password:e?.type==='password',matches:ref ? e === entryFor(ref).e : undefined};
     },
     verifyValue(ref, expected) {
-      // Input may legitimately change its accessible name/context, so compare
-      // the original node and actual value, not the pre-edit text fingerprint.
+      // Compare the original node and its actual value.
       const e=entries.get(ref)?.e;
       if (!e?.isConnected || !editable(e) || active()!==e) throw Error('填写后目标或焦点已变化，请重新观察');
       const value=e.isContentEditable ? e.innerText : e.value;
@@ -298,19 +337,18 @@
         total++;if (items.length >= limit) continue;
         const isDisabled=disabled(e);
         // Cache semantics only, never geometry, hit tests, focus, values or
-        // enabled state. prepare()/verifyPoint() always fingerprint live nodes.
+        // enabled state. prepare()/verifyPoint() always re-check live nodes.
         let cached=semanticCache.get(e);
         if(!cached || cached.revision!==revision) {
           const name=label(e,labels()),context=contextInfo(e,contextCache),region=context.region;
-          const nextFingerprint=fingerprint(e,name,context.identity);
-          // Re-observing a recycled row must not make its old ref valid for a different record.
-          if (cached && cached.fingerprint!==nextFingerprint) identities.delete(e);
-          cached={revision,name,region,fingerprint:nextFingerprint};
+          // A recycled row now showing another record gets a new ref, so the old one cannot hit it.
+          if (cached && cached.row!==context.row && identities.has(e)) forget(e);
+          cached={revision,name,region,row:context.row};
           semanticCache.set(e,cached);
         }
         const {name,region}=cached;
         const ref=`${documentId.slice(0,6)}.${identity(e)}`;
-        entries.set(ref,{e,fingerprint:cached.fingerprint});
+        entries.set(ref,{...entry(e,contextCache),row:cached.row});
         // Most targets in a long document are offscreen. Keep their references
         // and geometry without probing client rects / hit-testing them twice.
         const candidates=inView ? points(e,true) : [], p=candidates.find(p=>receives(e,p.x,p.y));
@@ -420,7 +458,8 @@
       let previous,stableFrames=0,scrolled=false,reason='目标正在移动';
       do {
         if(ref)entryFor(ref);
-        if (disabled(e)) reason='目标不可用';
+        // Hovering a disabled control is allowed: its tooltip often explains why it is disabled.
+        if (mode!=='hover' && disabled(e)) reason='目标不可用';
         else {
           const p=wheel?wheelPoint(e,mode==='scroll_x'?'x':'y'):clickable(e),r=rect(e);
           // Measure this target, not ancestor animation metadata (which can run forever without moving it).
@@ -449,12 +488,12 @@
     },
     verifyPoint(ref,x,y,expectedRect,mode='click') {
       const e=entryFor(ref).e;
-      if (disabled(e) || !sameRect(rect(e),expectedRect) || !receives(e,x,y)) throw Error('目标在鼠标定位后改变或被遮挡，请重新观察');
+      if ((mode!=='hover' && disabled(e)) || !sameRect(rect(e),expectedRect) || !receives(e,x,y)) throw Error('目标在鼠标定位后改变或被遮挡，请重新观察');
       if (mode==='fill' && !editable(e)) throw Error('目标不是可填写字段或只读');
       return true;
     },
-    async coordinate(x,y,expectedStamp,fullPage=false) {
-      if (stamp()!==expectedStamp) throw Error('截图视口已变化，请重新截图');
+    // Coordinates are already mapped from the chosen image to CSS pixels; no check that the image is still current.
+    async coordinate(x,y,fullPage=false) {
       if (![x,y].every(Number.isFinite)||x<0||y<0) throw Error('坐标超出视口');
       if (fullPage) {
         if (x>=Math.max(document.documentElement.scrollWidth,document.body?.scrollWidth||0)||y>=Math.max(document.documentElement.scrollHeight,document.body?.scrollHeight||0)) throw Error('坐标超出文档');
@@ -471,10 +510,10 @@
       if (e && !ancestors(e).some(node=>node.matches('canvas,iframe,frame,video,img,svg'))) {
         const target=ancestors(e).find(node=>node.matches('button,a[href],input,select,textarea,[role=button],[role=option],[role=menuitem],li'))||e;
         const ref=`${version}:coordinate:${identity(target)}`;
-        entries.set(ref,{e:target,fingerprint:fingerprint(target)});
+        entries.set(ref,entry(target));
         hoverTarget={ref,rect:rect(target)};
       }
-      return {x,y,stamp:stamp(),pageX:x+scrollX,pageY:y+scrollY,identity:identity(e),editable:!!e&&editable(e),password:e?.type==='password',canvas:e?.tagName==='CANVAS',hit:e?{tag:e.tagName.toLowerCase(),name:label(e)}:null,hoverTarget};
+      return {x,y,pageX:x+scrollX,pageY:y+scrollY,identity:identity(e),editable:!!e&&editable(e),password:e?.type==='password',canvas:e?.tagName==='CANVAS',hit:e?{tag:e.tagName.toLowerCase(),name:label(e)}:null,hoverTarget};
     },
   };
   Object.defineProperty(globalThis,'__novaWebview',{value:api,configurable:true});

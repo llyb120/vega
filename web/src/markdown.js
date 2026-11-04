@@ -10,6 +10,8 @@ function imageURL(value) {
   if (hex) return "/api/blobs/" + hex[1];
   const archived = /^(?:\/api\/blobs\/|sqlite:blob\/)(blob-[\w-]+)$/.exec(value);
   if (archived) return "/api/blobs/" + archived[1];
+  // Archived Chrome screenshots (images[].url of a chrome result).
+  if (/^\/api\/files\/(?:[\w.%-]+\/)*[\w.%-]+\.(?:webp|png|jpe?g)$/i.test(value) && !/(^|\/)\.\.?(\/|$)/.test(value.slice(11))) return value;
   if (/^data:image\/(?:png|jpeg|gif|webp|bmp|avif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value))
     return value;
   if (!/^https?:\/\//i.test(value) || /[\u0000-\u001f\u007f\\]/.test(value)) return;
@@ -17,6 +19,16 @@ function imageURL(value) {
     const url = new URL(value);
     if (url.hostname && !url.username && !url.password) return url.href;
   } catch {}
+}
+
+/** "@名称" of known employees, active only during one renderMarkdown call ({ name, id } list; names are unique per user). */
+let mentionPattern, mentionIds;
+function useMentions(people) {
+  const named = (people || []).filter((p) => p?.id && String(p.name || "").trim());
+  mentionIds = new Map(named.map((p) => [String(p.name).trim(), String(p.id)]));
+  const names = [...mentionIds.keys()].sort((a, b) => b.length - a.length).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // Longest name first, so "@测试牛马处理" finds 测试牛马; "@" right after a letter or digit (an email) does not count.
+  mentionPattern = names.length ? new RegExp(`(^|[^\\p{L}\\p{N}_])@(${names.join("|")})`, "gu") : undefined;
 }
 
 export function renderInline(text) {
@@ -41,7 +53,11 @@ export function renderInline(text) {
     .replace(
       /(^|[\s：:])((?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32})(?=$|[\s，。；！？、]|[.,;!?](?=\s|$))/gi,
       (_, prefix, url) => prefix + protect(`<img src="${escape(imageURL(url))}" alt="存档图片" loading="lazy" decoding="async" referrerpolicy="no-referrer">`, url),
-    );
+    )
+    .replace(mentionPattern || /(?!)()()/gu, (match, prefix, name) => {
+      const id = mentionIds.get(name);
+      return prefix + protect(`<a class="mention" href="?employee=${encodeURIComponent(id)}" data-employee="${escape(id)}">@${escape(name)}</a>`, "@" + name);
+    });
   const html = escape(source)
     .replace(
       /\[([^\]\n]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g,
@@ -73,7 +89,11 @@ function tableRow(line) {
 
 // shortcut: chat-oriented Markdown subset (no raw HTML or reference-style images);
 // upgrade to a full parser if richer message formatting is required.
-export function renderMarkdown(text) {
+export function renderMarkdown(text, options = {}) {
+  useMentions(options.mentions);
+  try { return renderBlocks(text); } finally { useMentions(); }
+}
+function renderBlocks(text) {
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n"),
     html = [],
     codes = [];
@@ -130,13 +150,15 @@ export function renderMarkdown(text) {
       continue;
     }
     const unordered = line.match(/^\s*[-*+]\s+(.+)$/),
-      ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+      ordered = line.match(/^\s*(\d+)[.)]\s+(.+)$/);
     if (unordered || ordered) {
       const tag = unordered ? "ul" : "ol",
-        item = (unordered || ordered)[1];
+        item = unordered ? unordered[1] : ordered[2];
       if (paragraph.length || quote.length || (list && list !== tag)) flush();
       if (!list) {
-        html.push(`<${tag}>`);
+        // Keep the author's numbering when a list resumes after other blocks ("4. …" after bullets).
+        const start = ordered ? Number(ordered[1]) : 1;
+        html.push(start !== 1 ? `<ol start="${start}">` : `<${tag}>`);
         list = tag;
       }
       html.push(`<li>${renderInline(item)}</li>`);

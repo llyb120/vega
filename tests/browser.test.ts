@@ -195,9 +195,10 @@ test(
       ],
       { windowsHide: true, stdio: "ignore" },
     );
-    const store = new Store(":memory:"),
+    const store = await Store.open(":memory:"),
       bridge = new FixtureBridge();
-    store.db.prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)").run("fixture", "fixture", "test-only", "admin", 0, Date.now(), 0);
+    await store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
+    await store.run("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)", "fixture", "fixture", "test-only", "admin", 0, Date.now(), 0);
     let submitted = 0, liveSubmitted = 0,
       live: BrowserLive | undefined;
     const server = createServer((req, res) => {
@@ -301,7 +302,7 @@ test(
       assert.equal(preview.tabTag, tag);
       assert(preview.image.width > 0);
       assert.equal(preview.title, "Vega complete browser fixture");
-      assert(store.blobData(preview.image.url.split("/").at(-1)!));
+      assert(existsSync(store.files.fromUrl(preview.image.url.slice("/api/files/".length).split("?")[0].split("/"))));
       assert.equal(
         engine.observations.get("owner:" + tag)!.id,
         shot.snapshotId,
@@ -358,7 +359,7 @@ test(
       });
       assert.equal(invalid.completedActions, 0);
       assert.equal(submitted, 1);
-      const archive = store.object<any>("browser-observation", shot.snapshotId);
+      const archive = JSON.parse(readFileSync(shot.documentPath, "utf8"));
       const remoteOwner = "browser-view:fixture";
       let remote = await browserScreenshot(engine, remoteOwner, tag);
       const remotePoint = async (selector: string) => {
@@ -573,11 +574,11 @@ test(
           messages.push(value);
           if (value.type === "frame") {
             frames.push(value);
-            queueMicrotask(() =>
-              live!.message(
-                peer,
-                JSON.stringify({ type: "frame_ack", frameId: value.frameId }),
-              ),
+            queueMicrotask(async () =>
+              await live!.message(
+                                peer,
+                                JSON.stringify({ type: "frame_ack", frameId: value.frameId }),
+                              ),
             );
           }
         },
@@ -599,31 +600,31 @@ test(
         );
       };
       const beforeFrames = Number(
-        store.db.prepare("SELECT COUNT(*) AS n FROM blobs").get()!.n,
+        (await store.one("SELECT COUNT(*) AS n FROM blobs"))!.n,
       );
-      live.open(peer);
+      await live.open(peer);
       await until(() => frames.length >= 2);
       assert.equal(
         frames.at(-1)!.width,
         1568,
         "high-DPR frames are resized independently of CSS coordinates",
       );
-      live.message(peer, JSON.stringify({ type: "mode", mode: "control" }));
+      await live.message(peer, JSON.stringify({ type: "mode", mode: "control" }));
       await until(() =>
         messages.some((m) => m.type === "mode" && m.mode === "control"),
       );
       let sequence = 0;
       const input = async (action: Obj) => {
         const seq = ++sequence;
-        live!.message(
-          peer,
-          JSON.stringify({
-            type: "input",
-            seq,
-            frameId: frames.at(-1)!.frameId,
-            action,
-          }),
-        );
+        await live!.message(
+                    peer,
+                    JSON.stringify({
+                      type: "input",
+                      seq,
+                      frameId: frames.at(-1)!.frameId,
+                      action,
+                    }),
+                  );
         await until(() =>
           messages.some((m) => m.type === "input_result" && m.seq === seq),
         );
@@ -703,11 +704,11 @@ test(
         frameId: frames.at(-1)!.frameId,
         action: { action: "click_at", ...(await point("button")) },
       };
-      live.message(peer, JSON.stringify(duplicate));
+      await live.message(peer, JSON.stringify(duplicate));
       await engine.gate.run(async () => {});
       assert.equal(submitted, 3, "duplicate WS input cannot submit twice");
       assert.equal(
-        Number(store.db.prepare("SELECT COUNT(*) AS n FROM blobs").get()!.n),
+        Number((await store.one("SELECT COUNT(*) AS n FROM blobs"))!.n),
         beforeFrames,
         "continuous live frames must never be saved to SQLite",
       );
@@ -715,12 +716,12 @@ test(
       live = undefined;
       assert(
         archive.images.length === 1,
-        "Observation not persisted in SQLite",
+        "Observation file not written",
       );
     } finally {
       await live?.close();
       bridge.close();
-      store.close();
+      await store.close();
       await new Promise<void>((yes) => {
         server.closeAllConnections();
         server.close(() => yes());
@@ -736,6 +737,245 @@ test(
         maxRetries: 10,
         retryDelay: 100,
       });
+    }
+  },
+);
+
+test(
+  "real isolated Chrome: a DOM node keeps its ref while nearby text changes; only removal or a recycled row invalidates it",
+  { timeout: 60000, skip: process.env.VEGA_TEST_CHROME !== "1" },
+  async () => {
+    const binary = process.env.VEGA_CHROME_PATH || ["C:/Program Files/Google/Chrome/Application/chrome.exe", "/usr/bin/google-chrome", "/usr/bin/chromium"].find(existsSync);
+    assert(binary, "Set VEGA_CHROME_PATH");
+    const dir = await mkdtemp(join(tmpdir(), "vega-chrome-")), profile = join(dir, "profile");
+    const child = spawn(binary, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0", "--user-data-dir=" + profile, "--no-sandbox", "about:blank"], { windowsHide: true, stdio: "ignore" });
+    const store = await Store.open(":memory:"), bridge = new FixtureBridge();
+    await store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
+    let verified = "", slowImage = 0;
+    const server = createServer((req, res) => {
+      if (req.url === "/slow.png") { slowImage++; setTimeout(() => { res.setHeader("Content-Type", "image/png"); res.end(); }, 1200); return; }
+      res.setHeader("Content-Type", "text/html");
+      if (req.url?.startsWith("/verify")) { verified = new URL(req.url, "http://x").searchParams.get("code") || ""; res.end("<title>Verified</title>ok"); return; }
+      if (req.url === "/slow") { res.end(`<title>Slow</title><img src="/slow.png"><button>Ready</button>`); return; }
+      res.end(`<!doctype html><title>Identity</title>
+        <form action="/verify"><p>Please enter the access code. Code Expires After <span id="left">300</span>s</p>
+          <input name="code" aria-label="Enter Access Code"><button>Verify</button></form>
+        <ul id="list"><li><span class="title">Record A</span><button>Open</button></li></ul>
+        <button id="save-btn" onclick="document.title='saved'">Save</button>
+        <button id="btn-4821">Generated</button><button>Remove me</button>
+        <script>let n=300;setInterval(()=>{document.getElementById('left').textContent=--n},40)</script>`);
+    });
+    await new Promise<void>((yes) => server.listen(0, "127.0.0.1", yes));
+    const url = `http://127.0.0.1:${(server.address() as any).port}`;
+    try {
+      let endpoint = "";
+      for (let i = 0; i < 100 && !endpoint; i++) {
+        try {
+          const [port, path] = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).trim().split("\n");
+          endpoint = `ws://127.0.0.1:${port}${path}`;
+        } catch { await sleep(50); }
+      }
+      assert(endpoint, "Chrome did not publish DevToolsActivePort");
+      await bridge.connect(endpoint);
+      const engine = new Chrome(store, bridge, readFileSync("server/assets/browser/browser-page.js", "utf8"));
+      const open = await engine.execute("owner", dir, { operation: "open", url, visual: "none" });
+      const tag = open.tabTag;
+      const find = (o: Obj, name: string) => o.pages[0].items.find((i: Obj) => i.name === name);
+      const inspect = () => engine.execute("owner", dir, { operation: "inspect", tabTag: tag, visual: "none" });
+      const act = (action: Obj) => engine.execute("owner", dir, { operation: "act", tabTag: tag, visual: "none", settleMs: 0, action: { frame: 0, ...action } });
+      const run = (expression: string) => engine.execute("owner", dir, { operation: "evaluate", tabTag: tag, expression, feedback: "none" });
+
+      // The countdown changes the field's surrounding text every 40 ms; the field keeps its ref.
+      const code = find(open, "Enter Access Code");
+      assert(code);
+      await sleep(300);
+      const later = await inspect();
+      assert.equal(find(later, "Enter Access Code").ref, code.ref, "re-observation keeps the same ref");
+      assert.notEqual(find(later, "Enter Access Code").fieldContext, code.fieldContext, "the surrounding text really changed");
+      await sleep(300);
+      const fill = await act({ action: "fill", ref: code.ref, text: "151755" });
+      assert.equal(fill.status, "executed", fill.reason);
+
+      // A stable id follows a framework replacing the node.
+      const save = find(await inspect(), "Save");
+      await run("(()=>{const o=document.getElementById('save-btn'),n=o.cloneNode(true);o.replaceWith(n);return 1})()");
+      const saved = await act({ action: "click", ref: save.ref });
+      assert.equal(saved.status, "executed", saved.reason);
+      assert.equal((await run("document.title")).value, "saved");
+
+      // A generated-looking id does not: removal invalidates the ref.
+      const generated = find(await inspect(), "Generated");
+      await run("(()=>{const o=document.getElementById('btn-4821');o.replaceWith(o.cloneNode(true));return 1})()");
+      const gone = await act({ action: "click", ref: generated.ref });
+      assert.equal(gone.status, "not_executed");
+      assert.match(gone.reason, /目标节点已从页面移除/);
+
+      // Removing a node without id invalidates it.
+      const remove = find(await inspect(), "Remove me");
+      await run("(()=>{[...document.querySelectorAll('button')].find(b=>b.textContent==='Remove me').remove();return 1})()");
+      const removed = await act({ action: "click", ref: remove.ref });
+      assert.equal(removed.status, "not_executed");
+      assert.match(removed.reason, /目标节点已从页面移除/);
+
+      // A recycled list row showing another record still invalidates its old ref.
+      const row = find(await inspect(), "Open");
+      await run("(()=>{document.querySelector('#list .title').textContent='Record B';return 1})()");
+      const recycled = await act({ action: "click", ref: row.ref });
+      assert.equal(recycled.status, "not_executed");
+      assert.match(recycled.reason, /另一条记录/);
+      assert.notEqual(find(await inspect(), "Open").ref, row.ref, "the recycled row gets a new ref");
+
+      // Navigation waits for the document to finish loading (slow image), and still submits the earlier fill.
+      const slow = await engine.execute("owner", dir, { operation: "goto", tabTag: tag, url: url + "/slow", visual: "none" });
+      assert.equal(slowImage, 1);
+      assert.equal(slow.pages[0].readyState, "complete", "navigation returned only after the slow image finished");
+      assert.equal(verified, "");
+    } finally {
+      bridge.close();
+      await store.close();
+      await new Promise<void>((yes) => { server.closeAllConnections(); server.close(() => yes()); });
+      child.kill();
+      await new Promise<void>((yes) => { if (child.exitCode !== null) yes(); else child.once("exit", () => yes()); });
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  },
+);
+
+test(
+  "real isolated Chrome: hover by ref shows a tooltip; coordinates map through the named image without a staleness check; results lead with images",
+  { timeout: 60000, skip: process.env.VEGA_TEST_CHROME !== "1" },
+  async () => {
+    const binary = process.env.VEGA_CHROME_PATH || ["C:/Program Files/Google/Chrome/Application/chrome.exe", "/usr/bin/google-chrome", "/usr/bin/chromium"].find(existsSync);
+    assert(binary, "Set VEGA_CHROME_PATH");
+    const dir = await mkdtemp(join(tmpdir(), "vega-chrome-")), profile = join(dir, "profile");
+    const child = spawn(binary, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0", "--user-data-dir=" + profile, "--no-sandbox", "--window-size=1000,700", "about:blank"], { windowsHide: true, stdio: "ignore" });
+    const store = await Store.open(":memory:"), bridge = new FixtureBridge();
+    await store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
+    const server = createServer((_req, res) => {
+      res.setHeader("Content-Type", "text/html");
+      res.end(`<!doctype html><title>Hover</title><body style="margin:0">
+        <button id="metric" onmouseenter="setTimeout(()=>{const t=document.createElement('div');t.id='tip';t.textContent='Take the sum of metrics';document.body.append(t)},100)"
+          onmouseleave="document.getElementById('tip')?.remove()">Market Total DAU</button>
+        <button id="hit" style="position:absolute;left:200px;top:300px;width:120px;height:40px" onmousemove="document.title='moved'">Target</button>
+        <div style="height:3000px"></div>`);
+    });
+    await new Promise<void>((yes) => server.listen(0, "127.0.0.1", yes));
+    const url = `http://127.0.0.1:${(server.address() as any).port}`;
+    try {
+      let endpoint = "";
+      for (let i = 0; i < 100 && !endpoint; i++) {
+        try {
+          const [port, path] = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).trim().split("\n");
+          endpoint = `ws://127.0.0.1:${port}${path}`;
+        } catch { await sleep(50); }
+      }
+      assert(endpoint, "Chrome did not publish DevToolsActivePort");
+      await bridge.connect(endpoint);
+      const engine = new Chrome(store, bridge, readFileSync("server/assets/browser/browser-page.js", "utf8"));
+      const open = await engine.execute("owner", dir, { operation: "open", url, visual: "none" });
+      const tag = open.tabTag;
+      const find = (o: Obj, name: string) => o.pages[0].items.find((i: Obj) => i.name === name);
+
+      // Hover by ref: no click, the tooltip appears in the automatic observation.
+      const metric = find(open, "Market Total DAU");
+      const hovered = await engine.execute("owner", dir, { operation: "act", tabTag: tag, visual: "none", action: { action: "hover", ref: metric.ref } });
+      assert.equal(hovered.status, "executed", hovered.reason);
+      assert.match(hovered.pages[0].text, /Take the sum of metrics/);
+
+      // Results put identifiers and images before the page summary; the summary drops derivable fields.
+      const seen = await engine.execute("owner", dir, { operation: "inspect", tabTag: tag, maxItems: 1 });
+      const keys = Object.keys(seen);
+      assert(keys.indexOf("images") < keys.indexOf("pages") && keys.indexOf("snapshotId") < keys.indexOf("pages"));
+      assert.equal(seen.pages[0].items.length, 1);
+      assert.equal(seen.pages[0].items[0].nodeId, undefined);
+      assert.equal(seen.pages[0].items[0].documentRect, undefined);
+      assert(seen.images[0]?.imageId, "viewport image");
+      const stale = seen.images[0];
+
+      // Coordinates are mapped through the named image and executed without checking that the image is current.
+      await engine.execute("owner", dir, { operation: "evaluate", tabTag: tag, expression: "(scrollTo(0,40),scrollY)", feedback: "none" });
+      const toImage = (image: Obj, x: number, y: number) => ({ x: ((x - image.x) * image.pixelWidth) / image.width, y: ((y - image.y) * image.pixelHeight) / image.height });
+      // Target sits at CSS y 300–340; after the 40px scroll it shows at 260–300, so aim with current CSS positions.
+      const moved = await engine.execute("owner", dir, { operation: "act", tabTag: tag, visual: "none", imageId: stale.imageId, maxItems: 1, action: { action: "move", ...toImage(stale, 260, 280) } });
+      assert.equal(moved.status, "executed", moved.reason);
+      assert.equal(moved.nextCall, undefined);
+      assert.equal(moved.pages[0].items.length, 1, "act honours maxItems");
+      assert.equal(Object.keys(moved).at(-1), "pages");
+      assert.equal((await engine.execute("owner", dir, { operation: "evaluate", tabTag: tag, expression: "document.title", feedback: "none" })).value, "moved");
+    } finally {
+      bridge.close();
+      await store.close();
+      await new Promise<void>((yes) => { server.closeAllConnections(); server.close(() => yes()); });
+      child.kill();
+      await new Promise<void>((yes) => { if (child.exitCode !== null) yes(); else child.once("exit", () => yes()); });
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  },
+);
+
+test(
+  "real isolated Chrome: with the isolated launch flags an extension debugger attach no longer shrinks the viewport",
+  { timeout: 60000, skip: process.env.VEGA_TEST_CHROME !== "1" },
+  async () => {
+    const { headlessArguments } = await import("../server/core/headless");
+    const binary = process.env.VEGA_CHROME_PATH || ["C:/Program Files/Google/Chrome/Application/chrome.exe", "/usr/bin/google-chrome", "/usr/bin/chromium"].find(existsSync);
+    assert(binary, "Set VEGA_CHROME_PATH");
+    const dir = await mkdtemp(join(tmpdir(), "vega-chrome-")), extension = join(dir, "probe");
+    const server = createServer((_req, res) => { res.setHeader("Content-Type", "text/html"); res.end("<title>t</title>probe"); });
+    await new Promise<void>((yes) => server.listen(0, "127.0.0.1", yes));
+    const url = `http://127.0.0.1:${(server.address() as any).port}/`;
+    // A minimal chrome.debugger extension: innerHeight right after attach and 1.5 s later, reported via the title.
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(extension);
+    await writeFile(join(extension, "manifest.json"), JSON.stringify({ manifest_version: 3, name: "probe", version: "1", permissions: ["debugger", "tabs"], background: { service_worker: "w.js" } }));
+    await writeFile(join(extension, "w.js"), [
+      "async function probe(){const [t]=await chrome.tabs.query({url:'http://127.0.0.1/*'});if(!t)return setTimeout(probe,200);",
+      "const ev=async e=>(await chrome.debugger.sendCommand({tabId:t.id},'Runtime.evaluate',{expression:e,returnByValue:true})).result.value;",
+      "await chrome.debugger.attach({tabId:t.id},'1.3');const a=await ev('innerHeight');await new Promise(r=>setTimeout(r,1500));",
+      "const b=await ev('innerHeight');await ev('document.title=\"H:'+a+'/'+b+'\"');}probe();",
+    ].join("\n"));
+    const launch = async (args: string[]) => {
+      const profile = await mkdtemp(join(dir, "profile-"));
+      // Branded Chrome ignores --load-extension; load the probe over CDP instead, as the employee browser does.
+      const flags = args.filter((a) => !a.startsWith("--user-data-dir=") && !/^--(?:load-extension|disable-extensions-except)=/.test(a) && a !== "about:blank")
+        .concat("--enable-unsafe-extension-debugging", "--user-data-dir=" + profile, "--no-sandbox", "about:blank");
+      const child = spawn(binary, flags, { windowsHide: true, stdio: "ignore" });
+      try {
+        let endpoint = "";
+        for (let i = 0; i < 100 && !endpoint; i++) {
+          try { const [port, path] = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).trim().split("\n"); endpoint = `ws://127.0.0.1:${port}${path}`; }
+          catch { await sleep(50); }
+        }
+        const ws = new WebSocket(endpoint);
+        await new Promise((yes) => ws.once("open", yes));
+        let seq = 0;
+        const pending = new Map<number, (v: any) => void>();
+        ws.on("message", (m) => { const d = JSON.parse(String(m)); pending.get(d.id)?.(d); });
+        const call = (method: string, params: Obj = {}) => new Promise<any>((yes) => { const id = ++seq; pending.set(id, yes); ws.send(JSON.stringify({ id, method, params })); });
+        assert(!(await call("Extensions.loadUnpacked", { path: extension })).error);
+        await call("Target.createTarget", { url });
+        for (let i = 0; i < 60; i++) {
+          await sleep(200);
+          const page = (await call("Target.getTargets")).result.targetInfos.find((t: Obj) => t.type === "page" && t.title.startsWith("H:"));
+          if (page) { ws.close(); return page.title.slice(2).split("/").map(Number); }
+        }
+        ws.close();
+        throw Error("probe did not report");
+      } finally {
+        child.kill();
+        await new Promise<void>((yes) => { if (child.exitCode !== null) yes(); else child.once("exit", () => yes()); });
+      }
+    };
+    try {
+      const isolated = headlessArguments(join(dir, "unused"), extension);
+      const [after, later] = await launch(isolated);
+      assert.equal(later, after, "no debugging bar: the viewport keeps its height after attach");
+      // Without the flag the bar appears (even headless) and takes height away; the extension's settle wait covers that case.
+      const [plainAfter, plainLater] = await launch(isolated.filter((a) => a !== "--silent-debugger-extension-api"));
+      assert(plainLater < plainAfter, `debugging bar shrinks the viewport without the flag (${plainAfter} -> ${plainLater})`);
+    } finally {
+      await new Promise<void>((yes) => server.close(() => yes()));
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   },
 );

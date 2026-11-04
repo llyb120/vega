@@ -22,6 +22,9 @@ const stateExpression =
 
 // shortcut: JPEG snapshot stream (at most 10 fps); use screencast/WebRTC for video-grade motion.
 // Frames are ephemeral and acknowledged one at a time; video must never fill SQLite or an input queue.
+// An unchanged screen is sent as a tiny "same" frame (fresh state, no image), and a page that has been still
+// for a while with no input is sampled at 2 fps instead of 10.
+const ACTIVE_MS = 100, IDLE_MS = 500, IDLE_AFTER = 2000;
 export class BrowserLive {
   tickets = new Map<string, Ticket>();
   sessions = new Map<string, LiveSession>();
@@ -32,7 +35,7 @@ export class BrowserLive {
   constructor(
     public chrome: Chrome,
     public auth: Auth,
-    public canUse: (principal: Principal) => boolean = (principal) => principal.user.role === "admin",
+    public canUse: (principal: Principal) => boolean | Promise<boolean> = (principal) => principal.user.role === "admin",
   ) {
     auth.events.on("logout", this.logout);
     auth.events.on("revoke", this.revoke);
@@ -47,7 +50,7 @@ export class BrowserLive {
   };
   async ticket(principal: Principal, tabTag: unknown) {
     assert(
-      !!this.auth.resolveHash(principal.hash) && this.canUse(this.auth.resolveHash(principal.hash)!),
+      !!await this.auth.resolveHash(principal.hash) && await this.canUse((await this.auth.resolveHash(principal.hash))!),
       "无权查看和操作此浏览器",
     );
     const tab = await this.chrome
@@ -64,7 +67,7 @@ export class BrowserLive {
     });
     return { ticket };
   }
-  authorize(request: Socket["request"], consume = false) {
+  async authorize(request: Socket["request"], consume = false) {
     const url = new URL(request.url),
       origin = process.env.VEGA_PUBLIC_URL
         ? new URL(process.env.VEGA_PUBLIC_URL).origin
@@ -81,11 +84,11 @@ export class BrowserLive {
       .map((v) => v.trim())
       .find((v) => v.startsWith("vega_session="))
       ?.slice("vega_session=".length);
-    const principal = this.auth.authenticate(token),
+    const principal = await this.auth.authenticate(token),
       id = url.searchParams.get("ticket") || "",
       ticket = this.tickets.get(id);
     assert(
-      principal && this.canUse(principal) &&
+      principal && (await this.canUse(principal)) &&
         ticket &&
         ticket.hash === principal.hash &&
         ticket.until >= Date.now(),
@@ -94,8 +97,8 @@ export class BrowserLive {
     if (consume) this.tickets.delete(id);
     return { principal, ticket };
   }
-  open(socket: Socket) {
-    const { principal, ticket } = this.authorize(socket.request, true);
+  async open(socket: Socket) {
+    const { principal, ticket } = await this.authorize(socket.request, true);
     assert(this.sessions.size < 4, "实时浏览器连接过多");
     for (const session of this.sessions.values())
       if (session.principal.hash === principal.hash)
@@ -104,15 +107,19 @@ export class BrowserLive {
     this.sessions.set(socket.id, session);
     void session.run();
   }
-  message(socket: Socket, raw: string) {
+  async message(socket: Socket, raw: string) {
     const session = this.sessions.get(socket.id);
     if (!session) return;
-    try {
-      assert(Buffer.byteLength(raw) <= 65536, "消息过大");
-      session.message(JSON.parse(raw));
-    } catch {
-      void session.close(4400, "实时操作消息无效，请重新连接");
-    }
+    // Messages are handled one at a time in arrival order, even though each check awaits storage.
+    const handle = async () => {
+      try {
+        assert(Buffer.byteLength(raw) <= 65536, "消息过大");
+        await session.message(JSON.parse(raw));
+      } catch {
+        void session.close(4400, "实时操作消息无效，请重新连接");
+      }
+    };
+    await (session.inbox = session.inbox.then(handle));
   }
   async close() {
     this.auth.events.off("logout", this.logout);
@@ -129,6 +136,7 @@ class LiveSession {
   wantsControl = false;
   stopping = false;
   claimTask?: Promise<void>;
+  inbox = Promise.resolve();
   release?: () => void;
   io = new Mutex();
   observation?: Awaited<ReturnType<Chrome["observe"]>>;
@@ -144,6 +152,10 @@ class LiveSession {
   inputPending = false;
   lastMessage = Date.now();
   lastInput = Date.now();
+  lastChange = Date.now();
+  lastCapture = -Infinity;
+  lastShot = "";
+  lastSize?: { width: number; height: number };
   mouse?: { x: number; y: number; button: string; frame: Frame; seq: number };
   constructor(
     public hub: BrowserLive,
@@ -154,11 +166,11 @@ class LiveSession {
   send(value: Obj) {
     if (this.active) this.socket.send(JSON.stringify(value));
   }
-  valid() {
+  async valid() {
     return (
       this.active &&
-      !!this.hub.auth.resolveHash(this.principal.hash) &&
-      this.hub.canUse(this.hub.auth.resolveHash(this.principal.hash)!)
+      !!await this.hub.auth.resolveHash(this.principal.hash) &&
+      await this.hub.canUse((await this.hub.auth.resolveHash(this.principal.hash))!)
     );
   }
   async run() {
@@ -166,7 +178,7 @@ class LiveSession {
       this.send({ type: "ready", tabTag: this.tabTag, mode: "view" });
       let captureFailedAt = 0;
       while (this.active) {
-        assert(this.valid(), "登录已失效");
+        assert(await this.valid(), "登录已失效");
         assert(Date.now() - this.lastMessage < 20000, "连接已中断，请重新连接");
         if (this.wantsControl && Date.now() - this.lastInput > 30000)
           this.releaseControl("闲置已退出远程操作");
@@ -175,9 +187,10 @@ class LiveSession {
             Date.now() - this.pendingFrame.at < 10000,
             "画面传输超时，请重新连接",
           );
-        } else if (!this.stopping && (!this.wantsControl || this.locked)) {
+        } else if (!this.stopping && (!this.wantsControl || this.locked) && performance.now() - this.lastCapture >= this.interval()) {
           const capture = () => this.io.run(async () => {
             if (this.inputPending || this.pointerTask) return;
+            this.lastCapture = performance.now(); // monotonic: pacing must not depend on wall-clock jumps
             try {
               await this.capture();
               captureFailedAt = 0;
@@ -196,12 +209,16 @@ class LiveSession {
               if (this.active && !this.wantsControl) await capture();
             });
         }
-        await sleep(100);
+        await sleep(ACTIVE_MS);
       }
     } catch (e: any) {
       this.send({ type: "error", reason: e.message });
       await this.close(1011, "实时浏览器连接已停止");
     }
+  }
+  interval() {
+    const now = Date.now();
+    return now - this.lastChange > IDLE_AFTER && now - this.lastInput > IDLE_AFTER ? IDLE_MS : ACTIVE_MS;
   }
   async pageState() {
     const chrome = this.hub.chrome;
@@ -253,23 +270,32 @@ class LiveSession {
     const after = await this.pageState();
     if (before.stamp !== after.stamp || before.document !== after.document)
       return;
-    const { data, info } = await sharp(Buffer.from(shot.data, "base64"), {
-      limitInputPixels: 64000000,
-    })
-      .resize({
-        width: 1568,
-        height: 1200,
-        fit: "inside",
-        withoutEnlargement: true,
+    // Identical capture bytes mean an identical picture: skip the re-encode and the image payload.
+    const same = shot.data === this.lastShot && !!this.lastSize;
+    let data: Buffer | undefined;
+    if (!same) {
+      const out = await sharp(Buffer.from(shot.data, "base64"), {
+        limitInputPixels: 64000000,
       })
-      .jpeg({ quality: 70 })
-      .toBuffer({ resolveWithObject: true });
+        .resize({
+          width: 1568,
+          height: 1200,
+          fit: "inside",
+          withoutEnlargement: true,
+        })
+        .jpeg({ quality: 70 })
+        .toBuffer({ resolveWithObject: true });
+      data = out.data;
+      this.lastShot = shot.data;
+      this.lastSize = { width: out.info.width, height: out.info.height };
+      this.lastChange = Date.now();
+    }
     if (!this.active) return;
     const frame: Frame = {
       id: ++this.frameNumber,
       at: Date.now(),
-      width: info.width,
-      height: info.height,
+      width: this.lastSize!.width,
+      height: this.lastSize!.height,
       state: after,
       observation: this.observation!,
     };
@@ -285,11 +311,11 @@ class LiveSession {
       editable: after.focus.editable,
       width: frame.width,
       height: frame.height,
-      data: data.toString("base64"),
+      ...(data ? { data: data.toString("base64") } : { same: true }),
     });
   }
-  message(message: Obj) {
-    assert(this.valid(), "登录已失效");
+  async message(message: Obj) {
+    assert(await this.valid(), "登录已失效");
     this.lastMessage = Date.now();
     assert(
       message && typeof message === "object" && !Array.isArray(message),
@@ -300,6 +326,8 @@ class LiveSession {
       return;
     }
     if (message.type === "frame_ack") {
+      // The viewer could not show its last image; the next frame carries a full picture again.
+      if (message.resend === true) this.lastShot = "";
       if (this.pendingFrame && this.pendingFrame.id === message.frameId) {
         this.presented = this.pendingFrame;
         this.acknowledged.set(this.presented.id, this.presented);
@@ -438,7 +466,7 @@ class LiveSession {
     let attempted = false;
     try {
       assert(
-        this.valid() && this.locked && this.wantsControl,
+        await this.valid() && this.locked && this.wantsControl,
         "远程控制已停止",
       );
       const chrome = this.hub.chrome,

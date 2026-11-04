@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1
+# Vega 镜像，数据库用 MySQL（8.0.19+，不支持 MariaDB）。除下面 ENV 中的 DB_TYPE/MYSQL_* 默认值外与 Dockerfile 完全一致。
+# 运行时传 MYSQL_PASSWORD；也可用 MYSQL_URL 或覆盖 MYSQL_HOST 等。截图等文件仍在 /data/files，需持久化 /data。
+#   docker build -f Dockerfile.mysql -t vega:mysql .
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS clients
+WORKDIR /src
+COPY local/go.mod local/go.sum ./
+RUN go mod download
+COPY local/*.go local/icon.ico local/VERSION ./
+RUN set -eu; mkdir -p /out; \
+    for target in windows/amd64 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+        os="${target%/*}"; arch="${target#*/}"; \
+        flags="-s -w"; suffix=""; \
+        if [ "$os" = windows ]; then flags="$flags -H=windowsgui"; suffix=".exe"; fi; \
+        CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="$flags" \
+            -o "/out/vega-local-$os-$arch$suffix" .; \
+    done
+
+FROM node:24-bookworm-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY nitro.config.ts tsconfig.json ./
+COPY server ./server
+COPY shared ./shared
+COPY web ./web
+COPY extensions/nova-chrome ./extensions/nova-chrome
+COPY scripts/client-manifest.mjs ./scripts/client-manifest.mjs
+COPY local/VERSION ./local/VERSION
+COPY --from=clients /out ./web/public/clients
+RUN node scripts/client-manifest.mjs web/public/clients
+RUN npm run build
+
+FROM node:24-bookworm-slim AS runtime
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates chromium chromium-sandbox git openssh-client ripgrep tini \
+        fontconfig fonts-liberation fonts-croscore fonts-crosextra-carlito \
+        fonts-crosextra-caladea fonts-dejavu-core fonts-noto-core fonts-noto-mono \
+        fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei \
+        fonts-noto-color-emoji fonts-symbola \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /data/chromium /data/downloads /workspace \
+    && chown -R node:node /data /workspace
+ENV NODE_ENV=production \
+    NITRO_HOST=0.0.0.0 \
+    NITRO_PORT=8080 \
+    VEGA_DB=/data/vega.db \
+    VEGA_SKILL_CACHE=/data/skill-cache \
+    VEGA_CHROMIUM_NO_SANDBOX=0 \
+    DB_TYPE=mysql \
+    MYSQL_HOST=mysql \
+    MYSQL_PORT=3306 \
+    MYSQL_USER=vega \
+    MYSQL_DATABASE=vega
+COPY --from=build /app/.output /app/.output
+COPY --from=build /app/extensions/nova-chrome /app/extension
+COPY docker /app/docker
+COPY docker/chromium-policy.json /etc/chromium/policies/managed/vega.json
+COPY docker/fonts.conf /etc/fonts/local.conf
+RUN fc-cache -f
+USER node
+WORKDIR /workspace
+VOLUME ["/data", "/workspace"]
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=75s --retries=3 \
+    CMD ["node", "/app/docker/healthcheck.mjs"]
+ENTRYPOINT ["/usr/bin/tini", "--", "node", "/app/docker/start.mjs"]

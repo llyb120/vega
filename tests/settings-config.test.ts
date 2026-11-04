@@ -10,6 +10,12 @@ import { Store } from "../server/core/store";
 const settings = readFileSync("web/src/SettingsView.vue", "utf8");
 const capabilities = readFileSync("web/src/EmployeeCapabilities.vue", "utf8");
 const providers = readFileSync("web/src/ProviderSettings.vue", "utf8");
+const employeeVault = readFileSync("web/src/EmployeeVault.vue", "utf8");
+function vaultFunction(name: string, scope: any) {
+  const source = employeeVault.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
+  assert(source, name);
+  return runInNewContext(`(${source})`, scope);
+}
 function settingsFunction(name: string, scope: any) {
   const source = (["provider", "discover"].includes(name) ? providers : ["saveMcp", "addMcp"].includes(name) ? capabilities : settings).match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
   assert(source, name);
@@ -81,17 +87,20 @@ test("each MCP JSON keeps its complete config and stored secrets", async () => {
   assert.equal(JSON.parse(scope.mcp.value.local).command, "node");
 });
 
-test("MCP and skill editors belong to the employee while the vault remains global", () => {
+test("MCP, skill and vault editors belong to the employee; system settings no longer hold a vault", () => {
   assert.match(settings, /<PageHeader title="系统设置"/);
   assert.match(capabilities, /v-model="mcp\[key\]"[^>]*:aria-label="key \+ ' JSON配置'"/);
   assert(!settings.includes("saveMcp") && !settings.includes("/skills/upload"));
   assert(capabilities.includes('v-if="canEdit"') && capabilities.includes("v-else") && capabilities.includes("尚未配置 MCP"));
-  assert.match(settings, /@click="editVault\(item\)"/);
-  assert.match(settings, /@click="newVault"/);
-  assert.match(settings, /v-model="vaultForm.content" :required="!vaultForm.id"/);
-  assert.match(settings, /vaultForm.id \? '保存修改' : '新增并加密保存'/);
+  assert(!/vault|密码本/.test(settings));
+  assert.match(employeeVault, /const base = `\/employees\/\$\{props.employeeId\}\/vault`/);
+  assert.match(employeeVault, /@click="edit\(item\)"/);
+  assert.match(employeeVault, /@click="reset"/);
+  assert.match(employeeVault, /v-model="form.content" :required="!form.id"/);
+  assert.match(employeeVault, /form.id \? '保存修改' : '新增并加密保存'/);
   const employeeSettings = readFileSync("web/src/EmployeeSettings.vue", "utf8");
   const app = readFileSync("web/src/App.vue", "utf8");
+  assert.match(app, /employee.value.canConfigure \? \[\['vault', '密码本'\]\]/);
   assert(!employeeSettings.includes("vaultIds") && !employeeSettings.includes("vaultEntries"));
   assert(!app.includes("vaultIds") && !app.includes("vaultEntries"));
 });
@@ -103,36 +112,39 @@ test("MCP JSON validation rejects malformed transports and options", () => {
 
 test("vault keeps the existing name/condition/content form without requiring website configuration", async () => {
   const form = { value: {} as any };
-  settingsFunction("editVault", { vaultForm: form })({ id: "entry", name: "account", condition: "仅用于合作伙伴身份验证，不用于业务站邮箱登录" });
+  vaultFunction("edit", { form })({ id: "entry", type: "login", name: "account", condition: "仅用于合作伙伴身份验证，不用于业务站邮箱登录", share: true });
+  assert.equal(form.value.type, "login");
   assert.equal(form.value.condition, "仅用于合作伙伴身份验证，不用于业务站邮箱登录");
   assert.equal(form.value.content, "");
-  let body: any;
-  await settingsFunction("saveVault", { vaultForm: form, props: { api: async (_path: string, _method: string, value: any) => { body = value; } }, run: async (fn: any) => fn(), newVault() {}, loadVault: async () => {}, emit() {} })();
+  assert.equal(form.value.share, true);
+  let body: any, path = "";
+  await vaultFunction("save", { form, base: "/employees/e1/vault", props: { api: async (p: string, _method: string, value: any) => { path = p; body = value; } }, run: async (fn: any) => fn(), reset() {}, load: async () => {}, emit() {}, disposed: false })();
+  assert.equal(path, "/employees/e1/vault");
   assert.equal(body.condition, form.value.condition);
   assert.equal(body.content, "");
   assert.equal(body.site, undefined);
-  assert(!settings.includes('v-model="vaultForm.site"'));
+  assert(!employeeVault.includes('v-model="form.site"'));
 });
 
-test("vault adds multiple entries and edits only the chosen one without exposing secrets", () => {
-  const store = new Store(":memory:"), vault = new Vault(store);
+test("vault adds multiple entries and edits only the chosen one without exposing secrets", async () => {
+  const store = await Store.open(":memory:"), vault = new Vault(store);
   try {
-    const first = vault.save({ name: "account", condition: "first task", content: "secret-one" });
-    const second = vault.save({ name: "account", condition: "second task", content: "secret-two" });
+    const first = await vault.save({ name: "account", condition: "first task", content: "secret-one" });
+    const second = await vault.save({ name: "account", condition: "second task", content: "secret-two" });
     assert.notEqual(first.id, second.id);
-    assert.equal(vault.list().length, 2);
-    assert(!JSON.stringify(vault.list()).includes("secret-"));
+    assert.equal((await vault.list()).length, 2);
+    assert(!JSON.stringify(await vault.list()).includes("secret-"));
     const form = { value: {} };
-    settingsFunction("editVault", { vaultForm: form })(vault.list()[0]);
+    vaultFunction("edit", { form })((await vault.list())[0]);
     assert.equal((form.value as any).content, "");
-    vault.save({ id: first.id, name: "renamed", condition: "updated condition", content: "" });
-    assert.equal(vault.get(first.id, "test").content, "secret-one");
-    assert.equal(vault.get(second.id, "test").content, "secret-two");
-    vault.save({ id: second.id, name: "replacement", condition: "second task", content: "new-secret" });
-    vault.remove(first.id);
-    assert.equal(vault.list().length, 1);
-    assert.equal(vault.get(second.id, "test").content, "new-secret");
-    settingsFunction("newVault", { vaultForm: form })();
+    await vault.save({ id: first.id, name: "renamed", condition: "updated condition", content: "" });
+    assert.equal((await vault.get(first.id, "test")).content, "secret-one");
+    assert.equal((await vault.get(second.id, "test")).content, "secret-two");
+    await vault.save({ id: second.id, name: "replacement", condition: "second task", content: "new-secret" });
+    await vault.remove(first.id);
+    assert.equal((await vault.list()).length, 1);
+    assert.equal((await vault.get(second.id, "test")).content, "new-secret");
+    vaultFunction("reset", { form })();
     assert.equal((form.value as any).id, undefined);
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });

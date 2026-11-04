@@ -10,6 +10,7 @@ export function normalizeAction(raw: Obj) {
   assert(
     [
       "click",
+      "hover",
       "fill",
       "upload",
       "press",
@@ -26,6 +27,7 @@ export function normalizeAction(raw: Obj) {
   const kind = a.action,
     allowed: Record<string, string[]> = {
       click: ["frame", "ref", "button", "click_count"],
+      hover: ["frame", "ref"],
       fill: ["frame", "ref", "text"],
       upload: ["frame", "selector", "files"],
       press: ["key"],
@@ -45,28 +47,19 @@ export function normalizeAction(raw: Obj) {
     delete a.frame;
     delete a.ref;
   }
-  // Models often fill every field of the action schema with defaults ("", 0, [], false); those are not intent.
-  const placeholder = (v: unknown) =>
-    v == null || v === "" || v === 0 || v === false ||
-    (Array.isArray(v) && !v.length) ||
-    (typeof v === "object" && !Array.isArray(v) && Object.values(v as Obj).every((x) => x == null || x === "" || x === 0));
-  for (const k of Object.keys(a))
-    if (k !== "action" && !allowed[kind].includes(k) && placeholder(a[k])) delete a[k];
-  for (const k of ["frame", "button", "click_count", "duration_ms"])
-    if (a[k] === "" || a[k] === null || (k !== "frame" && a[k] === 0)) delete a[k];
   const unexpected = Object.keys(a).filter((k) => k !== "action" && !allowed[kind].includes(k));
   assert(
     !unexpected.length,
     `Unexpected Chrome action field for ${kind}: ${unexpected.join(", ")} (allowed: ${allowed[kind].join(", ") || "none"}; omit unused fields)`,
   );
-  if (["click", "fill", "scroll", "upload"].includes(kind)) {
+  if (["click", "hover", "fill", "scroll", "upload"].includes(kind)) {
     a.frame ??= 0;
     assert(
       Number.isInteger(a.frame) && a.frame >= 0 && a.frame < 12,
       "Invalid frame",
     );
   }
-  if (["click", "fill"].includes(kind))
+  if (["click", "hover", "fill"].includes(kind))
     assert(typeof a.ref === "string" && a.ref, "DOM ref required");
   if (["fill", "type"].includes(kind))
     assert(
@@ -93,8 +86,8 @@ export function normalizeAction(raw: Obj) {
   if (kind === "wait") {
     a.ms ??= 250;
     assert(
-      Number.isInteger(a.ms) && a.ms >= 0 && a.ms <= 2000,
-      "wait must be0–2000ms",
+      Number.isInteger(a.ms) && a.ms >= 0 && a.ms <= 10000,
+      "wait must be 0–10000ms",
     );
   }
   if (["scroll", "scroll_at"].includes(kind))

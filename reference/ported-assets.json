@@ -1,15 +1,7 @@
 [
   {
     "path": "server/assets/browser/browser-page.js",
-    "sha256": "1C88D701E46ED4C59BB50DDC8CF1859F60B81F97EF22137B208902A17A2ECBB6"
-  },
-  {
-    "path": "shared/chrome-tool.json",
-    "sha256": "AF1A953D0EED9366CF3CFFB774196DC8F8FE07314DF7CC5CB48F7D4BC7A70663"
-  },
-  {
-    "path": "shared/employee-tool.json",
-    "sha256": "034C29424451F26299ED7ED74534BCB1D1770C94B174632EC0FA673DBFC6ED02"
+    "sha256": "CFEFAD6CCBC45AD7E34C581CE7AB71462AF91FDBAC8EEACA6BA367C368FF4F0B"
   },
   {
     "path": "shared/agent-tools.json",
@@ -21,7 +13,7 @@
   },
   {
     "path": "extensions/nova-chrome/worker.js",
-    "sha256": "FF5799A9D968B2B39B14A162304FBF6783F82716572F2A8DFAD82142F19A0A2E"
+    "sha256": "3C1AFAB94642F16F02A78B50489F8ABAE5CB219B2671B1311D31759102BA4DF8"
   },
   {
     "path": "extensions/nova-chrome/content.js",
@@ -29,7 +21,7 @@
   },
   {
     "path": "extensions/nova-chrome/manifest.json",
-    "sha256": "DC8351DB86A1A31C3E08B657FC3C5C1F1E416CA3974B4D25ABDEEA4FEF2E7A33"
+    "sha256": "1C4898690CDC23FCAE2B984A671AB96E41BCE4B357B4C6C8835D841D0C5A9FA6"
   },
   {
     "path": "extensions/nova-chrome/popup.js",

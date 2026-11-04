@@ -430,3 +430,4 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
 
 /* Bot avatars are silhouettes: drop the tinted square behind them wherever an avatar slot is used. */
 :is(.nav-avatar, .chat-avatar, .avatar-current, .identity-avatar):has(> .employee-picture.is-bot) { background: transparent; overflow: visible; }
+.auth-splash { width: 100%; height: 100%; background: var(--bg); }

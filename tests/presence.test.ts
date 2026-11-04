@@ -17,13 +17,13 @@ test("OS idle/lock hints do not silently treat unavailable sessions as idle", ()
   assert.equal(linuxPresence("").locked, true);
 });
 test("locked computer tasks remain queued, unlock resumes same task without LLM polling", async () => {
-  const store = new Store(":memory:");
+  const store = await Store.open(":memory:");
   let locked = true,
     runs = 0;
   const employee = new Employee(store, new Vault(store), {
     run: async () => {
       runs++;
-      employee.update((s) => (s.enabled = false));
+      await employee.update((s) => (s.enabled = false));
     },
     cancel: () => {},
     isRunning: () => false,
@@ -45,29 +45,29 @@ test("locked computer tasks remain queued, unlock resumes same task without LLM 
     text: "computer work",
     profile: "lightweight",
   });
-  employee.update((s) => {
-    s.tasks[0].side = "computer";
-    s.enabled = true;
-    s.workStart = s.workEnd = "00:00";
-  });
+  await employee.update((s) => {
+        s.tasks[0].side = "computer";
+        s.enabled = true;
+        s.workStart = s.workEnd = "00:00";
+      });
   employee.closed = false;
   try {
     await employee.tick();
-    assert.equal(employee.state().tasks[0].status, "queued");
+    assert.equal((await employee.state()).tasks[0].status, "queued");
     assert.equal(runs, 0);
     locked = false;
     await employee.tick();
     for (let i = 0; i < 50 && employee.busy.size; i++) await sleep(10);
     assert.equal(runs, 1);
-    assert.equal(employee.state().tasks.length, 1);
-    assert(employee.state().tasks[0].computerSession);
+    assert.equal((await employee.state()).tasks.length, 1);
+    assert((await employee.state()).tasks[0].computerSession);
   } finally {
     employee.close();
-    store.close();
+    await store.close();
   }
 });
 test("new physical user activity yields active computer work while preserving its session", async () => {
-  const store = new Store(":memory:");
+  const store = await Store.open(":memory:");
   let cancelled = "";
   const employee = new Employee(store, new Vault(store), {
     run: async () => {},
@@ -86,12 +86,12 @@ test("new physical user activity yields active computer work while preserving it
   });
   employee.closed = true;
   await employee.execute("", { action: "add", kind: "todo", text: "work" });
-  employee.update((s) => {
-    const t = s.tasks[0];
-    t.status = "running";
-    t.side = "computer";
-    t.computerSession = "same-computer";
-  });
+  await employee.update((s) => {
+        const t = s.tasks[0];
+        t.status = "running";
+        t.side = "computer";
+        t.computerSession = "same-computer";
+      });
   employee.nativePresence = {
     available: true,
     locked: false,
@@ -101,19 +101,19 @@ test("new physical user activity yields active computer work while preserving it
   };
   employee.closed = false;
   const stop = employee.monitorComputer(
-    employee.state().tasks[0].id,
+    (await employee.state()).tasks[0].id,
     "same-computer",
   );
   try {
     for (let i = 0; i < 100 && !cancelled; i++) await sleep(30);
     assert.equal(cancelled, "same-computer");
-    assert.equal(employee.state().tasks[0].computerSession, "same-computer");
-    assert.equal(employee.state().tasks[0].status, "queued");
-    assert(employee.state().desktopAskAfter > Date.now());
+    assert.equal((await employee.state()).tasks[0].computerSession, "same-computer");
+    assert.equal((await employee.state()).tasks[0].status, "queued");
+    assert((await employee.state()).desktopAskAfter > Date.now());
   } finally {
     stop();
     employee.close();
-    store.close();
+    await store.close();
   }
 });
 test(

@@ -57,6 +57,7 @@ func main() {
 	}
 	a, err := newAgent()
 	must(err)
+	clearKeys()
 	lis, err := net.Listen("tcp", localAddress)
 	must(err)
 	browserServer, browserErr := localChrome.start()
@@ -211,6 +212,13 @@ func execute(ctx context.Context, j job) map[string]any {
 			return failure("path required")
 		}
 		return fileOperation(req)
+	}
+	if j.Op == "key" {
+		var req keyReq
+		if json.Unmarshal(j.Args, &req) != nil {
+			return failure("Invalid key request")
+		}
+		return keyOperation(req)
 	}
 	return failure("Unknown operation")
 }

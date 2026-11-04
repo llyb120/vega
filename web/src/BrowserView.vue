@@ -41,6 +41,9 @@ let socket = null,
   remoteDrag = null,
   afterInput = 0,
   connectTimer = null,
+  retryTimer = null,
+  liveRetries = 0,
+  resumeTab = null,
   gesture = null,
   touchGesture = null,
   lastTouchAt = 0,
@@ -63,6 +66,8 @@ function disconnect() {
   resetInput();
   clearInterval(heartbeat);
   clearTimeout(connectTimer);
+  clearTimeout(retryTimer);
+  retryTimer = null;
   heartbeat = null;
   socket?.close();
   socket = null;
@@ -116,9 +121,16 @@ function loadedImage() {
 }
 function hidden() {
   if (document.hidden) {
+    if (socket || retryTimer) resumeTab = tabs.value.find((tab) => tab.tag === selected.value) || null;
+    version++; // a connection still fetching its ticket must not open in the background
     disconnect();
+    busy.value = false;
     imageReady.value = false;
-    info.value = "页面已隐藏，实时连接已释放；点击刷新截图重新连接。";
+    info.value = "页面已隐藏，实时连接已释放；回到页面后自动重连。";
+  } else if (resumeTab && !socket) {
+    const tab = resumeTab;
+    resumeTab = null;
+    void capture(tab, true);
   }
 }
 const keys = [
@@ -150,16 +162,20 @@ function siteName(url) {
 }
 const viewable = (tab) =>
   tab?.controllable === true && /^(https?:\/\/|about:blank$)/i.test(tab.url);
-async function capture(tab) {
+/** `resume` reconnects the same tab quietly: the last picture and zoom stay until a fresh frame arrives. */
+async function capture(tab, resume = false) {
   if (busy.value || !viewable(tab)) return;
   const request = ++version;
   disconnect();
-  resetView();
+  if (!resume) {
+    liveRetries = 0;
+    resetView();
+    screenshot.value = null;
+  }
   if (selected.value !== tab.tag) text.value = "";
   imageReady.value = false;
   imageFailStreak = 0;
   selected.value = tab.tag;
-  screenshot.value = null;
   error.value = "";
   info.value = "";
   busy.value = true;
@@ -175,6 +191,7 @@ async function capture(tab) {
     if (props.employeeId) url.searchParams.set("employeeId", props.employeeId);
     const ws = new WebSocket(url);
     socket = ws;
+    let serverError = false, opened = false;
     const fail = (reason) => {
       if (disposed || request !== version || socket !== ws) return;
       disconnect();
@@ -182,11 +199,33 @@ async function capture(tab) {
       busy.value = false;
       error.value = reason;
     };
+    // A dropped connection with nothing in flight reconnects by itself (1s, 2s, 4s); an operation that may
+    // have run, a server-reported error or a revoked login still stops and asks the user.
+    const lost = (code) => {
+      if (disposed || request !== version || socket !== ws) return;
+      if (!inflight && !remoteDrag && !serverError && code !== 4401 && code !== 4403 && liveRetries < 3 && !document.hidden) {
+        const delay = 1000 * 2 ** liveRetries++;
+        disconnect();
+        busy.value = false;
+        imageReady.value = false;
+        info.value = "实时连接中断，正在自动重连…";
+        retryTimer = setTimeout(() => {
+          if (!disposed && request === version) void capture(tab, true);
+        }, delay);
+        return;
+      }
+      fail(
+        inflight || remoteDrag
+          ? "连接中断，操作可能已执行，请核对网页，不要重复提交"
+          : error.value || "实时连接已断开，点击刷新截图重新连接",
+      );
+    };
     connectTimer = setTimeout(
       () => fail("实时连接超时，请检查反向代理是否支持WebSocket并刷新"),
       15000,
     );
     ws.onopen = () => {
+      opened = true;
       clearTimeout(connectTimer);
       heartbeat = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN)
@@ -197,7 +236,18 @@ async function capture(tab) {
       if (disposed || request !== version || socket !== ws) return;
       try {
         const value = JSON.parse(event.data);
-        if (value.type === "frame") {
+        if (value.type === "frame" && value.same === true) {
+          // The picture did not change: keep the shown image, take the fresh frame state, acknowledge at once.
+          const image = imageReady.value && screenshot.value?.image;
+          if (!image) {
+            ws.send(JSON.stringify({ type: "frame_ack", frameId: value.frameId, resend: true }));
+            return;
+          }
+          const { same, ...frame } = value;
+          acceptScreenshot({ ...frame, snapshotId: "live-" + value.frameId, image });
+          loadedImage();
+          busy.value = false;
+        } else if (value.type === "frame") {
           if (typeof value.data !== "string" || value.data.length > 6000000)
             throw Error("画面过大");
           let bytes;
@@ -209,7 +259,7 @@ async function capture(tab) {
             imageFailStreak++;
             info.value = "收到损坏画面帧，已跳过";
             if (value.frameId && ws.readyState === WebSocket.OPEN)
-              ws.send(JSON.stringify({ type: "frame_ack", frameId: value.frameId }));
+              ws.send(JSON.stringify({ type: "frame_ack", frameId: value.frameId, resend: true }));
             return;
           }
           const nextURL = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
@@ -222,7 +272,7 @@ async function capture(tab) {
             imageFailStreak++;
             info.value = "画面帧无法解码，已跳过";
             if (value.frameId && ws.readyState === WebSocket.OPEN)
-              ws.send(JSON.stringify({ type: "frame_ack", frameId: value.frameId }));
+              ws.send(JSON.stringify({ type: "frame_ack", frameId: value.frameId, resend: true }));
             return;
           }
           if (disposed || request !== version || socket !== ws) {
@@ -234,6 +284,8 @@ async function capture(tab) {
           imageURL = nextURL;
           imageFailStreak = 0;
           const { data, ...frame } = value;
+          liveRetries = 0;
+          if (info.value.startsWith("实时连接中断")) info.value = "";
           acceptScreenshot({
             ...frame,
             snapshotId: "live-" + value.frameId,
@@ -259,18 +311,18 @@ async function capture(tab) {
           info.value = value.reason || "";
         } else if (value.type === "input_result" || value.type === "pointer_result") {
           inputResult(value);
-        } else if (value.type === "error") error.value = value.reason;
+        } else if (value.type === "error") {
+          serverError = true;
+          error.value = value.reason;
+        }
       } catch {
         fail("实时画面格式无效，请重新连接");
       }
     };
-    ws.onerror = () => fail("WebSocket连接失败；请确认登录状态和反向代理配置");
-    ws.onclose = () =>
-      fail(
-        inflight || remoteDrag
-          ? "连接中断，操作可能已执行，请核对网页，不要重复提交"
-          : error.value || "实时连接已断开，点击刷新截图重新连接",
-      );
+    ws.onerror = () => {
+      if (!opened) fail("WebSocket连接失败；请确认登录状态和反向代理配置");
+    };
+    ws.onclose = (event) => lost(event?.code);
   } catch (e) {
     if (!disposed && request === version) {
       disconnect();

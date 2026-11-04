@@ -1,11 +1,19 @@
 <script setup vapor>
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import Icon from "./Icon.vue";
+import MentionTextarea from "./MentionTextarea.vue";
 import EmployeeAvatarPicker from "./EmployeeAvatarPicker.vue";
-const props = defineProps({ employee: Object, api: Function, saving: Boolean, deleting: Boolean, clearing: Boolean, busy: Boolean });
-const emit = defineEmits(["save", "delete", "clear-chat", "execution", "avatar", "cancel"]);
+const props = defineProps({ employee: Object, api: Function, saving: Boolean, deleting: Boolean, resetting: String, busy: Boolean });
+const emit = defineEmits(["save", "delete", "reset", "execution", "avatar", "cancel"]);
 const clients = computed(() => props.employee.executionClients || []);
 const local = computed(() => !!props.employee.execution?.localAgent);
+// Colleagues this employee can @ (same reach rule as the backend).
+const colleagues = ref([]);
+watch(() => props.employee.id, async (id) => {
+  colleagues.value = [];
+  if (!id) return;
+  try { const list = await props.api(`/employees/${id}/colleagues`); if (props.employee.id === id) colleagues.value = list; } catch { /* the picker just stays empty */ }
+}, { immediate: true });
 </script>
 <template>
   <div class="page-scroll settings-page">
@@ -14,7 +22,9 @@ const local = computed(() => !!props.employee.execution?.localAgent);
         <div class="card-head"><h3>牛马资料</h3><p class="hint">保存后，新任务会使用更新的工作原则和目录。</p></div>
         <div class="form-grid">
           <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
-          <label>工作原则<textarea v-model="employee.instruction" rows="6" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
+          <label>工作原则<MentionTextarea v-model="employee.instruction" :colleagues="colleagues" rows="6" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果；发布相关的工作转交给 @发布助手。" /><small class="hint">输入 @ 可选择协作同事（只能 @ 你的个人牛马或团队牛马）；同事改名后会自动更新。</small></label>
+          <label>对外说明<textarea v-model="employee.publicSummary" rows="2" maxlength="300" placeholder="例如：负责前端项目的开发和发布，可以回答构建、部署相关问题。"></textarea><small class="hint">其他牛马看到的简介，用来判断该不该找它（最多 300 字）。</small></label>
+          <label class="check"><input v-model="employee.acceptsColleagues" type="checkbox" />接受其他牛马的转交和询问</label>
           <label>工作目录<input v-model="employee.cwd" class="mono-input" required spellcheck="false" /></label>
         </div>
         <div class="actions end form-actions"><button type="button" class="ghost" @click="emit('cancel')">返回对话</button><button class="primary" :disabled="saving">{{ saving ? '保存中…' : '保存修改' }}</button></div>
@@ -31,10 +41,11 @@ const local = computed(() => !!props.employee.execution?.localAgent);
           <p v-if="!clients.length" class="hint">无在线客户端；连接后可切换。</p>
         </section>
         <section class="card danger-zone">
-          <div class="card-head"><h3>危险操作</h3><p class="hint">清空聊天只影响本牛马的对话记录；删除会连同职责、记忆、任务和浏览器登录一并清除。项目文件和共享密码本不会删除。</p></div>
+          <div class="card-head"><h3>危险操作</h3><p class="hint">清空聊天只删除对话记录；重置会停止并删除全部会话和任务，保留记忆、职责、设置、密码本和浏览器登录；删除会连同职责、记忆、密码本、任务和浏览器登录一并清除。项目文件不会删除。</p></div>
           <div class="danger-actions">
-            <button type="button" class="danger" :disabled="clearing || deleting" @click="emit('clear-chat')"><Icon name="trash" :size="15" />{{ clearing ? '正在清空…' : '清空聊天记录' }}</button>
-            <button type="button" class="danger" :disabled="deleting || clearing" @click="emit('delete')"><Icon name="trash" :size="15" />{{ deleting ? '正在删除…' : '永久删除牛马' }}</button>
+            <button type="button" class="danger" :disabled="!!resetting || deleting" @click="emit('reset', 'chat')"><Icon name="trash" :size="15" />{{ resetting === 'chat' ? '正在清空…' : '清空聊天记录' }}</button>
+            <button type="button" class="danger" :disabled="!!resetting || deleting" @click="emit('reset', 'all')"><Icon name="trash" :size="15" />{{ resetting === 'all' ? '正在重置…' : '重置牛马' }}</button>
+            <button type="button" class="danger" :disabled="deleting || !!resetting" @click="emit('delete')"><Icon name="trash" :size="15" />{{ deleting ? '正在删除…' : '永久删除牛马' }}</button>
           </div>
         </section>
       </div>

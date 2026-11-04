@@ -17,6 +17,7 @@ test("container Chromium automatically loads the fixed extension in its private 
   assert(args.includes("--user-data-dir=/data/chromium"));
   assert(args.includes("--load-extension=/app/extension"));
   assert(args.includes("--disable-extensions-except=/app/extension"));
+  assert(args.includes("--silent-debugger-extension-api"));
   assert(
     !args.some((arg: string) =>
       /no-sandbox|disable.*sandbox|remote-debugging|ignore-certificate|disable-web-security/.test(
@@ -97,13 +98,13 @@ test("isolated-browser presence applies to any platform with a private headless 
 });
 
 test("dedicated container browser tasks start without claiming a physical desktop and retain normal task isolation", async () => {
-  const store = new Store(":memory:");
+  const store = await Store.open(":memory:");
   let runs = 0,
     takeovers = 0;
   const employee = new Employee(store, new Vault(store), {
     run: async () => {
       runs++;
-      employee.update((s) => (s.enabled = false));
+      await employee.update((s) => (s.enabled = false));
     },
     cancel: () => {},
     isRunning: () => false,
@@ -121,21 +122,21 @@ test("dedicated container browser tasks start without claiming a physical deskto
       kind: "todo",
       text: "only control the private browser",
     });
-    employee.update((s) => {
-      s.enabled = true;
-      s.workStart = s.workEnd = "00:00";
-      s.tasks[0].side = "computer";
-    });
+    await employee.update((s) => {
+            s.enabled = true;
+            s.workStart = s.workEnd = "00:00";
+            s.tasks[0].side = "computer";
+          });
     employee.lastActivity = Date.now();
     employee.closed = false;
     await employee.tick();
     for (let i = 0; i < 30 && employee.busy.size; i++) await sleep(5);
     assert.equal(runs, 1);
     assert.equal(takeovers, 0);
-    assert(employee.state().tasks[0].computerSession);
+    assert((await employee.state()).tasks[0].computerSession);
   } finally {
     employee.close();
-    store.close();
+    await store.close();
   }
 });
 
@@ -161,4 +162,16 @@ test("Docker image builds Linux-native artifacts, runs non-root, persists state 
       .DownloadDirectory,
     "/data/downloads",
   );
+});
+
+test("Dockerfile.mysql differs from Dockerfile only by its header comment and MySQL ENV defaults", () => {
+  const strip = (text: string) =>
+    text
+      .split("\n")
+      .filter((line) => !/^# (Vega 镜像|运行时传|  docker build -f)/.test(line))
+      .join("\n")
+      .replace(/ \\\n {4}DB_TYPE=mysql \\\n {4}MYSQL_HOST=mysql \\\n {4}MYSQL_PORT=3306 \\\n {4}MYSQL_USER=vega \\\n {4}MYSQL_DATABASE=vega\n/, "\n");
+  const mysql = readFileSync("Dockerfile.mysql", "utf8");
+  assert.match(mysql, /DB_TYPE=mysql/);
+  assert.equal(strip(mysql), readFileSync("Dockerfile", "utf8"));
 });

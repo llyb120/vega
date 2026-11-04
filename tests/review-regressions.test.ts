@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -16,7 +17,7 @@ import { LocalAgentUnavailable } from "../server/core/local-agent";
 import { sleep } from "../server/core/util";
 
 test("snapshot-only and inferred Chrome targets use the same mutex as explicit tab and live controls", async () => {
-  const store = new Store(":memory:");
+  const store = await Store.open(":memory:");
   const chrome = new Chrome(store, {} as any, "");
   chrome.observations.set("owner:C1", { id: "snapshot", tabTag: "C1" } as any);
   const entered: string[] = [];
@@ -33,56 +34,70 @@ test("snapshot-only and inferred Chrome targets use the same mutex as explicit t
   assert.deepEqual(entered, ["C2"]);
   release(); await held; await Promise.all(jobs);
   assert.deepEqual(entered, ["C2", "C1", "C1", "C1"]);
-  store.close();
+  await store.close();
 });
 
-test("forked image grants survive deletion of the source and preview grants stay user-scoped", async () => {
-  const store = new Store(":memory:");
+test("forked images survive deletion of the source and preview files stay user-scoped", async () => {
+  const store = await Store.open(":memory:");
   for (const id of ["alice", "bob"])
-    store.db.prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)").run(id, id, "fixture", "admin", 0, Date.now(), 0);
-  const auth = new Auth(store, "fixture"), alice = auth.user("alice")!, bob = auth.user("bob")!;
-  const source = store.newSession({ ownerId: "alice" }), blob = store.blob("image/png", Buffer.from("fixture"));
-  store.grantBlob(blob, source.id);
-  store.append(source.id, { role: "user", images: [{ mime: "image/png", blobId: blob }] });
-  const fork = store.fork(source.id);
-  store.deleteSession(source.id);
-  assert.equal(auth.canBlob(alice, store.messages(fork.id)[0].images![0].blobId!), true);
-  assert.equal(auth.canBlob(bob, blob), false);
-  const preview = store.blob("image/png", Buffer.from("preview"));
+    await store.run("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)", id, id, "fixture", "admin", 0, Date.now(), 0);
+  const auth = new Auth(store, "fixture"), alice = (await auth.user("alice"))!, bob = (await auth.user("bob"))!;
+  const source = await store.newSession({ ownerId: "alice" }), blob = await store.blob("image/png", Buffer.from("fixture"));
+  await store.grantBlob(blob, source.id);
+  await store.append(source.id, { role: "user", images: [{ mime: "image/png", blobId: blob }] });
+  const fork = await store.fork(source.id);
+  await store.deleteSession(source.id);
+  assert.equal(await auth.canBlob(alice, (await store.messages(fork.id))[0].images![0].blobId!), true);
+  assert.equal(await auth.canBlob(bob, blob), false);
   const chrome = new Chrome(store, {} as any, "");
   chrome.observe = async () => ({ id: "preview", tabTag: "C1", frames: [], pages: [{ url: "https://example.test" }], images: [], captured: Date.now() } as any);
-  chrome.capture = async (o) => { o.images = [{ blobId: preview }]; return { fullPage: false, scrollExpanded: undefined, fullPageFallback: undefined, documentSize: undefined, screenshotComplete: true, totalTiles: 1, nextTile: undefined }; };
-  await chrome.feedback("browser-view:alice", "C1", {}, "screenshot");
-  assert.equal(auth.canBlob(alice, preview), true);
-  assert.equal(auth.canBlob(bob, preview), false);
-  store.close();
+  chrome.capture = async (owner, o) => { o.images = [{ path: await store.files.write(owner, "preview-0.webp", "x") }]; return { fullPage: false, scrollExpanded: undefined, fullPageFallback: undefined, documentSize: undefined, screenshotComplete: true, totalTiles: 1, nextTile: undefined }; };
+  const shown = await chrome.feedback("browser-view:alice", "C1", {}, "screenshot");
+  const parts = (path: string) => path.slice(store.files.root.length + 1).split("/");
+  // The browser view's screenshot and DOM record are files of that user only.
+  assert.deepEqual(parts(shown.images[0].path).slice(0, 2), ["views", "alice"]);
+  assert.deepEqual(parts(shown.documentPath!).slice(0, 2), ["views", "alice"]);
+  assert.equal(await auth.canFile(alice, parts(shown.images[0].path)), true);
+  assert.equal(await auth.canFile(bob, parts(shown.images[0].path)), false);
+  // A fork owns copies of its files, so deleting the source keeps the fork's screenshots readable.
+  const owner = await store.newSession({ ownerId: "alice" }), shot = await store.files.write(owner, "a.webp", "pixels");
+  await store.append(owner.id, { role: "tool", name: "chrome_screenshot", text: JSON.stringify({ images: [{ path: shot }] }), images: [{ mime: "image/webp", path: shot, url: store.files.url(shot) }] });
+  const copy = await store.fork(owner.id), copied = (await store.messages(copy.id))[0];
+  await store.deleteSession(owner.id);
+  assert(copied.images![0].path!.includes(copy.id) && copied.text!.includes(copy.id));
+  assert.equal((await store.files.read(copied.images![0].path!)).toString(), "pixels");
+  assert.equal(await auth.canFile(alice, parts(copied.images![0].path!)), true);
+  assert.equal(await auth.canFile(bob, parts(copied.images![0].path!)), false);
+  await assert.rejects(async () => await store.files.read(shot));
+  await store.close();
 });
 
-test("upgrading old histories backfills image grants for existing forks", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "vega-image-migration-"));
+test("a database from an older schema version is refused and left unchanged (no migration)", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "vega-old-schema-"));
   const path = join(directory, "history.db");
   try {
-    const old = new Store(path), session = old.newSession({ ownerId: "alice" });
-    const blob = old.blob("image/png", Buffer.from("fixture"));
-    old.append(session.id, { role: "user", images: [{ mime: "image/png", blobId: blob }] });
-    old.db.exec("PRAGMA user_version=3");
-    old.close();
-    const migrated = new Store(path);
-    assert.ok(migrated.db.prepare("SELECT 1 FROM blob_access WHERE blob=? AND session=?").get(blob, session.id));
-    assert.equal(migrated.db.prepare("PRAGMA user_version").get()!.user_version, 4);
-    migrated.close();
+    const old = await Store.open(path), session = await old.newSession({ ownerId: "alice" });
+    await old.run("UPDATE settings SET value='5' WHERE name='schema'");
+    await old.close();
+    await assert.rejects(async () => await Store.open(path), /Not a supported Vega database/);
+    if (process.env.DB_TYPE !== "mysql") {
+      const reopened = new DatabaseSync(path);
+      assert.equal((reopened.prepare("SELECT value FROM settings WHERE name='schema'").get() as any).value, "5");
+      assert.ok(reopened.prepare("SELECT 1 FROM sessions WHERE id=?").get(session.id));
+      reopened.close();
+    }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("a local response loss stops queued calls and persists the question instead of calling the model again", async () => {
-  const store = new Store(":memory:");
+  const store = await Store.open(":memory:");
   const subscriptions = new Subscriptions(store, "");
   const catalog = new Catalog(store, subscriptions);
   const chrome = new Chrome(store, new ChromeBridge(), "");
-  const engine = new Engine(store, catalog, chrome);
+  const engine = await Engine.create(store, catalog, chrome);
   engine.employee.closed = true;
-  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, model: "fixture/model", provider: {} });
-  const session = store.newSession({ ownerId: "alice", localAgent: true, clientId: "a".repeat(32), cwd: process.cwd() });
+  await store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, model: "fixture/model", provider: {} });
+  const session = await store.newSession({ ownerId: "alice", localAgent: true, clientId: "a".repeat(32), cwd: process.cwd() });
   engine.localAgents.connect("alice", { instance: "a".repeat(32), cwd: session.cwd, platform: "windows" });
   let operations = 0, completions = 0;
   engine.localAgents.request = async () => { operations++; throw new LocalAgentUnavailable(); };
@@ -96,9 +111,9 @@ test("a local response loss stops queued calls and persists the question instead
     await engine.run(session.id, { role: "user", text: "run fixture" });
     assert.equal(operations, 1);
     assert.equal(completions, 1);
-    assert.match(store.messages(session.id).at(-1)!.text!, /本轮已暂停.*不会自动重试/);
+    assert.match((await store.messages(session.id)).at(-1)!.text!, /本轮已暂停.*不会自动重试/);
     assert.equal(engine.active.size, 0);
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("deleting a root clears a selected descendant Stage and invalidates pending UI refreshes", async () => {
@@ -112,6 +127,7 @@ test("deleting a root clears a selected descendant Stage and invalidates pending
     activeTools: { value: ["stale"] }, draft: { value: "stale" }, attachments: { value: ["stale"] },
     drafts: new Map([["leaf", { text: "private draft" }], ["root", { text: "root draft" }]]),
     restoreDraft: () => { state.draft.value = ""; state.attachments.value = []; },
+    resetLive: () => { state.live.value = ""; state.thinking.value = ""; },
     sessionRequest: 4, confirm: () => true, attempt: (fn: any) => fn(), api: async () => ({ ok: true }), bootstrap: async () => {},
   };
   state.bootstrap = async () => { state.sessions.value = []; };

@@ -17,7 +17,7 @@ import { resolveModel } from "../server/core/config";
 import { createServer } from "node:http";
 test("skills index/frontmatter and explicit /skill invocation remain readable with SQLite storage", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-skill-")),
-    s = new Store(":memory:");
+    s = await Store.open(":memory:");
   try {
     await mkdir(join(dir, "skills/example"), { recursive: true });
     const content =
@@ -32,21 +32,21 @@ test("skills index/frontmatter and explicit /skill invocation remain readable wi
       expandSkillCommand("/skill:example do it", skills),
       /先用 read/,
     );
-    const session = s.newSession({ cwd: dir }),
+    const session = await s.newSession({ cwd: dir }),
       prompt = await sessionPrompt(session, cfg, s);
     assert.match(prompt, /project convention/);
     assert.match(prompt, /SKILL.md/);
-    s.save("skill", "db", {
-      id: "db",
-      name: "saved",
-      description: "DB skill",
-      content: "do it",
-    });
+    await s.save("skill", "db", {
+            id: "db",
+            name: "saved",
+            description: "DB skill",
+            content: "do it",
+          });
     const all = await loadSkills(cfg, s, dir);
     assert.equal(all.length, 2);
     assert(all.some((v) => v.path === "sqlite:skill/db"));
   } finally {
-    s.close();
+    await s.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -67,18 +67,18 @@ test("WorkBuddy built-in CLI locator uses reference app.asar.unpacked layout", a
   }
 });
 test("subscription sessions encrypt before SQLite persistence; native wrapped args stay objects", async () => {
-  const s = new Store(":memory:");
+  const s = await Store.open(":memory:");
   try {
     const a = new Subscriptions(s, "");
-    a.saveLogin("codebuddy", {
-      origin: "https://www.codebuddy.ai",
-      auth: {
-        accessToken: "subscription-secret",
-        expiresAt: Date.now() + 3600000,
-      },
-    });
+    await a.saveLogin("codebuddy", {
+            origin: "https://www.codebuddy.ai",
+            auth: {
+              accessToken: "subscription-secret",
+              expiresAt: Date.now() + 3600000,
+            },
+          });
     assert(
-      !JSON.stringify(s.get("subscription:codebuddy", {})).includes(
+      !JSON.stringify(await s.get("subscription:codebuddy", {})).includes(
         "subscription-secret",
       ),
     );
@@ -93,7 +93,7 @@ test("subscription sessions encrypt before SQLite persistence; native wrapped ar
     assert.throws(() => nativeArguments("{"));
     a.close();
   } finally {
-    s.close();
+    await s.close();
   }
 });
 test("CodeBuddy repeated/changing delta IDs and wrapped JSON match original native fixture", async () => {

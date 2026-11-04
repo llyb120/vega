@@ -4,6 +4,10 @@
 
 **这是容器里的专用浏览器，不是给宿主机或访问网页的客户端浏览器静默安装扩展。** 使用 Debian Chromium 而不是受近年扩展命令行限制影响的品牌版 Google Chrome，不篡改用户 Preferences，也不需要签名私钥或 Web Store 发布。
 
+## 字体
+
+镜像内置常用字体，网页截图和导出 PDF 不出现方块字：Noto（含中日韩 CJK、等宽、彩色 emoji）、文泉驿微米黑/正黑、DejaVu、Liberation 与 Croscore（与 Arial/Times/Courier 等宽）、Carlito/Caladea（与 Calibri/Cambria 等宽）、Symbola（符号）。`docker/fonts.conf` 把网页常写的微软雅黑、PingFang SC、宋体、黑体、Segoe UI 等字体名映射到对应的 Noto 字体。
+
 ## 构建和启动（Linux）
 
 在项目根目录执行：

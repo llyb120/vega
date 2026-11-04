@@ -60,7 +60,7 @@ const icon = (item) => icons[toolKind(item.name)];
           <img
             v-for="(image, n) in m.images || []"
             :key="n"
-            :src="image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`"
+            :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)"
             alt="工具返回的图片"
           />
         </details>

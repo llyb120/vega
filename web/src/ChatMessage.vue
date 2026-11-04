@@ -4,13 +4,16 @@ import UserMessage from "./UserMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { computed, ref } from "vue";
-import { taskLabel, taskTone, shortTime, isInProgress } from "./task-status";
+import { taskLabel, taskTone, shortTime } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
-import { exportResult } from "./export-result.js";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean });
+import { exportResult, exportTitleOf } from "./export-result.js";
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember"]);
 const exportOpen = ref(false), exportError = ref("");
 // Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
+// A colleague employee's message sits on the employee side with its own name and avatar, never as "me".
+const mine = computed(() => props.message.role === "user" && !props.message.colleague);
+const sender = computed(() => props.message.colleague ? { id: props.message.colleague.employeeId, name: `牛马「${props.message.colleague.name}」`, avatar: props.message.colleague.avatar || "" } : { id: props.employeeId, name: props.name, avatar: props.avatar });
 const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
 const linkedTask = computed(() => {
   const id = props.message.tasks?.[0]?.id;
@@ -24,35 +27,34 @@ const exportMarkdown = computed(() => {
   return String(task.result || task.completion || "").trim();
 });
 const canExport = computed(() => props.message.delivery && !!exportMarkdown.value);
-const exportTitle = computed(() => linkedTask.value?.text || props.message.tasks?.[0]?.title || "任务结果");
-function runExport(format) {
+const exportTitle = computed(() => exportTitleOf(linkedTask.value?.text || props.message.tasks?.[0]?.title));
+async function runExport(format) {
   exportError.value = "";
   try {
-    exportResult(format, { title: exportTitle.value, markdown: exportMarkdown.value });
+    await exportResult(format, { title: exportTitle.value, request: linkedTask.value?.text, markdown: exportMarkdown.value });
     exportOpen.value = false;
   } catch (error) {
     exportError.value = error?.message || String(error);
   }
 }
-// While a linked task is actively running, this reply's bot keeps glancing around like the typing avatar.
-// Only live statuses count, so an old snapshot saying "running" never animates forever.
-const working = computed(() => !!props.message.tasks?.some((task) => isInProgress(props.taskStatus?.[task.id])));
 </script>
 <template>
-  <article class="chat-message" :class="message.role" :data-message-seq="message.seq" tabindex="-1">
-    <span v-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="MESSAGE_POSE" :from="enterFrom" :animate="working" /></span>
+  <article class="chat-message" :class="[mine ? 'user' : 'assistant', { continued, colleague: !!message.colleague }]" :data-message-seq="message.seq" tabindex="-1">
+    <span v-if="!mine && continued" class="chat-avatar spacer" aria-hidden="true"></span>
+    <span v-else-if="!mine" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></span>
     <div class="chat-content">
       <div class="chat-heading">
-        <strong v-if="message.role !== 'user'">{{ name }}</strong>
+        <strong v-if="!mine && !continued">{{ sender.name }}</strong>
+        <span v-if="message.colleague" class="colleague-tag">{{ message.role === 'user' ? '同事转交' : '同事回复' }}</span>
         <time v-if="message.at">{{ shortTime(message.at) }}</time>
         <button v-if="quotable && message.seq" type="button" class="chat-reply" aria-label="引用这条消息" title="引用" @click="emit('quote', message)"><Icon name="reply" :size="13" /><span class="reply-label">引用</span></button>
-        <button v-if="rememberable && message.role !== 'user' && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
+        <button v-if="rememberable && !mine && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
       </div>
       <div class="chat-bubble" :class="{ failed: message.error }" :role="message.error ? 'alert' : undefined">
         <button v-if="message.quote" type="button" class="chat-quote" :aria-label="'跳转到引用的消息：' + message.quote.text" @click="emit('jump', message.quote.seq)"><strong>{{ message.quote.role === 'user' ? '我' : name }}</strong><span>{{ message.quote.text }}</span></button>
         <UserMessage v-if="message.role === 'user' && message.text" :text="message.displayText || message.text" />
-        <MessageText v-else-if="message.text" :text="message.displayText || message.text" />
-        <img v-for="(image, index) in message.images || []" :key="index" :src="image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`" alt="消息附图" />
+        <MessageText v-else-if="message.text" :text="message.displayText || message.text" :streaming="message.streaming" />
+        <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
       </div>
       <div v-if="message.sendStatus" class="chat-send-status" role="status">
         <span v-if="message.sendStatus === 'sending'"><span class="spinner" aria-hidden="true"></span>发送中…</span>
@@ -80,6 +82,9 @@ const working = computed(() => !!props.message.tasks?.some((task) => isInProgres
 <style scoped>
 .chat-message { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 16px; min-width: 0; outline: none; }
 .chat-message.user { justify-content: flex-end; }
+/* Follow-up bubbles of one reply run sit tight under the first, without repeating avatar and name. */
+.chat-message.continued { margin-top: -10px; }
+.chat-avatar.spacer { height: 0; background: none; }
 .chat-avatar { display: grid; place-items: center; flex: none; width: var(--chat-avatar); height: var(--chat-avatar); overflow: hidden; border-radius: 12px; background: var(--accent-soft); color: var(--accent-text); font-size: 16px; font-weight: 600; }
 /* One shrinkable column: grid items default to an automatic minimum of their min-content width, so a single
    nowrap child (a long task title, URL or code line) would otherwise widen the track past the screen. */
@@ -89,6 +94,8 @@ const working = computed(() => !!props.message.tasks?.some((task) => isInProgres
 .user .chat-content > * { max-width: 100%; }
 .chat-heading { display: flex; align-items: center; gap: 8px; min-height: 20px; color: var(--muted); font-size: 11px; }
 .chat-heading strong { color: var(--text-2); font-size: 12px; font-weight: 600; }
+.colleague-tag { padding: 0 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; }
+.colleague .chat-bubble { box-shadow: inset 2px 0 var(--accent); }
 .chat-send-status { color: var(--muted); font-size: 11px; }
 .chat-send-status > span { display: flex; align-items: center; gap: 5px; }
 .chat-send-status .spinner { width: 11px; height: 11px; }

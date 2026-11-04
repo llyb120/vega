@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -245,6 +247,7 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	}()
 	connection.jobs.mu.Lock()
 	connection.jobs.sessionBusy = ready.Busy
+	connection.jobs.upload = resultUploader(saved.Origin, connection.token, connection.instance)
 	connection.jobs.mu.Unlock()
 	a.connectionStatus(connection, connectionStatus{Code: "connected"})
 	if ready.Resume {
@@ -258,8 +261,12 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 
 type localJob struct {
 	cancel context.CancelFunc
-	result map[string]any
+	result []byte
 }
+
+// Results larger than this go over HTTP so a big file read never holds the socket (and its heartbeat) for seconds.
+const inlineResultLimit = 256 << 10
+
 type jobRunner struct {
 	running      int
 	ctx          context.Context
@@ -272,6 +279,7 @@ type jobRunner struct {
 	lastActivity time.Time
 	updateReady  chan bool
 	recovery     *time.Timer
+	upload       func(context.Context, []byte) error
 }
 
 func newJobRunner(ctx context.Context, resumable bool) *jobRunner {
@@ -325,13 +333,38 @@ func (runner *jobRunner) suspend(conn *websocket.Conn) {
 	}
 }
 func (runner *jobRunner) write(value any) {
+	data, err := json.Marshal(value)
+	if err == nil {
+		runner.writeRaw(data)
+	}
+}
+func (runner *jobRunner) writeRaw(data []byte) {
 	if runner.conn == nil {
 		return
 	}
 	_ = runner.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if runner.conn.WriteJSON(value) != nil {
+	if runner.conn.WriteMessage(websocket.TextMessage, data) != nil {
 		_ = runner.conn.Close()
 	}
+}
+
+// deliver sends a finished result; the caller holds runner.mu. Large results are posted outside the lock.
+func (runner *jobRunner) deliver(id string, task *localJob) {
+	if len(task.result) <= inlineResultLimit || runner.upload == nil {
+		runner.writeRaw(task.result)
+		return
+	}
+	upload, data := runner.upload, task.result
+	go func() {
+		if upload(runner.ctx, data) != nil {
+			return // kept; the next reconnect delivers it again
+		}
+		runner.mu.Lock()
+		defer runner.mu.Unlock()
+		if runner.tasks[id] == task {
+			delete(runner.tasks, id)
+		}
+	}()
 }
 func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 	runner.mu.Lock()
@@ -351,7 +384,7 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 				task.cancel()
 				delete(runner.tasks, id)
 			} else if task.result != nil {
-				runner.write(task.result)
+				runner.deliver(id, task)
 			}
 		}
 	}
@@ -448,11 +481,37 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 				return
 			}
 			// Keep only results, never inputs: reconnecting must not replay an operation.
-			task.result = map[string]any{"type": "result", "id": request.ID, "result": result}
-			runner.write(task.result)
+			task.result, _ = json.Marshal(map[string]any{"type": "result", "id": request.ID, "result": result})
+			runner.deliver(request.ID, task)
 			if !runner.resumable {
 				delete(runner.tasks, request.ID)
 			}
 		}(request)
+	}
+}
+
+func resultUploader(origin, token, instance string) func(context.Context, []byte) error {
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return func(ctx context.Context, data []byte) error {
+		// At least 30s, plus time for a slow uplink (64 KB/s).
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second+time.Duration(len(data)/(64<<10))*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+"/api/local-agent/result", bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Vega-Instance", instance)
+		response, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return fmt.Errorf("result upload: HTTP %d", response.StatusCode)
+		}
+		return nil
 	}
 }

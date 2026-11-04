@@ -28,18 +28,18 @@ export function app() {
 }
 export async function initialize(pageScript: string, helper: string) {
   if (application) return application;
-  const store = new Store(),
+  const store = await Store.open(),
     subscriptions = new Subscriptions(store, helper),
     catalog = new Catalog(store, subscriptions),
     bridge = new ChromeBridge(),
     chrome = new Chrome(store, bridge, pageScript),
-    engine = new Engine(store, catalog, chrome);
+    engine = await Engine.create(store, catalog, chrome);
   const token = process.env.VEGA_TOKEN || randomBytes(32).toString("base64url");
   if (token.length < 16)
     throw Error("VEGA_TOKEN must be at least16 characters");
   const auth = new Auth(store, token);
   auth.events.on("revoke", (id) => engine.localAgents.disconnect(id));
-  if (!auth.hasUsers())
+  if (!await auth.hasUsers())
     console.info(
       "[Vega] Create the first administrator using the setup token" +
         (process.env.VEGA_TOKEN ? " configured in VEGA_TOKEN." : ": " + token),
@@ -52,25 +52,25 @@ export async function initialize(pageScript: string, helper: string) {
     browserLive: new BrowserLive(chrome, auth),
     employeeLives: new Map(),
     eventsSocket: new EventsSocket(engine, auth),
-    clientSockets: new ClientSockets(store, auth, engine.localAgents, (clientId) => engine.clientInUse(clientId)),
+    clientSockets: new ClientSockets(store, auth, engine.localAgents, async (clientId) => await engine.clientInUse(clientId)),
     headless: new HeadlessBrowser(),
   };
   const dbPath = process.env.VEGA_DB || "vega.db";
   await application.headless.start(dbPath);
   await bridge.start();
-  engine.employee.start();
-  engine.relay.restart();
+  await engine.employee.start();
+  await engine.relay.restart();
   return application;
 }
-export function employeeLive(employeeId?: string) {
+export async function employeeLive(employeeId?: string) {
   const application = app();
   if (!employeeId) return application.browserLive;
-  const employee = application.engine.employee.for(employeeId);
+  const employee = await application.engine.employee.for(employeeId);
   let live = application.employeeLives.get(employeeId);
   if (!live) {
     const chrome = application.engine.browsers.peek(employeeId);
     if (!chrome) throw Error("牛马浏览器尚未启动");
-    live = new BrowserLive(chrome, application.auth, (principal) => employee.manageable(principal.user));
+    live = new BrowserLive(chrome, application.auth, async (principal) => await employee.manageable(principal.user));
     application.employeeLives.set(employeeId, live);
   }
   return live;

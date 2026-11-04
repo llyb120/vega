@@ -15,6 +15,8 @@ export function chromiumArguments(profile, extension, sandbox = "0") {
     "--no-default-browser-check",
     "--window-size=1440,900",
     "--password-store=basic",
+    // No debugging bar resizing the viewport on attach; only the Nova extension runs in this profile.
+    "--silent-debugger-extension-api",
     `--user-data-dir=${profile}`,
     `--disable-extensions-except=${extension}`,
     `--load-extension=${extension}`,

@@ -5,7 +5,7 @@ import vm from "node:vm";
 import { webcrypto } from "node:crypto";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
-import { employeeChatMessages } from "../web/src/conversation.js";
+import { employeeChatMessages, continuesPrevious } from "../web/src/conversation.js";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
 const between = (start: string, end: string) => chat.slice(chat.indexOf(start), chat.indexOf(end));
@@ -13,20 +13,19 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
   const messages = ref<any[]>([]), running = ref(false), hasMore = ref(false);
   const history = createChatHistory({ api, path: () => "/employees/fixture/chat", messages, running, hasMore });
   const context: any = {
-    console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, runningFrom: ref(null), disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
+    console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
     props: { employeeId: "fixture", api, composer: reactive({ text: "", images: [], quote: undefined }) },
-    visible: computed(() => employeeChatMessages(messages.value, running.value)), employeeChatMessages, frozen: [] as any[],
+    employeeChatMessages, continuesPrevious,
   };
-  context.easeIn = (seqs: number[]) => context.frozen.push(...seqs);
   const methods = vm.runInNewContext([
     "let turn = 0;",
-    between("const draft = computed", "// While a turn runs"),
-    between("const displayed =", "const history ="),
+    between("const draft = computed", "const visible ="),
+    between("const visible =", "const history ="),
     between("const nearBottom =", "/** Prepend one older page"),
     between("async function refresh(apply", "async function upload("),
     between("async function send()", "async function stop()"),
     between("function handleEvent(event)", "watch(() => props.revision"),
-    "({ refresh, handleEvent, finishTurn, send, retry, outbox, displayed })",
+    "({ refresh, handleEvent, finishTurn, send, retry, outbox, displayed, visible, typingContinued })",
   ].join("\n"), context);
   return { ...context, ...methods, dispose: () => { context.disposed = true; } };
 }
@@ -88,7 +87,7 @@ test("incoming messages do not pull a reader away from older history", async () 
 test("employee chat uses conclusion bubbles and typing dots; process details remain available in execution/debug records", () => {
   assert(chat.includes('import ChatMessage from "./ChatMessage.vue"'));
   assert(!chat.includes("<ToolSteps") && !chat.includes("<TurnProcess") && !chat.includes("<ConversationTimeline"));
-  assert(chat.includes("employeeChatMessages(messages.value, running.value)"));
+  assert(chat.includes("employeeChatMessages(messages.value)"));
   assert(chat.includes("正在输入中") && chat.includes("typing-dots") && chat.includes("prefers-reduced-motion"));
   const bubble = readFileSync("web/src/ChatMessage.vue", "utf8");
   assert(bubble.includes("<UserMessage") && bubble.includes("<MessageText") && bubble.includes("chat-quote") && bubble.includes("chat-task-link"));
@@ -106,15 +105,62 @@ test("in-flight and persisted tool calls share a single entry in the detailed ex
   assert.equal(items.filter((item: any) => item.active).length, 2);
 });
 
-test("employee stream events keep typing visible but never append partial text or process data to the chat", async () => {
+const tick = async (n = 10) => { for (let i = 0; i < n; i++) await Promise.resolve(); };
+const texts = (state: any) => Array.from(state.displayed.value, (row: any) => row.message.text);
+
+test("no streaming in the employee chat: deltas, thinking and tool events never show; typing dots cover the wait", async () => {
   const state = mount();
   state.handleEvent({ type: "started" });
-  for (const type of ["message_start", "thinking_delta", "text_delta", "tool_start", "tool_end"]) state.handleEvent({ type, data: "process details" });
+  state.handleEvent({ type: "message_start" });
+  for (const type of ["text_delta", "thinking_delta", "tool_start", "tool_end"]) state.handleEvent({ type, data: "process details" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(texts(state), []);
   assert.equal(state.running.value, true);
-  assert.equal(state.messages.value.length, 0);
+  assert(!chat.includes("live-reply"));
+});
+
+test("message_end shows the persisted message (text with tool calls) once, while the turn keeps running", async () => {
+  const persisted = { seq: 2, role: "assistant", text: "好的，我去安排", calls: [{ id: "c", name: "employee_task_create" }] };
+  const api = async (path: string) => path.includes("after=") ? { session: { id: "s" }, messages: [persisted], running: true }
+    : { session: { id: "s" }, messages: [{ seq: 1, role: "user", text: "work" }], running: true };
+  const state = mount(api);
+  await state.refresh();
+  state.handleEvent({ type: "started" });
+  state.handleEvent({ type: "message_start" });
+  state.handleEvent({ type: "text_delta", data: "好的，我去安排" });
+  assert.deepEqual(texts(state), ["work"]);
+  state.handleEvent({ type: "message_end" });
+  await tick(40);
+  await nextTick();
+  assert.deepEqual(texts(state), ["work", "好的，我去安排"]);
+  assert.equal(state.displayed.value[1].message.seq, 2);
+  assert.equal(state.running.value, true, "typing dots stay for the rest of the turn");
+});
+
+test("a reply appears when the persisted message is merged", async () => {
+  const state = mount(async () => ({ session: { id: "s" }, messages: [{ seq: 1, role: "assistant", text: "已核对" }], running: true }));
+  state.handleEvent({ type: "started" });
+  state.handleEvent({ type: "message_start" });
+  assert.deepEqual(texts(state), []);
+  state.handleEvent({ type: "message_end" });
+  await tick(40);
+  assert.deepEqual(texts(state), ["已核对"]);
   state.handleEvent({ type: "done" });
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  await tick(40);
   assert.equal(state.running.value, false);
+});
+
+test("consecutive bubbles of one reply run do not repeat avatar and name; deliveries stand alone", async () => {
+  const state = mount(async () => ({ session: { id: "s" }, running: false, messages: [
+    { seq: 1, role: "user", text: "work" },
+    { seq: 2, role: "assistant", text: "收到，先核对", calls: [{ id: "a", name: "employee_status" }] },
+    { seq: 3, role: "tool", callId: "a", text: "{}" },
+    { seq: 4, role: "assistant", text: "已安排" },
+    { seq: 5, role: "assistant", text: "**已交付**", delivery: true },
+    { seq: 6, role: "assistant", text: "进展", progress: true },
+  ] }));
+  await state.refresh();
+  assert.deepEqual(Array.from(state.displayed.value, (row: any) => [row.message.seq, row.continued]), [[1, false], [2, false], [4, true], [5, false], [6, false]]);
 });
 
 test("a delayed history response cannot clear a newer typing state", async () => {
@@ -123,7 +169,7 @@ test("a delayed history response cannot clear a newer typing state", async () =>
   const pending = state.refresh();
   for (let i = 0; i < 10 && !finish; i++) await Promise.resolve();
   assert(finish, "the history request is in flight");
-  state.handleEvent({ type: "text_delta", data: "not shown until final" });
+  state.handleEvent({ type: "thinking_delta", data: "still working" });
   finish({ session: { id: "s" }, messages: [{ seq: 1, role: "user", text: "work" }], running: false });
   await pending;
   assert.equal(state.running.value, true);
@@ -152,7 +198,6 @@ test("the typing row turns into the reply in one tick: reply merged, typing clea
   assert.equal(state.running.value, false);
   assert.deepEqual(state.visible.value.map((message: any) => message.seq), [1, 2]);
   assert.equal(state.error.value, "");
-  assert.deepEqual(state.frozen, [2], "only the new reply eases in from the typing avatar");
   assert(!seen.some(([running, count]) => !running && count < 2), "no state where typing is gone but the reply is not shown: " + JSON.stringify(seen));
   assert(replies.slice(1).every((path) => /\?after=[12]$/.test(path)), "only messages after the newest known sequence are fetched: " + replies.join(", "));
 });
@@ -293,7 +338,7 @@ test("server echoes keep pending bubbles in place and a late failed acknowledgem
   const firstId = state.outbox.value[0].clientMessageId;
   state.messages.value = [{ seq: 1, role: "user", text: "first", clientMessageId: firstId }];
   await nextTick();
-  assert.deepEqual(Array.from(state.displayed.value, (message: any) => message.text), ["first", "second"]);
+  assert.deepEqual(Array.from(state.displayed.value, (row: any) => row.message.text), ["first", "second"]);
   assert.equal(state.outbox.value[0].afterSeq, 1);
   state.dispose();
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -312,7 +357,7 @@ test("failed earlier messages stay before later server messages, and interrupted
   const later = state.outbox.value[1];
   state.messages.value = [{ seq: 1, role: "user", text: "later", clientMessageId: later.clientMessageId }];
   await nextTick();
-  assert.deepEqual(Array.from(state.displayed.value, (message: any) => message.text), ["failed first", "later"]);
+  assert.deepEqual(Array.from(state.displayed.value, (row: any) => row.message.text), ["failed first", "later"]);
   const queued = state.outbox.value[0];
   queued.sendStatus = "sent";
   state.running.value = true;
@@ -322,13 +367,16 @@ test("failed earlier messages stay before later server messages, and interrupted
   assert.equal(queued.sendStatus, "failed", "accepted but unprocessed messages can be resent after interruption");
 });
 
-test("reply avatars animate only while a linked task is live and actively in progress", async () => {
-  const { isInProgress } = await import("../web/src/task-status.js");
-  assert.deepEqual(["running", "recovering", "in_progress"].filter(isInProgress), ["running", "recovering", "in_progress"]);
-  for (const status of ["queued", "pending", "deferred", "waiting", "approval", "blocked", "done", "completed", "failed", "stopped", "cancelled", undefined]) assert.equal(isInProgress(status), false, String(status));
+test("chat avatars never animate; sidebar and header avatars animate only while a task is running", () => {
   const bubble = readFileSync("web/src/ChatMessage.vue", "utf8");
-  assert(bubble.includes("isInProgress(props.taskStatus?.[task.id])"), "only the live status (never the stored snapshot) can start the animation");
-  assert(chat.includes(':task-status="taskStatus"') && readFileSync("web/src/App.vue", "utf8").includes(':tasks="employee.tasks"'));
+  assert(!/animate/.test(bubble) && !/<EmployeeAvatar[^>]*animate/.test(chat), "reply and typing avatars in the chat stay still");
+  assert(readFileSync("web/src/AppSidebar.vue", "utf8").includes(':animate="!!entry.runningTasks"'));
+  assert(readFileSync("web/src/EmployeeHeader.vue", "utf8").includes(':animate="working"'));
+  const app = readFileSync("web/src/App.vue", "utf8");
+  assert(app.includes(`:working="activeTasks.some((task) => task.status === 'running')"`), "queued or waiting tasks do not count as running");
+  assert(app.includes("runningTasks: event.data.runningTasks"), "the sidebar row follows live task changes");
+  const route = readFileSync("server/routes/api/[...path].ts", "utf8");
+  assert(route.includes('runningTasks: s.tasks.filter((t) => t.status === "running").length'));
   const avatar = readFileSync("web/src/BotAvatar.vue", "utf8");
   assert(avatar.includes("IntersectionObserver"), "off-screen avatars pause");
 });

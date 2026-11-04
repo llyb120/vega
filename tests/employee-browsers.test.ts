@@ -6,8 +6,8 @@ import { ChromeBridge, requestTimeout } from "../server/core/chrome-bridge";
 import { EmployeeBrowsers } from "../server/core/employee-browsers";
 import { HeadlessBrowser } from "../server/core/headless";
 
-function fixture(t: TestContext) {
-  const store = new Store(":memory:"), browsers = new EmployeeBrowsers(store, "");
+async function fixture(t: TestContext) {
+  const store = await Store.open(":memory:"), browsers = new EmployeeBrowsers(store, "");
   const bridge = new ChromeBridge(true), chrome = new Chrome(store, bridge, ""), browser = new HeadlessBrowser();
   const client = crypto.randomUUID();
   const connect = () => bridge.clients.set(client, { at: Date.now(), browser: "Google Chrome" });
@@ -22,12 +22,12 @@ function fixture(t: TestContext) {
     return { version: bridge.version };
   });
   browsers.entries.set("ea", { chrome, browser });
-  t.after(async () => { await browsers.close(); store.close(); });
+  t.after(async () => { await browsers.close(); await store.close(); });
   return { browsers, chrome, bridge, browser, start, close, probe, connect };
 }
 
 test("employee browsers start lazily, share concurrent recovery and stay resident across tasks", async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   assert.equal(f.start.mock.callCount(), 0);
   const [a, b] = await Promise.all([f.browsers.get("ea"), f.browsers.get("ea")]);
   assert.equal(a, b);
@@ -55,7 +55,7 @@ test("employee browsers start lazily, share concurrent recovery and stay residen
 
 test("a disconnected resident browser survives recovery timeout and heals on the next access", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1000 });
-  const f = fixture(t);
+  const f = await fixture(t);
   await f.browsers.get("ea");
   const child = f.browser.child;
   f.bridge.clients.clear();
@@ -71,7 +71,7 @@ test("a disconnected resident browser survives recovery timeout and heals on the
 });
 
 test("stopping during a health probe cannot return or resurrect the browser", async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   await f.browsers.get("ea");
   f.browsers.entries.get("ea")!.probedAt = Date.now() - EmployeeBrowsers.PROBE_TTL_MS - 1;
   let complete!: (value: any) => void;

@@ -18,18 +18,18 @@ test(
     const dir = await mkdtemp(join(tmpdir(), "vega-web-auth-")),
       db = join(dir, "auth.db"),
       token = randomBytes(32).toString("base64url");
-    const seeded = new Store(db),
-      legacy = seeded.newSession({ title: "legacy admin-only", cwd: dir }),
-      employeeSession = seeded.newSession({
-        title: "employee-owned history",
-        cwd: dir,
-        taskId: "employee-test-task",
-      }),
-      secretBlob = seeded.blob(
-        "image/png",
-        Buffer.from("secret-image-fixture"),
-      );
-    seeded.close();
+    const seeded = await Store.open(db),
+      legacy = await seeded.newSession({ title: "legacy admin-only", cwd: dir }),
+      employeeSession = await seeded.newSession({
+              title: "employee-owned history",
+              cwd: dir,
+              taskId: "employee-test-task",
+            }),
+      secretBlob = await seeded.blob(
+              "image/png",
+              Buffer.from("secret-image-fixture"),
+            );
+    await seeded.close();
     let thinkingRequests = 0, triggerRequests = 0;
     const mock = createServer(async (req, res) => {
       if (req.method === "GET" && req.url === "/models") {
@@ -88,7 +88,7 @@ test(
             choices: [
               {
                 index: 0,
-                delta: thinkingOnly ? { reasoning_content: "I need to respond, but no answer was generated" } : memoryCall ? { tool_calls: [{ index: 0, id: "memory-fixture", type: "function", function: { name: "employee", arguments: JSON.stringify({ action: "memory_propose", claim: memory, source: "model", memoryKind: "convention" }) } }] } : { content: "private session response" },
+                delta: thinkingOnly ? { reasoning_content: "I need to respond, but no answer was generated" } : memoryCall ? { tool_calls: [{ index: 0, id: "memory-fixture", type: "function", function: { name: "memory_propose", arguments: JSON.stringify({ claim: memory, memoryKind: "convention" }) } }] } : { content: "private session response" },
                 finish_reason: memoryCall ? "tool_calls" : "stop",
               },
             ],
@@ -433,6 +433,9 @@ test(
       const beforeDutyCalls = triggerRequests;
       for (const login of [a, b, v]) assert.equal((await req(`/employees/${team.id}`, "POST", { action: "add", kind: "duty", condition: "每天23:59", text: "两框职责" }, login)).r.status, 403);
       assert.equal(triggerRequests, beforeDutyCalls, "unauthorized writes do not invoke the trigger interpreter");
+      for (const login of [a, b, v]) assert.equal((await req(`/employees/${team.id}/reset?confirmed=true`, "POST", {}, login)).r.status, 403, "only managers may reset an employee");
+      assert.equal((await req(`/employees/${workerA.id}/reset?confirmed=true`, "POST", {}, b)).r.status, 404);
+      assert.equal((await req(`/employees/${workerA.id}/reset`, "POST", {}, a)).r.status, 400, "reset needs explicit confirmation");
       const duty = await ok(`/employees/${team.id}`, "POST", { action: "add", kind: "duty", condition: "每天23:59", text: "两框职责内容" }, admin);
       let savedDuty = (await ok(`/employees/${team.id}`, "GET", undefined, admin)).duties.find((entry: any) => entry.id === duty.id);
       assert.equal(savedDuty.condition, "每天23:59"); assert.deepEqual(savedDuty.times, ["23:59"]);
@@ -506,19 +509,33 @@ test(
       const readAfterFailure = await ok(`/sessions/${teamChat.session.id}`, 'GET', undefined, b);
       assert.equal(readAfterFailure.messages.at(-1).text, failedChat.messages.at(-1).text, 'the failure survives a new reader rather than depending on a transient event');
       assert.equal((await ok(`/employees/${team.id}`, 'GET', undefined, admin)).tasks.length, 0);
-      const sharedCredential = await ok("/vault", "POST", { name: "shared service", condition: "authorized test", content: "shared-vault-test-secret" }, admin);
+      // Each employee's creator maintains that employee's own vault; nobody else reads or edits it.
+      const own: Record<string, string> = {};
       for (const [worker, login] of [[team, admin], [workerA, a], [workerB, b]] as const) {
+        own[worker.id] = (await ok(`/employees/${worker.id}/vault`, "POST", { name: worker.name + " service", condition: "authorized test", content: worker.id + "-secret", share: true }, login)).id;
+        assert.equal((await ok(`/employees/${worker.id}`, "GET", undefined, login)).canConfigure, true);
+        const listed = await ok(`/employees/${worker.id}/vault`, "GET", undefined, login);
+        assert.deepEqual(listed.entries.map((entry: any) => [entry.id, entry.share]), [[own[worker.id], true]]);
+        assert(!JSON.stringify(listed).includes(worker.id + "-secret"));
         const entries = await ok(`/employees/${worker.id}`, "POST", { action: "vault_list" }, login);
-        assert(entries.entries.some((entry: any) => entry.id === sharedCredential.id), "employees share the global vault without grants");
-        assert(!JSON.stringify(entries).includes("shared-vault-test-secret"));
-        const value = await ok(`/employees/${worker.id}`, "POST", { action: "vault_get", id: sharedCredential.id, text: "authorized test" }, login);
-        assert.equal(value.content, "shared-vault-test-secret");
+        assert.deepEqual(entries.entries.map((entry: any) => entry.id), [own[worker.id]], "an employee only sees its own entries");
+        const value = await ok(`/employees/${worker.id}`, "POST", { action: "vault_get", id: own[worker.id], text: "authorized test" }, login);
+        assert.equal(value.content, worker.id + "-secret");
       }
+      assert.notEqual((await req(`/employees/${workerA.id}`, "POST", { action: "vault_get", id: own[workerB.id], text: "authorized test" }, a)).r.status, 200, "A cannot read B's entry by id");
+      assert.equal((await req(`/employees/${workerB.id}/vault`, "GET", undefined, a)).r.status, 404);
+      for (const login of [admin, b]) assert.notEqual((await req(`/employees/${workerA.id}/vault`, "GET", undefined, login)).r.status, 200);
+      assert.equal((await req(`/employees/${workerA.id}/vault`, "GET", undefined, admin)).r.status, 403, "administrators do not open another creator's vault");
+      assert.equal((await req(`/employees/${workerA.id}`, "POST", { action: "vault_get", id: own[workerA.id], text: "authorized test" }, admin)).r.status, 403);
+      assert.equal((await ok(`/employees/${workerA.id}`, "GET", undefined, admin)).canConfigure, false);
       for (const login of [a, b, v]) {
-        assert.equal((await req("/vault", "GET", undefined, login)).r.status, 403);
-        assert.equal((await req("/vault", "POST", { name: "forbidden", condition: "test", content: "must not save" }, login)).r.status, 403);
-        assert.equal((await req(`/vault/${sharedCredential.id}`, "DELETE", undefined, login)).r.status, 403);
+        assert.equal((await req(`/employees/${team.id}/vault`, "GET", undefined, login)).r.status, 403);
+        assert.equal((await req(`/employees/${team.id}/vault`, "POST", { name: "forbidden", condition: "test", content: "must not save" }, login)).r.status, 403);
+        assert.equal((await req(`/employees/${team.id}/vault/${own[team.id]}`, "DELETE", undefined, login)).r.status, 403);
       }
+      assert.equal((await req("/vault", "GET", undefined, admin)).r.status, 404, "the global vault route is gone");
+      await ok(`/employees/${workerA.id}/vault/${own[workerA.id]}`, "DELETE", undefined, a);
+      assert.deepEqual((await ok(`/employees/${workerA.id}/vault`, "GET", undefined, a)).entries, []);
       for (const [worker, login] of [[workerA, a], [workerB, b]] as const) {
         await ok(`/employees/${worker.id}`, "POST", { action: "add", kind: "todo", text: "isolated work", key: "same-key", nextCheckInMinutes: 60 }, login);
       }
@@ -605,7 +622,6 @@ test(
         ["/config", "PUT", {}],
         ["/skills", "GET", undefined],
         ["/employee", "POST", { action: "vault_list" }],
-        ["/employee", "POST", { action: "vault_save", name: "x" }],
       ])
         assert.equal(
           (await req(path as string, method as string, data, a)).r.status,
@@ -831,10 +847,10 @@ test(
       let continued: any,
         privateMessages: any[] = [];
       for (let n = 0; n < 150; n++) {
-        const inspectPrivate = new Store(db);
-        continued = inspectPrivate.session(s2.id);
-        privateMessages = inspectPrivate.messages(s2.id);
-        inspectPrivate.close();
+        const inspectPrivate = await Store.open(db);
+        continued = await inspectPrivate.session(s2.id);
+        privateMessages = await inspectPrivate.messages(s2.id);
+        await inspectPrivate.close();
         if (
           !continued.running &&
           privateMessages.some(

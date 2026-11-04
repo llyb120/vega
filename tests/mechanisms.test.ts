@@ -18,6 +18,7 @@ import { Engine } from "../server/core/engine";
 import { Relay } from "../server/core/relay";
 import { compileScript, parse } from "@vue/compiler-sfc";
 import { envelope, fieldBytes, fieldNumber } from "../server/core/devin";
+import { chromeCall, employeeCall } from "./public-call";
 const cleanup: (() => any)[] = [];
 afterEach(async () => {
   for (const f of cleanup.splice(0).reverse()) await f();
@@ -55,13 +56,14 @@ const completion = (res: any, m: any) => {
       "\n\ndata: [DONE]\n\n",
   );
 };
+const legacy = (name: string, args: any) => name === "employee" ? employeeCall(args) : name === "chrome" ? chromeCall(args) : { name, arguments: args };
 const call = (id: string, name: string, args: any) => ({
   index: 0,
   id,
-  function: { name, arguments: JSON.stringify(args) },
+  function: { name: legacy(name, args).name, arguments: JSON.stringify(legacy(name, args).arguments) },
 });
-function setup(url: string) {
-  const s = new Store(":memory:"),
+async function setup(url: string) {
+  const s = await Store.open(":memory:"),
     auth = new Subscriptions(s, ""),
     catalog = new Catalog(s, auth),
     chrome = new Chrome(
@@ -69,28 +71,28 @@ function setup(url: string) {
       new ChromeBridge(),
       readFileSync("server/assets/browser/browser-page.js", "utf8"),
     ),
-    engine = new Engine(s, catalog, chrome);
+    engine = await Engine.create(s, catalog, chrome);
   engine.employee.closed = true;
-  s.put("config", {
-    scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
-    model: "p/m",
-    provider: {
-      p: {
-        api: "openai-completions",
-        baseURL: url,
-        models: {
-          m: {
-            limit: { context: 128000, output: 8192 },
-            modalities: { input: ["text", "image"] },
+  await s.put("config", {
+        scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
+        model: "p/m",
+        provider: {
+          p: {
+            api: "openai-completions",
+            baseURL: url,
+            models: {
+              m: {
+                limit: { context: 128000, output: 8192 },
+                modalities: { input: ["text", "image"] },
+              },
+            },
           },
         },
-      },
-    },
-    contextMode: "acp",
-  });
+        contextMode: "acp",
+      });
   cleanup.push(async () => {
     await engine.close();
-    s.close();
+    await s.close();
   });
   return engine;
 }
@@ -103,11 +105,11 @@ test("native thinking-only employee chat recovers once without scene downgrades 
     res.setHeader("Content-Type", "application/connect+proto");
     res.end(Buffer.concat([envelope(Buffer.concat([result, fieldNumber(5, 1)])), envelope(Buffer.from("{}"), 2)]));
   });
-  const e = setup(url), config = e.config();
+  const e = await setup(url), config = await e.config();
   config.provider.p.api = "devin";
-  e.store.put("config", config);
+  await e.store.put("config", config);
   e.catalog.resolve = async () => resolveModel(config);
-  const employee = e.employee.for(e.employee.create({ name: "Native assistant" }, "owner").id), session = employee.chat("owner");
+  const employee = await e.employee.for((await e.employee.create({ name: "Native assistant" }, "owner")).id), session = await employee.chat("owner");
   const events: any[] = [];
   e.events.on("event", (event) => events.push(event));
   await e.run(session.id, { role: "user", text: "请确认收到" });
@@ -115,9 +117,9 @@ test("native thinking-only employee chat recovers once without scene downgrades 
   assert.equal(events.filter((event) => event.type === "retry").length, 1);
   assert(events.some((event) => event.type === "thinking_delta"));
   assert(!events.some((event) => event.type === "scene" || event.type === "error"));
-  assert.equal(e.store.messages(session.id).at(-1)?.text, "收到，我会按你的要求处理。");
+  assert.equal((await e.store.messages(session.id)).at(-1)?.text, "收到，我会按你的要求处理。");
   assert.equal(events.at(-1).data.error, false);
-  assert.equal(employee.state().tasks.length, 0, "a normal question must not be forced into a task");
+  assert.equal((await employee.state()).tasks.length, 0, "a normal question must not be forced into a task");
 });
 
 test("MCP Streamable HTTP describe-before-call, definition revalidation, readOnly allowlist", async () => {
@@ -243,17 +245,17 @@ test("Responses reasoning survives new user turns and invalid continuation falls
     }),
     p = new Providers(),
     signal = new AbortController().signal;
-  const store = new Store(":memory:"), session = store.newSession(), ctx = new Context(store, session.id);
-  cleanup.push(() => store.close());
-  ctx.configure(128000, 8192, 100, model.selection);
-  store.append(session.id, { role: "user", text: "one" });
-  const first = await p.chat(model, "sys", ctx.promptView(), [], signal, undefined, session.id);
-  store.append(session.id, first);
-  const before = ctx.promptView();
-  store.append(session.id, { role: "user", text: "two" });
+  const store = await Store.open(":memory:"), session = await store.newSession(), ctx = await Context.open(store, session.id);
+  cleanup.push(async () => await store.close());
+  await ctx.configure(128000, 8192, 100, model.selection);
+  await store.append(session.id, { role: "user", text: "one" });
+  const first = await p.chat(model, "sys", await ctx.promptView(), [], signal, undefined, session.id);
+  await store.append(session.id, first);
+  const before = await ctx.promptView();
+  await store.append(session.id, { role: "user", text: "two" });
   ctx.completedBefore = 3;
-  assert.deepEqual(ctx.promptView().slice(0, before.length), before);
-  await p.chat(model, "sys", ctx.promptView(), [], signal, undefined, session.id);
+  assert.deepEqual((await ctx.promptView()).slice(0, before.length), before);
+  await p.chat(model, "sys", await ctx.promptView(), [], signal, undefined, session.id);
   assert.equal(requests[1].previous_response_id, "r1");
   assert.equal(requests[1].input.length, 1);
   assert.equal(requests[2].previous_response_id, undefined);
@@ -261,7 +263,7 @@ test("Responses reasoning survives new user turns and invalid continuation falls
   assert.deepEqual(requests[2].input.find((item: any) => item.type === "reasoning"), {
     type: "reasoning", encrypted_content: reasoning.encrypted_content, summary: reasoning.summary,
   });
-  assert.deepEqual(store.messages(session.id)[1].opaque, [reasoning], "wire normalization must not alter stored native state");
+  assert.deepEqual((await store.messages(session.id))[1].opaque, [reasoning], "wire normalization must not alter stored native state");
   assert.equal(count, 3);
 });
 test("employee external-job defer and Chrome relay reuse exactly two isolated sessions", async () => {
@@ -299,14 +301,14 @@ test("employee external-job defer and Chrome relay reuse exactly two isolated se
     })] });
     else completion(res, { tool_calls: [call("complete", "employee", { action: "complete", deliverableRef: [], text: "job123 complete; verified original job status" })] });
   });
-  const e = setup(url),
-    cfg = e.config();
+  const e = await setup(url),
+    cfg = await e.config();
   cfg.provider.p.models.vision = {
     limit: { context: 128000, output: 8192 },
     modalities: { input: ["text", "image"] },
   };
   cfg.scenes = { ...cfg.scenes, computer: ["p/vision"] };
-  e.store.put("config", cfg);
+  await e.store.put("config", cfg);
   const dir = await mkdtemp(join(tmpdir(), "vega-worker-"));
   cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const created = await e.employee.execute("", {
@@ -317,35 +319,35 @@ test("employee external-job defer and Chrome relay reuse exactly two isolated se
   });
   const key = created.value.id;
   for (let segment = 0; segment < 4; segment++) {
-    e.employee.update((s) => {
-      const t = s.tasks.find((t) => t.id === key)!;
-      t.status = "running";
-      t.nextCheckAt = 0;
-    });
-    const task = e.employee.state().tasks.find((t) => t.id === key)!;
+    await e.employee.update((s) => {
+            const t = s.tasks.find((t) => t.id === key)!;
+            t.status = "running";
+            t.nextCheckAt = 0;
+          });
+    const task = (await e.employee.state()).tasks.find((t) => t.id === key)!;
     e.employee.busy.set(key, {
       computer: task.side === "computer",
       session: "",
     });
     await e.employee.run(task);
   }
-  const task = e.employee.state().tasks.find((t) => t.id === key)!;
+  const task = (await e.employee.state()).tasks.find((t) => t.id === key)!;
   assert.equal(task.status, "done");
   assert(
     task.workSession &&
       task.computerSession &&
       task.workSession !== task.computerSession,
   );
-  assert.equal(e.store.sessions().length, 2);
+  assert.equal((await e.store.sessions()).length, 2);
   assert.equal(calls, 5);
   assert.equal(e.employee.busy.size, 0);
 });
 test("StarLink validates peer identity and preserves authenticated owner for tasks and support", async () => {
-  const e = setup("https://unused.test");
-  e.employee.update((s) => (s.public = true));
+  const e = await setup("https://unused.test");
+  await e.employee.update((s) => (s.public = true));
   const owner = { token: "alice/token", name: "Alice" };
   await e.relay.serve(owner, "employee_say", { text: "remote task" });
-  const task = e.employee.state().tasks[0];
+  const task = (await e.employee.state()).tasks[0];
   assert.equal(task.owner.token, owner.token);
   await assert.rejects(() =>
     e.employee.control(
@@ -359,7 +361,7 @@ test("StarLink validates peer identity and preserves authenticated owner for tas
       question: "do something",
     }),
   );
-  e.employee.update((s) => s.links.push(owner.token));
+  await e.employee.update((s) => s.links.push(owner.token));
   await e.employee.remote(owner, "starlink.help", {
     id: "request",
     task: "need info",
@@ -371,7 +373,7 @@ test("StarLink validates peer identity and preserves authenticated owner for tas
     question: "duplicate",
   });
   assert.equal(
-    e.employee.state().tasks.filter((t) => t.replyTo?.id === "request").length,
+    (await e.employee.state()).tasks.filter((t) => t.replyTo?.id === "request").length,
     1,
   );
 });

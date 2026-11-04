@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { Store, type Message } from "../server/core/store";
-import { promptHistory } from "../server/core/history";
+import { promptHistory, archivedResult } from "../server/core/history";
 import { Providers, ProviderError, bodyFor, type Tool } from "../server/core/provider";
 import { resolveModel } from "../server/core/config";
 import { Subscriptions } from "../server/core/subscriptions";
@@ -239,7 +239,7 @@ test("truncated, malformed or incomplete streams never dispatch tools", async ()
     );
   }
 });
-test("wire history preserves tool-call IDs, images and signed reasoning without leaking connection options", () => {
+test("wire history preserves tool-call IDs, images and signed reasoning without leaking connection options", async () => {
   for (const api of [
     "openai-completions",
     "openai-responses",
@@ -252,27 +252,27 @@ test("wire history preserves tool-call IDs, images and signed reasoning without 
       baseURL: "https://example.com/v1",
       reasoningEffort: "high",
     };
-    const { body } = bodyFor(
-      m,
-      "sys",
-      [
-        {
-          role: "assistant",
-          model: m.selection,
-          thinking: "why",
-          opaque: [{ type: "thinking", thinking: "why", signature: "sig" }],
-          calls: [{ id: "call|item", name: "read", arguments: { path: "x" } }],
-        },
-        {
-          role: "tool",
-          callId: "call|item",
-          name: "read",
-          text: "done",
-          images: [{ mime: "image/png", data: "abc" }],
-        },
-      ],
-      [tool],
-    );
+    const { body } = await bodyFor(
+          m,
+          "sys",
+          [
+            {
+              role: "assistant",
+              model: m.selection,
+              thinking: "why",
+              opaque: [{ type: "thinking", thinking: "why", signature: "sig" }],
+              calls: [{ id: "call|item", name: "read", arguments: { path: "x" } }],
+            },
+            {
+              role: "tool",
+              callId: "call|item",
+              name: "read",
+              text: "done",
+              images: [{ mime: "image/png", data: "abc" }],
+            },
+          ],
+          [tool],
+        );
     assert(!JSON.stringify(body).includes("private-key"));
     assert(
       JSON.stringify(body).includes("data") ||
@@ -281,56 +281,97 @@ test("wire history preserves tool-call IDs, images and signed reasoning without 
     assert(!JSON.stringify(body).includes("call|item"));
   }
 });
-test("Chrome history keeps two distinct images per stream through ACP and every provider", () => {
+test("Chrome history keeps only the latest two image results per tab through ACP and every provider", async () => {
   const rows: Message[] = [];
-  const observe = (tab: string, images: { blobId: string; frameStream?: string; frame?: number; readOnlyImage?: boolean }[]) => {
+  const observe = (tab: string, images: { path: string; frameStream?: string; tile?: number; readOnlyImage?: boolean }[], name = "chrome_act") => {
     const callId = "shot-" + rows.length;
     rows.push(
-      { role: "assistant", calls: [{ id: callId, name: "chrome", arguments: {} }] },
-      { role: "tool", name: "chrome", callId,
+      { role: "assistant", calls: [{ id: callId, name, arguments: {} }] },
+      { role: "tool", name, callId,
         text: `[m${String(rows.length + 1).padStart(5, "0")}] ` + JSON.stringify({
           tabTag: tab, snapshotId: callId, pages: [{ text: callId }], completedActions: 1,
-          documentPath: "sqlite:browser-observation/" + callId,
-          images: images.map(image => ({ ...image, path: "sqlite:blob/" + image.blobId })),
+          documentPath: "/files/" + callId + ".json",
+          images,
         }),
-        images: images.map(({ blobId }) => ({ mime: "image/png", blobId })),
+        images: images.map(({ path }) => ({ mime: "image/webp", path })),
       },
     );
   };
-  observe("C1", [{ blobId: "view-old", frameStream: "C1:viewport" }]);
-  observe("C1", [{ blobId: "view-new", frameStream: "C1:viewport" }]);
-  observe("C1", [{ blobId: "view-new", frameStream: "C1:viewport" }]);
-  observe("C1", [{ blobId: "tile0-old", frameStream: "C1:document:0" }, { blobId: "tile1-old", frameStream: "C1:document:1" }]);
-  observe("C1", [{ blobId: "tile0-middle", frameStream: "C1:document:0" }, { blobId: "tile1-new", frameStream: "C1:document:1" }]);
-  observe("C1", [{ blobId: "tile0-new", frameStream: "C1:document:0" }]);
-  for (const blobId of ["crop1", "crop2", "crop3"]) observe("C1", [{ blobId }]);
-  observe("C1", [{ blobId: "export", frameStream: "C1:document:0", readOnlyImage: true }]);
-  observe("C1", [{ blobId: "scroll", frameStream: "C1:viewport", frame: 0 }]);
-  observe("C2", [{ blobId: "other-tab", frameStream: "C2:viewport" }]);
-  observe("C3", [{ blobId: "third-tab", frameStream: "C3:viewport" }]);
+  observe("C1", [{ path: "view-old", frameStream: "C1:viewport" }], "chrome_navigate");
+  observe("C1", [{ path: "tile0", frameStream: "C1:document:0", tile: 0 }, { path: "tile1", frameStream: "C1:document:1", tile: 1 }], "chrome_screenshot");
+  observe("C1", [{ path: "crop" }], "chrome_screenshot");
+  observe("C1", [{ path: "scroll", readOnlyImage: true }], "chrome_screenshot");
+  observe("C1", [{ path: "view-a", frameStream: "C1:viewport" }], "chrome_navigate");
+  observe("C1", [{ path: "tile0-new", frameStream: "C1:document:0", tile: 0 }, { path: "tile1-new", frameStream: "C1:document:1", tile: 1 }], "chrome_screenshot");
+  observe("C1", [{ path: "view-b", frameStream: "C1:viewport" }]);
+  observe("C1", [{ path: "view-b", frameStream: "C1:viewport" }]);
+  observe("C2", [{ path: "other-tab", frameStream: "C2:viewport" }]);
+  rows.push(
+    { role: "assistant", calls: [{ id: "plain", name: "read", arguments: {} }] },
+    { role: "tool", name: "read", callId: "plain", text: "image file", images: [{ mime: "image/png", blobId: "plain-1" }, { mime: "image/png", blobId: "plain-2" }, { mime: "image/png", blobId: "plain-3" }] },
+  );
   const original = structuredClone(rows);
-  const expected = ["view-old", "view-new", "tile1-old", "tile0-middle", "tile1-new", "tile0-new", "crop1", "crop2", "crop3", "export", "scroll", "other-tab", "third-tab"];
+  // Older captures (viewport, tiles, crop, read-only scroll area) are stale; one capture's tiles stay together,
+  // an unchanged repeated frame counts once, other tabs and non-Chrome images are untouched.
+  const expected = ["tile0-new", "tile1-new", "view-b", "other-tab", "plain-1", "plain-2", "plain-3"];
   const projected = promptHistory(rows);
-  assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.blobId)), expected);
+  assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.path || image.blobId)), expected);
   assert.deepEqual(promptHistory(projected), projected, "repeated projection must keep attachment/metadata alignment");
   const old = JSON.parse(projected[1].text!.replace(/^\[m\d+\]\s*/, ""));
   assert.equal(old.pages, undefined);
   assert.equal(old.completedActions, 1);
-  assert.equal(old.documentPath, "sqlite:browser-observation/shot-0");
+  assert.equal(old.documentPath, "/files/shot-0.json");
+  assert.equal(old.domOmitted, "[DOM 已移出上下文：/files/shot-0.json，需要时用 read 分页读回]");
+  // Omitted screenshots are replaced by their paths; metadata goes with them.
+  assert.equal(old.images, undefined);
+  assert.equal(old.imagesOmitted, "[截图已移出上下文：view-old，需要时用 read 读回；看页面现状请重新截图]");
+  const tiles = JSON.parse(projected[3].text!.replace(/^\[m\d+\]\s*/, ""));
+  assert.match(tiles.imagesOmitted, /截图已移出上下文：tile0，tile1，/);
   for (const api of ["openai-completions", "openai-responses", "anthropic-messages"]) {
     for (const history of [rows, projected]) {
       const resolved: string[] = [];
-      bodyFor(model(api, "https://example.test/v1"), "", history, [], image => {
-        resolved.push(image.blobId!);
-        return { mime: image.mime, data: "AA==" };
-      });
+      await bodyFor(model(api, "https://example.test/v1"), "", history, [], async image => {
+                resolved.push(image.path || image.blobId!);
+                return { mime: image.mime, data: "AA==" };
+              });
       assert.deepEqual(resolved, expected, api);
     }
   }
   assert.deepEqual(rows, original, "canonical history and image metadata remain archived intact");
 });
 
-test("native reasoning is replayed only to its source model and remains untouched in history", () => {
+test("oversized Chrome results stay prunable after archiving", () => {
+  const rows: Message[] = [];
+  const observe = (id: string, big: boolean) => {
+    const value = {
+      tabTag: "C1", snapshotId: id, documentPath: "/files/" + id + ".json",
+      images: [{ path: id, frameStream: "C1:viewport" }],
+      pages: [{ text: (id + " ").repeat(big ? 20000 : 1) }],
+    };
+    const raw = JSON.stringify(value);
+    rows.push(
+      { role: "assistant", calls: [{ id, name: "chrome_inspect", arguments: {} }] },
+      { role: "tool", name: "chrome_inspect", callId: id, images: [{ mime: "image/webp", path: id }],
+        text: big ? archivedResult("chrome_inspect", value, raw, "/files/output-" + id + ".json") : raw },
+    );
+  };
+  observe("big", true);
+  const archived = JSON.parse(rows[1].text!);
+  assert.equal(archived.tabTag, "C1");
+  assert.equal(archived.archivePath, "/files/output-big.json");
+  assert(archived.preview.length < 33000 && archived.preview.includes("big big"));
+  assert.equal(archived.images[0].frameStream, "C1:viewport");
+  assert(JSON.parse(archivedResult("read", { x: "y".repeat(40000) }, "z".repeat(40000), "/files/output-r.json")).preview);
+  for (const id of ["a", "b"]) observe(id, false);
+  const projected = promptHistory(rows);
+  const old = JSON.parse(projected[1].text!);
+  assert.equal(old.preview, undefined);
+  assert(old.domOmitted && old.imagesOmitted);
+  assert.equal(old.archivePath, "/files/output-big.json");
+  assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.path)), ["a", "b"]);
+});
+
+test("native reasoning is replayed only to its source model and remains untouched in history", async () => {
   for (const api of ["openai-responses", "anthropic-messages"]) {
     const m = model(api, "https://example.test/v1");
     const opaque = api === "openai-responses"
@@ -338,14 +379,14 @@ test("native reasoning is replayed only to its source model and remains untouche
       : { type: "thinking", thinking: "visible", signature: "native-secret" };
     const history = [{ role: "assistant" as const, model: m.selection, text: "answer", opaque: [opaque] }];
     const before = structuredClone(history);
-    assert(JSON.stringify(bodyFor(m, "sys", history, []).body).includes("native-secret"));
-    assert(!JSON.stringify(bodyFor({ ...m, selection: "other/model" }, "sys", history, []).body).includes("native-secret"));
+    assert(JSON.stringify((await bodyFor(m, "sys", history, [])).body).includes("native-secret"));
+    assert(!JSON.stringify((await bodyFor({ ...m, selection: "other/model" }, "sys", history, [])).body).includes("native-secret"));
     assert.deepEqual(history, before);
   }
 });
 test("Devin model resolution enables native reasoning replay for configured models", async () => {
-  const store = new Store(":memory:");
-  cleanup.push(() => store.close());
+  const store = await Store.open(":memory:");
+  cleanup.push(async () => await store.close());
   const catalog = new Catalog(store, new Subscriptions(store, ""));
   catalog.models = async () => ({
     models: {}, raw: [{ variants: [{ model_uid: "m" }] }], version: "fixture-version",
@@ -354,7 +395,7 @@ test("Devin model resolution enables native reasoning replay for configured mode
     model: "p/m", provider: { p: { api: "devin", baseURL: "https://fixture.test", models: { m: {} } } },
   });
   assert.equal(m.options.requiresReasoningContentOnAssistantMessages, true);
-  const { body } = bodyFor(m, "sys", [{ role: "assistant", text: "answer", thinking: "visible reasoning" }], []);
+  const { body } = await bodyFor(m, "sys", [{ role: "assistant", text: "answer", thinking: "visible reasoning" }], []);
   assert.equal(body.messages[1].reasoning_content, "visible reasoning");
   const wire = encodeDevin(body, "fixture-key", "fixture-version");
   const message = decodeProto(wire.subarray(5)).find(([f]) => f === 3)![1] as Buffer;
@@ -518,8 +559,8 @@ test("CodeBuddy and WorkBuddy identities remain separate, CLI env credentials an
       else process.env[k] = v;
     }
   });
-  const s = new Store(":memory:");
-  cleanup.push(() => s.close());
+  const s = await Store.open(":memory:");
+  cleanup.push(async () => await s.close());
   const auth = new Subscriptions(s, "");
   const code = await auth.load("codebuddy"),
     work = await auth.load("workbuddy");
@@ -614,8 +655,8 @@ test("WorkBuddy original encrypted envelope decoder rejects key substitution", (
   assert.throws(() => decodeWorkBuddyToken(envelope, "wrong"));
 });
 test("Devin login callback requires matching state and PKCE is persisted only as pending memory", async () => {
-  const s = new Store(":memory:");
-  cleanup.push(() => s.close());
+  const s = await Store.open(":memory:");
+  cleanup.push(async () => await s.close());
   const auth = new Subscriptions(s, "");
   cleanup.push(() => auth.close());
   const start = await auth.loginStart("devin"),
@@ -629,5 +670,5 @@ test("Devin login callback requires matching state and PKCE is persisted only as
   assert.equal(good.status, 200);
   await good.text();
   assert.equal(auth.pending.get(start.state)?.code, "good");
-  assert(!JSON.stringify(s.objects("model-cache")).includes("code_verifier"));
+  assert(!JSON.stringify(await s.objects("model-cache")).includes("code_verifier"));
 });

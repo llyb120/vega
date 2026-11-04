@@ -23,65 +23,14 @@ type Observation = {
   coverageGaps: string[];
   images: Obj[];
   captured: number;
+  /** File holding the full record (pages, images), written when the observation is returned. */
+  documentPath?: string;
   fullPage: boolean;
   screenshot: boolean;
 };
 
-/** Models like terra often fill every schema field with empty placeholders; treat those as omitted. */
-export function usableChromeRef(ref: unknown) {
-  return typeof ref === "string" && ref.trim() ? ref.trim() : undefined;
-}
-export function usableChromeRegion(region: unknown) {
-  if (!region || typeof region !== "object" || Array.isArray(region)) return undefined;
-  const keys = Object.keys(region as object);
-  if (!keys.length) return undefined;
-  const { x, y, width, height } = region as Obj;
-  if (![x, y, width, height].every((value) => Number.isFinite(value))) return undefined;
-  if ((x as number) < 0 || (y as number) < 0 || (width as number) <= 0 || (height as number) <= 0) return undefined;
-  return { x, y, width, height };
-}
-function isPlaceholderChromeAction(action: unknown) {
-  if (!action || typeof action !== "object" || Array.isArray(action)) return false;
-  const a = action as Obj;
-  return a.action === "wait"
-    && !a.ms && !a.duration_ms
-    && !usableChromeRef(a.ref)
-    && !a.selector && !a.text
-    && !a.x && !a.y && !a.to_x && !a.to_y
-    && !a.delta && !a.delta_x
-    && !(Array.isArray(a.files) && a.files.length);
-}
-export function sanitizeChromeArgs(a: Obj): Obj {
-  const out: Obj = { ...a };
-  for (const key of ["tabTag", "url", "snapshotId", "query", "expression", "downloadId", "ref", "imageId"] as const) {
-    if (out[key] == null || out[key] === "") delete out[key];
-  }
-  const region = usableChromeRegion(out.region);
-  if (region) out.region = region;
-  else delete out.region;
-  const ref = usableChromeRef(out.ref);
-  if (ref) out.ref = ref;
-  else delete out.ref;
-  if (out.action && typeof out.action === "object") {
-    const action: Obj = { ...(out.action as Obj) };
-    if (!usableChromeRef(action.ref)) delete action.ref;
-    out.action = action;
-  }
-  if (Array.isArray(out.actions)) {
-    out.actions = out.actions.map((item: any) => {
-      if (!item || typeof item !== "object") return item;
-      const action: Obj = { ...item };
-      if (!usableChromeRef(action.ref)) delete action.ref;
-      return action;
-    });
-  }
-  if (isPlaceholderChromeAction(out.action) && !(Array.isArray(out.actions) && out.actions.length)) delete out.action;
-  if (Array.isArray(out.actions) && !out.actions.length) delete out.actions;
-  if (out.operation && out.operation !== "devtools") delete out.devtools;
-  if (out.operation && !String(out.operation).startsWith("experience_")) delete out.experience;
-  if (out.operation && out.operation !== "run") delete out.plan;
-  return out;
-}
+/** Default navigation settle bound while the page is still loading. */
+export const NAVIGATION_SETTLE_MS = 4000;
 
 export class Chrome {
   gate = new Mutex();
@@ -252,15 +201,25 @@ export class Chrome {
       screenshot: false,
     };
   }
-  async capture(o: Observation, a: Obj, prior?: Observation) {
+  /** Screenshot files go to the owner's directory: the session (task) or the user's browser view. */
+  private async fileOwner(owner: string) { return owner.startsWith("browser-view:") ? owner : await this.store.session(owner); }
+  /**
+   * File name of an image or DOM record. The browser view only ever needs the current frame, so it overwrites one
+   * file per tab (and tile); sessions keep every capture by id for read-back.
+   */
+  private fileName(owner: string, tag: string, id: string, slot: string) {
+    return owner.startsWith("browser-view:") ? `live-${tag.replace(/[^\w-]/g, "_")}${slot}` : id + slot.replace(/^-\d+/, "");
+  }
+  async capture(owner: string, o: Observation, a: Obj, prior?: Observation) {
     const tag = o.tabTag,
       page = o.pages[0],
       vp = page.viewport;
     const dpr = vp.devicePixelRatio || 1;
-    let region = usableChromeRegion(a.region);
-    const captureRef = usableChromeRef(a.ref);
+    let region = a.region;
+    const captureRef = a.ref;
     assert(!region || !captureRef, "Use region or ref, not both");
     assert(a.maxEdge === undefined || (Number.isInteger(a.maxEdge) && (a.maxEdge === 0 || (a.maxEdge >= 320 && a.maxEdge <= 3840))), "maxEdge must be 0 or 320–3840");
+    if (region) assert(["x", "y", "width", "height"].every((k) => Number.isFinite(region[k]) && (k === "x" || k === "y" ? region[k] >= 0 : region[k] > 0)), "Invalid screenshot region");
     if (a.expandScroll) assert((a.frame ?? 0) === 0, "expandScroll requires frame 0");
     if (captureRef && !a.expandScroll) region = (await this.point(o, a.frame || 0, captureRef, "capture")).rect;
     let full = !region && (a.fullPage === true || !!a.expandScroll);
@@ -371,10 +330,9 @@ export class Chrome {
         const { data, info } = await image
           .webp({ lossless: true })
           .toBuffer({ resolveWithObject: true });
-        const blob = this.store.blob("image/webp", data);
         let imageID = o.id + "-" + o.images.length,
           unchanged = false,
-          blobID = blob;
+          path = "";
         const imageX = full ? x : x - (vp.scrollX || 0), imageY = full ? y : y - (vp.scrollY || 0);
         const frameStream = !region && !a.expandScroll ? `${tag}:${full ? "document:" + i : "viewport"}` : undefined;
         const previous = prior?.images.find(
@@ -393,10 +351,11 @@ export class Chrome {
           prior.pages[0].document === page.document &&
           typeof page.stamp === "string" && prior.pages[0].stamp === page.stamp
         ) {
-          const old = this.store.blobData(previous.blobId);
+          let old: Buffer | undefined;
+          try { old = await this.store.files.read(previous.path); } catch {}
           if (old) {
             const [a, b] = await Promise.all([
-              sharp(old.data).removeAlpha().raw().toBuffer(),
+              sharp(old).removeAlpha().raw().toBuffer(),
               sharp(data).removeAlpha().raw().toBuffer(),
             ]);
             if (
@@ -405,16 +364,18 @@ export class Chrome {
             ) {
               unchanged = true;
               imageID = previous.imageId;
-              blobID = previous.blobId;
+              path = previous.path;
             }
           }
         }
+        const fresh = !path;
+        path ||= await this.store.files.write(await this.fileOwner(owner), this.fileName(owner, tag, imageID, `-${o.images.length}.webp`), data);
         o.images.push({
           imageId: imageID,
           snapshotId: o.id,
-          blobId: blobID,
-          path: `sqlite:blob/${blobID}`,
-          url: `/api/blobs/${blobID}`,
+          path,
+          // An overwritten browser-view frame gets a new address so caches never show the previous one.
+          url: fresh ? this.store.files.url(path) + (owner.startsWith("browser-view:") ? "?v=" + o.id : "") : previous!.url,
           x: imageX,
           y: imageY,
           width: w,
@@ -447,6 +408,14 @@ export class Chrome {
     }
   }
   summarize(o: Observation, a: Obj) {
+    // Summary only (documentPath keeps the full record): drop what is derivable or a default.
+    // nodeId = page.document + ":" + the part of ref after "."; documentRect = viewportRect + page.viewport scrollX/scrollY.
+    const compactItem = (v: Obj) => {
+      const { nodeId: _node, documentRect: _rect, ...item } = v;
+      for (const key of ["actionable", "disabled", "editable", "password"]) if (item[key] === false) delete item[key];
+      for (const key of ["value", "fieldContext"]) if (item[key] === "") delete item[key];
+      return item;
+    };
     const limit = a.maxItems ?? 60,
       maxText = a.maxTextChars ?? 3000;
     assert(
@@ -478,7 +447,7 @@ export class Chrome {
           maxText,
         ),
         fullText: undefined,
-        items,
+        items: items.map(compactItem),
         elements: items
           .map(
             (v: Obj) =>
@@ -505,37 +474,30 @@ export class Chrome {
       mode === "screenshot" ||
       a.feedback === "screenshot" ||
       (!["none", "inspect"].includes(a.feedback) && a.visual !== "none");
-    const inspectRef = usableChromeRef(a.ref), inspectRegion = usableChromeRegion(a.region);
-    a = { ...a, ...(inspectRef ? { ref: inspectRef } : {}), ...(inspectRegion ? { region: inspectRegion } : {}) };
-    if (!inspectRef) delete a.ref;
-    if (!inspectRegion) delete a.region;
-    assert(mode === "screenshot" || (!inspectRef && !inspectRegion), "inspect does not accept region/ref; use screenshot");
+    assert(mode === "screenshot" || (!a.ref && !a.region), "inspect does not accept region/ref; use screenshot");
     let shot: Obj = {};
     if (capture) {
-      try { shot = await this.capture(o, mode === "screenshot" ? a : { ...a, fullPage: false, expandScroll: false }, prior); }
+      try { shot = await this.capture(owner, o, mode === "screenshot" ? a : { ...a, fullPage: false, expandScroll: false }, prior); }
       catch (error: any) {
         if (mode === "screenshot" || a.feedback === "screenshot") throw error;
         o.screenshot = false; o.images = [];
         shot = { screenshotError: error.message };
       }
     }
+    o.documentPath = await this.store.files.write(await this.fileOwner(owner), this.fileName(owner, tag, o.id, ".json"), JSON.stringify({ ...o, frames: undefined }));
     this.observations.set(key, o);
-    for (const image of o.images) {
-      if (owner.startsWith("browser-view:")) this.store.grantBlobUser(image.blobId, owner.slice("browser-view:".length));
-      else this.store.grantBlob(image.blobId, owner);
-    }
-    this.store.save("browser-observation", o.id, { ...o, frames: undefined });
     const origin = new URL(o.pages[0].url).origin;
+    // Identifiers and images first: an oversized result is clipped from the end, never these.
     return {
       browser: "chrome",
       tabTag: tag,
       snapshotId: o.id,
-      pages: this.summarize(o, a),
-      coverageGaps: o.coverageGaps,
-      documentPath: `sqlite:browser-observation/${o.id}`,
       images: o.images,
       ...shot,
-      experienceHint: this.experiences.hint(owner, origin),
+      documentPath: o.documentPath,
+      coverageGaps: o.coverageGaps,
+      experienceHint: await this.experiences.hint(owner, origin),
+      pages: this.summarize(o, a),
     };
   }
   async point(
@@ -753,7 +715,7 @@ export class Chrome {
     assert(frame, "Unknown credential input frame");
     const url = await this.evaluate(tag, frame, "location.href", signal);
     const site = vaultSite(url);
-    assert(origins.every((allowed) => allowed.has(site)), "凭据尚未针对当前页面核对或已切换认证页面，已阻止这次凭据写入；请先观察实际页面（含 SSO / 子框架）再重新 get 核对使用条件，无需补网站配置，不要跨系统试用账号。");
+    assert(origins.every((allowed) => allowed.has(site)), "凭据尚未针对当前页面核对或已切换认证页面，已阻止这次凭据写入；请先观察实际页面（含 SSO / 子框架）再重新 vault_get 核对使用条件，无需补网站配置，不要跨系统试用账号。");
   }
   private coordinateImage(o: Observation, imageId?: string) {
     const image = o.images.find((i) => i.imageId === imageId) || o.images[0];
@@ -764,7 +726,7 @@ export class Chrome {
   }
   private async preflight(o: Observation, actions: Obj[], top: Obj, cwd: string) {
     for (const action of actions) {
-      if (["click", "fill", "scroll"].includes(action.action) && action.ref) {
+      if (["click", "hover", "fill", "scroll"].includes(action.action) && action.ref) {
         const frame = o.pages.findIndex((p) => p.items?.some((v: Obj) => v.ref === action.ref));
         assert(frame >= 0, "ref not found in observed frames; never fabricate refs");
         action.frame = frame;
@@ -779,6 +741,28 @@ export class Chrome {
         for (const [x, y] of action.action === "drag" ? [[action.x, action.y], [action.to_x, action.to_y]] : [[action.x, action.y]])
           assert(x < image.pixelWidth && y < image.pixelHeight, "Coordinates outside image or viewport");
       }
+    }
+  }
+  /**
+   * After open/goto/back/forward/reload/select: wait while the tab is loading or its document is not
+   * complete, bounded by settleMs (0 or omitted = 4000 ms). Long-polling or streaming pages simply hit the bound.
+   * Returns the last tab list.
+   */
+  async settleNavigation(tag: string, settleMs: number | undefined, signal: AbortSignal) {
+    const deadline = Date.now() + Math.min(settleMs || NAVIGATION_SETTLE_MS, 5000);
+    let tabs: Obj[] | undefined;
+    for (;;) {
+      tabs = (await this.bridge.request("tabs", {}, signal)).tabs;
+      const tab = tabs?.find((t: Obj) => t.tag === tag);
+      let loading = !!tab?.loading;
+      if (tab && !loading) {
+        // A tab can stop "loading" while the document is still interactive (SPA bootstrap, redirects).
+        const state = await this.cdp(tag, "Runtime.evaluate", { expression: "document.readyState", returnByValue: true }, undefined, signal)
+          .then((r: Obj) => r?.result?.value, () => "complete");
+        loading = typeof state === "string" && state !== "complete";
+      }
+      if (!loading || Date.now() >= deadline) return tabs;
+      await sleep(Math.min(100, Math.max(0, deadline - Date.now())), signal);
     }
   }
   private async waitForLoad(tag: string, ms: number, signal: AbortSignal) {
@@ -805,7 +789,7 @@ export class Chrome {
     const tag = o.tabTag,
       kind = a.action || a.type;
     let frameIndex = a.frame ?? 0;
-    if (["click", "fill", "scroll"].includes(kind) && a.ref) {
+    if (["click", "hover", "fill", "scroll"].includes(kind) && a.ref) {
       const actual = o.pages.findIndex((p) =>
         p.items.some((v: Obj) => v.ref === a.ref),
       );
@@ -821,13 +805,13 @@ export class Chrome {
     const changed = () => { signal.throwIfAborted(); progress.attempted = true; };
     if (kind === "wait") {
       assert(
-        Number.isInteger(a.ms) && a.ms >= 0 && a.ms <= 2000,
-        "wait is 0–2000ms",
+        Number.isInteger(a.ms) && a.ms >= 0 && a.ms <= 10000,
+        "wait is 0–10000ms",
       );
       await sleep(a.ms, signal);
       return;
     }
-    if (["click", "fill", "scroll"].includes(kind)) {
+    if (["click", "hover", "fill", "scroll"].includes(kind)) {
       assert(frame, "Unknown frame");
       const mode =
         kind === "scroll" ? (a.delta_x ? "scroll_x" : "scroll_y") : kind;
@@ -875,6 +859,8 @@ export class Chrome {
         );
       }
       progress.domPreflight = false;
+      // hover: the pointer stays on the verified element; tooltips and menus show in the following observation.
+      if (kind === "hover") return;
       signal.throwIfAborted();
       await this.mouse(tag, p, a.button || "left", a.click_count || 1);
       progress.focus = p.editable
@@ -1043,7 +1029,7 @@ export class Chrome {
       const p = await this.evaluate(
         tag,
         o.frames[0],
-        `__novaWebview.coordinate(${xy.x},${xy.y},${JSON.stringify(o.pages[0].stamp)},${o.fullPage})`,
+        `__novaWebview.coordinate(${xy.x},${xy.y},${o.fullPage})`,
       );
       changed();
       await this.cdp(tag, "Input.dispatchMouseEvent", {
@@ -1057,8 +1043,6 @@ export class Chrome {
           o.frames[0],
           `__novaWebview.verifyPoint(${JSON.stringify(p.hoverTarget.ref)},${p.x},${p.y},${JSON.stringify(p.hoverTarget.rect)})`,
         );
-        const hovered = await this.evaluate(tag, o.frames[0], `__novaWebview.stamp()`);
-        assert(hovered === p.stamp, "悬停期间视口已变化，停止点击");
       }
       if (kind === "click_at") {
         await this.mouse(tag, p, a.button || "left", a.click_count || 1);
@@ -1131,7 +1115,6 @@ export class Chrome {
     parent?: AbortSignal,
     credentials: CredentialBinding[] = [],
   ): Promise<any> {
-    args = sanitizeChromeArgs(args);
     if (args.operation === "stop") {
       this.cancelled.get(owner)?.abort();
       return { stopped: true };
@@ -1202,11 +1185,11 @@ export class Chrome {
     if (op.startsWith("experience_")) {
       const o = latest(),
         origin = o ? new URL(o.pages[0].url).origin : undefined;
-      return this.experiences.execute(
-        owner,
-        a,
-        o && origin ? { id: o.id, origin } : undefined,
-      );
+      return await this.experiences.execute(
+              owner,
+              a,
+              o && origin ? { id: o.id, origin } : undefined,
+            );
     }
     if (op === "run")
       return this.run(owner, cwd, { ...a, tabTag: tag }, signal, credentials);
@@ -1259,15 +1242,11 @@ export class Chrome {
       if (op === "close_tab") return result;
       if (a.observe === "none") return result;
       if (tag) {
-        let loading = true;
-        const deadline = Date.now() + Math.min(a.settleMs || 1500, 5000);
-        while (loading && Date.now() < deadline) {
-          const tabs = await this.bridge.request("tabs", {}, signal);
-          loading = tabs.tabs.find((t: Obj) => t.tag === tag)?.loading;
-          if (loading) await sleep(50, signal);
-        }
+        const tabs = await this.settleNavigation(tag, a.settleMs, signal);
         return {
           ...result,
+          // The bridge listed tabs as the navigation started; report them as they are after settling.
+          ...(tabs && result.tabs ? { tabs } : {}),
           ...(await this.feedback(
             owner,
             tag,
@@ -1390,7 +1369,7 @@ export class Chrome {
       verification: "unverified",
     };
     // Lyra parity: these are emitted only on failure. domPreflight stays true
-    // through a click/fill's hover-verify, so a stamp/iframe-move failure counts
+    // through a click/fill's hover-verify, so an iframe-move failure counts
     // as a preflight abort even after attempted flipped on real input.
     if (error) {
       result.failedAtPreflight = !!progress.domPreflight;
@@ -1399,7 +1378,7 @@ export class Chrome {
     }
     if ((!script || a.feedback !== "none") && (!opened.length || child)) {
       try {
-        if (settleMs > 0 && (opened.length || script || actions.some((v) => ["click", "click_at", "press"].includes(v.action)))) {
+        if (settleMs > 0 && (opened.length || script || actions.some((v) => ["click", "click_at", "press", "hover"].includes(v.action)))) {
           await this.waitForLoad(observedTag, settleMs, signal);
           if (observedTag === tag) await this.evaluate(tag, o.frames[0], `__novaWebview.settle(250,${Math.min(settleMs, 1000)})`, signal).catch(() => {});
         }
@@ -1424,7 +1403,9 @@ export class Chrome {
                 : "操作 " + v.action,
         ),
       );
-    return result;
+    // pages last: an oversized result is clipped from the end, keeping status and images.
+    const { pages, ...head } = result;
+    return pages === undefined ? head : { ...head, pages };
   }
   async run(owner: string, cwd: string, a: Obj, parent: AbortSignal, credentials: CredentialBinding[] = []) {
     const plan = a.plan;
@@ -1541,15 +1522,19 @@ export class Chrome {
     }
     const latest = result.openedTabs?.length && !result.snapshotId ? undefined : observation();
     const done = !reason && completed === plan.steps.length;
+    const { pages: _pages, snapshotId: _snapshot, images: _images, documentPath: _document, tabTag: _tag, ...rest } = result;
+    // Identifiers and images first, pages last: an oversized result is clipped from the end.
     return {
-      ...result, snapshotId: latest?.id, pages: latest ? this.summarize(latest, a) : [], images: latest?.images || [],
-      documentPath: latest ? "sqlite:browser-observation/" + latest.id : undefined, tabTag: tag,
+      snapshotId: latest?.id, images: latest?.images || [],
+      documentPath: latest?.documentPath, tabTag: tag,
+      ...rest,
       altairRun: {
         status: done ? "completed" : "needs_review", history, checks, executedActions: executed,
         guided: { completedSteps: completed, totalSteps: plan.steps.length, remainingSteps: plan.steps.slice(completed), next: reason },
         verification: done && plan.expectedText ? "subgoal_verified" : "unverified",
         notice: "run validates page evidence only; it is not user authorization or proof of business success.",
       },
+      pages: latest ? this.summarize(latest, a) : [],
     };
   }
 }

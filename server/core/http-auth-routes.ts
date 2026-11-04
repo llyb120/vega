@@ -53,10 +53,10 @@ export async function authRoute(event: H3Event, path: string[]) {
       const action = path[1],
         method = event.method;
       if (action === "me" && method === "GET") {
-        const p = auth.authenticate(getCookie(event, COOKIE));
+        const p = await auth.authenticate(getCookie(event, COOKIE));
         return p
           ? publicSession(p)
-          : { user: null, csrfToken: null, setupRequired: !auth.hasUsers() };
+          : { user: null, csrfToken: null, setupRequired: !await auth.hasUsers() };
       }
       if (["setup", "login"].includes(action) && method === "POST") {
         const a = await bodyJSON(event, 4096);
@@ -69,7 +69,7 @@ export async function authRoute(event: H3Event, path: string[]) {
       }
       const p = principal(event);
       if (action === "logout" && method === "POST") {
-        auth.logout(p.hash);
+        await auth.logout(p.hash);
         clearLogin(event);
         return { ok: true };
       }
@@ -84,7 +84,7 @@ export async function authRoute(event: H3Event, path: string[]) {
     const p = principal(event);
     check(p.user.role === "admin", 403, "Administrator permission required");
     if (event.method === "GET" && path.length === 1)
-      return { users: auth.users() };
+      return { users: await auth.users() };
     if (event.method === "POST" && path.length === 1)
       return { user: await auth.add(await bodyJSON(event, 4096)) };
     if (event.method === "PUT" && path.length === 2)

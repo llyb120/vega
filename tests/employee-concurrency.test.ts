@@ -10,20 +10,22 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { sleep } from "../server/core/util";
+import { chromeCall, employeeCall } from "./public-call";
 
-const call = (id: string, name: string, arguments_: any) => ({ role: "assistant", calls: [{ id, name, arguments: arguments_ }] });
+const legacy = (name: string, args: any) => name === "employee" ? employeeCall(args) : name === "chrome" ? chromeCall(args) : { name, arguments: args };
+const call = (id: string, name: string, arguments_: any) => ({ role: "assistant", calls: [{ id, ...legacy(name, arguments_) }] });
 
 test("a lightweight shell query releases its workspace lease before later model reasoning finishes", { timeout: 10000 }, async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "vega-transient-work-")), store = new Store(":memory:");
-  const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  const cwd = await mkdtemp(join(tmpdir(), "vega-transient-work-")), store = await Store.open(":memory:");
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "p/light", scenes: { lightweight: ["p/light"], coding: ["p/code"] }, provider: { p: { api: "openai-completions", baseURL: "https://unused.test", models: { light: { limit: { context: 128000, output: 8192 } }, code: { limit: { context: 128000, output: 8192 } } } } } });
-  const employee = engine.employee.for(engine.employee.create({ name: "Command employee", cwd }, "owner").id), requests = new Map<string, number>();
+  await store.put("config", { model: "p/light", scenes: { lightweight: ["p/light"], coding: ["p/code"] }, provider: { p: { api: "openai-completions", baseURL: "https://unused.test", models: { light: { limit: { context: 128000, output: 8192 } }, code: { limit: { context: 128000, output: 8192 } } } } } });
+  const employee = await engine.employee.for((await engine.employee.create({ name: "Command employee", cwd }, "owner")).id), requests = new Map<string, number>();
   let query = "", writer = "", reasoning = false, release!: () => void;
   const gate = new Promise<void>(resolve => release = resolve);
-  const until = async (condition: () => boolean) => { for (let index = 0; index < 1000; index++) { if (condition()) return; await sleep(5); } throw Error("parallel command condition not reached"); };
+  const until = async (condition: () => boolean | Promise<boolean>) => { for (let index = 0; index < 1000; index++) { if (await condition()) return; await sleep(5); } throw Error("parallel command condition not reached"); };
   engine.providers.chat = async (model, _system, messages, _definitions, _signal, _emit, sessionId) => {
-    const id = store.session(sessionId!).taskId!, attempt = requests.get(id) || 0; requests.set(id, attempt + 1);
+    const id = (await store.session(sessionId!)).taskId!, attempt = requests.get(id) || 0; requests.set(id, attempt + 1);
     assert(attempt < 8);
     if (id === query) {
       assert.equal(model.selection, "p/light");
@@ -34,7 +36,7 @@ test("a lightweight shell query releases its workspace lease before later model 
       if (model.selection === "p/light") return call("code", "switch_scene", { scene: "coding", message: "验证编码阶段可继续执行" });
       assert([...engine.employee.writers.values()].some(lease => lease.taskId === writer));
     }
-    return employee.task(employee.state(), id).plan?.length
+    return employee.task(await employee.state(), id).plan?.length
       ? call("done", "employee", { action: "complete", deliverableRef: [], text: "verified result", summary: "已验证。" })
       : call("plan", "employee", { action: "progress", text: "verified", plan: [{ content: "verify", status: "completed" }] });
   };
@@ -45,35 +47,35 @@ test("a lightweight shell query releases its workspace lease before later model 
     assert.equal(engine.employee.writers.size, 0, "the completed shell query must not hold a whole-task write lock");
     writer = (await employee.execute("", { action: "add", kind: "todo", text: "独立编码阶段" })).value.id;
     await engine.employee.drain();
-    await until(() => employee.task(employee.state(), writer).status === "done");
-    assert.equal(employee.task(employee.state(), query).status, "running");
+    await until(async () => employee.task(await employee.state(), writer).status === "done");
+    assert.equal(employee.task(await employee.state(), query).status, "running");
     release();
-    await until(() => employee.task(employee.state(), query).status === "done" && !employee.busy.size);
+    await until(async () => employee.task(await employee.state(), query).status === "done" && !employee.busy.size);
     assert.equal(engine.employee.writers.size, 0);
   } finally {
     engine.employee.closed = true; release(); await engine.close();
     for (let index = 0; index < 100 && employee.busy.size; index++) await sleep(5);
-    store.close(); await rm(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await store.close(); await rm(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });
 
 test("ordinary tasks keep progressing while a shared-directory code writer is active, and a blocked writer resumes in its original session without replay", { timeout: 10000 }, async () => {
   const cwd = await mkdtemp(join(tmpdir(), "vega-parallel-work-"));
   await writeFile(join(cwd, "input.txt"), "read-only input");
-  const store = new Store(":memory:"), engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  const store = await Store.open(":memory:"), engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "p/light", scenes: { lightweight: ["p/light"], coding: ["p/code"] }, provider: { p: { api: "openai-completions", baseURL: "https://unused.test", models: { light: { limit: { context: 128000, output: 8192 } }, code: { limit: { context: 128000, output: 8192 } } } } } });
-  const employee = engine.employee.for(engine.employee.create({ name: "Parallel employee", cwd }, "owner").id);
+  await store.put("config", { model: "p/light", scenes: { lightweight: ["p/light"], coding: ["p/code"] }, provider: { p: { api: "openai-completions", baseURL: "https://unused.test", models: { light: { limit: { context: 128000, output: 8192 } }, code: { limit: { context: 128000, output: 8192 } } } } } });
+  const employee = await engine.employee.for((await engine.employee.create({ name: "Parallel employee", cwd }, "owner")).id);
   const jobs: Record<string, string> = {}, requests = new Map<string, number>();
   let release!: () => void, entered = false;
   const gate = new Promise<void>(resolve => release = resolve);
   const add = async (name: string) => { const result = await employee.execute("", { action: "add", kind: "todo", text: name }); jobs[name] = result.value.id; return result.value.id; };
-  const until = async (condition: () => boolean, description: string) => {
-    for (let index = 0; index < 500; index++) { if (condition()) return; await sleep(5); }
+  const until = async (condition: () => unknown, description: string) => {
+    for (let index = 0; index < 500; index++) { if (await condition()) return; await sleep(5); }
     throw Error("Task condition not reached: " + description);
   };
   engine.providers.chat = async (model, _system, messages, _definitions, signal, _emit, sessionId) => {
-    const session = store.session(sessionId!), id = session.taskId!, task = employee.task(employee.state(), id);
+    const session = await store.session(sessionId!), id = session.taskId!, task = employee.task(await employee.state(), id);
     const attempt = (requests.get(id) || 0) + 1; requests.set(id, attempt);
     assert(attempt <= 15, "task cannot loop on a blocked operation");
     const successful = (name: string) => messages.some(message => message.role === "tool" && message.name === name && !message.error);
@@ -102,26 +104,26 @@ test("ordinary tasks keep progressing while a shared-directory code writer is ac
     await until(() => entered, "first writer holds its code phase");
     await add("reader"); await add("waiter"); await add("summary");
     await engine.employee.drain();
-    await until(() => employee.state().tasks.find(task => task.id === jobs.waiter)?.workspaceWait && !employee.busy.has(jobs.waiter), "second writer yields instead of retrying");
-    const blocked = employee.task(employee.state(), jobs.waiter), originalSession = blocked.workSession;
+    await until(async () => (await employee.state()).tasks.find(task => task.id === jobs.waiter)?.workspaceWait && !employee.busy.has(jobs.waiter), "second writer yields instead of retrying");
+    const blocked = employee.task(await employee.state(), jobs.waiter), originalSession = blocked.workSession;
     assert.equal(blocked.status, "queued");
     assert.equal(blocked.recovery, undefined);
     assert.equal(blocked.failures || 0, 0);
-    assert(store.messages(originalSession).some(message => message.role === "tool" && message.text?.includes('"status":"queued"')));
-    await until(() => [jobs.reader, jobs.summary].every(id => employee.task(employee.state(), id).status === "done"), "read and summary tasks finish while writer is still active");
-    assert.equal(employee.task(employee.state(), jobs.writer).status, "running");
+    assert((await store.messages(originalSession)).some(message => message.role === "tool" && message.text?.includes('"status":"queued"')));
+    await until(async () => { const state = await employee.state(); return [jobs.reader, jobs.summary].every((id) => employee.task(state, id).status === "done"); }, "read and summary tasks finish while writer is still active");
+    assert.equal(employee.task(await employee.state(), jobs.writer).status, "running");
     assert.equal(await readFile(join(cwd, "input.txt"), "utf8"), "read-only input");
     release();
-    await until(() => Object.values(jobs).every(id => employee.task(employee.state(), id).status === "done") && !employee.busy.size, "all original jobs finish");
-    assert.equal(employee.task(employee.state(), jobs.waiter).workSession, originalSession);
+    await until(async () => { const state = await employee.state(); return Object.values(jobs).every((id) => employee.task(state, id).status === "done") && !employee.busy.size; }, "all original jobs finish");
+    assert.equal(employee.task(await employee.state(), jobs.waiter).workSession, originalSession);
     assert.equal(await readFile(join(cwd, "shared.txt"), "utf8"), "A verified + C verified");
     assert.equal(engine.employee.writers.size, 0);
-    assert.equal(store.sessions().length, 4);
-    assert.equal(store.messages(employee.task(employee.state(), jobs.writer).workSession).filter(message => message.role === "tool" && message.name === "write").length, 1);
-    assert.equal(store.messages(originalSession).filter(message => message.role === "tool" && message.name === "edit").length, 1);
+    assert.equal((await store.sessions()).length, 4);
+    assert.equal((await store.messages(employee.task(await employee.state(), jobs.writer).workSession)).filter(message => message.role === "tool" && message.name === "write").length, 1);
+    assert.equal((await store.messages(originalSession)).filter(message => message.role === "tool" && message.name === "edit").length, 1);
   } finally {
     engine.employee.closed = true; release(); await engine.close();
     for (let index = 0; index < 100 && employee.busy.size; index++) await sleep(5);
-    store.close(); await rm(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await store.close(); await rm(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });

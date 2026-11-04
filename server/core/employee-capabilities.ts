@@ -8,50 +8,64 @@ import { uploadSkill } from "./skill-upload";
 import { skillKind } from "./skills";
 import { type Obj } from "./util";
 
-export function migrateEmployeeCapabilities(store: Store) {
-  if (store.get("employee-capabilities:migrated", false) || store.get("employee:default-deleted", false)) return;
-  store.transaction(() => {
-    const config = store.get<Config>("config", { model: "", provider: {} });
-    store.save("employee-capabilities", "default", {
-      mcp: config.mcp || {}, skills: config.skills || [], skillsDirectory: config.skillsDirectory,
-    });
-    for (const skill of store.objects<Obj>("skill")) {
-      store.save(skillKind("default"), skill.id, { ...skill, employeeId: "default" });
-      store.remove("skill", skill.id);
-    }
-    delete config.mcp; delete config.skills; delete config.skillsDirectory;
-    store.put("config", config);
-    store.put("employee-capabilities:migrated", true);
-  });
+export async function migrateEmployeeCapabilities(store: Store) {
+  if (await store.get("employee-capabilities:migrated", false) || await store.get("employee:default-deleted", false)) return;
+  await store.transaction(async () => {
+        const config = await store.get<Config>("config", { model: "", provider: {} });
+        await store.save("employee-capabilities", "default", {
+                mcp: config.mcp || {}, skills: config.skills || [], skillsDirectory: config.skillsDirectory,
+              });
+        for (const skill of await store.objects<Obj>("skill")) {
+          await store.save(skillKind("default"), skill.id, { ...skill, employeeId: "default" });
+          await store.remove("skill", skill.id);
+        }
+        delete config.mcp; delete config.skills; delete config.skillsDirectory;
+        await store.put("config", config);
+        await store.put("employee-capabilities:migrated", true);
+      });
 }
 
-export function employeeConfig(store: Store, config: Config, employeeId: string): Config {
-  const own = store.object<Obj>("employee-capabilities", employeeId) || {};
+export async function employeeConfig(store: Store, config: Config, employeeId: string): Promise<Config> {
+  const own = await store.object<Obj>("employee-capabilities", employeeId) || {};
   return { ...config, employeeId, mcp: own.mcp || {}, skills: own.skills || [], skillsDirectory: own.skillsDirectory };
 }
 
 // This permission deliberately has no administrator override.
-export function canConfigureEmployee(employee: Employee, user: { id: string; role: string }) {
-  return !!user.id && employee.state().ownerId === user.id && user.role !== "viewer";
+export async function canConfigureEmployee(employee: Employee, user: { id: string; role: string }) {
+  return !!user.id && (await employee.state()).ownerId === user.id && user.role !== "viewer";
 }
 
 export async function employeeCapabilities(employee: Employee, user: { id: string; role: string }, method: string, path: string[], body: Obj = {}) {
-  migrateEmployeeCapabilities(employee.store);
-  check(employee.accessible(user), 404, "Employee not found");
+  await migrateEmployeeCapabilities(employee.store);
+  check(await employee.accessible(user), 404, "Employee not found");
   check(!employee.deleting, 409, "牛马正在删除，请稍候");
-  const store = employee.store, id = employee.employeeId, canEdit = canConfigureEmployee(employee, user);
-  const config = store.object<Obj>("employee-capabilities", id) || {};
+  const store = employee.store, id = employee.employeeId, canEdit = await canConfigureEmployee(employee, user);
+  const config = await store.object<Obj>("employee-capabilities", id) || {};
   if (method === "GET" && path[0] === "capabilities" && path.length === 1) {
     const masked = canEdit ? maskedConfig({ model: "", provider: {}, mcp: config.mcp || {} }).mcp : undefined;
     return {
       canEdit,
-      skills: store.objects<Obj>(skillKind(id)).map((skill) => canEdit
+      skills: (await store.objects<Obj>(skillKind(id))).map((skill) => canEdit
         ? { id: skill.id, name: skill.name, description: skill.description, files: skill.assets?.map((asset: Obj) => asset.path) || ["SKILL.md"] }
         : { name: skill.name }),
       mcp: Object.keys(config.mcp || {}).map((name) => canEdit ? { name, config: masked![name] } : { name }),
     };
   }
-  check(canEdit, 403, "只有牛马创建者可以查看或修改 skill / MCP 配置详情");
+  check(canEdit, 403, path[0] === "vault" ? "只有牛马创建者可以查看或修改这个牛马的密码本" : "只有牛马创建者可以查看或修改 skill / MCP 配置详情");
+  if (path[0] === "vault") {
+    // The employee's own book: entries never leave it and the secret is never returned.
+    if (method === "GET" && path.length === 1) return { entries: (await employee.vault.list()).filter((entry) => !entry.tempFor) };
+    if (method === "POST" && path.length === 1) {
+      check(!body.id || !(await employee.vault.list()).find((entry) => entry.id === body.id)?.tempFor, 400, "任务临时条目不能编辑");
+      const saved = await employee.vault.save({ id: body.id, type: body.type, name: body.name, condition: body.condition, content: body.content, share: typeof body.share === "boolean" ? body.share : undefined });
+      await employee.emitChanged();
+      return saved;
+    }
+    check(method === "DELETE" && path.length === 2, 404, "Vault route not found");
+    await employee.vault.remove(decodeURIComponent(path[1]));
+    await employee.emitChanged();
+    return { ok: true };
+  }
   if (path[0] === "mcp" && path.length === 1 && method === "PUT") {
     const mcp = body.mcp;
     check(mcp && typeof mcp === "object" && !Array.isArray(mcp) && Object.keys(mcp).length <= 50, 400, "MCP配置必须为对象，最多50项");
@@ -61,18 +75,18 @@ export async function employeeCapabilities(employee: Employee, user: { id: strin
       check(!!name.trim() && name.length <= 100 && !/[\x00-\x1f]/.test(name) && !["__proto__", "constructor", "prototype"].includes(name), 400, "Invalid MCP name");
       validateMcpServer(value, name);
     }
-    store.save("employee-capabilities", id, { ...config, mcp: next });
+    await store.save("employee-capabilities", id, { ...config, mcp: next });
   } else if (path[0] === "skills" && path[1] === "upload" && path.length === 2 && method === "POST") {
     const result = await uploadSkill(store, body, id);
-    employee.emitChanged(employee.state());
+    await employee.emitChanged();
     return result;
   } else if (path[0] === "skills" && path.length === 2 && ["GET", "DELETE"].includes(method)) {
     const name = decodeURIComponent(path[1]);
-    const skill = store.object<Obj>(skillKind(id), name);
+    const skill = await store.object<Obj>(skillKind(id), name);
     check(skill, 404, "Skill not found");
     if (method === "GET") return { id: skill.id, name: skill.name, description: skill.description, content: skill.content, files: skill.assets?.map((asset: Obj) => asset.path) || ["SKILL.md"] };
-    store.remove(skillKind(id), name);
+    await store.remove(skillKind(id), name);
   } else check(false, 404, "Capability route not found");
-  employee.emitChanged(employee.state());
+  await employee.emitChanged();
   return { ok: true };
 }

@@ -1,7 +1,8 @@
 import { updateEmployeeAvatar } from "../../core/employee-avatar";
+import { colleaguesOf } from "../../core/colleagues";
 import { chatHistory } from "../../core/chat-page";
 import { prepareDutyInput } from "../../core/duty-condition";
-import { employeeCapabilities } from "../../core/employee-capabilities";
+import { canConfigureEmployee, employeeCapabilities } from "../../core/employee-capabilities";
 import {
   browserTabs,
   browserScreenshot,
@@ -9,19 +10,22 @@ import {
 } from "../../core/browser-preview";
 import { publicOrigin, principal } from "../../core/http-auth";
 import { authRoute, bodyJSON } from "../../core/http-auth-routes";
-import { check } from "../../core/auth";
+import { AuthError, check } from "../../core/auth";
+import { sep } from "node:path";
 import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import {
   defineEventHandler,
   getRequestURL,
+  getRequestHeaders,
   readBody,
   createError,
   setHeader,
   send,
 } from "h3";
 import { app, employeeLive } from "../../core/application";
-import { assert, object, type Obj } from "../../core/util";
+import { CLIENT_BODY_LIMIT } from "../../core/client-socket";
+import { assert, filterAsync, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
 import presets from "../../../shared/provider-presets.json";
@@ -39,7 +43,7 @@ async function inputMessage(
     (a.text || "").length <= 2 << 20 && (!a.images || a.images.length <= 16),
     "Message too large",
   );
-  const quote = a.quoteSeq === undefined ? undefined : store.quote(sessionId, a.quoteSeq);
+  const quote = a.quoteSeq === undefined ? undefined : await store.quote(sessionId, a.quoteSeq);
   const images: { mime: string; blobId?: string; data?: string }[] = [];
   let total = 0;
   for (const image of a.images || []) {
@@ -59,8 +63,8 @@ async function inputMessage(
       data.length <= 25 << 20 && total <= 64 << 20,
       "Image attachment limit exceeded",
     );
-    const blobId = store.blob(image.mime, data);
-    store.grantBlob(blobId, sessionId);
+    const blobId = await store.blob(image.mime, data);
+    await store.grantBlob(blobId, sessionId);
     images.push({ mime: image.mime, blobId });
   }
   return { role: "user", text: a.text || "", images, quote };
@@ -79,9 +83,19 @@ export default defineEventHandler(async (event) => {
     const body = await bodyJSON(event, 4096);
     setHeader(event, "Cache-Control", "no-store");
     try {
-      return body.clientId ? app().clientSockets.pair(body) : engine.localAgents.verify(body.ticket, auth);
+      return body.clientId ? await app().clientSockets.pair(body) : await engine.localAgents.verify(body.ticket, auth);
     }
     catch { throw createError({ statusCode: 401, statusMessage: "Local agent ticket invalid or expired" }); }
+  }
+  if (path[0] === "local-agent" && path[1] === "result" && method === "POST") {
+    setHeader(event, "Cache-Control", "no-store");
+    // Only headers and URL are needed; reading the body stays with bodyJSON.
+    const request = { headers: new Headers(getRequestHeaders(event) as Record<string, string>), url: getRequestURL(event).href } as unknown as Request;
+    try { await app().clientSockets.authorize(request); }
+    catch { throw createError({ statusCode: 403, statusMessage: "Client credential invalid or revoked" }); }
+    const body = await bodyJSON(event, CLIENT_BODY_LIMIT);
+    try { return await app().clientSockets.upload(request, body); }
+    catch (e: any) { throw createError({ statusCode: 409, statusMessage: e.message }); }
   }
   const who = principal(event),
     user = who.user;
@@ -94,48 +108,44 @@ export default defineEventHandler(async (event) => {
     if (path[1] === "ticket") return engine.localAgents.ticket(who, a.instance);
     if (path[1] === "revoke") {
       check(typeof a.clientId === "string" && /^[a-f0-9]{32}$/.test(a.clientId), 400, "clientId required");
-      app().clientSockets.revoke(user.id, a.clientId);
+      await app().clientSockets.revoke(user.id, a.clientId);
       return { ok: true };
     }
     throw createError({ statusCode: 404, statusMessage: "Not found" });
   }
   try {
-    if (["config", "providers", "skills", "employee", "vault"].includes(path[0]))
+    if (["config", "providers", "skills", "employee"].includes(path[0]))
       check(user.role === "admin", 403, "Administrator permission required");
     if (path[0] === "debug") {
       check(user.role === "admin", 403, "Administrator permission required");
       check(method === "GET" && path[1] === "sessions" && path.length === 2, 404, "Debug route not found");
-      const employees = engine.employee.all().map((employee) => employee.state());
-      const names = new Map(employees.map((employee) => [employee.id, employee.name]));
-      const tasks = new Map(employees.flatMap((employee) => employee.tasks.map((task) => [task.id, { task, employeeId: employee.id }] as const)));
-      return store.sessions().filter((session) => session.employeeId || session.taskId).map((session) => {
-        const linked = session.taskId ? tasks.get(session.taskId) : undefined;
-        const employeeId = session.employeeId || linked?.employeeId || "";
+      const names = new Map(await Promise.all((await engine.employee.all()).map(async (employee) => { const s = await employee.profile(); return [s.id, s.name] as const; })));
+      return Promise.all((await store.employeeSessions()).map(async (session) => {
+        const linked = session.taskId ? await store.employeeTask(session.taskId) : undefined;
+        const employeeId = session.employeeId || linked?.employee || "";
         return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联牛马", taskText: linked?.task.text || "", kind: !session.taskId ? "chat" : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
-      });
+      }));
     }
     if (path[0] === "bootstrap" && method === "GET")
       return {
         user,
-        sessions: store
-          .sessions()
-          .filter((s) => !s.taskId && !s.employeeId && auth.canRead(user, s)),
+        // Admins also see unowned conversations; everyone else only their own (indexed by owner).
+        sessions: await filterAsync(user.role === "admin" ? await store.plainSessions() : await store.sessionsBy("owner", user.id),
+          async (s) => !s.taskId && !s.employeeId && await auth.canRead(user, s)),
         running: Object.fromEntries(
-          [...engine.active.keys()]
-            .filter((key) => {
-              try {
-                const session = store.session(key);
-                return !session.taskId && auth.canRead(user, session);
-              } catch {
-                return false;
-              }
-            })
-            .map((id) => [id, true]),
+          (await filterAsync([...engine.active.keys()], async (key) => {
+            try {
+              const session = await store.session(key);
+              return !session.taskId && await auth.canRead(user, session);
+            } catch {
+              return false;
+            }
+          })).map((id) => [id, true]),
         ),
         config:
           user.role === "admin"
-            ? maskedConfig(engine.config())
-            : { model: engine.config().model, provider: {} },
+            ? maskedConfig(await engine.config())
+            : { model: (await engine.config()).model, provider: {} },
         cwd: user.role === "viewer" ? "" : process.cwd(),
         clients: engine.localAgents.list(user.id),
         stack: {
@@ -144,52 +154,61 @@ export default defineEventHandler(async (event) => {
           storage: "SQLite",
         },
       };
+    if (path[0] === "files" && method === "GET") {
+      const file = store.files.fromUrl(path.slice(1)), parts = file.slice(store.files.root.length + 1).split(sep), mime = store.files.mime(file);
+      check(mime && await auth.canFile(user, parts), 404, "File not found");
+      let data: Buffer;
+      try { data = await store.files.read(file); } catch { throw new AuthError(404, "File not found"); }
+      setHeader(event, "Content-Type", mime!);
+      setHeader(event, "Cache-Control", "private, max-age=31536000, immutable");
+      return send(event, data);
+    }
     if (path[0] === "blobs" && method === "GET") {
-      check(auth.canBlob(user, path[1]), 404, "Blob not found");
-      const blob = store.blobData(path[1]);
+      check(await auth.canBlob(user, path[1]), 404, "Blob not found");
+      const blob = await store.blobData(path[1]);
       assert(blob, "Blob not found");
       setHeader(event, "Content-Type", blob.mime);
       return send(event, Buffer.from(blob.data));
     }
     if (path[0] === "employees") {
       if (path.length === 1) {
-        if (method === "GET") return engine.employee.all().filter((employee) => employee.accessible(user)).map((employee) => {
-          const s = employee.state();
-          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, scope: s.scope, canManage: employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
-        });
+        if (method === "GET") return Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
+          const s = await employee.state();
+          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, publicSummary: s.publicSummary || "", acceptsColleagues: s.acceptsColleagues !== false, scope: s.scope, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, runningTasks: s.tasks.filter((t) => t.status === "running").length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
+        }));
         if (method === "POST") {
           check(user.role !== "viewer", 403, "Execution permission required");
-          return engine.employee.create(a, user.id, user.role === "admin" ? "team" : "personal");
+          return await engine.employee.create(a, user.id, user.role === "admin" ? "team" : "personal");
         }
       }
-      const employee = engine.employee.all().find((employee) => employee.employeeId === path[1]);
-      check(employee && employee.accessible(user), 404, "Employee not found");
+      const employee = (await engine.employee.all()).find((employee) => employee.employeeId === path[1]);
+      check(employee && await employee.accessible(user), 404, "Employee not found");
       check(!employee.deleting, 409, "牛马正在删除，请稍候");
-      const state = employee.state();
+      const state = await employee.state();
       if (method !== "GET") check(user.role !== "viewer", 403, "只读账号不能执行操作");
-      if (["capabilities", "skills", "mcp"].includes(path[2]))
+      if (["capabilities", "skills", "mcp", "vault"].includes(path[2]))
         return await employeeCapabilities(employee, user, method, path.slice(2), a);
       if (path[2] === "avatar") {
         if (method === "GET") {
           check(/^blob-[a-f\d]{32}$/.test(state.avatar || ""), 404, "Avatar not found");
-          const image = store.blobData(state.avatar!);
+          const image = await store.blobData(state.avatar!);
           check(image && image.mime === "image/webp", 404, "Avatar not found");
           setHeader(event, "Content-Type", "image/webp");
           setHeader(event, "Cache-Control", "private, max-age=86400");
           return send(event, Buffer.from(image.data));
         }
         if (method === "POST") {
-          check(employee.manageable(user), 403, "只有牛马管理者可以修改头像");
+          check(await employee.manageable(user), 403, "只有牛马管理者可以修改头像");
           return await updateEmployeeAvatar(employee, a);
         }
         check(false, 405, "Method not allowed");
       }
       if (path[2] === "execution" && method === "POST") {
-        check(employee.manageable(user), 403, "只有牛马管理者可以切换默认执行位置");
+        check(await employee.manageable(user), 403, "只有牛马管理者可以切换默认执行位置");
         return engine.switchEmployeeExecution(employee.employeeId, a.localAgent, a.clientId, user.id);
       }
       if (path.length === 2 && method === "DELETE") {
-        check(employee.manageable(user), 403, "只有牛马管理者可以删除牛马");
+        check(await employee.manageable(user), 403, "只有牛马管理者可以删除牛马");
         check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认删除牛马及其任务、会话和浏览器登录数据");
         check(!employee.busy.size && !(state.chatSession && engine.active.has(state.chatSession)), 409, "牛马仍在执行，请先停止任务和当前对话，再删除牛马");
         await engine.removeEmployee(employee.employeeId, async () => {
@@ -198,25 +217,30 @@ export default defineEventHandler(async (event) => {
         });
         return { ok: true };
       }
+      if (path[2] === "reset" && path.length === 3 && method === "POST") {
+        check(await employee.manageable(user), 403, "只有牛马管理者可以重置牛马");
+        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认清空该牛马的全部会话和任务");
+        return await engine.resetEmployee(employee.employeeId);
+      }
       if (path[2] === "chat" && path[3] === "clear" && method === "POST") {
-        check(employee.manageable(user), 403, "只有牛马管理者可以清空聊天记录");
+        check(await employee.manageable(user), 403, "只有牛马管理者可以清空聊天记录");
         check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认清空该牛马的聊天记录");
         check(!(state.chatSession && engine.active.has(state.chatSession)), 409, "对话仍在进行，请先停止后再清空聊天记录");
-        return engine.clearEmployeeChat(employee.employeeId);
+        return await engine.clearEmployeeChat(employee.employeeId);
       }
       if (path[2] === "chat" && method === "GET") {
-        const session = employee.chat(user.id);
-        return { session, ...chatHistory(store, session.id, getRequestURL(event).searchParams), running: engine.active.has(session.id) };
+        const session = await employee.chat(user.id);
+        return { session, ...await chatHistory(store, session.id, getRequestURL(event).searchParams), running: engine.active.has(session.id) };
       }
       if (path[2] === "messages" && method === "POST") {
         check(a.clientMessageId === undefined || (typeof a.clientMessageId === "string" && /^[a-zA-Z0-9_-]{16,80}$/.test(a.clientMessageId)), 400, "Invalid message ID");
-        const session = employee.chat(user.id);
+        const session = await employee.chat(user.id);
         const message = {
           ...await inputMessage(a, store, session.id), actorId: user.id,
           clientMessageId: a.clientMessageId,
           clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.quoteSeq ?? null])).digest("hex") : undefined,
         };
-        check(!employee.deleting, 409, "牛马正在删除，请稍候");
+        check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
         await engine.submitChat(session.id, message);
         return { id: session.id };
       }
@@ -225,7 +249,7 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
       if (path[2] === "chrome") {
-        check(employee.manageable(user), 403, "只有牛马管理者可以查看和控制浏览器登录环境");
+        check(await employee.manageable(user), 403, "只有牛马管理者可以查看和控制浏览器登录环境");
         if (method === "POST" && a.operation === "close") {
           check(!employee.busy.size, 409, "Stop browser tasks first");
           const live = app().employeeLives.get(employee.employeeId);
@@ -236,7 +260,7 @@ export default defineEventHandler(async (event) => {
         const browser = await engine.browsers.get(employee.employeeId);
         check(!employee.deleting, 409, "牛马正在删除，请稍候");
         if (path[3] === "tabs" && method === "GET") return browserTabs(browser);
-        if (path[3] === "live" && method === "POST") return employeeLive(employee.employeeId).ticket(who, a.tabTag);
+        if (path[3] === "live" && method === "POST") return (await employeeLive(employee.employeeId)).ticket(who, a.tabTag);
         if (path[3] === "screenshot" && method === "POST") return browserScreenshot(browser, "employee-view:" + user.id, a.tabTag);
         if (path[3] === "control" && method === "POST") return browserControl(browser, "employee-view:" + user.id, a);
         if (path[3] === "tool" && method === "POST") return browser.execute("employee-view:" + user.id, state.cwd, a);
@@ -244,16 +268,20 @@ export default defineEventHandler(async (event) => {
         check(false, 404, "Browser route not found");
       }
       if (path[2] === "control" && method === "POST") {
-        if (["settings", "fire"].includes(a.action)) check(employee.manageable(user), 403, "只有牛马管理者可以修改设置或触发职责");
+        if (["settings", "fire"].includes(a.action)) check(await employee.manageable(user), 403, "只有牛马管理者可以修改设置或触发职责");
         return employee.control(a);
       }
-      if (path[2] === "transcript" && method === "POST") return employee.transcript(a.threadId);
+      if (path[2] === "transcript" && method === "POST") return await employee.transcript(a.threadId);
+      if (path[2] === "colleagues" && path.length === 3 && method === "GET")
+        return (await colleaguesOf(employee)).map(({ profile: p }) => ({ id: p.id, name: p.name, scope: p.scope, publicSummary: p.publicSummary || "", acceptsColleagues: p.acceptsColleagues !== false }));
       if (path.length === 2 && method === "GET") {
         const { enabled, workStart, workEnd, ...visible } = state;
-        return { ...visible, canManage: employee.manageable(user), executionClients: employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
+        return { ...visible, acceptsColleagues: state.acceptsColleagues !== false, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
       }
       if (path.length === 2 && method === "POST") {
-        if (!employee.manageable(user)) check(a.action === "list" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
+        if (!await employee.manageable(user)) check(a.action === "list" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
+        // Same owner-only rule as the vault page: managing an employee does not open its vault.
+        if (typeof a.action === "string" && a.action.startsWith("vault_")) check(await canConfigureEmployee(employee, user), 403, "只有牛马创建者可以使用这个牛马的密码本");
         const result = await employee.execute("", await prepareDutyInput(engine, employee, a));
         return result.secret ? JSON.parse(result.secret) : result.value;
       }
@@ -262,73 +290,70 @@ export default defineEventHandler(async (event) => {
     if (path[0] === "sessions") {
       if (path.length === 1 && method === "POST") {
         assert(!a.model || typeof a.model === "string", "Invalid model");
-        if (a.model) await engine.catalog.resolve(engine.config(), a.model);
+        if (a.model) await engine.catalog.resolve(await engine.config(), a.model);
         assert(a.clientId === undefined || (typeof a.clientId === "string" && /^[a-f0-9-]{32,36}$/.test(a.clientId)), "Invalid client ID");
         const clients = engine.localAgents.list(user.id),
           localAgent = a.localAgent === undefined ? clients.length > 0 : a.localAgent,
           agent = engine.localAgents.active(user.id, a.clientId);
         assert(typeof localAgent === "boolean", "Invalid execution mode");
         assert(!localAgent || agent, "客户端未连接或存在多个客户端，请选择在线执行客户端");
-        return store.newSession({
-          cwd: localAgent ? agent!.cwd : a.cwd,
-          localAgent,
-          localPlatform: localAgent ? agent!.platform : undefined,
-          clientId: localAgent ? agent!.clientId : undefined,
-          clientName: localAgent ? agent!.name : undefined,
-          ownerId: user.id,
-          model: a.model,
-          title: a.title,
-          readOnly: a.readOnly === true,
-        });
+        return await store.newSession({
+                  cwd: localAgent ? agent!.cwd : a.cwd,
+                  localAgent,
+                  localPlatform: localAgent ? agent!.platform : undefined,
+                  clientId: localAgent ? agent!.clientId : undefined,
+                  clientName: localAgent ? agent!.name : undefined,
+                  ownerId: user.id,
+                  model: a.model,
+                  title: a.title,
+                  readOnly: a.readOnly === true,
+                });
       }
       const key = path[1],
-        session = auth.session(user, key, method !== "GET");
+        session = await auth.session(user, key, method !== "GET");
       if (session.employeeId && method !== "GET") check(false, 400, "Use the employee workspace to manage its conversations");
       if (path[2] === "access")
         check(false, 404, "Private sessions cannot be shared");
 
       if (path.length === 2 && method === "GET") {
         const query = getRequestURL(event).searchParams;
-        const history = chatHistory(store, key, query);
+        const history = await chatHistory(store, key, query);
         return {
           session,
           canWrite: !session.taskId && auth.canWrite(user, session),
           ...history,
-          folds: engine.store.db
-            .prepare("SELECT data FROM folds WHERE session=?")
-            .all(key)
+          folds: (await engine.store.all("SELECT data FROM folds WHERE session=?", key))
             .map((r: any) => JSON.parse(r.data)),
-          fire: engine.fire.forSession(key),
+          fire: await engine.fire.forSession(key),
           running: engine.active.has(key),
-          context: new Context(
-            store,
-            key,
-            engine.config().contextMode === "acp" ? "acp" : "auto",
-          ).status(),
+          // Incremental refreshes (`after`) get the budget from context_budget events instead.
+          ...(query.has("after") && query.get("context") !== "1"
+            ? {}
+            : {
+                context: await (await Context.open(store, key, (await engine.config()).contextMode === "acp" ? "acp" : "auto")).status(),
+              }),
         };
       }
       if (path.length === 2 && method === "DELETE") {
-        const family = store.sessionFamily(key);
+        const family = await store.sessionFamily(key);
         assert(
-          family.every(
-            (s) =>
-              !engine.active.has(s.id) &&
-              engine.fire.forSession(s.id)?.status !== "running" &&
-              !s.taskId && !s.employeeId,
-          ),
+          (await filterAsync(family, async (s) =>
+            !engine.active.has(s.id) &&
+            (await engine.fire.forSession(s.id))?.status !== "running" &&
+            !s.taskId && !s.employeeId)).length === family.length,
           "Cannot delete running or employee-owned session",
         );
-        store.deleteSession(key);
+        await store.deleteSession(key);
         for (const s of family) await engine.releaseSession(s.id);
         return { ok: true };
       }
       if (path[2] === "execution" && method === "POST")
         return await engine.switchExecution(key, a.localAgent, a.clientId, user.id);
       if (path[2] === "stage" && method === "POST")
-        return store.stage(key, a.inheritModel === true);
+        return await store.stage(key, a.inheritModel === true);
       if (path[2] === "cancel" && method === "POST") {
         assert(!session.taskId, "Use employee controls to stop tasks");
-        engine.fire.pause(key);
+        await engine.fire.pause(key);
         engine.cancel(key);
         return { ok: true };
       }
@@ -344,15 +369,15 @@ export default defineEventHandler(async (event) => {
           /^\s*\/fire(?:\s|$)/i.test(message.text)
         ) {
           assert(!engine.active.has(key), "Session already running");
-          return engine.fire.start(key, message.text, message.images);
+          return await engine.fire.start(key, message.text, message.images);
         }
         if (
           path[2] === "messages" &&
           /^\s*\/target(?:\s|$)/i.test(message.text)
         )
           throw Error("/target must be used inside /fire");
-        if (path[2] === "messages" && engine.fire.resume(key, message))
-          return { id: key, fire: engine.fire.forSession(key) };
+        if (path[2] === "messages" && await engine.fire.resume(key, message))
+          return { id: key, fire: await engine.fire.forSession(key) };
         const stage = parseStage(message.text);
         let target = key;
         if (stage) {
@@ -362,7 +387,7 @@ export default defineEventHandler(async (event) => {
           );
           if (stage.current)
             await engine.launch(key, { ...message, text: stage.current });
-          target = store.stage(key).id;
+          target = (await store.stage(key)).id;
           message.text = stage.prompt;
         }
         await engine.launch(target, message);
@@ -376,7 +401,7 @@ export default defineEventHandler(async (event) => {
           "Title required",
         );
         session.title = a.title;
-        store.saveSession(session);
+        await store.saveSession(session);
         return { ok: true };
       }
       if (path[2] === "fork" && method === "POST") {
@@ -384,7 +409,7 @@ export default defineEventHandler(async (event) => {
           !engine.active.has(key),
           "Wait until the session stops before forking",
         );
-        return store.fork(key);
+        return await store.fork(key);
       }
     }
     if (path[0] === "config" && method === "PUT")
@@ -399,8 +424,8 @@ export default defineEventHandler(async (event) => {
           "服务商信息无效",
         );
         const raw = structuredClone(a.provider);
-        mergeSecrets(raw, engine.config().provider?.[a.id]);
-        const p = await engine.catalog.provider(raw, engine.config()),
+        mergeSecrets(raw, (await engine.config()).provider?.[a.id]);
+        const p = await engine.catalog.provider(raw, await engine.config()),
           fetched = await engine.catalog.models(p, true),
           models = { ...fetched.models, ...modelEntries(p.models) };
         return { models };
@@ -408,7 +433,7 @@ export default defineEventHandler(async (event) => {
       if (path[1] === "presets") return presets;
       if (path[1] === "models")
         return engine.catalog.list(
-          engine.config(),
+          await engine.config(),
           a.force === true ||
             getRequestURL(event).searchParams.get("force") === "true",
         );
@@ -428,12 +453,12 @@ export default defineEventHandler(async (event) => {
             ),
           };
         if (a.action === "logout") {
-          engine.catalog.auth.logout(a.source);
+          await engine.catalog.auth.logout(a.source);
           return { ok: true };
         }
         if (a.action === "status") {
           try {
-            await engine.catalog.auth.load(a.source, store.get("paths", {}));
+            await engine.catalog.auth.load(a.source, await store.get("paths", {}));
             return { available: true };
           } catch (e: any) {
             return { available: false, reason: e.message };
@@ -442,7 +467,7 @@ export default defineEventHandler(async (event) => {
         throw Error("Unknown subscription action");
       }
       if (path[1] === "import" && method === "POST") {
-        const cfg = engine.config(),
+        const cfg = await engine.config(),
           key = a.id || a.source;
         assert(
           [
@@ -484,10 +509,10 @@ export default defineEventHandler(async (event) => {
         };
       }
       if (path[1] === "paths" && method === "PUT") {
-        store.put("paths", {
-          workbuddyPath: a.workbuddyPath || "",
-          devinPath: a.devinPath || "",
-        });
+        await store.put("paths", {
+                    workbuddyPath: a.workbuddyPath || "",
+                    devinPath: a.devinPath || "",
+                  });
         return { ok: true };
       }
     }
@@ -495,10 +520,7 @@ export default defineEventHandler(async (event) => {
     if (path[0] === "employee") {
       if (method === "GET")
         return {
-          ...(() => {
-            const { orbit, ...state } = engine.employee.state();
-            return state;
-          })(),
+          ...(({ orbit, ...state }) => state)(await engine.employee.state()),
           systemPresence: engine.employee.nativePresence,
           busy: [...engine.employee.busy.keys()],
           takeovers: [...engine.employee.takeovers].map(([id, v]) => ({
@@ -508,7 +530,7 @@ export default defineEventHandler(async (event) => {
         };
       if (path[1] === "control") return engine.employee.control(a);
       if (path[1] === "takeover") {
-        engine.employee.takeover(a);
+        await engine.employee.takeover(a);
         return { ok: true };
       }
       if (path[1] === "activity") {
@@ -518,20 +540,9 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
       if (path[1] === "transcript")
-        return engine.employee.transcript(a.threadId);
+        return await engine.employee.transcript(a.threadId);
       const out = await engine.employee.execute("", a);
       return out.secret ? JSON.parse(out.secret) : out.value;
-    }
-    if (path[0] === "vault") {
-      const vault = engine.vault;
-      if (method === "GET" && path.length === 1)
-        return { entries: vault.list() };
-      if (method === "POST" && path.length === 1) return vault.save(a);
-      if (method === "DELETE" && path.length === 2) {
-        vault.remove(path[1]);
-        return { ok: true };
-      }
-      check(false, 404, "Vault route not found");
     }
     if (path[0] === "chrome") {
       if (path.length === 2 && path[1] === "tabs" && method === "GET")
@@ -565,7 +576,7 @@ export default defineEventHandler(async (event) => {
     }
     if (path[0] === "experiences" && method === "GET")
       return engine.chrome.experiences.graph(
-        engine.chrome.experiences.all().filter((e) => !e.disabled),
+        (await engine.chrome.experiences.all()).filter((e) => !e.disabled),
       );
     if (path[0] === "team") {
       if (path[1] === "call")

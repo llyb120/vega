@@ -1,12 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, readlink, writeFile, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
-import { platform } from "node:os";
+import { hostname, platform } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Duplex } from "node:stream";
-import { assert } from "./util";
+import { assert, sleep } from "./util";
 
 export function extensionDirectory(moduleUrl = import.meta.url, entry = process.argv[1]) {
   const candidates = [
@@ -36,6 +36,9 @@ export function headlessArguments(profile: string, extension: string) {
     "--no-default-browser-check",
     "--window-size=1920,1200",
     "--password-store=basic",
+    // No "started debugging this browser" bar (headless shows it too): it shrank the viewport 56px on every attach.
+    // Safe here: the private profile only runs the Nova extension.
+    "--silent-debugger-extension-api",
     "--remote-debugging-port=0",
     `--user-data-dir=${profile}`,
     `--disable-extensions-except=${extension}`,
@@ -78,6 +81,69 @@ async function loadExtension(child: ChildProcess, path: string) {
     output.on("data", receive);
     input.write(JSON.stringify({ id: 1, method: "Extensions.loadUnpacked", params: { path } }) + "\0");
   });
+}
+
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === "EPERM"; } };
+
+// Every Chromium we spawned is its own process group (detached); killing the group takes renderers/zygote with it.
+function killTree(pid: number, signal: NodeJS.Signals) {
+  try { process.kill(platform() === "win32" ? pid : -pid, signal); return; } catch {}
+  try { process.kill(pid, signal); } catch {}
+}
+
+// Last-resort guard: any Chromium still running when Node exits (crash, process.exit,
+// graceful close timed out) is killed synchronously so it cannot hold its profile lock.
+const running = new Set<ChildProcess>();
+export function killBrowsersSync() {
+  for (const child of running) if (child.pid && child.exitCode === null && child.signalCode === null) killTree(child.pid, "SIGKILL");
+  running.clear();
+}
+let exitHook = false;
+
+/**
+ * A private profile locked by a Chromium left over from an earlier server process
+ * (e.g. Node was SIGKILLed) makes every new instance exit with code 21. Linux only:
+ * SingletonLock is a symlink "host-pid"; the holder is reclaimed only when it is on
+ * this host, alive, and its cmdline uses exactly this --user-data-dir.
+ */
+export async function reclaimProfile(profile: string): Promise<"none" | "stale" | "killed" | "foreign"> {
+  if (platform() !== "linux") return "none";
+  let target: string;
+  try { target = await readlink(join(profile, "SingletonLock")); } catch { return "none"; }
+  const cut = target.lastIndexOf("-"), host = target.slice(0, cut), pid = Number(target.slice(cut + 1));
+  if (host === hostname() && Number.isInteger(pid) && pid > 0 && alive(pid)) {
+    let cmdline: string;
+    // Chromium rewrites its process title, so argv may appear as one space-joined string.
+    try { cmdline = (await readFile(`/proc/${pid}/cmdline`, "utf8")).replace(/\0/g, " ") + " "; } catch { return "foreign"; }
+    // Never touch a process that is not a Chromium on this exact profile (pid reuse, other users' browsers).
+    if (!cmdline.includes(` --user-data-dir=${profile} `)) return "foreign";
+    let group = false;
+    try { group = Number((await readFile(`/proc/${pid}/stat`, "utf8")).split(") ")[1]?.split(" ")[2]) === pid; } catch {}
+    const kill = (signal: NodeJS.Signals) => group ? killTree(pid, signal) : (() => { try { process.kill(pid, signal); } catch {} })();
+    kill("SIGTERM");
+    for (let i = 0; i < 30 && alive(pid); i++) await sleep(100);
+    if (alive(pid)) { kill("SIGKILL"); for (let i = 0; i < 20 && alive(pid); i++) await sleep(100); }
+    if (alive(pid)) return "foreign";
+    await removeSingletons(profile);
+    return "killed";
+  }
+  // Holder is gone, or the lock was written by another host name (container recreated
+  // on the same volume): the profile belongs to this server only, so the lock is stale.
+  await removeSingletons(profile);
+  return "stale";
+}
+const removeSingletons = (profile: string) =>
+  Promise.all(["SingletonLock", "SingletonSocket", "SingletonCookie"].map((name) => rm(join(profile, name), { force: true })));
+
+function startupError(code: number | null, signal: NodeJS.Signals | null, stderr: string, cause: unknown) {
+  const tail = stderr.trim().split("\n").slice(-12).join("\n").slice(-1500);
+  const parts = [`牛马浏览器 Chromium 启动即退出（${signal ? "signal " + signal : "code " + code}）`];
+  // 21 = profile in use; 0 = handed off to a live Chromium already holding the profile.
+  if (code === 21 || code === 0) parts.push("该牛马的浏览器配置目录正被残留 Chromium 占用（未能自动清理，请结束占用该目录的 chromium 进程后重试）");
+  if (process.getuid?.() === 0 && process.env.VEGA_CHROMIUM_NO_SANDBOX !== "1")
+    parts.push("当前以 root 运行且未关闭沙箱：Chromium 在 root 下必须设置环境变量 VEGA_CHROMIUM_NO_SANDBOX=1 后重启服务");
+  parts.push(tail ? "stderr：" + tail : "无错误输出（原始错误：" + (cause instanceof Error ? cause.message : String(cause)) + "）");
+  return Error(parts.join("；"));
 }
 
 function chromeBinary(): string | undefined {
@@ -144,19 +210,35 @@ export class HeadlessBrowser {
     }
     if (process.env.VEGA_CHROMIUM_NO_SANDBOX === "1" || platform() === "win32")
       args.unshift("--no-sandbox");
+    if (instance) await reclaimProfile(this.dir);
+    // Detached = own process group, so close/exit can kill the whole Chromium tree at once.
     this.child = spawn(binary, args, {
-      stdio: instance ? ["ignore", "ignore", "ignore", "pipe", "pipe"] : "ignore",
+      stdio: instance ? ["ignore", "ignore", "pipe", "pipe", "pipe"] : "ignore",
       windowsHide: true,
       detached: platform() !== "win32",
     });
     const child = this.child;
     child.unref();
-    child.once("error", () => { if (this.child === child) this.child = undefined; });
-    child.once("exit", () => { if (this.child === child) this.child = undefined; });
+    running.add(child);
+    if (!exitHook) { exitHook = true; process.once("exit", killBrowsersSync); }
+    // A pipe reset when Chromium dies must never surface as an uncaught stream error.
+    for (const stream of child.stdio) stream?.on("error", () => {});
+    let stderr = "";
+    // Always drain stderr (keep the last 4KB) so a chatty Chromium never blocks on a full pipe.
+    child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4096); });
+    child.once("error", () => { running.delete(child); if (this.child === child) this.child = undefined; });
+    child.once("exit", () => { running.delete(child); if (this.child === child) this.child = undefined; });
     await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
     if (instance) {
       try { await loadExtension(child, extension); }
-      catch (error) { await this.close(); throw error; }
+      catch (error) {
+        // A dead pipe (ECONNRESET/EPIPE) means Chromium is exiting: wait briefly for its exit status.
+        if (child.exitCode === null && child.signalCode === null)
+          await new Promise<void>((yes) => { const timer = setTimeout(yes, 2000); child.once("exit", () => { clearTimeout(timer); yes(); }); });
+        const exited = child.exitCode !== null || child.signalCode !== null;
+        await this.close();
+        throw exited ? startupError(child.exitCode, child.signalCode, stderr, error) : error;
+      }
     }
   }
   async close() {
@@ -170,10 +252,11 @@ export class HeadlessBrowser {
     } else child.kill();
     await new Promise<void>((yes) => {
       const timer = setTimeout(() => {
-        child.kill("SIGKILL");
+        if (child.pid) killTree(child.pid, "SIGKILL");
+        running.delete(child);
         yes();
       }, 4000);
-      if (child.exitCode !== null) {
+      if (child.exitCode !== null || child.signalCode !== null) {
         clearTimeout(timer);
         yes();
       } else

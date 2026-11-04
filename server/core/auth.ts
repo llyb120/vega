@@ -112,29 +112,21 @@ export class Auth {
   ) {
     this.events.setMaxListeners(256);
   }
-  hasUsers() {
+  async hasUsers() {
     return (
       Number(
-        (this.store.db.prepare("SELECT count(*) n FROM web_users").get() as any)
+        (await this.store.one("SELECT count(*) n FROM web_users") as any)
           .n,
       ) > 0
     );
   }
-  user(id: string): User | undefined {
-    const row = this.store.db
-      .prepare(
-        "SELECT id,username,role,disabled,createdAt,lastLogin FROM web_users WHERE id=?",
-      )
-      .get(id) as any;
+  async user(id: string): Promise<User | undefined> {
+    const row = await this.store.one("SELECT id,username,role,disabled,createdAt,lastLogin FROM web_users WHERE id=?", id) as any;
     return row ? { ...row, disabled: !!row.disabled } : undefined;
   }
-  users() {
+  async users() {
     return (
-      this.store.db
-        .prepare(
-          "SELECT id,username,role,disabled,createdAt,lastLogin FROM web_users ORDER BY createdAt,id",
-        )
-        .all() as any[]
+      await this.store.all("SELECT id,username,role,disabled,createdAt,lastLogin FROM web_users ORDER BY createdAt,id") as any[]
     ).map((row) => ({ ...row, disabled: !!row.disabled })) as User[];
   }
   async crypto<T>(fn: () => Promise<T>) {
@@ -168,53 +160,44 @@ export class Auth {
       this.attempts.set(key, bucket);
     }
   }
-  issue(user: User) {
+  async issue(user: User) {
     const token = randomBytes(32).toString("base64url"),
       hash = digest(token),
       csrf = randomBytes(32).toString("base64url"),
       expiresAt = Date.now() + TTL;
-    this.store.db
-      .prepare("DELETE FROM web_sessions WHERE expiresAt<=?")
-      .run(Date.now());
-    this.store.db
-      .prepare(
-        "DELETE FROM web_sessions WHERE hash IN (SELECT hash FROM web_sessions WHERE userId=? ORDER BY createdAt DESC LIMIT -1 OFFSET 19)",
-      )
-      .run(user.id);
-    this.store.db
-      .prepare("INSERT INTO web_sessions VALUES(?,?,?,?,?)")
-      .run(hash, user.id, csrf, Date.now(), expiresAt);
-    this.store.db
-      .prepare("UPDATE web_users SET lastLogin=? WHERE id=?")
-      .run(Date.now(), user.id);
+    await this.store.run("DELETE FROM web_sessions WHERE expiresAt<=?", Date.now());
+    // Keep the newest 19 sessions plus this one.
+    const older = await this.store.all("SELECT hash FROM web_sessions WHERE userId=? ORDER BY createdAt DESC", user.id) as { hash: string }[];
+    for (const { hash } of older.slice(19)) await this.store.run("DELETE FROM web_sessions WHERE hash=?", hash);
+    await this.store.run("INSERT INTO web_sessions VALUES(?,?,?,?,?)", hash, user.id, csrf, Date.now(), expiresAt);
+    await this.store.run("UPDATE web_users SET lastLogin=? WHERE id=?", Date.now(), user.id);
     return {
       token,
-      principal: { user: this.user(user.id)!, hash, csrf, expiresAt },
+      principal: { user: (await this.user(user.id))!, hash, csrf, expiresAt },
     };
   }
-  resolveHash(hash: string): Principal | undefined {
-    const row = this.store.db
-      .prepare("SELECT userId,csrf,expiresAt FROM web_sessions WHERE hash=?")
-      .get(hash) as any;
+  async resolveHash(hash: string): Promise<Principal | undefined> {
+    const row = await this.store.one("SELECT userId,csrf,expiresAt FROM web_sessions WHERE hash=?", hash) as any;
     if (!row || row.expiresAt <= Date.now()) return;
-    const user = this.user(row.userId);
+    const user = await this.user(row.userId);
     if (!user || user.disabled) return;
     return { user, hash, csrf: row.csrf, expiresAt: row.expiresAt };
   }
-  authenticate(token: string | undefined) {
+  async authenticate(token: string | undefined) {
     if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) return;
-    return this.resolveHash(digest(token));
+    return await this.resolveHash(digest(token));
   }
-  revoke(id: string) {
-    this.store.db.prepare("DELETE FROM web_sessions WHERE userId=?").run(id);
-    this.events.emit("revoke", id);
+  async revoke(id: string) {
+    await this.store.run("DELETE FROM web_sessions WHERE userId=?", id);
+    // Listeners may clean up storage too; revocation completes when they have.
+    await Promise.all(this.events.listeners("revoke").map((listener) => listener(id)));
   }
-  logout(hash: string) {
-    this.store.db.prepare("DELETE FROM web_sessions WHERE hash=?").run(hash);
+  async logout(hash: string) {
+    await this.store.run("DELETE FROM web_sessions WHERE hash=?", hash);
     this.events.emit("logout", hash);
   }
   async setup(a: Record<string, any>, ip = "local") {
-    check(!this.hasUsers(), 409, "Initial administrator already exists");
+    check(!await this.hasUsers(), 409, "Initial administrator already exists");
     this.rate(ip, "initial-admin");
     check(
       typeof a.setupToken === "string" && equal(a.setupToken, this.setupToken),
@@ -224,14 +207,12 @@ export class Auth {
     const name = username(a.username),
       pass = password(a.password),
       hash = await this.crypto(() => encoded(pass));
-    return this.store.transaction(() => {
-      check(!this.hasUsers(), 409, "Initial administrator already exists");
-      const id = randomBytes(16).toString("hex");
-      this.store.db
-        .prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)")
-        .run(id, name, hash, "admin", 0, Date.now(), 0);
-      return this.issue(this.user(id)!);
-    });
+    return await this.store.transaction(async () => {
+          check(!await this.hasUsers(), 409, "Initial administrator already exists");
+          const id = randomBytes(16).toString("hex");
+          await this.store.run("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)", id, name, hash, "admin", 0, Date.now(), 0);
+          return await this.issue((await this.user(id))!);
+        });
   }
   async login(a: Record<string, any>, ip = "local") {
     const name =
@@ -244,45 +225,37 @@ export class Auth {
       401,
       "Invalid username or password",
     );
-    const row = this.store.db
-      .prepare(
-        "SELECT id,password FROM web_users WHERE username=? COLLATE NOCASE",
-      )
-      .get(name) as any;
+    const row = await this.store.one("SELECT id,password FROM web_users WHERE username=?", name) as any;
     const stored = row?.password || dummy;
     const valid = await this.crypto(() => verify(a.password, stored));
-    const user = row && this.user(row.id),
+    const user = row && await this.user(row.id),
       current =
         row &&
-        (this.store.db
-          .prepare("SELECT password FROM web_users WHERE id=?")
-          .get(row.id) as any);
+        (await this.store.one("SELECT password FROM web_users WHERE id=?", row.id) as any);
     check(
       valid && user && !user.disabled && current?.password === stored,
       401,
       "Invalid username or password",
     );
     this.attempts.delete("user:" + digest(name));
-    return this.issue(user);
+    return await this.issue(user);
   }
   async add(a: Record<string, any>) {
     const name = username(a.username),
       pass = password(a.password);
     check(roles.includes(a.role), 400, "Invalid role");
     const hash = await this.crypto(() => encoded(pass));
-    return this.store.transaction(() => {
-      check(this.users().length < 100, 400, "Maximum100 users");
-      check(
-        !this.users().some((u) => u.username === name),
-        409,
-        "Username already exists",
-      );
-      const id = randomBytes(16).toString("hex");
-      this.store.db
-        .prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)")
-        .run(id, name, hash, a.role, 0, Date.now(), 0);
-      return this.user(id)!;
-    });
+    return await this.store.transaction(async () => {
+          check((await this.users()).length < 100, 400, "Maximum100 users");
+          check(
+            !(await this.users()).some((u) => u.username === name),
+            409,
+            "Username already exists",
+          );
+          const id = randomBytes(16).toString("hex");
+          await this.store.run("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)", id, name, hash, a.role, 0, Date.now(), 0);
+          return (await this.user(id))!;
+        });
   }
   async update(id: string, a: Record<string, any>) {
     check(
@@ -298,42 +271,36 @@ export class Auth {
       a.password !== undefined
         ? await this.crypto(() => encoded(password(a.password)))
         : undefined;
-    const user = this.store.transaction(() => {
-      const old = this.user(id);
-      check(old, 404, "User not found");
-      const next = {
-        ...old,
-        role: a.role ?? old.role,
-        disabled: a.disabled ?? old.disabled,
-      };
-      if (
-        old.role === "admin" &&
-        !old.disabled &&
-        (next.disabled || next.role !== "admin")
-      )
-        check(
-          this.users().some(
-            (u) => u.id !== id && u.role === "admin" && !u.disabled,
-          ),
-          409,
-          "Cannot disable or demote the last enabled administrator",
-        );
-      this.store.db
-        .prepare("UPDATE web_users SET role=?,disabled=? WHERE id=?")
-        .run(next.role, next.disabled ? 1 : 0, id);
-      if (hash)
-        this.store.db
-          .prepare("UPDATE web_users SET password=? WHERE id=?")
-          .run(hash, id);
-      return this.user(id)!;
-    });
-    this.revoke(id);
+    const user = await this.store.transaction(async () => {
+          const old = await this.user(id);
+          check(old, 404, "User not found");
+          const next = {
+            ...old,
+            role: a.role ?? old.role,
+            disabled: a.disabled ?? old.disabled,
+          };
+          if (
+            old.role === "admin" &&
+            !old.disabled &&
+            (next.disabled || next.role !== "admin")
+          )
+            check(
+              (await this.users()).some(
+                (u) => u.id !== id && u.role === "admin" && !u.disabled,
+              ),
+              409,
+              "Cannot disable or demote the last enabled administrator",
+            );
+          await this.store.run("UPDATE web_users SET role=?,disabled=? WHERE id=?", next.role, next.disabled ? 1 : 0, id);
+          if (hash)
+            await this.store.run("UPDATE web_users SET password=? WHERE id=?", hash, id);
+          return (await this.user(id))!;
+        });
+    await this.revoke(id);
     return user;
   }
   async changePassword(id: string, current: unknown, next: unknown) {
-    const row = this.store.db
-      .prepare("SELECT password FROM web_users WHERE id=?")
-      .get(id) as any;
+    const row = await this.store.one("SELECT password FROM web_users WHERE id=?", id) as any;
     check(row, 401, "Please sign in again");
     check(
       typeof current === "string" && Buffer.byteLength(current) <= 256,
@@ -343,26 +310,22 @@ export class Auth {
     const valid = await this.crypto(() => verify(current, row.password));
     check(valid, 401, "Current password invalid");
     const hash = await this.crypto(() => encoded(password(next)));
-    const latest = this.store.db
-      .prepare("SELECT password FROM web_users WHERE id=?")
-      .get(id) as any;
+    const latest = await this.store.one("SELECT password FROM web_users WHERE id=?", id) as any;
     check(
       latest?.password === row.password,
       409,
       "Password changed concurrently; sign in again",
     );
-    this.store.db
-      .prepare("UPDATE web_users SET password=? WHERE id=?")
-      .run(hash, id);
-    this.revoke(id);
+    await this.store.run("UPDATE web_users SET password=? WHERE id=?", hash, id);
+    await this.revoke(id);
   }
-  canRead(user: User, session: Session) {
+  async canRead(user: User, session: Session) {
     if (session.employeeId) {
       const employee = session.employeeId === "default"
-        ? this.store.get<any>("employee", {})
-        : this.store.object<any>("employee", session.employeeId);
+        ? await this.store.get<any>("employee", {})
+        : await this.store.object<any>("employee", session.employeeId);
       if (employee) {
-        const owner = employee.ownerId ? this.user(employee.ownerId) : undefined;
+        const owner = employee.ownerId ? await this.user(employee.ownerId) : undefined;
         if (employee.scope === "team" || (!employee.scope && (session.employeeId === "default" || owner?.role === "admin"))) return true;
         if (user.role === "admin" || employee.ownerId === user.id) return true;
       }
@@ -378,14 +341,14 @@ export class Auth {
       (user.role === "admin" || session.ownerId === user.id)
     );
   }
-  session(user: User, id: string, write = false) {
+  async session(user: User, id: string, write = false) {
     let session: Session;
     try {
-      session = this.store.session(id);
+      session = await this.store.session(id);
     } catch {
       throw new AuthError(404, "Session not found");
     }
-    check(this.canRead(user, session), 404, "Session not found");
+    check(await this.canRead(user, session), 404, "Session not found");
     if (write)
       check(
         this.canWrite(user, session),
@@ -394,17 +357,22 @@ export class Auth {
       );
     return session;
   }
-  canBlob(user: User, id: string) {
-    if (this.store.db.prepare("SELECT 1 FROM blob_user_access WHERE blob=? AND user=?").get(id, user.id)) return true;
-    const rows = this.store.db
-      .prepare("SELECT session FROM blob_access WHERE blob=?")
-      .all(id) as any[];
-    return rows.some((row) => {
+  /** A file under Files.root by its path segments (employees/<id>/…, users/<id>/<session>/…, views/<user>/…). */
+  async canFile(user: User, parts: string[]) {
+    const [kind, owner, bucket] = parts;
+    if (kind === "employees") return await this.canRead(user, { employeeId: owner } as Session);
+    if (kind === "views") return owner === user.id;
+    if (kind !== "users") return false;
+    try { return await this.canRead(user, await this.store.session(bucket)); } catch { return false; }
+  }
+  async canBlob(user: User, id: string) {
+    if (await this.store.one("SELECT 1 FROM blob_user_access WHERE blob_id=? AND user=?", id, user.id)) return true;
+    const rows = await this.store.all("SELECT session FROM blob_access WHERE blob_id=?", id) as any[];
+    for (const row of rows) {
       try {
-        return this.canRead(user, this.store.session(row.session));
-      } catch {
-        return false;
-      }
-    });
+        if (await this.canRead(user, await this.store.session(row.session))) return true;
+      } catch {}
+    }
+    return false;
   }
 }

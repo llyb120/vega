@@ -53,11 +53,11 @@ export class LocalAgents {
     this.tickets.set(ticket, { hash: principal.hash, instance, until: Date.now() + 15000 });
     return { ticket };
   }
-  verify(ticket: unknown, auth: Auth) {
+  async verify(ticket: unknown, auth: Auth) {
     assert(typeof ticket === "string", "Invalid agent ticket");
     const entry = this.tickets.get(ticket);
     this.tickets.delete(ticket);
-    const principal = entry && entry.until >= Date.now() && auth.resolveHash(entry.hash);
+    const principal = entry && entry.until >= Date.now() && await auth.resolveHash(entry.hash);
     assert(principal, "Local agent ticket expired or login revoked");
     return { userId: principal.user.id, instance: entry!.instance, expiresAt: principal.expiresAt };
   }
@@ -127,10 +127,10 @@ export class LocalAgents {
   }
   private send(agent: Agent, job: Obj) {
     if (agent.reconnecting) throw new LocalAgentUnavailable();
-    if (agent.transport) agent.transport.send(job);
-    else this.emit({ type: "local_agent_request", targetUser: agent.userId, data: { instance: agent.instance, ...job } });
+    if (!agent.transport) throw new LocalAgentUnavailable();
+    agent.transport.send(job);
   }
-  request(agent: Agent, op: "exec" | "file" | "browser", args: Obj, signal: AbortSignal) {
+  request(agent: Agent, op: "exec" | "file" | "browser" | "key", args: Obj, signal: AbortSignal) {
     if (op === "exec") {
       assert(typeof args.command === "string" && args.command.trim(), "command required");
       assertShellCommand(args.command);
