@@ -14,6 +14,7 @@ import EmployeeTasks from "./EmployeeTasks.vue";
 import EmployeeDuties from "./EmployeeDuties.vue";
 import EmployeeMemories from "./EmployeeMemories.vue";
 import EmployeeSettings from "./EmployeeSettings.vue";
+import MentionTextarea from "./MentionTextarea.vue";
 import EmployeeCapabilities from "./EmployeeCapabilities.vue";
 import EmployeeVault from "./EmployeeVault.vue";
 import WorkPanel from "./WorkPanel.vue";
@@ -376,6 +377,8 @@ function showTasks(filter = "active") {
   workRailOpen.value = false;
   employeeTab.value = "tasks";
 }
+// A new employee is a team employee when an admin creates it (reaches the team), else the user's personal one (reaches the list: team + own).
+const newEmployeeColleagues = computed(() => employees.value.filter((entry) => !isAdmin.value || entry.scope === "team"));
 const employeeGroups = computed(() => [['team', '团队牛马'], ['personal', isAdmin.value ? '个人牛马' : '我的牛马']].map(([scope, label]) => ({ scope, label, entries: employees.value.filter((employee) => employee.scope === scope) })).filter((group) => group.entries.length));
 const labels = {
   queued: "排队中",
@@ -1544,7 +1547,7 @@ onBeforeUnmount(() => {
               <div class="create-head"><span class="create-icon" aria-hidden="true"><Icon name="users" :size="22" /></span><div><h3>你想把什么交给他？</h3><p class="hint">{{ isAdmin ? '团队牛马 · 所有成员可见' : '个人牛马 · 仅本人和管理员可见' }}</p></div></div>
               <div class="form-grid">
                 <label>牛马名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
-                <label>工作方向<textarea v-model="newEmployeeInstruction" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
+                <label>工作方向<MentionTextarea v-model="newEmployeeInstruction" :colleagues="newEmployeeColleagues" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果；发布相关的工作转交给 @发布助手。" /></label>
               </div>
               <ul class="create-facts">
                 <li><Icon name="check" :size="14" />创建后即可接活，无需设置启用或工作时间</li>

@@ -1,11 +1,19 @@
 <script setup vapor>
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import Icon from "./Icon.vue";
+import MentionTextarea from "./MentionTextarea.vue";
 import EmployeeAvatarPicker from "./EmployeeAvatarPicker.vue";
 const props = defineProps({ employee: Object, api: Function, saving: Boolean, deleting: Boolean, resetting: String, busy: Boolean });
 const emit = defineEmits(["save", "delete", "reset", "execution", "avatar", "cancel"]);
 const clients = computed(() => props.employee.executionClients || []);
 const local = computed(() => !!props.employee.execution?.localAgent);
+// Colleagues this employee can @ (same reach rule as the backend).
+const colleagues = ref([]);
+watch(() => props.employee.id, async (id) => {
+  colleagues.value = [];
+  if (!id) return;
+  try { const list = await props.api(`/employees/${id}/colleagues`); if (props.employee.id === id) colleagues.value = list; } catch { /* the picker just stays empty */ }
+}, { immediate: true });
 </script>
 <template>
   <div class="page-scroll settings-page">
@@ -14,7 +22,7 @@ const local = computed(() => !!props.employee.execution?.localAgent);
         <div class="card-head"><h3>牛马资料</h3><p class="hint">保存后，新任务会使用更新的工作原则和目录。</p></div>
         <div class="form-grid">
           <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
-          <label>工作原则<textarea v-model="employee.instruction" rows="6" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果；发布相关的工作转交给 @发布助手。"></textarea><small class="hint">可用「@牛马名称」指定协作同事（只能 @ 你的个人牛马或团队牛马）；同事改名后会自动更新。</small></label>
+          <label>工作原则<MentionTextarea v-model="employee.instruction" :colleagues="colleagues" rows="6" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果；发布相关的工作转交给 @发布助手。" /><small class="hint">输入 @ 可选择协作同事（只能 @ 你的个人牛马或团队牛马）；同事改名后会自动更新。</small></label>
           <label>对外说明<textarea v-model="employee.publicSummary" rows="2" maxlength="300" placeholder="例如：负责前端项目的开发和发布，可以回答构建、部署相关问题。"></textarea><small class="hint">其他牛马看到的简介，用来判断该不该找它（最多 300 字）。</small></label>
           <label class="check"><input v-model="employee.acceptsColleagues" type="checkbox" />接受其他牛马的转交和询问</label>
           <label>工作目录<input v-model="employee.cwd" class="mono-input" required spellcheck="false" /></label>

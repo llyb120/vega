@@ -1,4 +1,5 @@
 import { updateEmployeeAvatar } from "../../core/employee-avatar";
+import { colleaguesOf } from "../../core/colleagues";
 import { chatHistory } from "../../core/chat-page";
 import { prepareDutyInput } from "../../core/duty-condition";
 import { canConfigureEmployee, employeeCapabilities } from "../../core/employee-capabilities";
@@ -173,7 +174,7 @@ export default defineEventHandler(async (event) => {
       if (path.length === 1) {
         if (method === "GET") return Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
           const s = await employee.state();
-          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, scope: s.scope, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
+          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, publicSummary: s.publicSummary || "", acceptsColleagues: s.acceptsColleagues !== false, scope: s.scope, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
         }));
         if (method === "POST") {
           check(user.role !== "viewer", 403, "Execution permission required");
@@ -271,6 +272,8 @@ export default defineEventHandler(async (event) => {
         return employee.control(a);
       }
       if (path[2] === "transcript" && method === "POST") return await employee.transcript(a.threadId);
+      if (path[2] === "colleagues" && path.length === 3 && method === "GET")
+        return (await colleaguesOf(employee)).map(({ profile: p }) => ({ id: p.id, name: p.name, scope: p.scope, publicSummary: p.publicSummary || "", acceptsColleagues: p.acceptsColleagues !== false }));
       if (path.length === 2 && method === "GET") {
         const { enabled, workStart, workEnd, ...visible } = state;
         return { ...visible, acceptsColleagues: state.acceptsColleagues !== false, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
