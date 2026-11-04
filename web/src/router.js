@@ -1,5 +1,4 @@
-// A tiny hash router: the address bar mirrors which page is open (/#/employees/e1/tasks), so refresh and links land
-// on it. Only the hash changes while navigating, so mobile browsers show no page-loading bar.
+// A tiny history router: the address bar mirrors which page is open, so refresh and links land on it.
 // Paths only describe the page; App.vue checks that the ids exist and are visible before opening them.
 export const PAGES = ["resources", "browser", "experiences", "debug", "settings", "account"];
 export const ADMIN_PAGES = ["browser", "experiences", "debug", "settings"];
@@ -8,7 +7,7 @@ export const GROUP_PANELS = ["work", "members"];
 const PAGE_SUBS = { settings: ["scenes"], debug: true, experiences: true };
 const pageSub = (page, sub) => PAGE_SUBS[page] === true || PAGE_SUBS[page]?.includes(sub);
 export const EMPLOYEE_TABS = ["tasks", "browser", "duties", "memories", "capabilities", "vault", "settings"];
-/** First path segments that are app pages; the server answers old /employees/… links with index.html (then redirected). */
+/** First path segments that are app pages; the server answers these with index.html. */
 export const ROUTE_ROOTS = ["employees", "groups", "chat", ...PAGES];
 
 const decode = (part) => { try { return decodeURIComponent(part); } catch { return part; } };
@@ -51,12 +50,4 @@ export function formatRoute(route) {
   return "/" + view + (sub && pageSub(view, sub) ? "/" + encode(sub) : "");
 }
 
-export const employeePath = (id) => "#/employees/" + encode(id);
-/** The route path in a location: the hash (#/…), else an old path link (/employees/…, /?employee=ID). */
-export function locationPath(location) {
-  return location.hash.startsWith("#/") ? location.hash.slice(1) : location.pathname + location.search;
-}
-/** The path the address bar already shows in canonical form (/#/…), or null when it needs rewriting. */
-export function canonicalPath(location) {
-  return location.pathname === "/" && !location.search && location.hash.startsWith("#/") ? location.hash.slice(1) : null;
-}
+export const employeePath = (id) => "/employees/" + encode(id);
