@@ -25,6 +25,7 @@ import DebugSessions from "./DebugSessions.vue";
 import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
+import { useUnread } from "./unread.js";
 import {
   computed,
   nextTick,
@@ -1020,8 +1021,10 @@ function handleEvent(event) {
   if (view.value === "debug" && ["started", "message_end", "tool_end", "done", "employee_changed"].includes(event.type)) debugRevision.value++;
   if (event.session && event.session === employee.value.chatSession) {
     employeeEvent.value = event;
+    unread.onEvent(event);
     return;
   }
+  unread.onEvent(event);
   if (event.type === "group_changed") {
     background((async () => {
       await loadGroupsSoon();
@@ -1424,6 +1427,8 @@ onBeforeUnmount(() => {
   eventsSocket?.close();
   localBridge?.close();
 });
+// Last, once all the state it reads exists.
+const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, employeeTab, selectedEmployee, employees, employee, groups, background }));
 </script>
 
 <template>
@@ -1550,7 +1555,7 @@ onBeforeUnmount(() => {
           <p v-if="executionUnavailable" class="execution-warning" role="status">所选客户端已离线或尚未选择，请选择在线客户端或切换到服务端；不会自动切换或重试操作。</p>
         </div>
       </template>
-      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" />
+      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @read="unread.groupRead" />
       <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
       <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" />
       <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" />

@@ -373,6 +373,7 @@ test("failed earlier messages stay before later server messages, and interrupted
 test("chat avatars never animate; sidebar and header avatars animate only while a task is running", () => {
   const bubble = readFileSync("web/src/ChatMessage.vue", "utf8");
   assert(!/animate/.test(bubble) && !/<EmployeeAvatar[^>]*animate/.test(chat), "reply and typing avatars in the chat stay still");
+  assert(!/<EmployeeAvatar[^>]*animate/.test(readFileSync("web/src/GroupChat.vue", "utf8")), "the group's 正在回复 avatars stay still too");
   assert(readFileSync("web/src/AppSidebar.vue", "utf8").includes(':animate="!!entry.runningTasks"'));
   assert(readFileSync("web/src/EmployeeHeader.vue", "utf8").includes(':animate="working"'));
   const app = readFileSync("web/src/App.vue", "utf8");

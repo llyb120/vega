@@ -153,7 +153,7 @@ export default defineEventHandler(async (event) => {
       if (path.length === 1) {
         if (method === "GET") return Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
           const s = await employee.state();
-          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, ownerId: s.ownerId, mine: s.ownerId === user.id, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, runningTasks: s.tasks.filter((t) => t.status === "running").length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
+          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, ownerId: s.ownerId, mine: s.ownerId === user.id, chatSession: s.chatSession || "", unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, runningTasks: s.tasks.filter((t) => t.status === "running").length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
         }));
         if (method === "POST") {
           check(user.role !== "viewer", 403, "Execution permission required");
@@ -166,6 +166,8 @@ export default defineEventHandler(async (event) => {
       check(employee && (avatarOnly || await employee.accessible(user)), 404, "Employee not found");
       check(!employee.deleting, 409, "牛马正在删除，请稍候");
       const state = await employee.state();
+      // Marking the chat read is reading: read-only accounts may do it.
+      if (path[2] === "chat" && path[3] === "read" && path.length === 4 && method === "POST") return { seq: state.chatSession ? await store.markRead(user.id, state.chatSession) : 0 };
       if (method !== "GET") check(user.role !== "viewer", 403, "只读账号不能执行操作");
       if (["capabilities", "skills", "mcp", "vault"].includes(path[2]))
         return await employeeCapabilities(employee, user, method, path.slice(2), a);
@@ -595,6 +597,8 @@ async function groupRoute(path: string[], method: string, a: Obj, user: { id: st
   const { engine, store } = app(), groups = engine.groups;
   if (path.length === 1 && method === "GET") return await groups.list(user);
   if (path[1] === "directory" && method === "GET") return await groups.directory();
+  // Marking read is reading: read-only accounts may do it.
+  if (path[2] === "read" && path.length === 3 && method === "POST") return { seq: await store.markRead(user.id, (await groups.mine(user, path[1])).session) };
   const leaving = method === "DELETE" && path[2] === "users" && path[3] === user.id;
   if (method !== "GET" && !leaving) check(user.role !== "viewer", 403, "只读账号不能在群聊中操作");
   if (path.length === 1 && method === "POST") return await groups.create(user, a);

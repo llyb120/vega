@@ -30,6 +30,7 @@ const roleLabel = { admin: "管理员", operator: "操作用户", viewer: "只�
 const adminNav = [["experiences", "经验图谱", "graph"], ["debug", "调试会话", "code"], ["settings", "系统设置", "settings"]];
 function employeeTone(entry) { return entry.attentionTasks ? "warn" : entry.activeTasks ? "info" : ""; }
 function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionTasks} 项待你处理` : entry.activeTasks ? `${entry.activeTasks} 项进行中` : "空闲"; }
+const unreadLabel = (n) => n > 99 ? "99+" : String(n);
 </script>
 <template>
   <div class="sidebar-inner">
@@ -59,6 +60,7 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
         >
           <span class="nav-avatar"><EmployeeAvatar :employee-id="entry.id" :name="entry.name" :avatar="entry.avatar" :animate="!!entry.runningTasks" /><span v-if="employeeTone(entry)" :class="['avatar-dot', employeeTone(entry)]" aria-hidden="true"></span></span>
           <span class="nav-text nav-label"><strong class="truncate">{{ entry.name }}</strong><small :class="employeeTone(entry)">{{ employeeLine(entry) }}</small></span>
+          <span v-if="entry.unread" class="unread" :aria-label="entry.unread + ' 条未读消息'">{{ unreadLabel(entry.unread) }}</span>
           <span v-if="entry.attentionTasks" class="count warn nav-label">{{ entry.attentionTasks }}</span>
           <span v-else-if="entry.activeTasks" class="count nav-label">{{ entry.activeTasks }}</span>
         </button>
@@ -81,6 +83,7 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
       >
         <span class="nav-avatar group-nav-avatar"><GroupAvatar :group="chat" /><span v-if="chat.running?.length" class="avatar-dot info" aria-hidden="true"></span></span>
         <span class="nav-text nav-label"><strong class="truncate">{{ chat.name }}</strong><small class="truncate">{{ chat.running?.length ? '牛马回复中…' : chat.lastText || `${chat.users.length} 人 · ${chat.employees.length} 个牛马` }}</small></span>
+        <span v-if="chat.unread" class="unread" :aria-label="chat.unread + ' 条未读消息'">{{ unreadLabel(chat.unread) }}</span>
       </button>
       <p v-if="!chats?.length" class="sidebar-empty nav-label">拉上同事和牛马一起干活</p>
 
@@ -126,6 +129,7 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
   </div>
 </template>
 <style scoped>
+.unread { flex: none; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--danger); color: #fff; font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; }
 .sidebar-inner { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .sidebar-brand { display: flex; align-items: center; gap: 10px; flex: none; height: 52px; padding: 0 12px 0 16px; }
 .sidebar-brand .brand-mark { width: 28px; height: 28px; border-radius: 8px; font-size: 14px; }

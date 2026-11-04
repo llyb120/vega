@@ -9,8 +9,8 @@ import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
 import { exportResult, exportTitleOf } from "./export-result.js";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String });
-const emit = defineEmits(["quote", "jump", "task", "retry", "remember"]);
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean });
+const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author"]);
 const exportOpen = ref(false), exportError = ref("");
 // Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
 // In a group every message carries its author (a user or an employee, avatar filled in by the group view); only the
@@ -44,10 +44,12 @@ async function runExport(format) {
 <template>
   <article class="chat-message" :class="[mine ? 'user' : 'assistant', { continued, authored: !!message.author }]" :data-message-seq="message.seq" tabindex="-1">
     <span v-if="!mine && continued" class="chat-avatar spacer" aria-hidden="true"></span>
+    <button v-else-if="!mine && openAuthor" type="button" class="chat-avatar author-link" :aria-label="'打开和 ' + sender.name + ' 的聊天'" :title="'打开和 ' + sender.name + ' 的聊天'" @click="emit('author', sender.id)"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></button>
     <span v-else-if="!mine" class="chat-avatar" aria-hidden="true"><UserAvatar v-if="sender.kind === 'user'" :user-id="sender.id" :name="sender.name" :avatar="sender.avatar" /><EmployeeAvatar v-else :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></span>
     <div class="chat-content">
       <div class="chat-heading">
-        <strong v-if="!mine && !continued">{{ sender.name }}</strong>
+        <button v-if="!mine && !continued && openAuthor" type="button" class="author-name" @click="emit('author', sender.id)">{{ sender.name }}</button>
+        <strong v-else-if="!mine && !continued">{{ sender.name }}</strong>
         <span v-if="!mine && sender.kind === 'user' && message.author" class="author-tag">用户</span>
         <time v-if="message.at">{{ shortTime(message.at) }}</time>
         <button v-if="quotable && message.seq" type="button" class="chat-reply" aria-label="引用这条消息" title="引用" @click="emit('quote', message)"><Icon name="reply" :size="13" /><span class="reply-label">引用</span></button>
@@ -113,6 +115,10 @@ async function runExport(format) {
 .chat-message:focus .chat-bubble { outline: 2px solid var(--accent); outline-offset: 2px; }
 .chat-bubble :deep(.message-text) { font-size: 14px; }
 .chat-bubble :deep(.code-block) { margin-left: -4px; margin-right: -4px; }
+.author-link { padding: 0; border: 0; cursor: pointer; }
+.author-link:hover:not(:disabled) { background: var(--accent-soft); filter: brightness(1.05); }
+.author-name { height: auto; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--text-2); font-size: 12px; font-weight: 600; }
+.author-name:hover:not(:disabled) { background: transparent; color: var(--accent-text); text-decoration: underline; }
 .chat-bubble img { display: block; max-width: 100%; max-height: 360px; margin-top: 6px; border-radius: var(--r-md); }
 .chat-quote { display: grid; justify-content: stretch; justify-items: start; gap: 1px; width: 100%; height: auto; min-height: 0; margin: 0 0 6px; padding: 4px 8px; border: 0; border-left: 2px solid var(--accent); border-radius: 2px 6px 6px 2px; background: rgb(255 255 255 / 60%); color: var(--text-2); font-weight: 400; text-align: left; white-space: normal; }
 .chat-quote strong { font-size: 11px; }

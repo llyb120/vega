@@ -120,7 +120,7 @@ export class Groups {
   }
   async list(viewer: Viewer) {
     const mine = (await this.all()).filter((g) => g.users.includes(viewer.id));
-    return (await Promise.all(mine.map((g) => this.view(g, viewer)))).sort((a, b) => b.lastAt - a.lastAt);
+    return (await Promise.all(mine.map(async (g) => ({ ...await this.view(g, viewer), unread: await this.store.unread(viewer.id, g.session) })))).sort((a, b) => b.lastAt - a.lastAt);
   }
   /** Users who can be invited: every enabled account. */
   async directory() {

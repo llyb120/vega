@@ -263,13 +263,13 @@ test("工作面板: the group's tasks by member, open ones first; guests see a p
     const from = (name: string, status: string, at: number) => ({ id: "t-" + name, text: name, status, createdAt: at, cwd: "/tmp", profile: "lightweight", owner: { token: "", name: "" }, workSession: "secret-session",
       group: { groupId: group.id, name: "面板", hop: 0, requester: { kind: "user", id: "u2", name: "bob" }, byOwner: false } });
     await employeeA.update((state) => {
-      state.tasks.push(from("done-old", "done", 1), from("queued", "queued", 2), from("waiting", "waiting", 3), from("running", "running", 4), from("done-new", "done", 5));
+      (state.tasks as any[]).push(from("done-old", "done", 1), from("queued", "queued", 2), from("waiting", "waiting", 3), from("running", "running", 4), from("done-new", "done", 5));
       state.tasks.push({ ...from("elsewhere", "queued", 6), group: undefined });
     });
     const owner = await engine.groups.tasks(u1, group.id), guest = await engine.groups.tasks(u2, group.id);
     assert.deepEqual(owner.members.map((m) => [m.name, m.mine]), [["小A", true], ["小B", false]]);
     assert.deepEqual(owner.members[0].tasks.map((t: any) => t.text), ["waiting", "running", "queued", "done-new", "done-old"], "needs-attention, running, queued, then newest ended; other tasks excluded");
-    assert.equal(owner.members[0].tasks[0].workSession, "secret-session", "the owner gets the full task");
+    assert.equal((owner.members[0].tasks[0] as any).workSession, "secret-session", "the owner gets the full task");
     const seen = guest.members[0].tasks[0] as any;
     assert.deepEqual([seen.text, seen.status, seen.requester.name, seen.workSession, seen.cwd], ["waiting", "waiting", "bob", undefined, undefined], "other members see no sessions or location");
     await assert.rejects(engine.groups.tasks(u3, group.id), /群聊不存在|不在/);
@@ -285,4 +285,80 @@ test("工作面板 UI: a header button opens it beside the chat; owners open tas
   assert.match(panel, /if \(member\.mine\) emit\("open", \{ employeeId: member\.id, taskId: task\.id \}\);\n  else selected\.value = task;/);
   assert.match(panel, /<TaskDetail :task="selected" readonly/);
   assert.match(panel, /\{\{ requester\(task\) \}\} 发起/);
+});
+
+test("unread: one read marker per user and conversation; others' visible messages count, capped at 100", async () => {
+  const { store, engine, make, close } = await fixture();
+  try {
+    const a = await make("小A", "u1");
+    const group = await engine.groups.create(u1, { name: "未读", users: ["u2"], employees: [a] });
+    const session = (await engine.groups.get(group.id))!.session;
+    await store.append(session, { role: "user", text: "我自己说的", actorId: "u1", author: { kind: "user", id: "u1", name: "alice" } });
+    await store.append(session, { role: "user", text: "bob 说的", actorId: "u2", author: { kind: "user", id: "u2", name: "bob" } });
+    await store.append(session, { role: "assistant", text: "牛马回复", author: { kind: "employee", id: a, name: "小A" } });
+    await store.append(session, { role: "assistant", notice: true, text: "系统通知" });
+    const unread = async (user: any) => (await engine.groups.list(user)).find((g) => g.id === group.id)!.unread;
+    assert.deepEqual([await unread(u1), await unread(u2)], [2, 2], "own messages and notices never count");
+    await store.markRead("u1", session);
+    assert.equal(await unread(u1), 0);
+    assert.equal(await unread(u2), 2, "markers are per user");
+    assert.equal((await store.objects("read")).length, 1, "reading writes one marker row");
+    // Employee chat: the employee's visible replies count; tool output and tool-only turns do not.
+    const chat = await (await engine.employee.for(a)).chat("u1");
+    await store.append(chat.id, { role: "user", text: "hi", actorId: "u1" });
+    await store.append(chat.id, { role: "assistant", text: "", calls: [{ id: "c", name: "read", arguments: {} }] } as any);
+    await store.append(chat.id, { role: "tool", text: "x", callId: "c", name: "read" } as any);
+    await store.append(chat.id, { role: "assistant", text: "好的" });
+    assert.equal(await store.unread("u1", chat.id), 1);
+    for (let i = 0; i < 250; i++) await store.append(chat.id, { role: "assistant", text: "刷屏 " + i });
+    assert.equal(await store.unread("u1", chat.id), 100, "counting stops at 100 (shown as 99+)");
+    await store.markRead("u1", chat.id);
+    assert.equal(await store.unread("u1", chat.id), 0);
+  } finally { await close(); }
+});
+
+test("group avatars open the employee chat for its owner or an admin; unread badges in the sidebar", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const bubble = await readFile("web/src/ChatMessage.vue", "utf8"), chat = await readFile("web/src/GroupChat.vue", "utf8"), sidebar = await readFile("web/src/AppSidebar.vue", "utf8"), app = await readFile("web/src/App.vue", "utf8");
+  assert.match(bubble, /<button v-else-if="!mine && openAuthor" type="button" class="chat-avatar author-link"[^>]*@click="emit\('author', sender\.id\)"/);
+  assert.match(bubble, /<button v-if="!mine && !continued && openAuthor" type="button" class="author-name" @click="emit\('author', sender\.id\)">/);
+  assert.match(chat, /const canOpen = \(author\) => author\?\.kind === "employee" && \(props\.user\?\.role === "admin" \|\| !!group\.value\?\.employees\.find\(\(e\) => e\.id === author\.id\)\?\.mine\);/);
+  assert.match(chat, /:open-author="canOpen\(message\.author\)"/);
+  assert.match(chat, /@author="emit\('open-employee', \$event\)"/);
+  assert.match(sidebar, /const unreadLabel = \(n\) => n > 99 \? "99\+" : String\(n\);/);
+  assert.equal((sidebar.match(/class="unread"/g) || []).length, 2, "both 牛马 and 群聊 rows show the count");
+  assert.match(chat, /props\.api\(`\/groups\/\$\{id\}\/read`, "POST", \{\}\)/);
+  const unread = await readFile("web/src/unread.js", "utf8");
+  assert.match(unread, /app\(\)\.api\(`\/employees\/\$\{id\}\/chat\/read`, "POST", \{\}\)/);
+  assert.match(app, /@read="unread\.groupRead"/);
+});
+
+test("unread UI: the 牛马 chat on screen is marked read; a message elsewhere refreshes the counts", async () => {
+  const { ref, nextTick } = await import("vue");
+  const { useUnread } = await import("../web/src/unread.js");
+  const calls: string[] = [];
+  const state: any = {
+    api: async (path: string, method = "GET") => { calls.push(method + " " + path); return method === "GET" ? [{ id: "a", unread: 3, chatSession: "chat-a" }, { id: "b", unread: 2, chatSession: "chat-b" }] : {}; },
+    view: ref("employee"), creatingEmployee: ref(false), employeeSession: ref(""), employeeTab: ref("chat"), selectedEmployee: ref("a"),
+    employees: ref([{ id: "a", unread: 1, chatSession: "chat-a" }, { id: "b", unread: 0, chatSession: "chat-b" }]), employee: ref({ chatSession: "chat-a" }),
+    groups: ref([{ id: "g", unread: 4 }]), background: (p: Promise<unknown>) => p,
+  };
+  const warn = console.warn; console.warn = () => {};
+  const unread = useUnread(() => state);
+  console.warn = warn;
+  state.selectedEmployee.value = "b"; await nextTick(); state.selectedEmployee.value = "a"; await nextTick(); await sleep(0);
+  assert(calls.includes("POST /employees/a/chat/read"), "opening a chat with unread messages marks it read");
+  assert.equal(state.employees.value[0].unread, 0);
+  calls.length = 0;
+  await unread.onEvent({ type: "message_end", session: "chat-b" });
+  await sleep(0);
+  assert.deepEqual(calls, ["GET /employees"]);
+  assert.deepEqual(state.employees.value.map((e: any) => e.unread), [0, 2], "the open chat stays read; the other shows its count");
+  state.employeeTab.value = "tasks"; await nextTick();
+  calls.length = 0;
+  await unread.onEvent({ type: "message_end", session: "chat-a" });
+  await sleep(0);
+  assert.deepEqual(calls, ["GET /employees"], "not on screen: counted, not marked read");
+  unread.groupRead("g");
+  assert.equal(state.groups.value[0].unread, 0);
 });

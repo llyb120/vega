@@ -5,6 +5,8 @@ import { Db, Sqlite, type Dialect } from "./db";
 import { Files } from "./files";
 import type { FileRef } from "./attachments";
 import { assert, id } from "./util";
+/** Unread counts stop here (the badge shows 99+). */
+export const UNREAD_MAX = 100;
 export type Part = { type: string; [key: string]: any };
 export type Message = {
   seq?: number;
@@ -324,6 +326,30 @@ export class Store {
     await this.run("DELETE FROM employee_runs WHERE employee=?", employee);
   }
   private parseMessage(row: any): Message { return { ...JSON.parse(row.data), seq: Number(row.seq) }; }
+  /**
+   * Unread messages: one read marker (the last seq seen) per user and conversation, so reading writes one row per open,
+   * never per message. Unread counts what others said after it: employees' visible replies and other users' messages in
+   * a group (never tool output, system notices or the viewer's own messages); counting stops at UNREAD_MAX.
+   */
+  async markRead(user: string, session: string) {
+    const last = (await this.one("SELECT MAX(seq) AS seq FROM messages WHERE session=?", session))?.seq;
+    const seq = Number(last || 0), key = user + "/" + session;
+    if (seq > ((await this.object<{ seq: number }>("read", key))?.seq || 0)) await this.save("read", key, { seq });
+    return seq;
+  }
+  async unread(user: string, session: string) {
+    let after = (await this.object<{ seq: number }>("read", user + "/" + session))?.seq || 0, count = 0;
+    for (;;) {
+      const rows = await this.all("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq LIMIT 200", session, after) as any[];
+      for (const row of rows) {
+        const m = this.parseMessage(row);
+        const visible = m.role === "assistant" ? !!(m.text?.trim() || m.delivery || m.images?.length || m.tasks?.length) : m.role === "user" && !!m.author && m.actorId !== user;
+        if (visible && !m.notice && ++count >= UNREAD_MAX) return count;
+      }
+      if (rows.length < 200) return count;
+      after = Number(rows.at(-1).seq);
+    }
+  }
   /** Newest message of a session, optionally only an assistant message or one with images. */
   async lastMessage(key: string, only?: "assistant" | "user" | "images"): Promise<Message | undefined> {
     const where = only === "assistant" || only === "user" ? ` AND ${this.json("$.role")}='${only}'` : only === "images" ? ` AND ${this.jsonLength("$.images")}>0` : "";

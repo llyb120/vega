@@ -1,5 +1,5 @@
 <script setup vapor>
-import { computed, nextTick, onMounted, provide, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import PageHeader from "./PageHeader.vue";
 import ChatMessage from "./ChatMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
@@ -13,7 +13,7 @@ import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
 const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number });
-const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel"]);
+const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel", "read"]);
 const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), work = ref(false), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
 const directory = ref([]), form = ref({ name: "", bulletin: "", users: [], employees: [] }), edit = ref({ name: "", bulletin: "" }), invite = ref(""), bring = ref("");
 const readonly = computed(() => props.user?.role === "viewer");
@@ -32,6 +32,8 @@ const invitable = computed(() => directory.value.filter((u) => !group.value?.use
 // Both add rows always show, so users find them; when empty they say why.
 const noUsersHint = computed(() => props.user?.role === "admin" ? "没有可邀请的用户（在左下角「账号与安全」→ 成员里新建账号）" : "没有可邀请的用户（请管理员在「账号与安全」里新建账号）");
 const noEmployeesHint = computed(() => props.myEmployees?.length ? "你的牛马都已在群里" : "你还没有牛马（先在左侧「数字牛马」里新建）");
+// A member employee's avatar and name open its chat for whoever may open it: its owner, or an admin.
+const canOpen = (author) => author?.kind === "employee" && (props.user?.role === "admin" || !!group.value?.employees.find((e) => e.id === author.id)?.mine);
 const canStop = (e) => e.mine || group.value?.isCreator;
 
 async function run(fn) {
@@ -51,8 +53,20 @@ async function load(scroll = false) {
   taskStatus.value = result.taskStatus || {};
   group.value = result.group;
   edit.value = { name: result.group.name, bulletin: result.group.bulletin };
+  void markRead();
   if (stick) { await nextTick(); transcript.value?.scrollTo({ top: transcript.value.scrollHeight }); }
 }
+// Open and visible: everything loaded so far is read (one marker per user on the server).
+let readSeq = 0;
+async function markRead() {
+  const id = props.groupId, last = messages.value.at(-1)?.seq || 0;
+  if (!id || document.hidden || last <= readSeq) return;
+  readSeq = last;
+  try { await props.api(`/groups/${id}/read`, "POST", {}); if (props.groupId === id) emit("read", id); } catch { readSeq = 0; }
+}
+const visibility = () => { if (!document.hidden) void markRead(); };
+onMounted(() => document.addEventListener("visibilitychange", visibility));
+onBeforeUnmount(() => document.removeEventListener("visibilitychange", visibility));
 async function loadDirectory() {
   try { directory.value = (await props.api("/groups/directory")).filter((u) => u.id !== props.user?.id); } catch { directory.value = []; }
 }
@@ -119,7 +133,7 @@ async function loadWork() {
 }
 function toggleWork() { work.value = !work.value; if (work.value) { panel.value = false; void run(loadWork); } }
 watch(panel, (open) => { if (open) work.value = false; });
-watch(() => props.groupId, () => { group.value = null; messages.value = []; panel.value = false; work.value = false; workMembers.value = []; draft.value = ""; void run(() => load(true)); });
+watch(() => props.groupId, () => { readSeq = 0; group.value = null; messages.value = []; panel.value = false; work.value = false; workMembers.value = []; draft.value = ""; void run(() => load(true)); });
 watch(() => props.revision, () => { void run(() => load()); void run(loadWork); });
 watch(panel, (open) => { if (open && !directory.value.length) void loadDirectory(); });
 onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadDirectory(); });
@@ -156,10 +170,10 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
               <div v-if="group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
               <template v-for="{ message, continued } in shown" :key="message.seq">
                 <p v-if="message.notice" class="group-notice">{{ message.text }}</p>
-                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" />
+                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :open-author="canOpen(message.author)" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" @author="emit('open-employee', $event)" />
               </template>
               <article v-for="e in runningMembers" :key="'typing-' + e.id" class="chat-message assistant chat-typing" role="status" :aria-label="e.name + ' 正在回复'">
-                <span class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" animate /></span>
+                <span class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></span>
                 <div class="chat-content">
                   <div class="chat-heading"><strong>{{ e.name }}</strong><span>正在回复</span><button v-if="canStop(e) && !readonly" type="button" class="ghost sm stop-reply" @click="stop(e)"><Icon name="stop" :size="12" />停止</button></div>
                   <div class="chat-bubble"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
