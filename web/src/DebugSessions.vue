@@ -4,7 +4,8 @@ import EmployeeSessionView from "./EmployeeSessionView.vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
 import { formatBeijing } from "../../shared/time";
-const props = defineProps({ api: Function, revision: Number });
+const props = defineProps({ api: Function, revision: Number, tab: String });
+const emit = defineEmits(["tab"]);
 const sessions = ref([]), selected = ref(""), employee = ref(""), search = ref(""), busy = ref(false), error = ref("");
 const labels = { chat: "沟通会话", work: "主执行会话", computer: "浏览器会话" };
 const employees = computed(() => [...new Map(sessions.value.map((session) => [session.employeeId, session.employeeName])).entries()]);
@@ -18,6 +19,9 @@ async function refresh() {
 }
 watch(() => props.revision, refresh);
 onMounted(refresh);
+// The selected session lives in the address (/debug/:session).
+watch(() => props.tab, (id) => { selected.value = id || ""; }, { immediate: true });
+watch(selected, (id) => { if (id !== (props.tab || "")) emit("tab", id); });
 onBeforeUnmount(() => { disposed = true; version++; });
 </script>
 <template>

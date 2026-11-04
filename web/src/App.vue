@@ -26,6 +26,7 @@ import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 import { useUnread } from "./unread.js";
+import { ADMIN_PAGES, parseRoute, formatRoute } from "./router.js";
 import {
   computed,
   nextTick,
@@ -635,14 +636,20 @@ async function enter(result) {
   await bootstrap();
   startLocalPairing();
   if (isAdmin.value) startPresence();
+  // Open the page in the address bar: an employee link is checked against the visible list by loadEmployee.
+  const route = parseRoute(window.location.href);
+  routeReady = false;
+  if (route.employee) selectedEmployee.value = route.employee;
   await Promise.all([loadModels(), refreshEmployee()]);
-  view.value = "employee";
+  await applyRoute(route);
   try {
     const pending = JSON.parse(
       sessionStorage.getItem("vega:provider-login:" + user.value.id) || "null",
     );
     if (isAdmin.value && pending?.expires > Date.now()) view.value = "settings";
   } catch {}
+  routeReady = true;
+  syncRoute(true);
   closed = false;
 }
 async function login() {
@@ -665,6 +672,7 @@ async function login() {
   authBusy.value = false;
 }
 function resetLogin() {
+  routeReady = false;
   void clearChatCache(user.value?.id);
   employeeLoadVersion++;
   try {
@@ -735,7 +743,7 @@ async function logout() {
   }
 }
 onMounted(() => {
-  window.addEventListener("popstate", employeeLocationChanged);
+  window.addEventListener("popstate", routeChanged);
   void checkAuth();
 });
 async function checkAuth(delay = 1000) {
@@ -754,7 +762,7 @@ async function checkAuth(delay = 1000) {
     setTimeout(() => checkAuth(Math.min(delay * 2, 10000)), delay);
   }
 }
-onBeforeUnmount(() => window.removeEventListener("popstate", employeeLocationChanged));
+onBeforeUnmount(() => window.removeEventListener("popstate", routeChanged));
 async function selectSession(session) {
   if (session.taskId) {
     openEmployee(session.id);
@@ -1179,15 +1187,6 @@ function selectedNow(session) {
   return current.value?.id === session;
 }
 let employeeLoadVersion = 0;
-function employeeLocationChanged() {
-  if (user.value) return chooseEmployee(new URL(window.location.href).searchParams.get("employee") || "");
-}
-function setEmployeeURL(id, replace = false) {
-  const url = new URL(window.location.href);
-  if (id) url.searchParams.set("employee", id);
-  else url.searchParams.delete("employee");
-  if (url.href !== window.location.href) window.history[replace ? "replaceState" : "pushState"](null, "", url.href);
-}
 function prepareEmployee(id) {
   const entry = employees.value.find((item) => item.id === id);
   if (!entry) return;
@@ -1203,10 +1202,8 @@ async function loadEmployee() {
   void pruneChatCache(owner, list.map((entry) => entry.id));
   employees.value = list;
   activeTaskCount.value = list.reduce((count, employee) => count + employee.activeTasks, 0);
-  const requested = selectedEmployee.value || new URL(window.location.href).searchParams.get("employee");
-  const id = list.find((entry) => entry.id === requested)?.id || list[0]?.id || "";
+  const id = list.find((entry) => entry.id === selectedEmployee.value)?.id || list[0]?.id || "";
   selectedEmployee.value = id;
-  setEmployeeURL(id, true);
   if (!id) {
     employee.value = { duties: [], tasks: [], memories: [], runs: [] };
     employeeSession.value = "";
@@ -1229,7 +1226,6 @@ function employeeBrowserApi(path, method = "GET", data) {
 async function chooseEmployee(id) {
   selectedEmployee.value = id;
   prepareEmployee(id);
-  setEmployeeURL(id);
   employeeSession.value = "";
   employeeEvent.value = null;
   employeeTab.value = "chat";
@@ -1427,6 +1423,54 @@ onBeforeUnmount(() => {
   eventsSocket?.close();
   localBridge?.close();
 });
+// 路由: the address bar mirrors the open page and its tab (router.js); refresh, links and back/forward restore it.
+// User navigation pushes; restoring a route and falling back from unknown or forbidden ids replace.
+// Each page (each group) remembers its own tab for this visit, so returning to it lands on the same tab.
+const pageTabs = ref({});
+const pageKey = computed(() => view.value === "group" ? "group:" + selectedGroup.value : view.value);
+const pageSub = computed(() => pageTabs.value[pageKey.value] || "");
+function setPageTab(tab) { pageTabs.value = { ...pageTabs.value, [pageKey.value]: tab || "" }; }
+const routePath = computed(() => user.value ? formatRoute({
+  view: view.value, employee: selectedEmployee.value, creating: creatingEmployee.value, tab: employeeTab.value, task: employeeTaskFocus.value,
+  session: view.value === "employee" ? employeeSession.value : current.value?.id, group: selectedGroup.value, sub: pageSub.value,
+}) : "");
+let routeReady = false, routing = 0;
+function syncRoute(replace) {
+  const path = routePath.value;
+  if (routeReady && path && path !== window.location.pathname + window.location.search) window.history[replace ? "replaceState" : "pushState"](null, "", path);
+}
+watch(routePath, () => syncRoute(routing > 0));
+async function applyRoute(route) {
+  routing++;
+  try {
+    if (route.view === "group" && route.group && !groups.value.some((g) => g.id === route.group)) route = { view: "employee" };
+    if (ADMIN_PAGES.includes(route.view) && !isAdmin.value) route = { view: "employee" };
+    if (route.view === "group") openGroup(route.group);
+    else if (route.view === "chat") {
+      const session = route.session && sessions.value.find((s) => s.id === route.session);
+      if (session) await attempt(() => selectSession(session));
+      else { current.value = null; view.value = "chat"; }
+    } else if (route.view !== "employee") view.value = route.view;
+    else if (route.creating && canExecute.value) { creatingEmployee.value = true; openEmployee(); }
+    else {
+      const id = employees.value.some((e) => e.id === route.employee) ? route.employee : selectedEmployee.value;
+      if (id && (id !== selectedEmployee.value || creatingEmployee.value || employee.value.id !== id)) await chooseEmployee(id);
+      else { creatingEmployee.value = false; employeeSession.value = ""; employeeTaskFocus.value = ""; employeeTab.value = "chat"; view.value = "employee"; }
+      if (id && selectedEmployee.value === id) {
+        if (route.session) openEmployee(route.session);
+        else if (route.task) await openEmployeeTask(route.task);
+        else if (employeeTabs.value.some(([tab]) => tab === route.tab)) employeeTab.value = route.tab;
+      }
+    }
+    setPageTab(route.sub);
+  } finally {
+    await nextTick();
+    routing--;
+  }
+}
+function routeChanged() {
+  if (user.value && routeReady) void applyRoute(parseRoute(window.location.href));
+}
 // Last, once all the state it reads exists.
 const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, employeeTab, selectedEmployee, employees, employee, groups, background }));
 </script>
@@ -1555,9 +1599,9 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
           <p v-if="executionUnavailable" class="execution-warning" role="status">所选客户端已离线或尚未选择，请选择在线客户端或切换到服务端；不会自动切换或重试操作。</p>
         </div>
       </template>
-      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @read="unread.groupRead" />
+      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" :tab="pageSub" @tab="setPageTab" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @read="unread.groupRead" />
       <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
-      <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" />
+      <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" :tab="pageSub" @tab="setPageTab" />
       <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" />
       <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
         <template v-if="(creatingEmployee || !employees.length)">
@@ -1650,8 +1694,8 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       </section>
       <ResourcesView v-else-if="view === 'resources'" />
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" />
-      <ExperiencesView v-else-if="view === 'experiences' && isAdmin" :api="api" />
-      <SettingsView v-else-if="view === 'settings' && isAdmin" :api="api" :config="config" :user-id="user.id" :models="catalogModels" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
+      <ExperiencesView v-else-if="view === 'experiences' && isAdmin" :api="api" :tab="pageSub" @tab="setPageTab" />
+      <SettingsView v-else-if="view === 'settings' && isAdmin" :api="api" :config="config" :user-id="user.id" :models="catalogModels" :tab="pageSub" @tab="setPageTab" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
     </section>
     <div class="toasts" aria-live="polite">
       <div v-if="error" class="toast error" role="alert"><Icon name="alert" :size="16" /><span>{{ error }}</span><button type="button" class="icon" aria-label="关闭错误" @click="error = ''"><Icon name="close" :size="14" /></button></div>

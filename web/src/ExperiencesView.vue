@@ -1,8 +1,9 @@
 <script setup vapor>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
-const props = defineProps({ api: Function });
+const props = defineProps({ api: Function, tab: String });
+const emit = defineEmits(["tab"]);
 const busy = ref(false),
   error = ref(""),
   routes = ref([]),
@@ -10,6 +11,9 @@ const busy = ref(false),
   query = ref(""),
   selected = ref(""),
   detailOpen = ref(false);
+// The selected route lives in the address (/experiences/:id).
+watch(() => props.tab, (id) => { if (id !== selected.value) { selected.value = id || ""; detailOpen.value = !!id; } }, { immediate: true });
+watch(selected, (id) => { if (id !== (props.tab || "")) emit("tab", id); });
 function choose(id) {
   selected.value = id;
   detailOpen.value = true;

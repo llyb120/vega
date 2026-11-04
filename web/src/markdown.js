@@ -60,7 +60,7 @@ export function renderInline(text) {
     )
     .replace(mentionPattern || /(?!)()()/gu, (match, prefix, name) => {
       const { id, link } = mentionIds.get(name);
-      return prefix + protect(link ? `<a class="mention" href="?employee=${encodeURIComponent(id)}" data-employee="${escape(id)}">@${escape(name)}</a>` : `<span class="mention">@${escape(name)}</span>`, "@" + name);
+      return prefix + protect(link ? `<a class="mention" href="/employees/${encodeURIComponent(id)}" data-employee="${escape(id)}">@${escape(name)}</a>` : `<span class="mention">@${escape(name)}</span>`, "@" + name);
     });
   const html = escape(source)
     .replace(

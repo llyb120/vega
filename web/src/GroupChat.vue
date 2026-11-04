@@ -12,8 +12,8 @@ import { continuesPrevious } from "./conversation";
 import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
-const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number });
-const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel", "read"]);
+const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number, tab: String });
+const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel", "read", "tab"]);
 const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), work = ref(false), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
 const directory = ref([]), form = ref({ name: "", bulletin: "", users: [], employees: [] }), edit = ref({ name: "", bulletin: "" }), invite = ref(""), bring = ref("");
 const readonly = computed(() => props.user?.role === "viewer");
@@ -137,6 +137,12 @@ watch(() => props.groupId, () => { readSeq = 0; group.value = null; messages.val
 watch(() => props.revision, () => { void run(() => load()); void run(loadWork); });
 watch(panel, (open) => { if (open && !directory.value.length) void loadDirectory(); });
 onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadDirectory(); });
+// The open side panel lives in the address (/groups/:id/work or /members) so refresh keeps it.
+watch(() => props.tab, (tab) => {
+  if ((tab === "work") !== work.value) toggleWork();
+  panel.value = tab === "members";
+}, { immediate: true });
+watch(() => work.value ? "work" : panel.value ? "members" : "", (tab) => { if (tab !== (props.tab || "")) emit("tab", tab); });
 </script>
 <template>
   <section class="group-workspace">

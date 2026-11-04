@@ -12,7 +12,7 @@ const mentions = inject("mentions", null);
 const segments = computed(() => mentionSegments(shown.value, mentions?.people.value));
 </script>
 <template>
-  <div class="message-text"><template v-for="(part, index) in segments" :key="index"><a v-if="part.id && part.link" class="mention" :href="'?employee=' + encodeURIComponent(part.id)" @click.exact.prevent="mentions?.open(part.id)">{{ part.text }}</a><span v-else-if="part.id" class="mention">{{ part.text }}</span><template v-else>{{ part.text }}</template></template></div>
+  <div class="message-text"><template v-for="(part, index) in segments" :key="index"><a v-if="part.id && part.link" class="mention" :href="'/employees/' + encodeURIComponent(part.id)" @click.exact.prevent="mentions?.open(part.id)">{{ part.text }}</a><span v-else-if="part.id" class="mention">{{ part.text }}</span><template v-else>{{ part.text }}</template></template></div>
   <button
     v-if="long"
     type="button"
