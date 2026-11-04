@@ -23,12 +23,16 @@ export function groupTurns(messages) {
   });
 }
 
-export function employeeChatMessages(messages, running = false) {
-  const visible = new Set();
-  const turns = groupTurns(messages);
-  for (const [index, turn] of turns.entries())
-    if (!running || index !== turns.length - 1) for (const message of turn.conclusion) visible.add(message);
-  return messages.filter((message) => message.role === "user" || message.delivery || visible.has(message));
+/** Chat page: everything the employee wrote is shown as soon as it exists, including text written alongside tool calls; tool calls, results and thinking stay hidden. */
+export function employeeChatMessages(messages) {
+  return messages.filter((message) => message.role === "user" || message.delivery ||
+    (message.role === "assistant" && !!(message.text?.trim() || message.images?.length)));
+}
+
+/** A bubble continues the previous one (no repeated avatar/name) inside one reply run; deliveries and progress notices stand alone. */
+export function continuesPrevious(previous, message) {
+  const standalone = (m) => m.delivery || m.progress;
+  return !!previous && previous.role !== "user" && message.role !== "user" && !standalone(previous) && !standalone(message);
 }
 
 /** Match Nova: adjacent thoughts/tools form one process segment; text breaks it. */

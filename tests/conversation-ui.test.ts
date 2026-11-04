@@ -5,7 +5,8 @@ import vm from "node:vm";
 import { webcrypto } from "node:crypto";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
-import { employeeChatMessages } from "../web/src/conversation.js";
+import { employeeChatMessages, continuesPrevious } from "../web/src/conversation.js";
+import { createLiveReply } from "../web/src/live-reply.js";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
 const between = (start: string, end: string) => chat.slice(chat.indexOf(start), chat.indexOf(end));
@@ -13,20 +14,20 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
   const messages = ref<any[]>([]), running = ref(false), hasMore = ref(false);
   const history = createChatHistory({ api, path: () => "/employees/fixture/chat", messages, running, hasMore });
   const context: any = {
-    console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, runningFrom: ref(null), disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
+    console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
     props: { employeeId: "fixture", api, composer: reactive({ text: "", images: [], quote: undefined }) },
-    visible: computed(() => employeeChatMessages(messages.value, running.value)), employeeChatMessages, frozen: [] as any[],
+    employeeChatMessages, continuesPrevious, createLiveReply, frozen: [] as any[],
   };
   context.easeIn = (seqs: number[]) => context.frozen.push(...seqs);
   const methods = vm.runInNewContext([
     "let turn = 0;",
-    between("const draft = computed", "// While a turn runs"),
-    between("const displayed =", "const history ="),
+    between("const draft = computed", "const visible ="),
+    between("const visible =", "const history ="),
     between("const nearBottom =", "/** Prepend one older page"),
     between("async function refresh(apply", "async function upload("),
     between("async function send()", "async function stop()"),
     between("function handleEvent(event)", "watch(() => props.revision"),
-    "({ refresh, handleEvent, finishTurn, send, retry, outbox, displayed })",
+    "({ refresh, handleEvent, finishTurn, send, retry, outbox, displayed, visible, reply, typingContinued })",
   ].join("\n"), context);
   return { ...context, ...methods, dispose: () => { context.disposed = true; } };
 }
@@ -88,7 +89,7 @@ test("incoming messages do not pull a reader away from older history", async () 
 test("employee chat uses conclusion bubbles and typing dots; process details remain available in execution/debug records", () => {
   assert(chat.includes('import ChatMessage from "./ChatMessage.vue"'));
   assert(!chat.includes("<ToolSteps") && !chat.includes("<TurnProcess") && !chat.includes("<ConversationTimeline"));
-  assert(chat.includes("employeeChatMessages(messages.value, running.value)"));
+  assert(chat.includes("employeeChatMessages(messages.value)"));
   assert(chat.includes("正在输入中") && chat.includes("typing-dots") && chat.includes("prefers-reduced-motion"));
   const bubble = readFileSync("web/src/ChatMessage.vue", "utf8");
   assert(bubble.includes("<UserMessage") && bubble.includes("<MessageText") && bubble.includes("chat-quote") && bubble.includes("chat-task-link"));
@@ -106,15 +107,74 @@ test("in-flight and persisted tool calls share a single entry in the detailed ex
   assert.equal(items.filter((item: any) => item.active).length, 2);
 });
 
-test("employee stream events keep typing visible but never append partial text or process data to the chat", async () => {
+const tick = async (n = 10) => { for (let i = 0; i < n; i++) await Promise.resolve(); };
+const texts = (state: any) => Array.from(state.displayed.value, (row: any) => row.message.text);
+
+test("streamed text shows as a live bubble at once; thinking and tool events never reach the chat", async () => {
   const state = mount();
   state.handleEvent({ type: "started" });
-  for (const type of ["message_start", "thinking_delta", "text_delta", "tool_start", "tool_end"]) state.handleEvent({ type, data: "process details" });
+  state.handleEvent({ type: "message_start" });
+  for (const type of ["thinking_delta", "tool_start", "tool_end"]) state.handleEvent({ type, data: "process details" });
+  assert.equal(state.reply.writing.value, false, "no text yet: the typing dots stay");
+  state.handleEvent({ type: "text_delta", data: "好的，" });
+  state.handleEvent({ type: "text_delta", data: "我去安排" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(texts(state), ["好的，我去安排"], "deltas accumulate into one bubble, painted per frame");
+  assert.equal(state.displayed.value[0].message.streaming, true);
+  assert.equal(state.reply.writing.value, true, "the live bubble replaces the typing dots");
   assert.equal(state.running.value, true);
-  assert.equal(state.messages.value.length, 0);
+});
+
+test("message_end swaps the live bubble for the persisted message in one tick, never showing it twice", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => release = resolve);
+  const persisted = { seq: 2, role: "assistant", text: "好的，我去安排", calls: [{ id: "c", name: "employee_task_create" }] };
+  const api = async (path: string) => path.includes("after=") ? (await gate, { session: { id: "s" }, messages: [persisted], running: true })
+    : { session: { id: "s" }, messages: [{ seq: 1, role: "user", text: "work" }], running: true };
+  const state = mount(api);
+  await state.refresh();
+  state.handleEvent({ type: "started" });
+  state.handleEvent({ type: "message_start" });
+  state.handleEvent({ type: "text_delta", data: "好的，我去安排" });
+  const seen: string[] = [];
+  // Rendering flushes once per tick (pre-flush), like the chat page.
+  watch(() => texts(state).join("|"), (value: string) => seen.push(value));
+  state.handleEvent({ type: "message_end" });
+  state.handleEvent({ type: "message_start" });
+  assert.deepEqual(texts(state), ["work", "好的，我去安排"], "the ended text stays while the persisted copy loads");
+  assert.equal(state.reply.writing.value, false, "the next message starts with typing dots");
+  release();
+  await tick(40);
+  await nextTick();
+  assert.deepEqual(texts(state), ["work", "好的，我去安排"]);
+  assert.equal(state.displayed.value[1].message.seq, 2, "the persisted copy (with tool calls) is what remains");
+  assert(!seen.some((value) => value.split("|").filter((text) => text === "好的，我去安排").length > 1), "never two copies: " + JSON.stringify(seen));
+});
+
+test("masked turns stream no deltas: the bubble appears when the persisted message is merged", async () => {
+  const state = mount(async () => ({ session: { id: "s" }, messages: [{ seq: 1, role: "assistant", text: "已核对" }], running: true }));
+  state.handleEvent({ type: "started" });
+  state.handleEvent({ type: "message_start" });
+  assert.deepEqual(texts(state), []);
+  state.handleEvent({ type: "message_end" });
+  await tick(40);
+  assert.deepEqual(texts(state), ["已核对"]);
   state.handleEvent({ type: "done" });
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  await tick(40);
   assert.equal(state.running.value, false);
+});
+
+test("consecutive bubbles of one reply run do not repeat avatar and name; deliveries stand alone", async () => {
+  const state = mount(async () => ({ session: { id: "s" }, running: false, messages: [
+    { seq: 1, role: "user", text: "work" },
+    { seq: 2, role: "assistant", text: "收到，先核对", calls: [{ id: "a", name: "employee_status" }] },
+    { seq: 3, role: "tool", callId: "a", text: "{}" },
+    { seq: 4, role: "assistant", text: "已安排" },
+    { seq: 5, role: "assistant", text: "**已交付**", delivery: true },
+    { seq: 6, role: "assistant", text: "进展", progress: true },
+  ] }));
+  await state.refresh();
+  assert.deepEqual(Array.from(state.displayed.value, (row: any) => [row.message.seq, row.continued]), [[1, false], [2, false], [4, true], [5, false], [6, false]]);
 });
 
 test("a delayed history response cannot clear a newer typing state", async () => {
@@ -123,7 +183,7 @@ test("a delayed history response cannot clear a newer typing state", async () =>
   const pending = state.refresh();
   for (let i = 0; i < 10 && !finish; i++) await Promise.resolve();
   assert(finish, "the history request is in flight");
-  state.handleEvent({ type: "text_delta", data: "not shown until final" });
+  state.handleEvent({ type: "thinking_delta", data: "still working" });
   finish({ session: { id: "s" }, messages: [{ seq: 1, role: "user", text: "work" }], running: false });
   await pending;
   assert.equal(state.running.value, true);
@@ -293,7 +353,7 @@ test("server echoes keep pending bubbles in place and a late failed acknowledgem
   const firstId = state.outbox.value[0].clientMessageId;
   state.messages.value = [{ seq: 1, role: "user", text: "first", clientMessageId: firstId }];
   await nextTick();
-  assert.deepEqual(Array.from(state.displayed.value, (message: any) => message.text), ["first", "second"]);
+  assert.deepEqual(Array.from(state.displayed.value, (row: any) => row.message.text), ["first", "second"]);
   assert.equal(state.outbox.value[0].afterSeq, 1);
   state.dispose();
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -312,7 +372,7 @@ test("failed earlier messages stay before later server messages, and interrupted
   const later = state.outbox.value[1];
   state.messages.value = [{ seq: 1, role: "user", text: "later", clientMessageId: later.clientMessageId }];
   await nextTick();
-  assert.deepEqual(Array.from(state.displayed.value, (message: any) => message.text), ["failed first", "later"]);
+  assert.deepEqual(Array.from(state.displayed.value, (row: any) => row.message.text), ["failed first", "later"]);
   const queued = state.outbox.value[0];
   queued.sendStatus = "sent";
   state.running.value = true;

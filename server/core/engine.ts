@@ -830,7 +830,12 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         }
         assert(reply, "Provider retry exhausted");
         tools.context.recordUsage(view, reply.usage || {});
-        if (employee && !session.taskId && !reply.calls?.length && chatTasks.size) reply.tasks = [...chatTasks.values()];
+        // Chat shows every text right away: new task cards ride once on the first text written after they were created
+        // (usually the "已安排" line), or on the final reply when no text came in between.
+        if (employee && !session.taskId && chatTasks.size && (reply.text?.trim() || !reply.calls?.length)) {
+          reply.tasks = [...chatTasks.values()];
+          chatTasks.clear();
+        }
         this.store.append(key, redactMessage(reply, redact));
         emit("message_end", reply);
         if (!reply.calls?.length) {

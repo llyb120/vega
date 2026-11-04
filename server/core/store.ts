@@ -15,6 +15,8 @@ export type Message = {
   quote?: { seq: number; role: string; text: string; taskId?: string };
   tasks?: { id: string; title: string; status: string }[];
   delivery?: boolean;
+  /** A task milestone the executing session chose to tell the user (task_progress tellUser). */
+  progress?: boolean;
   thinking?: string;
   signature?: string;
   opaque?: any[];

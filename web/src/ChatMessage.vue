@@ -7,7 +7,7 @@ import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime, isInProgress } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
 import { exportResult } from "./export-result.js";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean });
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, enterFrom: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember"]);
 const exportOpen = ref(false), exportError = ref("");
 // Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
@@ -39,11 +39,12 @@ async function runExport(format) {
 const working = computed(() => !!props.message.tasks?.some((task) => isInProgress(props.taskStatus?.[task.id])));
 </script>
 <template>
-  <article class="chat-message" :class="message.role" :data-message-seq="message.seq" tabindex="-1">
-    <span v-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="MESSAGE_POSE" :from="enterFrom" :animate="working" /></span>
+  <article class="chat-message" :class="[message.role, { continued }]" :data-message-seq="message.seq" tabindex="-1">
+    <span v-if="message.role !== 'user' && continued" class="chat-avatar spacer" aria-hidden="true"></span>
+    <span v-else-if="message.role !== 'user'" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :pose="MESSAGE_POSE" :from="enterFrom" :animate="working" /></span>
     <div class="chat-content">
       <div class="chat-heading">
-        <strong v-if="message.role !== 'user'">{{ name }}</strong>
+        <strong v-if="message.role !== 'user' && !continued">{{ name }}</strong>
         <time v-if="message.at">{{ shortTime(message.at) }}</time>
         <button v-if="quotable && message.seq" type="button" class="chat-reply" aria-label="引用这条消息" title="引用" @click="emit('quote', message)"><Icon name="reply" :size="13" /><span class="reply-label">引用</span></button>
         <button v-if="rememberable && message.role !== 'user' && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
@@ -51,7 +52,7 @@ const working = computed(() => !!props.message.tasks?.some((task) => isInProgres
       <div class="chat-bubble" :class="{ failed: message.error }" :role="message.error ? 'alert' : undefined">
         <button v-if="message.quote" type="button" class="chat-quote" :aria-label="'跳转到引用的消息：' + message.quote.text" @click="emit('jump', message.quote.seq)"><strong>{{ message.quote.role === 'user' ? '我' : name }}</strong><span>{{ message.quote.text }}</span></button>
         <UserMessage v-if="message.role === 'user' && message.text" :text="message.displayText || message.text" />
-        <MessageText v-else-if="message.text" :text="message.displayText || message.text" />
+        <MessageText v-else-if="message.text" :text="message.displayText || message.text" :streaming="message.streaming" />
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`" alt="消息附图" />
       </div>
       <div v-if="message.sendStatus" class="chat-send-status" role="status">
@@ -80,6 +81,9 @@ const working = computed(() => !!props.message.tasks?.some((task) => isInProgres
 <style scoped>
 .chat-message { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 16px; min-width: 0; outline: none; }
 .chat-message.user { justify-content: flex-end; }
+/* Follow-up bubbles of one reply run sit tight under the first, without repeating avatar and name. */
+.chat-message.continued { margin-top: -10px; }
+.chat-avatar.spacer { height: 0; background: none; }
 .chat-avatar { display: grid; place-items: center; flex: none; width: var(--chat-avatar); height: var(--chat-avatar); overflow: hidden; border-radius: 12px; background: var(--accent-soft); color: var(--accent-text); font-size: 16px; font-weight: 600; }
 /* One shrinkable column: grid items default to an automatic minimum of their min-content width, so a single
    nowrap child (a long task title, URL or code line) would otherwise widen the track past the screen. */

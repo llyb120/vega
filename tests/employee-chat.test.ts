@@ -74,18 +74,19 @@ test("queued chat retries are deduplicated without inserting the next actor's in
   } finally { finish(); await engine.close(); store.close(); }
 });
 
-test("employee chat shows user messages and final conclusions only; process details and partial streaming text stay in execution records", () => {
+test("employee chat shows every text the employee wrote at once, including text alongside tool calls; thinking, tool results and empty tool-only messages stay hidden", () => {
   const messages = [
     { seq: 1, role: "user", text: "work" },
     { seq: 2, role: "assistant", text: "I will inspect", thinking: "private reasoning", calls: [{ id: "read", name: "read" }] },
     { seq: 3, role: "tool", name: "read", callId: "read", text: "details" },
-    { seq: 4, role: "assistant", text: "Verified outcome" },
-    { seq: 5, role: "user", text: "next" },
-    { seq: 6, role: "assistant", text: "partial text" },
-    { seq: 7, role: "assistant", text: "Independent task delivered", delivery: true },
+    { seq: 4, role: "assistant", text: "", thinking: "only thinking", calls: [{ id: "x", name: "employee_status" }] },
+    { seq: 5, role: "assistant", text: "Verified outcome" },
+    { seq: 6, role: "user", text: "next" },
+    { seq: 7, role: "assistant", text: "partial text" },
+    { seq: 8, role: "assistant", text: "Independent task delivered", delivery: true },
+    { seq: 9, role: "assistant", text: "  ", images: [{ mime: "image/png", data: "x" }] },
   ];
-  assert.deepEqual(employeeChatMessages(messages, true).map((message: any) => message.seq), [1, 4, 5, 7]);
-  assert.deepEqual(employeeChatMessages(messages, false).map((message: any) => message.seq), [1, 4, 5, 6, 7]);
+  assert.deepEqual(employeeChatMessages(messages).map((message: any) => message.seq), [1, 2, 5, 6, 7, 8, 9]);
   assert.equal(messages[1].thinking, "private reasoning", "the minimal chat projection never removes canonical process history");
 });
 
