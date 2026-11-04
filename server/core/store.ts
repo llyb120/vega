@@ -85,13 +85,22 @@ export class Store {
     assert(
       (app === 0 || app === 1447380801) &&
         !(app === 0 && tables > 0) &&
-        version <= 4,
+        (tables === 0 || version === 5),
       "Not a supported Vega database; existing data left unchanged",
     );
     this.db
       .exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; BEGIN;
    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-   CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,data TEXT NOT NULL,updated INTEGER NOT NULL);
+   CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,data TEXT NOT NULL,updated INTEGER NOT NULL,employee TEXT,task TEXT,owner TEXT,source TEXT);
+   CREATE INDEX IF NOT EXISTS sessions_employee ON sessions(employee);
+   CREATE INDEX IF NOT EXISTS sessions_task ON sessions(task);
+   CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner,updated);
+   CREATE INDEX IF NOT EXISTS sessions_source ON sessions(source);
+   CREATE TABLE IF NOT EXISTS employee_tasks(id TEXT PRIMARY KEY,employee TEXT NOT NULL,active INTEGER NOT NULL,created INTEGER NOT NULL,data TEXT NOT NULL);
+   CREATE INDEX IF NOT EXISTS employee_tasks_employee ON employee_tasks(employee,active,created);
+   CREATE TABLE IF NOT EXISTS employee_runs(id INTEGER PRIMARY KEY,employee TEXT NOT NULL,task TEXT NOT NULL,data TEXT NOT NULL);
+   CREATE INDEX IF NOT EXISTS employee_runs_employee ON employee_runs(employee,id);
+   CREATE INDEX IF NOT EXISTS employee_runs_task ON employee_runs(task);
    CREATE TABLE IF NOT EXISTS messages(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,seq INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,seq));
    CREATE INDEX IF NOT EXISTS messages_client_id ON messages(session,json_extract(data,'$.actorId'),json_extract(data,'$.clientMessageId')) WHERE json_extract(data,'$.clientMessageId') IS NOT NULL;
    CREATE TABLE IF NOT EXISTS folds(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,id));
@@ -104,8 +113,7 @@ export class Store {
    CREATE TABLE IF NOT EXISTS blob_access(blob TEXT NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(blob,session));
    CREATE INDEX IF NOT EXISTS blob_access_session ON blob_access(session);
    CREATE TABLE IF NOT EXISTS blob_user_access(blob TEXT NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,user TEXT NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,PRIMARY KEY(blob,user));
-   ${version < 4 ? "INSERT OR IGNORE INTO blob_access(blob,session) SELECT b.id,m.session FROM messages m,json_each(m.data,'$.images') image JOIN blobs b ON b.id=json_extract(image.value,'$.blobId');" : ""}
-   PRAGMA application_id=1447380801; PRAGMA user_version=4; COMMIT;`);
+   PRAGMA application_id=1447380801; PRAGMA user_version=5; COMMIT;`);
     if (path !== ":memory:") chmodSync(path, 0o600);
   }
   /** Prepared statements are compiled once per SQL text and reused (one long-lived connection). */
@@ -221,9 +229,9 @@ export class Store {
   }
   saveSession(s: Session) {
     this.sql(
-        "INSERT INTO sessions VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated",
+        "INSERT INTO sessions VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated,employee=excluded.employee,task=excluded.task,owner=excluded.owner,source=excluded.source",
       )
-      .run(s.id, JSON.stringify(s), Date.now());
+      .run(s.id, JSON.stringify(s), Date.now(), s.employeeId || null, s.taskId || null, s.ownerId || null, s.stageSource || null);
   }
   session(key: string): Session {
     const row = this.sql("SELECT data FROM sessions WHERE id=?")
@@ -231,24 +239,30 @@ export class Store {
     assert(row, "Session not found");
     return JSON.parse(row.data);
   }
+  /** Every session, newest first: a full scan, so server paths use the indexed queries below instead. */
   sessions(): Session[] {
-    return this.sql("SELECT data FROM sessions ORDER BY updated DESC")
-      .all()
-      .map((r: any) => JSON.parse(r.data));
+    return this.parseSessions(this.sql("SELECT data FROM sessions ORDER BY updated DESC").all());
   }
+  private parseSessions(rows: unknown[]): Session[] {
+    return rows.map((r: any) => JSON.parse(r.data));
+  }
+  /** Sessions of one employee, task, owner or stage source (indexed columns), newest first. */
+  sessionsBy(column: "employee" | "task" | "owner" | "source", value: string): Session[] {
+    return this.parseSessions(this.sql(`SELECT data FROM sessions WHERE ${column}=? ORDER BY updated DESC`).all(value));
+  }
+  /** Ordinary conversations (no employee or task), newest first. */
+  plainSessions(): Session[] {
+    return this.parseSessions(this.sql("SELECT data FROM sessions WHERE employee IS NULL AND task IS NULL ORDER BY updated DESC").all());
+  }
+  /** Employee chats and task sessions, newest first. */
+  employeeSessions(): Session[] {
+    return this.parseSessions(this.sql("SELECT data FROM sessions WHERE employee IS NOT NULL OR task IS NOT NULL ORDER BY updated DESC").all());
+  }
+  /** A session and the stage sessions derived from it, transitively. */
   sessionFamily(key: string): Session[] {
-    const all = this.sessions(),
-      ids = new Set([key]);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const s of all)
-        if (s.stageSource && ids.has(s.stageSource) && !ids.has(s.id)) {
-          ids.add(s.id);
-          changed = true;
-        }
-    }
-    return all.filter((s) => ids.has(s.id));
+    const out = [this.session(key)];
+    for (let i = 0; i < out.length; i++) out.push(...this.sessionsBy("source", out[i].id));
+    return out;
   }
   deleteSession(key: string) {
     for (const s of this.sessionFamily(key)) {
@@ -267,6 +281,49 @@ export class Store {
       this.remove("context-state", key);
       this.sql("UPDATE sessions SET updated=? WHERE id=?").run(Date.now(), key);
     });
+  }
+  // Employee tasks and runs (see employee-rows.ts): plain rows keyed by id, JSON data, indexed by employee.
+  employeeTasks(employee: string) {
+    return this.sql("SELECT id,data FROM employee_tasks WHERE employee=? ORDER BY created,rowid").all(employee) as { id: string; data: string }[];
+  }
+  putEmployeeTask(employee: string, id: string, active: boolean, created: number, data: string) {
+    this.sql("INSERT INTO employee_tasks VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET employee=excluded.employee,active=excluded.active,data=excluded.data")
+      .run(id, employee, active ? 1 : 0, created, data);
+  }
+  deleteEmployeeTask(id: string) { this.sql("DELETE FROM employee_tasks WHERE id=?").run(id); }
+  /** One task without loading the employee's others. */
+  employeeTask(id: string): { employee: string; task: any } | undefined {
+    const row = this.sql("SELECT employee,data FROM employee_tasks WHERE id=?").get(id) as { employee: string; data: string } | undefined;
+    return row && { employee: row.employee, task: JSON.parse(row.data) };
+  }
+  activeTaskCount(employee: string) {
+    return Number((this.sql("SELECT count(*) n FROM employee_tasks WHERE employee=? AND active=1").get(employee) as any).n);
+  }
+  employeeRuns(employee: string) {
+    return this.sql("SELECT id,data FROM employee_runs WHERE employee=? ORDER BY id").all(employee) as { id: number; data: string }[];
+  }
+  insertEmployeeRun(employee: string, task: string, data: string) {
+    return Number(this.sql("INSERT INTO employee_runs(employee,task,data) VALUES(?,?,?)").run(employee, task, data).lastInsertRowid);
+  }
+  updateEmployeeRun(id: number, data: string) { this.sql("UPDATE employee_runs SET data=? WHERE id=?").run(data, id); }
+  deleteEmployeeRun(id: number) { this.sql("DELETE FROM employee_runs WHERE id=?").run(id); }
+  dropEmployeeRows(employee: string) {
+    this.sql("DELETE FROM employee_tasks WHERE employee=?").run(employee);
+    this.sql("DELETE FROM employee_runs WHERE employee=?").run(employee);
+  }
+  /** Newest message of a session, optionally only an assistant message or one with images. */
+  lastMessage(key: string, only?: "assistant" | "images"): Message | undefined {
+    const where = only === "assistant" ? " AND json_extract(data,'$.role')='assistant'" : only === "images" ? " AND json_array_length(data,'$.images')>0" : "";
+    const row = this.sql(`SELECT seq,data FROM messages WHERE session=?${where} ORDER BY seq DESC LIMIT 1`).get(key) as any;
+    return row ? { ...JSON.parse(row.data), seq: row.seq } : undefined;
+  }
+  /** Newest-first messages whose JSON field equals value; parsed one at a time until `match` accepts one. */
+  findMessage(key: string, field: string, value: string | number, match: (m: Message) => boolean = () => true): Message | undefined {
+    assert(/^\$(\.\w+)+$/.test(field), "Invalid message field");
+    for (const row of this.sql(`SELECT seq,data FROM messages WHERE session=? AND json_extract(data,'${field}')=? ORDER BY seq DESC`).all(key, value) as any[]) {
+      const m = { ...JSON.parse(row.data), seq: row.seq };
+      if (match(m)) return m;
+    }
   }
   message(key: string, seq: number): Message | undefined {
     const row = this.sql("SELECT data FROM messages WHERE session=? AND seq=?").get(key, seq) as { data: string } | undefined;

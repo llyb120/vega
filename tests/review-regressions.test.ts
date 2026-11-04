@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -71,19 +72,18 @@ test("forked images survive deletion of the source and preview files stay user-s
   store.close();
 });
 
-test("upgrading old histories backfills image grants for existing forks", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "vega-image-migration-"));
+test("a database from an older schema version is refused and left unchanged (no migration)", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "vega-old-schema-"));
   const path = join(directory, "history.db");
   try {
     const old = new Store(path), session = old.newSession({ ownerId: "alice" });
-    const blob = old.blob("image/png", Buffer.from("fixture"));
-    old.append(session.id, { role: "user", images: [{ mime: "image/png", blobId: blob }] });
-    old.db.exec("PRAGMA user_version=3");
+    old.db.exec("PRAGMA user_version=4");
     old.close();
-    const migrated = new Store(path);
-    assert.ok(migrated.db.prepare("SELECT 1 FROM blob_access WHERE blob=? AND session=?").get(blob, session.id));
-    assert.equal(migrated.db.prepare("PRAGMA user_version").get()!.user_version, 4);
-    migrated.close();
+    assert.throws(() => new Store(path), /Not a supported Vega database/);
+    const reopened = new DatabaseSync(path);
+    assert.equal((reopened.prepare("PRAGMA user_version").get() as any).user_version, 4);
+    assert.ok(reopened.prepare("SELECT 1 FROM sessions WHERE id=?").get(session.id));
+    reopened.close();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

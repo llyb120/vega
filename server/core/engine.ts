@@ -354,9 +354,8 @@ export class Engine {
     await this.localBrowsers.close();
   }
   async removeEmployee(key: string, beforeRemove: () => Promise<void> = async () => {}) {
-    const employee = this.employee.for(key), state = employee.state();
-    const taskIds = new Set(state.tasks.map((task) => task.id));
-    const sessions = this.store.sessions().filter((session) => session.employeeId === key || (session.taskId && taskIds.has(session.taskId)) || session.id === state.chatSession);
+    const employee = this.employee.for(key);
+    const sessions = this.store.sessionsBy("employee", key);
     assert(!employee.deleting && !this.executionSwitches.has("employee:" + key), "牛马正在删除或切换执行位置，请勿重复操作");
     assert(!employee.busy.size && !sessions.some((session) => this.active.has(session.id)), "牛马仍在执行，请先停止任务和当前对话，再删除牛马");
     employee.deleting = true;
@@ -385,10 +384,8 @@ export class Engine {
     assert(!employee.deleting && !employee.resetting && !this.closing && !this.executionSwitches.has("employee:" + key), "牛马正在删除、重置或切换执行位置，请稍候");
     employee.resetting = true;
     try {
-      const sessions = () => {
-        const state = employee.state(), taskIds = new Set(state.tasks.map((task) => task.id));
-        return this.store.sessions().filter((session) => session.employeeId === key || (session.taskId && taskIds.has(session.taskId)) || session.id === state.chatSession);
-      };
+      // Every chat and task session of an employee carries its employeeId.
+      const sessions = () => this.store.sessionsBy("employee", key);
       // Same abort as 停止; keep cancelling until every run (including one that was just starting) has exited.
       for (const deadline = Date.now() + 15000; employee.busy.size || sessions().some((session) => this.active.has(session.id));) {
         for (const run of employee.busy.values()) if (run.session) this.cancel(run.session);
@@ -428,9 +425,9 @@ export class Engine {
   employeeFor(session: Session) {
     if (session.employeeId) return this.employee.for(session.employeeId);
     if (session.taskId) {
-      const employee = this.employee.all().find((e) => e.state().tasks.some((t) => t.id === session.taskId));
-      assert(employee, "Employee task not found");
-      return employee;
+      const row = this.store.employeeTask(session.taskId);
+      assert(row, "Employee task not found");
+      return this.employee.for(row.employee);
     }
     return this.employee;
   }

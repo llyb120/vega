@@ -94,9 +94,11 @@ export class Tools {
   toolContext(): ToolContext {
     if (!this.session.employeeId && !this.session.taskId) return { kind: "normal" };
     if (!this.session.taskId) return { kind: "chat", member: this.engine.employeeFor(this.session).state().scope === "team" && !this.canManageEmployee() };
-    let state: ReturnType<ReturnType<Engine["employeeFor"]>["state"]> | undefined;
-    try { state = this.engine.employeeFor(this.session).state(); } catch { /* task record gone: only the always-visible task tools remain */ }
-    const task = state?.tasks.find((t) => t.id === this.session.taskId);
+    let state: ReturnType<ReturnType<Engine["employeeFor"]>["state"]> | undefined, task: Obj | undefined;
+    try {
+      const employee = this.engine.employeeFor(this.session);
+      state = employee.state(); task = employee.findTask(this.session.taskId);
+    } catch { /* task record gone: only the always-visible task tools remain */ }
     const duty = task?.dutyId ? state?.duties.find((d) => d.id === task.dutyId) : undefined;
     const dynamic = !!duty && !duty.manual && !duty.everyMinutes && !duty.times?.length && !duty.events?.length;
     return {
@@ -368,7 +370,7 @@ export class Tools {
       internal = toInternal(call.name, checkArgs(definition.parameters, rest), this.toolContext());
     }
     const a = internal ? internal.args : omitPlaceholders({ ...call.arguments }, (definition as any).parameters);
-    const waiting = this.session.employeeId && this.session.taskId && this.engine.employeeFor(this.session).state().tasks.find(task => task.id === this.session.taskId)?.workspaceWait;
+    const waiting = this.session.employeeId && this.session.taskId && this.engine.employeeFor(this.session).findTask(this.session.taskId)?.workspaceWait;
     if (waiting) return { value: { status: "queued", reason: "工作区写入占用，任务已暂停，本步未执行；资源释放后自动续做。" }, error: true, stop: true };
     if (internal) {
       const result = internal.tool === "chrome" ? await this.chrome(a) : await this.employee(internal, call.name, rest);
@@ -501,7 +503,7 @@ export class Tools {
       const task = employee.task(employee.state(), id);
       return { id, title: task.text.slice(0, 80), status: task.status };
     };
-    if (internal.target === "task") assert(employee.state().tasks.some((t) => t.id === a.id), "taskId 不是当前牛马的任务；职责请用 employee_duty_manage");
+    if (internal.target === "task") assert(employee.findTask(a.id), "taskId 不是当前牛马的任务；职责请用 employee_duty_manage");
     if (internal.target === "duty") assert(employee.state().duties.some((d) => d.id === a.id), "dutyId 不是当前牛马的职责；任务请用 employee_task_manage");
     if (this.session.employeeId && !this.session.taskId && employee.state().scope === "team" && !this.canManageEmployee())
       assert(["list", "resume", "answer", "stop"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "当前交代人无团队牛马管理权限；可以派单、查询、补充、续做和停止任务，职责、记忆和凭据请管理员管理");

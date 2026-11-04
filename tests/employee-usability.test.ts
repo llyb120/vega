@@ -170,7 +170,7 @@ test("employee deletion removes its sessions/profile and its own vault and survi
   try {
     const a = engine.employee.for(engine.employee.create({ name: "Remove", cwd: dir }, "alice").id), b = engine.employee.for(engine.employee.create({ name: "Keep", cwd: dir }, "alice").id);
     const job = await add(a), chat = a.chat("alice");
-    const legacy = store.newSession({ taskId: job.id, cwd: dir });
+    const legacy = store.newSession({ taskId: job.id, employeeId: a.employeeId, cwd: dir });
     a.update((state) => { state.tasks[0].workSession = legacy.id; });
     store.append(legacy.id, { role: "assistant", text: "private record" });
     const profile = engine.browsers.profile(a.employeeId);

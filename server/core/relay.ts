@@ -279,7 +279,7 @@ export class Relay {
     }
     if (event.type?.startsWith("starlink.")) {
       const employee = event.type === "starlink.reply"
-        ? this.employee.all().find((employee) => employee.state().tasks.some((task) => task.id === data.id)) || this.employee
+        ? this.employee.all().find((employee) => employee.findTask(data.id)) || this.employee
         : this.employee;
       await employee.remote(from, event.type, data);
     }
@@ -288,12 +288,9 @@ export class Relay {
     const employee = this.employee.for(args.employeeId || "default");
     assert(employee.state().public, "Employee is not public");
     if (command === "info") {
-      const s = employee.state();
       return {
         status: "ready",
-        tasks: s.tasks.filter(
-          (t) => !["done", "failed", "stopped", "cancelled", "sealed"].includes(t.status),
-        ).length,
+        tasks: employee.store.activeTaskCount(employee.employeeId),
       };
     }
     if (command === "employee_get") {
@@ -326,7 +323,10 @@ export class Relay {
       );
     }
     if (command === "transcript") {
-      const task = employee.state().tasks.find((task) => task.workSession === args.threadId || task.computerSession === args.threadId);
+      let taskId = "";
+      try { taskId = employee.store.session(args.threadId).taskId || ""; } catch {}
+      const task = employee.findTask(taskId);
+      assert(task && (task.workSession === args.threadId || task.computerSession === args.threadId), "Only the assigning member may view this task");
       assert(task?.owner.token === owner.token, "Only the assigning member may view this task");
       return employee.transcript(args.threadId);
     }

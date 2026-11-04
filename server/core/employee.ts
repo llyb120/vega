@@ -11,6 +11,7 @@ import { realpath } from "node:fs/promises";
 import { assert, id, clone, clip, sleep, type Obj } from "./util";
 import { Vault, VAULT_USAGE } from "./vault";
 import { requireSceneModel } from "./config";
+import { attachRows, baseRecord, saveRows } from "./employee-rows";
 export type Execution = Pick<Session, "localAgent" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
 export type Owner = { token: string; name: string };
 export type Task = Obj & {
@@ -94,7 +95,7 @@ const preview = (m: Message) => {
   return `#${m.seq}（${chars.length}字）${chars.slice(0, 60).join("")}${chars.length > 60 ? "…" : ""}`;
 };
 /** Resolve complete.deliverableRef: undefined = not declared, [] = no separate body, else cited messages in order. */
-export const resolveDeliverable = (messages: Message[], ref: unknown): { declared: boolean; refs: number[]; texts: string[]; error?: string; later: Message[] } => {
+export const resolveDeliverable = (messages: readonly Message[], ref: unknown): { declared: boolean; refs: number[]; texts: string[]; error?: string; later: Message[] } => {
   const candidates = messages.filter(authored);
   const list = candidates.slice(-8).map(preview).join("；") || "无";
   if (ref === undefined || ref === null || ref === "") return { declared: false, refs: [], texts: [], later: [], error: `task_complete 需要声明交付正文：用 deliverableRefs 引用本任务里你写过的正文消息编号（可多条，按顺序拼接；正文无需复制进 evidence），没有单独正文（如纯执行验证）传 deliverableRefs=[]。本任务可引用：${list}` };
@@ -387,7 +388,7 @@ export class Employee {
     Object.assign(s, { name: a.name.trim(), avatar, instruction: a.instruction || "", ownerId, scope, cwd: a.cwd || process.cwd(), enabled: true, workStart: "00:00", workEnd: "00:00" });
     employee.save(s);
     (this.root || this).members.set(key, employee);
-    employee.emitChanged(s);
+    employee.emitChanged();
     return s;
   }
   forget() {
@@ -398,6 +399,7 @@ export class Employee {
       this.store.sql("DELETE FROM objects WHERE kind=?").run(this.vault.kind);
       this.store.sql("DELETE FROM objects WHERE kind=?").run("experience:" + this.employeeId);
       this.store.sql("DELETE FROM objects WHERE kind=?").run("skill:" + this.employeeId);
+      this.store.dropEmployeeRows(this.employeeId);
       this.store.remove("employee-capabilities", this.employeeId);
       if (this.employeeId === "default") {
         this.store.sql("DELETE FROM settings WHERE key='employee'").run();
@@ -443,9 +445,19 @@ export class Employee {
       return session;
     });
   }
+  /** The employee record, plus only the task and run rows that changed (see employee-rows.ts). */
   save(s: EmployeeState) {
-    if (this.employeeId === "default") this.store.put("employee", s);
-    else this.store.save("employee", this.employeeId, s);
+    this.store.transaction(() => {
+      const base = baseRecord(s);
+      if (this.employeeId === "default") this.store.put("employee", base);
+      else this.store.save("employee", this.employeeId, base);
+      saveRows(this.store, this.employeeId, s, (task) => !ended(task.status));
+    });
+  }
+  /** One of this employee's tasks, read alone. */
+  findTask(id: string): Task | undefined {
+    const row = id ? this.store.employeeTask(id) : undefined;
+    return row?.employee === this.employeeId ? row.task : undefined;
   }
   wake(at: number) {
     const root = this.root || this;
@@ -528,7 +540,7 @@ export class Employee {
     t.nextCheckAt = now + 30000 * 2 ** (recovery.attempts - 1);
     t.checkpoint ||= "恢复原任务：检查错误与外部状态，诊断、最小修复并验证；不重复发送/提交，不扩大授权。";
   }
-  // shortcut: task history shares one SQLite document; normalize tasks when histories become large.
+  /** The employee record; its tasks and runs are rows, read only when used (see employee-rows.ts). */
   state(): EmployeeState {
     assert(!this.deleted && !(this.employeeId === "default" && this.store.get("employee:default-deleted", false)), "Employee not found");
     const fallback: EmployeeState = {
@@ -545,15 +557,13 @@ export class Employee {
       desktopAskAfter: 0,
       cwd: process.cwd(),
       duties: [],
-      tasks: [],
       memories: [],
-      runs: [],
       orbit: [],
       links: [],
-    };
-    const state = this.employeeId === "default"
+    } as unknown as EmployeeState;
+    const state = attachRows(this.store, this.employeeId, this.employeeId === "default"
       ? this.store.get<EmployeeState>("employee", fallback)
-      : this.store.object<EmployeeState>("employee", this.employeeId) || fallback;
+      : this.store.object<EmployeeState>("employee", this.employeeId) || fallback) as EmployeeState;
     // The built-in legacy employee belongs to the account that originally initialized the server.
     if (this.employeeId === "default" && !state.ownerId) {
       const creator = this.store.sql("SELECT id FROM web_users WHERE role='admin' ORDER BY createdAt,id LIMIT 1").get() as { id: string } | undefined;
@@ -586,15 +596,13 @@ export class Employee {
   }
   update<T>(fn: (s: EmployeeState) => T): T {
     assert(!this.deleting, "Employee is being deleted");
-    let state!: EmployeeState;
     const result = this.store.transaction(() => {
-      const s = state = this.state(),
+      const s = this.state(),
         value = fn(s);
       this.save(s);
       return value;
     });
-    // The saved state is what was just written: no second read and parse of the whole record.
-    this.emitChanged(state);
+    this.emitChanged();
     this.schedule();
     return result;
   }
@@ -623,10 +631,10 @@ export class Employee {
     for (const run of this.busy.values()) this.runtime.cancel(run.session);
     if (!this.root) for (const employee of this.members.values()) employee.close();
   }
-  emitChanged(s: EmployeeState) {
+  emitChanged() {
     this.runtime.emit("employee_changed", {
       employeeId: this.employeeId,
-      activeTasks: s.tasks.filter((t) => !ended(t.status)).length,
+      activeTasks: this.store.activeTaskCount(this.employeeId),
     });
   }
   schedule() {
@@ -939,7 +947,7 @@ export class Employee {
               `Delivery summary requires 1–400 characters; received ${length} (type: ${typeof a.summary}). 尚未交付：summary须为非空、非全空白的字符串，中英文、标点、空格与换行均计数。请先填写或精简summary（建议100–200字符），只保留结果、重要限制与需用户处理事项；完整证据放evidence，不要原样重试或直接截断。`,
             );
           }
-          const cited = resolveDeliverable(t.workSession ? this.store.messages(t.workSession) : [], a.deliverableRef);
+          const cited = resolveDeliverable(t.workSession ? this.store.sharedMessages(t.workSession).rows : [], a.deliverableRef);
           assert(!cited.error, "尚未交付：" + cited.error);
           const signature = cited.refs.join(",") + "|" + cited.later.map((m) => m.seq).join(",");
           if (cited.later.length && t.deliverableWarned !== signature) {
@@ -1219,8 +1227,8 @@ export class Employee {
       this.runtime.emit("employee_changed", { employeeId: this.employeeId });
     }
     if (caller && value && typeof value === "object" && !Array.isArray(value)) {
-      const task = this.state().tasks.find((t) => t.id === caller);
-      const last = task?.workSession && task.side !== "computer" ? this.store.messages(task.workSession).filter((m) => m.role === "assistant").at(-1) : undefined;
+      const task = this.findTask(caller);
+      const last = task?.workSession && task.side !== "computer" ? this.store.lastMessage(task.workSession, "assistant") : undefined;
       if (authored(last)) (value as Obj).textRef = last!.seq;
     }
     return { value, stop };
@@ -1237,19 +1245,14 @@ export class Employee {
   /** Latest help/approval delivery bubble for this task in the employee chat, if any. */
   latestTaskDelivery(chatSession: string | undefined, taskId: string) {
     if (!chatSession) return;
-    for (const message of this.store.messages(chatSession).slice().reverse()) {
-      if (!message.delivery || message.role !== "assistant") continue;
-      if (message.tasks?.some((task) => task.id === taskId)) return message;
-    }
+    return this.store.findMessage(chatSession, "$.delivery", 1, (message) => message.role === "assistant" && !!message.tasks?.some((task) => task.id === taskId));
   }
   /** Record the user's task-detail reply as a quoted chat bubble (deduped). */
   appendChatReply(chatSession: string | undefined, delivery: Message | undefined, text: string) {
     if (!chatSession || !delivery?.seq || !String(text || "").trim()) return;
     const trimmed = text.trim();
-    const existing = this.store.messages(chatSession).find((message) =>
-      message.role === "user" &&
-      message.quote?.seq === delivery.seq &&
-      (message.displayText || message.text) === trimmed
+    const existing = this.store.findMessage(chatSession, "$.quote.seq", delivery.seq, (message) =>
+      message.role === "user" && (message.displayText || message.text) === trimmed
     );
     if (existing) return existing;
     return this.store.append(chatSession, {
@@ -1259,15 +1262,12 @@ export class Employee {
     });
   }
   latestShot(t: Task) {
-    const rows = this.store.messages(
-      t.side === "computer" ? t.computerSession : t.workSession,
-    );
-    for (const m of [...rows].reverse())
-      if (m.images?.length) {
-        const im = this.store.imageData(m.images.at(-1)!);
-        if (im.data && im.data.length <= (4 * 1024 * 1024 * 4) / 3)
-          return { data: im.data, ext: im.mime.split("/")[1] };
-      }
+    const m = this.store.lastMessage(t.side === "computer" ? t.computerSession : t.workSession, "images");
+    if (m?.images?.length) {
+      const im = this.store.imageData(m.images.at(-1)!);
+      if (im.data && im.data.length <= (4 * 1024 * 1024 * 4) / 3)
+        return { data: im.data, ext: im.mime.split("/")[1] };
+    }
   }
   async control(a: Obj, owner: Owner = { token: "", name: "" }) {
     let reply: any;
@@ -1524,7 +1524,7 @@ export class Employee {
         before?.locked !== desk.locked ||
         before?.available !== desk.available
       )
-        this.emitChanged(initial);
+        this.emitChanged();
     }
     const s = this.state();
     if (this.deleting || this.deleted || this.resetting) return;
@@ -1618,7 +1618,7 @@ export class Employee {
     }
     if (changed) {
       this.save(s);
-      this.emitChanged(s);
+      this.emitChanged();
     }
     if (Number.isFinite(next)) this.wake(next);
     for (const job of jobs) void this.run(job).catch((error) => {
@@ -1695,7 +1695,7 @@ export class Employee {
       task.supplementPending = false;
       this.save(state);
       if (computer && !this.runtime.isolated) stopMonitor = this.monitorComputer(task.id, session);
-      const rowsBefore = this.store.messages(session), continuing = rowsBefore.some((message) => message.role === "user");
+      const rowsBefore = this.store.sharedMessages(session).rows, continuing = rowsBefore.some((message) => message.role === "user");
       const previous = {
         answer: rowsBefore.findLast((message) => message.taskInput?.answer !== undefined)?.taskInput?.answer,
         handoff: rowsBefore.findLast((message) => message.taskInput?.handoff !== undefined)?.taskInput?.handoff,
@@ -1728,7 +1728,7 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
       const prompt = context + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用task_progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。task_request_approval/task_ask_user/task_wait/task_relay_computer后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。验证码/访问码/2FA 属于必须 task_ask_user 的用户阻碍，不得自行认定无法获取后降级。task_relay_computer交接须继承当前交付类型与完成标准，不得擅自改成另一种目标。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后用 chrome_connection 检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。浏览器/扩展连续失败≥2 次（非验证码场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码使用switch_scene（主会话共享历史），Chrome必须用task_relay_computer交给独立computer会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时用deliverableRefs引用这些正文的消息编号（牛马工具回执的textRef即本条回复编号；不确定时task_complete会列出候选），系统按引用原文连同summary交付，不必复制进evidence；无单独正文传deliverableRefs=[]；evidence写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       await this.runtime.run(session, prompt, undefined, input);
-      const last = this.store.messages(session).at(-1);
+      const last = this.store.lastMessage(session);
       if (last?.role === "assistant" && !last.calls?.length && last.seq! > after) {
         lastReply = last;
         result = last.text || "";

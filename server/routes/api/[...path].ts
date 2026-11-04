@@ -118,20 +118,18 @@ export default defineEventHandler(async (event) => {
     if (path[0] === "debug") {
       check(user.role === "admin", 403, "Administrator permission required");
       check(method === "GET" && path[1] === "sessions" && path.length === 2, 404, "Debug route not found");
-      const employees = engine.employee.all().map((employee) => employee.state());
-      const names = new Map(employees.map((employee) => [employee.id, employee.name]));
-      const tasks = new Map(employees.flatMap((employee) => employee.tasks.map((task) => [task.id, { task, employeeId: employee.id }] as const)));
-      return store.sessions().filter((session) => session.employeeId || session.taskId).map((session) => {
-        const linked = session.taskId ? tasks.get(session.taskId) : undefined;
-        const employeeId = session.employeeId || linked?.employeeId || "";
+      const names = new Map(engine.employee.all().map((employee) => { const s = employee.state(); return [s.id, s.name]; }));
+      return store.employeeSessions().map((session) => {
+        const linked = session.taskId ? store.employeeTask(session.taskId) : undefined;
+        const employeeId = session.employeeId || linked?.employee || "";
         return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联牛马", taskText: linked?.task.text || "", kind: !session.taskId ? "chat" : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
       });
     }
     if (path[0] === "bootstrap" && method === "GET")
       return {
         user,
-        sessions: store
-          .sessions()
+        // Admins also see unowned conversations; everyone else only their own (indexed by owner).
+        sessions: (user.role === "admin" ? store.plainSessions() : store.sessionsBy("owner", user.id))
           .filter((s) => !s.taskId && !s.employeeId && auth.canRead(user, s)),
         running: Object.fromEntries(
           [...engine.active.keys()]

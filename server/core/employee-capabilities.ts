@@ -58,12 +58,12 @@ export async function employeeCapabilities(employee: Employee, user: { id: strin
     if (method === "POST" && path.length === 1) {
       check(!body.id || !employee.vault.list().find((entry) => entry.id === body.id)?.tempFor, 400, "任务临时条目不能编辑");
       const saved = employee.vault.save({ id: body.id, name: body.name, condition: body.condition, content: body.content, share: typeof body.share === "boolean" ? body.share : undefined });
-      employee.emitChanged(employee.state());
+      employee.emitChanged();
       return saved;
     }
     check(method === "DELETE" && path.length === 2, 404, "Vault route not found");
     employee.vault.remove(decodeURIComponent(path[1]));
-    employee.emitChanged(employee.state());
+    employee.emitChanged();
     return { ok: true };
   }
   if (path[0] === "mcp" && path.length === 1 && method === "PUT") {
@@ -78,7 +78,7 @@ export async function employeeCapabilities(employee: Employee, user: { id: strin
     store.save("employee-capabilities", id, { ...config, mcp: next });
   } else if (path[0] === "skills" && path[1] === "upload" && path.length === 2 && method === "POST") {
     const result = await uploadSkill(store, body, id);
-    employee.emitChanged(employee.state());
+    employee.emitChanged();
     return result;
   } else if (path[0] === "skills" && path.length === 2 && ["GET", "DELETE"].includes(method)) {
     const name = decodeURIComponent(path[1]);
@@ -87,6 +87,6 @@ export async function employeeCapabilities(employee: Employee, user: { id: strin
     if (method === "GET") return { id: skill.id, name: skill.name, description: skill.description, content: skill.content, files: skill.assets?.map((asset: Obj) => asset.path) || ["SKILL.md"] };
     store.remove(skillKind(id), name);
   } else check(false, 404, "Capability route not found");
-  employee.emitChanged(employee.state());
+  employee.emitChanged();
   return { ok: true };
 }
