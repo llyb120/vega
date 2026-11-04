@@ -17,11 +17,16 @@ export type Message = {
   quote?: { seq: number; role: string; text: string; taskId?: string };
   tasks?: { id: string; title: string; status: string }[];
   delivery?: boolean;
+  /** Group chat (groups.ts): who said it, in the group's own session. */
+  author?: { kind: "user" | "employee"; id: string; name: string };
   /**
-   * A colleague employee's message. In the receiver's chat (role user): the handoff origin (HandoffOrigin in
-   * colleagues.ts) and the sender's name. In the sender's chat (role assistant): who replied ({ employeeId, name }).
+   * Group chat relay depth: 0 for a user's message, n for the n-th employee turn handed on by @mentions since then.
+   * In a member's own group session (role user) also the group message it answers (seq) and who sent it.
    */
-  colleague?: { employeeId: string; name: string; [key: string]: any };
+  hop?: number;
+  group?: { groupId: string; name: string; seq: number; from: { kind: "user" | "employee"; id: string; name: string }; byOwner: boolean };
+  /** A group notice from the system (member joined/left, relay limit reached). */
+  notice?: boolean;
   /** A task milestone the executing session chose to tell the user (task_progress tellUser). */
   progress?: boolean;
   thinking?: string;
@@ -57,6 +62,8 @@ export type Session = {
   readerIds?: string[];
   fireRoot?: string;
   fireRole?: "work" | "judge";
+  /** A group chat's own session (no employee), or a member employee's session inside that group. */
+  groupId?: string;
   createdAt: number;
 };
 /** Schema version kept in settings; a database of another version is refused (no migrations). */

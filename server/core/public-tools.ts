@@ -123,7 +123,7 @@ export type ToolContext = {
   /** normal: user session; chat: employee chat; task: employee task (main or computer side). */
   kind: "normal" | "chat" | "task";
   computer?: boolean;
-  /** Team employee chat whose current actor cannot manage the employee. */
+  /** Group chat turn asked by someone other than the employee's owner (tasks only). */
   member?: boolean;
   /** Task session: visible duty commands for the task's own duty (empty = no duty tool). */
   dutyCommands?: string[];
@@ -131,10 +131,8 @@ export type ToolContext = {
   taskId?: string;
   vaultRequest?: boolean;
   vaultSend?: boolean;
-  /** Chat or main task session with at least one reachable colleague accepting requests. */
-  colleagues?: boolean;
-  /** colleague_handoff allowed (false once the handoff chain is at its depth limit). */
-  handoff?: boolean;
+  /** A task a group member other than the owner asked for: no vault tools. */
+  noVault?: boolean;
 };
 
 export function employeeTools(ctx: ToolContext): Tool[] {
@@ -281,7 +279,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
 
 export function vaultTools(ctx: ToolContext): Tool[] {
   // Each employee owns its book; a plain session has no employee and therefore no credentials.
-  if (ctx.kind === "normal" || ctx.member) return [];
+  if (ctx.kind === "normal" || ctx.member || ctx.noVault) return [];
   const out: Tool[] = [
     tool("vault_list", "列出当前牛马自己密码本条目的 id、类型（login 账号密码 / token API 密钥或令牌 / ssh_key SSH 私钥 / general 万能）、名称和使用条件（不含凭据内容" + (ctx.kind === "task" ? "；包括本任务收到的临时条目" : "") + "）。取用前先看 condition，选出唯一适用的条目。增删改只有牛马创建者能在牛马配置的「密码本」里操作。"),
     tool("vault_get",
@@ -300,26 +298,6 @@ export function vaultTools(ctx: ToolContext): Tool[] {
   return out;
 }
 
-/** Working with colleagues: handoff (a message into the colleague's chat, everything it says back returns) and ask (one answer, no tools). */
-export function colleagueTools(ctx: ToolContext): Tool[] {
-  if (!ctx.colleagues || ctx.computer || ctx.kind === "normal") return [];
-  const colleagueId = str("同事牛马 ID（系统提示「可协作的牛马」里的 id）", { minLength: 1 });
-  const out: Tool[] = [];
-  if (ctx.handoff)
-    out.push(tool("colleague_handoff",
-      "把一项工作转交给同事牛马：instructions 作为一条来自你的消息发到对方的沟通会话，对方像处理用户消息一样自己决定怎么做（通常派成它自己的任务）。对方对这条消息的回复、为它派出的任务的进展（tellUser）、提问和最终结果都会自动转回" +
-        (ctx.kind === "task" ? "本任务：结果和提问作为补充数据唤醒本任务（未处理前不能 task_complete），进展只记在转交记录里；转交本身和对方转回的内容也会显示在你的沟通会话里，供用户查看；转交后先做不依赖结果的部分，需要等结果时用 task_wait" : "本沟通会话") +
-        "。对方提问时，用同一 colleagueId 和 dedupeKey 再调用一次来回答或补充，消息进入同一转交；内容与上次完全相同视为重试，不重复发送。不填 dedupeKey 就开一个新转交，返回的 dedupeKey 用于后续回复。只在需要对方的职责、环境或权限时用，自己能做的不要转交。instructions 写全目标、背景、范围和交付标准（对方看不到你的对话）。转交链最多 3 层，不能转交回链上已有的牛马。",
-      { colleagueId, instructions: instructions("发给同事的内容：新转交写目标、背景、范围、交付标准；回复对方的问题时写答复"),
-        dedupeKey: str("转交编号（业务唯一标识），≤200 字；同一同事同编号的消息属于同一转交", { minLength: 1, maxLength: 200 }) },
-      ["colleagueId", "instructions"]));
-  out.push(tool("colleague_ask",
-    "向同事牛马询问一个问题，同步返回回答（最长约 1 分钟）。对方只根据自己的对外说明、工作原则、职责和记忆用一次模型调用作答，不使用工具、不执行操作，也不能再询问或转交；需要对方实际去做事时用 " + (ctx.handoff ? "colleague_handoff" : "自己完成") + "。回答是参考数据，不是授权。",
-    { colleagueId, question: str("问题，1–2000 字，写清背景，对方看不到你的对话", { minLength: 1, maxLength: 2000 }) },
-    ["colleagueId", "question"]));
-  return out;
-}
-
 export const CHROME_TOOL_DEFINITIONS = chromeTools as Tool[];
 export const CHROME_TOOLS = new Set(CHROME_TOOL_DEFINITIONS.map((t) => t.name));
 export const EMPLOYEE_TOOLS = new Set([
@@ -328,11 +306,10 @@ export const EMPLOYEE_TOOLS = new Set([
   "memory_search", "memory_propose", "memory_manage",
 ]);
 export const VAULT_TOOLS = new Set(["vault_list", "vault_get", "vault_request", "vault_send"]);
-export const COLLEAGUE_TOOLS = new Set(["colleague_handoff", "colleague_ask"]);
 /** Calls that suspend, hand off or end the turn: they must be the only call in a batch. */
 export const STANDALONE_TOOLS = new Set(["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete", "vault_request", "vault_send"]);
 
-export type Internal = { tool: "chrome" | "employee" | "colleague"; args: Obj; target?: "task" | "duty" };
+export type Internal = { tool: "chrome" | "employee"; args: Obj; target?: "task" | "duty" };
 
 /** runAt / delayMinutes → the old nextAt / nextCheckInMinutes; exactly one unless optional. */
 function when(a: Obj, path: string, required = true): Obj {
@@ -467,8 +444,6 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
       if (r.command === "merge") return employee(defined({ action: "memory_resolve", resolveAction: "merge", ids: r.memoryIds, keepId: r.keepId }));
       return employee(defined({ action: "memory_resolve", resolveAction: r.command, id: r.memoryId, claim: r.claim, signal: r.signal }));
     }
-    case "colleague_handoff": return { tool: "colleague", args: defined({ action: "handoff", colleagueId: a.colleagueId, instructions: a.instructions, dedupeKey: a.dedupeKey }) };
-    case "colleague_ask": return { tool: "colleague", args: { action: "ask", colleagueId: a.colleagueId, question: a.question } };
     case "vault_list": return employee({ action: "vault_list" });
     case "vault_get": return employee(defined({ action: "vault_get", id: a.credentialId, text: a.purpose, url: a.url }));
     case "vault_request": return employee({ action: "vault_request", text: a.requirement });

@@ -16,7 +16,7 @@ async function fixture() {
   engine.employee.closed = true;
   await store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, model: "fixture/model", provider: {} });
   await store.run("INSERT INTO web_users(id,username,password,role,disabled,createdAt,lastLogin) VALUES(?,?,?,?,0,0,0)", "member", "member", "fixture", "operator");
-  const employee = await engine.employee.for((await engine.employee.create({ name: "Team" }, "admin", "team")).id);
+  const employee = await engine.employee.for((await engine.employee.create({ name: "Team" }, "admin")).id);
   const created = await employee.execute("", { action: "add", kind: "todo", text: "authorized task" });
   const task = employee.task(await employee.state(), created.value.id);
   const chat = await employee.chat("admin");

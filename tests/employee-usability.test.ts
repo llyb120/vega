@@ -45,54 +45,20 @@ test("browser extension is resolved from source or packaged assets, never the wo
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("team employees are visible to everyone; personal employees and management stay scoped", async () => {
+test("employees belong to their owner: only the owner and administrators see or manage them", async () => {
   const { store, engine } = await fixture(), auth = new Auth(store, "test-token-at-least-16-characters");
   try {
-    const team = await engine.employee.for((await engine.employee.create({ name: "Team" }, "admin", "team")).id);
+    const mine = await engine.employee.for((await engine.employee.create({ name: "Admin's" }, "admin")).id);
     const personal = await engine.employee.for((await engine.employee.create({ name: "Private" }, "alice")).id);
     const alice = { id: "alice", role: "operator" } as any, bob = { id: "bob", role: "operator" } as any, viewer = { id: "viewer", role: "viewer" } as any, admin = { id: "admin", role: "admin" } as any;
-    for (const user of [alice, bob, viewer, admin]) assert(await team.accessible(user));
-    for (const user of [alice, bob, viewer]) assert(!await team.manageable(user));
-    assert(await team.manageable(admin));
-    assert(await personal.accessible(alice) && await personal.accessible(admin));
+    for (const user of [alice, bob, viewer]) assert(!await mine.accessible(user) && !await mine.manageable(user));
+    assert(await mine.manageable(admin));
+    assert(await personal.accessible(alice) && await personal.manageable(alice) && await personal.accessible(admin));
     assert(!await personal.accessible(bob) && !await personal.accessible(viewer));
-    const teamSession = await team.chat("admin"), privateSession = await personal.chat("alice");
-    assert(await auth.canRead(viewer, teamSession));
-    assert(await auth.canRead(bob, teamSession));
-    assert(!await auth.canRead(bob, privateSession));
-    assert(!auth.canWrite(viewer, teamSession));
-    assert.equal((await engine.employee.state()).scope, "team", "the legacy default employee migrates to the team group");
-  } finally { await engine.close(); await store.close(); }
-});
-
-test("team chat management uses the current sender, not the employee owner or a previous administrator", async () => {
-  const { store, engine } = await fixture();
-  try {
-    const insert = (...values: string[]) => store.run("INSERT INTO web_users(id,username,password,role,disabled,createdAt,lastLogin) VALUES(?,?,?,?,0,0,0)", ...values);
-    await insert("admin", "admin", "fixture", "admin");
-    await insert("member", "member", "fixture", "operator");
-    const employee = await engine.employee.for((await engine.employee.create({ name: "Team" }, "admin", "team")).id);
-    const session = await employee.chat("admin");
-    const tools = await Tools.create(engine, session, await engine.config(), new AbortController().signal, () => {});
-    const action = async (name: string) => (await tools.definitions({} as any)).some((tool) => tool.name === ({ add: "employee_task_create" } as Record<string, string>)[name] || tool.name === name);
-    tools.actorId = "admin";
-    assert(await action("memory_propose") && await action("add"));
-    await tools.execute({ id: "remember", ...employeeCall({ action: "memory_propose", claim: "Use this workflow", source: "ui" }) }, {} as any);
-    await tools.execute({ id: "duty", ...employeeCall({ action: "add", kind: "duty", text: "Weekly review", manual: true }) }, {} as any);
-    assert.equal((await employee.state()).duties.length, 1);
-    tools.actorId = "member";
-    assert(!await action("memory_propose") && !await action("vault_get"));
-    await assert.rejects(tools.execute({ id: "denied", ...employeeCall({ action: "memory_propose", claim: "untrusted change", source: "ui" }) }, {} as any), /Tool unavailable/);
-    await assert.rejects(tools.execute({ id: "denied-duty", name: "employee_duty_create", arguments: { instructions: "x", trigger: { kind: "manual" } } }, {} as any), /Tool unavailable/);
-    const work = await tools.execute({ id: "work", ...employeeCall({ action: "add", kind: "todo", text: "authorized work" }) }, {} as any);
-    await assert.rejects(tools.execute({ id: "denied-edit", name: "employee_task_manage", arguments: { taskId: work.value.id, request: { command: "set_instructions", instructions: "changed" } } }, {} as any), /command 只能是 "resume" \/ "answer" \/ "stop"/);
-    assert.equal((await employee.state()).duties.length, 1);
-    assert.equal(employee.task(await employee.state(), work.value.id).text, "authorized work");
-    tools.actorId = "admin";
-    await store.run("UPDATE web_users SET role='operator' WHERE id='admin'");
-    assert(!await action("memory_propose"), "revoked management cannot survive in a cached conversation");
-    tools.actorId = undefined;
-    assert(!await action("memory_propose"), "owner identity is never a fallback for a shared conversation");
+    const privateSession = await personal.chat("alice");
+    assert(await auth.canRead(alice, privateSession) && await auth.canRead(admin, privateSession));
+    assert(!await auth.canRead(bob, privateSession) && !await auth.canRead(viewer, privateSession));
+    assert.equal("scope" in await engine.employee.state(), false, "there is no team scope any more");
   } finally { await engine.close(); await store.close(); }
 });
 

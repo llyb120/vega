@@ -24,11 +24,10 @@ import { KeyFiles, gitSshCommand, keyDir } from "./key-files";
 import { isDeepStrictEqual } from "node:util";
 import { sceneModels, maskedConfig, mergeSecrets } from "./config";
 import { omitPlaceholders } from "./tool-args";
-import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, COLLEAGUE_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, checkArgs, colleagueTools, employeeTools, toInternal, vaultTools, type Internal, type ToolContext } from "./public-tools";
-import { HANDOFF_DEPTH, accepts, colleagueAsk, colleagueHandoff, colleaguesOf } from "./colleagues";
+import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type Internal, type ToolContext } from "./public-tools";
 import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
-import { CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, TEAM_MEMBER_RULES, TEAM_MANAGER_RULES } from "./prompt";
+import { CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
 import { prepareDutyInput } from "./duty-condition";
 import { Context } from "./context";
 import type { EmployeeState } from "./employee";
@@ -89,30 +88,23 @@ export class Tools {
   ) {
     this.keys = new KeyFiles(keyDir(engine.store.files.root), engine.localAgents);
   }
-  async canManageEmployee() {
-    if (!this.actorId) return false;
-    const user = await this.engine.store.one("SELECT id,role,disabled FROM web_users WHERE id=?", this.actorId) as { id: string; role: string; disabled: number } | undefined;
-    return !!user && !user.disabled && await (await this.engine.employeeFor(this.session)).manageable(user);
-  }
-  /** Employees already on the handoff chain this session works under: its task's origin, or the colleague message chat answers. */
-  async handoffChain(): Promise<string[]> {
-    if (this.session.taskId) return (await (await this.engine.employeeFor(this.session)).findTask(this.session.taskId))?.handoffFrom?.chain || [];
-    if (!this.session.employeeId) return [];
-    return (await this.engine.store.lastMessage(this.session.id, "user"))?.colleague?.chain || [];
+  /**
+   * In a group chat, a message from anyone but the employee's owner (another user or another employee) is a guest
+   * request: it may work with tasks only (see GUEST_RULES).
+   */
+  async guestRequest() {
+    if (!this.session.groupId || this.session.taskId) return undefined;
+    const last = await this.engine.store.lastMessage(this.session.id, "user");
+    return last?.group && !last.group.byOwner ? last.group.from : undefined;
   }
   /** Which employee/vault tools and branches this session may see; mirrors the runtime permission checks. */
   async toolContext(): Promise<ToolContext> {
     if (!this.session.employeeId && !this.session.taskId) return { kind: "normal" };
-    if (!this.session.taskId) {
-      const employee = await this.engine.employeeFor(this.session);
-      const colleagues = (await colleaguesOf(employee)).some((c) => accepts(c.profile));
-      return { kind: "chat", member: (await employee.profile()).scope === "team" && !await this.canManageEmployee(), colleagues, handoff: colleagues && (await this.handoffChain()).length < HANDOFF_DEPTH };
-    }
-    let state: EmployeeState | undefined, task: Obj | undefined, colleagues = false;
+    if (!this.session.taskId) return { kind: "chat", member: !!await this.guestRequest() };
+    let state: EmployeeState | undefined, task: Obj | undefined;
     try {
       const employee = await this.engine.employeeFor(this.session);
       state = await employee.state(); task = await employee.findTask(this.session.taskId);
-      colleagues = (await colleaguesOf(employee)).some((c) => accepts(c.profile));
     } catch { /* task record gone: only the always-visible task tools remain */ }
     const duty = task?.dutyId ? state?.duties.find((d) => d.id === task.dutyId) : undefined;
     const dynamic = !!duty && !duty.manual && !duty.everyMinutes && !duty.times?.length && !duty.events?.length;
@@ -123,8 +115,7 @@ export class Tools {
       dutyCommands: duty ? (dynamic ? ["schedule_next", "disable"] : ["disable"]) : [],
       vaultRequest: !!task?.owner?.token,
       vaultSend: !!(task?.replyTo && task?.vaultPk),
-      colleagues,
-      handoff: colleagues && (task?.handoffFrom?.chain?.length || 0) < HANDOFF_DEPTH,
+      noVault: !!task?.group && !task.group.byOwner,
     };
   }
   /** Shared rules for the exposed tool families, injected once into the system prompt instead of every description. */
@@ -135,7 +126,7 @@ export class Tools {
     if (names.has("vault_get")) parts.push("[密码本] " + VAULT_USAGE);
     if (ctx.kind === "task") parts.push(EMPLOYEE_TASK_RULES);
     if (ctx.kind === "normal" && names.has("employee_status")) parts.push(NORMAL_SESSION_EMPLOYEE_RULES);
-    if (ctx.kind === "chat") parts.push(ctx.member ? TEAM_MEMBER_RULES : TEAM_MANAGER_RULES);
+    if (ctx.kind === "chat") parts.push(ctx.member ? GUEST_RULES : OWNER_RULES);
     return parts.length ? "\n" + parts.join("\n") : "";
   }
   async definitions(model?: Model) {
@@ -258,7 +249,7 @@ export class Tools {
         ),
       );
       const ctx = await this.toolContext();
-      defs.push(...employeeTools(ctx), ...vaultTools(ctx), ...colleagueTools(ctx));
+      defs.push(...employeeTools(ctx), ...vaultTools(ctx));
       if (
         (!this.session.taskId || this.session.scene === "computer") &&
         (this.session.scene === "computer" ||
@@ -333,7 +324,7 @@ export class Tools {
       };
     }
     if (this.session.employeeId && !this.session.taskId)
-      return defs.filter((def) => EMPLOYEE_TOOLS.has(def.name) || VAULT_TOOLS.has(def.name) || COLLEAGUE_TOOLS.has(def.name) || ["read", "compress", "decompress", "recall", "search_context", "context_budget", "acp_status"].includes(def.name));
+      return defs.filter((def) => EMPLOYEE_TOOLS.has(def.name) || VAULT_TOOLS.has(def.name) || ["read", "compress", "decompress", "recall", "search_context", "context_budget", "acp_status"].includes(def.name));
     if (this.session.taskId && this.session.scene === "computer")
       return defs.filter((def) => !["write", "edit", "change_working_directory", "mcp", "switch_scene"].includes(def.name));
     return defs;
@@ -390,7 +381,7 @@ export class Tools {
     this.signal.throwIfAborted();
     const definition = (await this.definitions(model)).find((t) => t.name === call.name);
     assert(definition, "Tool unavailable in this scene");
-    const split = CHROME_TOOLS.has(call.name) || EMPLOYEE_TOOLS.has(call.name) || VAULT_TOOLS.has(call.name) || COLLEAGUE_TOOLS.has(call.name);
+    const split = CHROME_TOOLS.has(call.name) || EMPLOYEE_TOOLS.has(call.name) || VAULT_TOOLS.has(call.name);
     let internal: Internal | undefined, rest: Obj = {};
     if (split) {
       const { _after, ...publicArgs } = call.arguments || {};
@@ -402,7 +393,7 @@ export class Tools {
     const waiting = this.session.employeeId && this.session.taskId && (await (await this.engine.employeeFor(this.session)).findTask(this.session.taskId))?.workspaceWait;
     if (waiting) return { value: { status: "queued", reason: "工作区写入占用，任务已暂停，本步未执行；资源释放后自动续做。" }, error: true, stop: true };
     if (internal) {
-      const result = internal.tool === "chrome" ? await this.chrome(a) : internal.tool === "colleague" ? await this.colleague(a, call.name, rest) : await this.employee(internal, call.name, rest);
+      const result = internal.tool === "chrome" ? await this.chrome(a) : await this.employee(internal, call.name, rest);
       if (result.secret && a.action === "vault_get") {
         const credential = JSON.parse(result.secret);
         this.credentials.push({ site: credential.scopeSite || "", values: credentialValues(credential.content) });
@@ -507,15 +498,6 @@ export class Tools {
     }
     throw Error("Runtime-only or unknown tool: " + call.name);
   }
-  /** 转交 / 询问 a colleague; the text leaves this session, so vault content is refused like in task fields. */
-  private async colleague(a: Obj, tool: string, publicArgs: Obj): Promise<Outcome> {
-    this.refuseSecrets(tool, { instructions: a.instructions, question: a.question }, publicArgs);
-    const employee = await this.engine.employeeFor(this.session);
-    if (a.action === "ask") return { value: await colleagueAsk(this.engine, employee, a as any, this.signal) };
-    const taskId = this.session.taskId || "";
-    if (taskId) employee.authorize(await employee.state(), taskId, { action: "list" });
-    return { value: await colleagueHandoff(this.engine, employee, { taskId, session: this.session.id, chain: await this.handoffChain() }, a as any) };
-  }
   private refuseSecrets(tool: string, guarded: Obj, publicArgs: Obj) {
     const redactor = this.engine.redactors.get(this.session.id);
     if (redactor && JSON.stringify(redactor.value(guarded)) !== JSON.stringify(guarded)) {
@@ -527,7 +509,7 @@ export class Tools {
         else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x, path ? `${path}.${k}` : k);
       };
       walk(publicArgs, "");
-      throw new Error(`${tool || "该工具"} 的 ${fields.length ? fields.join("、") : "文本字段"} 含有密码本凭据内容（如账号、密码或令牌），不能写入任务进度、提问、备注、恢复点或发给同事。请删去该值后重试；需要指代时写“密码本中的某条目”。`);
+      throw new Error(`${tool || "该工具"} 的 ${fields.length ? fields.join("、") : "文本字段"} 含有密码本凭据内容（如账号、密码或令牌），不能写入任务进度、提问、备注或恢复点。请删去该值后重试；需要指代时写“密码本中的某条目”。`);
     }
   }
   private async employee(internal: Internal, tool = "", publicArgs: Obj = {}): Promise<Outcome> {
@@ -539,8 +521,8 @@ export class Tools {
       if (source?.seq) await employee.update((state) => {
               const task = employee.task(state, id);
               if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
-              // Work done for a colleague's message reports back to it (status, questions, result: Employee.save).
-              if (source.colleague && (replace || !task.handoffFrom)) task.handoffFrom = { ...source.colleague, at: Date.now() };
+              // Work started from a group message reports back to that group (Employee.toChat), as asked by its sender.
+              if (source.group && (replace || !task.group)) task.group = { groupId: source.group.groupId, name: source.group.name, hop: source.hop || 0, requester: source.group.from, byOwner: source.group.byOwner };
             });
       const task = employee.task(await employee.state(), id);
       return { id, title: task.text.slice(0, 80), status: task.status };
@@ -548,10 +530,9 @@ export class Tools {
     if (internal.target === "task") assert(await employee.findTask(a.id), "taskId 不是当前牛马的任务；职责请用 employee_duty_manage");
     if (internal.target === "duty") assert((await employee.state()).duties.some((d) => d.id === a.id), "dutyId 不是当前牛马的职责；任务请用 employee_task_manage");
     const memberOnly = (action: string, kind?: string) => ["list", "resume", "answer", "stop"].includes(action) || (action === "add" && kind === "todo");
-    // A colleague's request is delegation, not management: it may start and steer tasks, nothing else.
-    if (source?.colleague) assert(memberOnly(a.action, a.kind), `这条消息来自同事牛马「${source.colleague.name}」：同事的转交只能派单、查询、补充、续做和停止任务；职责、记忆和凭据只有用户能改`);
-    else if (this.session.employeeId && !this.session.taskId && (await employee.state()).scope === "team" && !await this.canManageEmployee())
-      assert(memberOnly(a.action, a.kind), "当前交代人无团队牛马管理权限；可以派单、查询、补充、续做和停止任务，职责、记忆和凭据请管理员管理");
+    // In a group, anyone but the owner delegates work: tasks only, never duties, memories or the vault.
+    const guest = source?.group && !source.group.byOwner ? source.group.from : undefined;
+    if (guest) assert(memberOnly(a.action, a.kind), `这条群聊消息来自${guest.kind === "user" ? "用户" : "牛马"}「${guest.name}」，不是牛马主人：只能派单、查询、补充、续做和停止任务；职责、记忆和密码本只有主人能用`);
     if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
       const task = employee.task(await employee.state(), a.id);
       assert(!task.owner.token, "Remote tasks require their assigning member");

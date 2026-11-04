@@ -1,5 +1,4 @@
-import { updateEmployeeAvatar } from "../../core/employee-avatar";
-import { colleaguesOf } from "../../core/colleagues";
+import { updateEmployeeAvatar, updateUserAvatar } from "../../core/employee-avatar";
 import { chatHistory } from "../../core/chat-page";
 import { prepareDutyInput } from "../../core/duty-condition";
 import { canConfigureEmployee, employeeCapabilities } from "../../core/employee-capabilities";
@@ -131,7 +130,7 @@ export default defineEventHandler(async (event) => {
         user,
         // Admins also see unowned conversations; everyone else only their own (indexed by owner).
         sessions: await filterAsync(user.role === "admin" ? await store.plainSessions() : await store.sessionsBy("owner", user.id),
-          async (s) => !s.taskId && !s.employeeId && await auth.canRead(user, s)),
+          async (s) => !s.taskId && !s.employeeId && !s.groupId && await auth.canRead(user, s)),
         running: Object.fromEntries(
           (await filterAsync([...engine.active.keys()], async (key) => {
             try {
@@ -142,6 +141,7 @@ export default defineEventHandler(async (event) => {
             }
           })).map((id) => [id, true]),
         ),
+        avatar: (await store.object<{ avatar: string }>("user-avatar", user.id))?.avatar || "",
         config:
           user.role === "admin"
             ? maskedConfig(await engine.config())
@@ -174,15 +174,17 @@ export default defineEventHandler(async (event) => {
       if (path.length === 1) {
         if (method === "GET") return Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
           const s = await employee.state();
-          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, publicSummary: s.publicSummary || "", acceptsColleagues: s.acceptsColleagues !== false, scope: s.scope, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, runningTasks: s.tasks.filter((t) => t.status === "running").length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
+          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, ownerId: s.ownerId, mine: s.ownerId === user.id, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, runningTasks: s.tasks.filter((t) => t.status === "running").length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
         }));
         if (method === "POST") {
           check(user.role !== "viewer", 403, "Execution permission required");
-          return await engine.employee.create(a, user.id, user.role === "admin" ? "team" : "personal");
+          return await engine.employee.create(a, user.id);
         }
       }
       const employee = (await engine.employee.all()).find((employee) => employee.employeeId === path[1]);
-      check(employee && await employee.accessible(user), 404, "Employee not found");
+      // Group members see each other's employee avatars.
+      const avatarOnly = path[2] === "avatar" && path.length === 3 && method === "GET" && !!employee && await engine.groups.sharesGroup(user.id, { employee: employee.employeeId });
+      check(employee && (avatarOnly || await employee.accessible(user)), 404, "Employee not found");
       check(!employee.deleting, 409, "牛马正在删除，请稍候");
       const state = await employee.state();
       if (method !== "GET") check(user.role !== "viewer", 403, "只读账号不能执行操作");
@@ -272,11 +274,9 @@ export default defineEventHandler(async (event) => {
         return employee.control(a);
       }
       if (path[2] === "transcript" && method === "POST") return await employee.transcript(a.threadId);
-      if (path[2] === "colleagues" && path.length === 3 && method === "GET")
-        return (await colleaguesOf(employee)).map(({ profile: p }) => ({ id: p.id, name: p.name, scope: p.scope, publicSummary: p.publicSummary || "", acceptsColleagues: p.acceptsColleagues !== false }));
       if (path.length === 2 && method === "GET") {
         const { enabled, workStart, workEnd, ...visible } = state;
-        return { ...visible, acceptsColleagues: state.acceptsColleagues !== false, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
+        return { ...visible, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
       }
       if (path.length === 2 && method === "POST") {
         if (!await employee.manageable(user)) check(a.action === "list" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
@@ -287,6 +287,18 @@ export default defineEventHandler(async (event) => {
       }
       check(false, 404, "Employee route not found");
     }
+    if (path[0] === "me" && path[1] === "avatar" && path.length === 2 && method === "POST")
+      return await updateUserAvatar(store, user.id, a);
+    if (path[0] === "avatars" && path[1] === "users" && path.length === 3 && method === "GET") {
+      check(path[2] === user.id || await engine.groups.sharesGroup(user.id, { user: path[2] }), 404, "Avatar not found");
+      const blob = (await store.object<{ avatar: string }>("user-avatar", path[2]))?.avatar;
+      const image = blob && await store.blobData(blob);
+      check(image && image.mime === "image/webp", 404, "Avatar not found");
+      setHeader(event, "Content-Type", "image/webp");
+      setHeader(event, "Cache-Control", "private, max-age=86400");
+      return send(event, Buffer.from(image.data));
+    }
+    if (path[0] === "groups") return await groupRoute(path, method, a, user, getRequestURL(event).searchParams);
     if (path[0] === "sessions") {
       if (path.length === 1 && method === "POST") {
         assert(!a.model || typeof a.model === "string", "Invalid model");
@@ -312,6 +324,7 @@ export default defineEventHandler(async (event) => {
       const key = path[1],
         session = await auth.session(user, key, method !== "GET");
       if (session.employeeId && method !== "GET") check(false, 400, "Use the employee workspace to manage its conversations");
+      if (session.groupId && method !== "GET") check(false, 400, "群聊请在群聊页面操作");
       if (path[2] === "access")
         check(false, 404, "Private sessions cannot be shared");
 
@@ -596,3 +609,34 @@ export default defineEventHandler(async (event) => {
     });
   }
 });
+
+/** 群聊 (groups.ts). Reading is open to every user in the group; changing anything needs a non-viewer account. */
+async function groupRoute(path: string[], method: string, a: Obj, user: { id: string; role: string }, query: URLSearchParams) {
+  const { engine, store } = app(), groups = engine.groups;
+  if (path.length === 1 && method === "GET") return await groups.list(user);
+  if (path[1] === "directory" && method === "GET") return await groups.directory();
+  const leaving = method === "DELETE" && path[2] === "users" && path[3] === user.id;
+  if (method !== "GET" && !leaving) check(user.role !== "viewer", 403, "只读账号不能在群聊中操作");
+  if (path.length === 1 && method === "POST") return await groups.create(user, a);
+  const id = path[1];
+  if (path.length === 2) {
+    if (method === "GET") return await groups.view(await groups.mine(user, id), user);
+    if (method === "PATCH") return await groups.update(user, id, a);
+    if (method === "DELETE") return await groups.remove(user, id);
+  }
+  if (path[2] === "messages" && path.length === 3) {
+    const group = await groups.mine(user, id);
+    if (method === "GET") return { ...await chatHistory(store, group.session, query), group: await groups.view(group, user) };
+    if (method === "POST") return await groups.send(user, id, a);
+  }
+  if (path[2] === "users") {
+    if (path.length === 3 && method === "POST") { await groups.addUsers(user, id, Array.isArray(a.userIds) ? a.userIds : []); return { ok: true }; }
+    if (path.length === 4 && method === "DELETE") return await groups.removeUser(user, id, path[3]);
+  }
+  if (path[2] === "employees") {
+    if (path.length === 3 && method === "POST") { await groups.addEmployee(user, id, a.employeeId); return { ok: true }; }
+    if (path.length === 4 && method === "DELETE") return await groups.removeEmployee(user, id, path[3]);
+  }
+  if (path[2] === "cancel" && method === "POST") return await groups.cancel(user, id, String(a.employeeId || ""));
+  throw createError({ statusCode: 404, statusMessage: "Group route not found" });
+}

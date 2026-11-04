@@ -140,7 +140,7 @@ export async function eventAllowed(user: User, value: any) {
     }
   }
   if (value.data?.employeeId) {
-    if (value.data.deleted) return user.role === "admin" || value.data.scope === "team" || value.data.ownerId === user.id;
+    if (value.data.deleted) return user.role === "admin" || value.data.ownerId === user.id;
     try { return await (await app().engine.employee.for(value.data.employeeId)).accessible(user); }
     catch { return false; }
   }
