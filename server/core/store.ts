@@ -310,9 +310,12 @@ export class Store {
    * Newest-first messages whose JSON field equals value (or is present, when value is undefined); parsed one at a time
    * until `match` accepts one.
    */
-  async findMessage(key: string, field: string, value: string | number | undefined, match: (m: Message) => boolean = () => true): Promise<Message | undefined> {
-    const test = value === undefined ? `${this.json(field)} IS NOT NULL` : `${this.json(field)}=?`;
-    for (const row of await this.all(`SELECT seq,data FROM messages WHERE session=? AND ${test} ORDER BY seq DESC`, key, ...(value === undefined ? [] : [value]))) {
+  async findMessage(key: string, field: string, value: string | number | boolean | undefined, match: (m: Message) => boolean = () => true): Promise<Message | undefined> {
+    // Compare JSON values: SQLite extracts true as 1; MySQL compares against the value as JSON.
+    const sqlite = this.db.dialect === "sqlite", extracted = this.json(field);
+    const test = value === undefined ? `${extracted} IS NOT NULL` : sqlite ? `${extracted}=?` : `JSON_EXTRACT(data,'${field}')=CAST(? AS JSON)`;
+    const params = value === undefined ? [] : [sqlite ? (typeof value === "boolean" ? Number(value) : value) : JSON.stringify(value)];
+    for (const row of await this.all(`SELECT seq,data FROM messages WHERE session=? AND ${test} ORDER BY seq DESC`, key, ...params)) {
       const m = this.parseMessage(row);
       if (match(m)) return m;
     }

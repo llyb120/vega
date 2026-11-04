@@ -1270,7 +1270,7 @@ export class Employee {
   /** Latest help/approval delivery bubble for this task in the employee chat, if any. */
   async latestTaskDelivery(chatSession: string | undefined, taskId: string) {
     if (!chatSession) return;
-    return await this.store.findMessage(chatSession, "$.delivery", 1, (message) => message.role === "assistant" && !!message.tasks?.some((task) => task.id === taskId));
+    return await this.store.findMessage(chatSession, "$.delivery", true, (message) => message.role === "assistant" && !!message.tasks?.some((task) => task.id === taskId));
   }
   /** Record the user's task-detail reply as a quoted chat bubble (deduped). */
   async appendChatReply(chatSession: string | undefined, delivery: Message | undefined, text: string) {
@@ -1551,100 +1551,107 @@ export class Employee {
       )
         await this.emitChanged();
     }
-    const s = await this.state();
-    if (this.deleting || this.deleted || this.resetting) return;
+    const jobs: Task[] = [];
     let next = Infinity,
       changed = false;
-    for (const task of s.tasks) {
-      const session = task.side === "computer" ? task.computerSession : task.workSession;
-      if (task.status === "running" && !this.busy.has(task.id) && !this.runtime.isRunning(session)) {
-        this.recover(task, "执行者已退出，修复遗留运行状态；续做前检查外部操作。", now);
-        changed = true;
-      }
+    // One transaction: the snapshot this pass judges (orphans, due duties, slots) is the one it saves.
+    try {
+      await this.store.transaction(async () => {
+        const s = await this.state();
+        if (this.deleting || this.deleted || this.resetting) return;
+        for (const task of s.tasks) {
+          const session = task.side === "computer" ? task.computerSession : task.workSession;
+          if (task.status === "running" && !this.busy.has(task.id) && !this.runtime.isRunning(session)) {
+            this.recover(task, "执行者已退出，修复遗留运行状态；续做前检查外部操作。", now);
+            changed = true;
+          }
+        }
+        for (const d of s.duties) {
+          if (!d.enabled || d.manual) continue;
+          let due = 0;
+          if (d.everyMinutes) {
+            if (!s.tasks.some((t) => t.dutyId === d.id && !ended(t.status)))
+              due = d.lastRunAt ? d.lastRunAt + d.everyMinutes * 60000 : 1;
+          } else if (d.times?.length) due = nextFixed(d.times, d.firedAt || now);
+          else due = d.nextCheckAt || 0;
+          const event = d.eventAt && d.eventAt <= now;
+          if ((due && due <= now) || event) {
+            this.fire(s, d, now, event ? (d.pending || []).join("\n") : undefined);
+            if (event) {
+              d.pending = [];
+              d.eventAt = 0;
+            }
+            changed = true;
+          } else {
+            if (due > now) next = Math.min(next, due);
+            if (d.eventAt > now) next = Math.min(next, d.eventAt);
+          }
+        }
+        const employees = await (this.root || this).all();
+        let slots = 3 - employees.reduce((count, employee) => count + employee.busy.size, 0);
+        const writers = (this.root || this).writers;
+        for (const t of s.tasks) {
+          if (this.busy.has(t.id) || !["queued", "deferred", "recovering"].includes(t.status))
+            continue;
+          if ((t.nextCheckAt || 0) > now) {
+            next = Math.min(next, t.nextCheckAt);
+            continue;
+          }
+          if (slots <= 0) continue;
+          if (this.runtime.isRunning(t.side === "computer" ? t.computerSession : t.workSession)) { next = Math.min(next, now + 1000); continue; }
+          const computer = t.side === "computer" || t.profile === "computer";
+          if (!computer && t.workspaceWait && writers.has(t.workspaceWait.key) && writers.get(t.workspaceWait.key)!.taskId !== t.id) continue;
+          if (computer) {
+            if ([...this.busy.values()].some((v) => v.computer)) continue;
+            if (this.locked || !desk?.available || desk.locked) {
+              next = Math.min(next, now + 2000);
+              continue;
+            }
+            if (s.desktopAskAfter > now) {
+              next = Math.min(next, s.desktopAskAfter);
+              continue;
+            }
+            let takeover = this.takeovers.get(t.id);
+            const idle =
+              desk.source === "isolated-chromium" ||
+              Math.min(desk.idleMs, now - this.lastActivity) >=
+                s.idleMinutes * 60000;
+            if (!idle && !takeover) {
+              takeover = { until: now + s.takeoverSeconds * 1000, accepted: false };
+              this.takeovers.set(t.id, takeover);
+              this.runtime.emit("employee_takeover", {
+                id: t.id,
+                text: t.handoff || t.text,
+                deadline: takeover.until,
+              });
+            }
+            if (takeover && !takeover.accepted && takeover.until > now) {
+              next = Math.min(next, takeover.until);
+              continue;
+            }
+            this.takeovers.delete(t.id);
+            t.side = "computer";
+          }
+          this.busy.set(t.id, { computer, session: "" });
+          slots--;
+          if (!computer && t.workspaceWait) {
+            writers.set(t.workspaceWait.key, { taskId: t.id, hold: !!t.workspaceWait.hold });
+            delete t.workspaceWait;
+          }
+          t.queueReason = "";
+          t.status = "running";
+          t.nextCheckAt = 0;
+          jobs.push(clone(t));
+          changed = true;
+        }
+        if (changed) await this.save(s);
+      });
+    } catch (error) {
+      // Nothing was saved: undo this pass's reservations.
+      for (const job of jobs) { this.busy.delete(job.id); this.releaseWorkspace(job.id); }
+      throw error;
     }
-    for (const d of s.duties) {
-      if (!d.enabled || d.manual) continue;
-      let due = 0;
-      if (d.everyMinutes) {
-        if (!s.tasks.some((t) => t.dutyId === d.id && !ended(t.status)))
-          due = d.lastRunAt ? d.lastRunAt + d.everyMinutes * 60000 : 1;
-      } else if (d.times?.length) due = nextFixed(d.times, d.firedAt || now);
-      else due = d.nextCheckAt || 0;
-      const event = d.eventAt && d.eventAt <= now;
-      if ((due && due <= now) || event) {
-        this.fire(s, d, now, event ? (d.pending || []).join("\n") : undefined);
-        if (event) {
-          d.pending = [];
-          d.eventAt = 0;
-        }
-        changed = true;
-      } else {
-        if (due > now) next = Math.min(next, due);
-        if (d.eventAt > now) next = Math.min(next, d.eventAt);
-      }
-    }
-    const jobs: Task[] = [];
-    const employees = await (this.root || this).all();
-    let slots = 3 - employees.reduce((count, employee) => count + employee.busy.size, 0);
-    const writers = (this.root || this).writers;
-    for (const t of s.tasks) {
-      if (this.busy.has(t.id) || !["queued", "deferred", "recovering"].includes(t.status))
-        continue;
-      if ((t.nextCheckAt || 0) > now) {
-        next = Math.min(next, t.nextCheckAt);
-        continue;
-      }
-      if (slots <= 0) continue;
-      if (this.runtime.isRunning(t.side === "computer" ? t.computerSession : t.workSession)) { next = Math.min(next, now + 1000); continue; }
-      const computer = t.side === "computer" || t.profile === "computer";
-      if (!computer && t.workspaceWait && writers.has(t.workspaceWait.key) && writers.get(t.workspaceWait.key)!.taskId !== t.id) continue;
-      if (computer) {
-        if ([...this.busy.values()].some((v) => v.computer)) continue;
-        if (this.locked || !desk?.available || desk.locked) {
-          next = Math.min(next, now + 2000);
-          continue;
-        }
-        if (s.desktopAskAfter > now) {
-          next = Math.min(next, s.desktopAskAfter);
-          continue;
-        }
-        let takeover = this.takeovers.get(t.id);
-        const idle =
-          desk.source === "isolated-chromium" ||
-          Math.min(desk.idleMs, now - this.lastActivity) >=
-            s.idleMinutes * 60000;
-        if (!idle && !takeover) {
-          takeover = { until: now + s.takeoverSeconds * 1000, accepted: false };
-          this.takeovers.set(t.id, takeover);
-          this.runtime.emit("employee_takeover", {
-            id: t.id,
-            text: t.handoff || t.text,
-            deadline: takeover.until,
-          });
-        }
-        if (takeover && !takeover.accepted && takeover.until > now) {
-          next = Math.min(next, takeover.until);
-          continue;
-        }
-        this.takeovers.delete(t.id);
-        t.side = "computer";
-      }
-      this.busy.set(t.id, { computer, session: "" });
-      slots--;
-      if (!computer && t.workspaceWait) {
-        writers.set(t.workspaceWait.key, { taskId: t.id, hold: !!t.workspaceWait.hold });
-        delete t.workspaceWait;
-      }
-      t.queueReason = "";
-      t.status = "running";
-      t.nextCheckAt = 0;
-      jobs.push(clone(t));
-      changed = true;
-    }
-    if (changed) {
-      await this.save(s);
-      await this.emitChanged();
-    }
+    if (changed) await this.emitChanged();
     if (Number.isFinite(next)) this.wake(next);
     for (const job of jobs) void this.run(job).catch((error) => {
       this.busy.delete(job.id);
@@ -1659,66 +1666,67 @@ export class Employee {
       error: any;
     let stopMonitor = () => {};
     try {
-      const state = await this.state(),
-        task = this.task(state, job.id),
-        computer = task.side === "computer",
+      const initial = await this.state(),
+        planned = this.task(initial, job.id),
+        computer = planned.side === "computer",
         cfg = await this.runtime.config();
       let scene = computer ? "computer" : "lightweight";
-      session = computer ? task.computerSession : task.workSession;
+      const notes: string[] = [];
+      let lostSession = "";
+      session = computer ? planned.computerSession : planned.workSession;
       if (session) {
         try {
           const stored = await this.store.session(session);
-          assert(stored.taskId === task.id && (!stored.employeeId || stored.employeeId === this.employeeId), "Execution session belongs to another task or employee");
+          assert(stored.taskId === planned.id && (!stored.employeeId || stored.employeeId === this.employeeId), "Execution session belongs to another task or employee");
           stored.employeeId = this.employeeId;
-          if (computer && task.execution?.localAgent && !stored.localAgent) {
-            Object.assign(stored, task.execution, { cwd: task.cwd });
-            task.checkpoint = (task.checkpoint || "") + "\n电脑会话已恢复到任务绑定的客户端；历史网页结果来自服务端，不得复用旧标签/ref。先用 chrome_tabs/chrome_inspect 核对本机现场，不重放已提交的操作。";
+          if (computer && planned.execution?.localAgent && !stored.localAgent) {
+            Object.assign(stored, planned.execution, { cwd: planned.cwd });
+            notes.push("电脑会话已恢复到任务绑定的客户端；历史网页结果来自服务端，不得复用旧标签/ref。先用 chrome_tabs/chrome_inspect 核对本机现场，不重放已提交的操作。");
           }
-          stored.ownerId ||= task.execution?.ownerId || state.ownerId || undefined;
+          stored.ownerId ||= planned.execution?.ownerId || initial.ownerId || undefined;
           stored.scene ||= scene;
           scene = stored.scene;
           await this.store.saveSession(stored);
         }
         catch {
-          task.previousSessions = [...(task.previousSessions || []), session].slice(-3);
-          task.checkpoint = (task.checkpoint || "") + "\n原执行会话缺失或不可读，保留任务与计划，改用新执行上下文；先核对外部回执，无法核验则task_ask_user，不得重放提交。";
+          lostSession = session;
+          notes.push("原执行会话缺失或不可读，保留任务与计划，改用新执行上下文；先核对外部回执，无法核验则task_ask_user，不得重放提交。");
           session = "";
         }
       }
       if (!session) {
         const model = requireSceneModel(cfg, scene);
         const created = await this.store.newSession({
-                  title:
-                    state.name + " · " + [...task.text.split("\n")[0]].slice(0, 30).join(""),
-                  cwd: task.cwd,
-                  ...task.execution,
-                  scene,
-                  model,
-                  taskId: task.id,
-                  employeeId: this.employeeId,
-                  ownerId: task.execution?.ownerId || state.ownerId || undefined,
-                });
+          title: initial.name + " · " + [...planned.text.split("\n")[0]].slice(0, 30).join(""),
+          cwd: planned.cwd,
+          ...planned.execution,
+          scene,
+          model,
+          taskId: planned.id,
+          employeeId: this.employeeId,
+          ownerId: planned.execution?.ownerId || initial.ownerId || undefined,
+        });
         session = created.id;
+      }
+      this.busy.get(planned.id)!.session = session;
+      // Record the run on fresh state: the task may have changed (answers, supplements) while the session was prepared.
+      let state = await this.update((s) => {
+        const task = this.task(s, job.id);
+        if (lostSession) task.previousSessions = [...(task.previousSessions || []), lostSession].slice(-3);
+        for (const note of notes) task.checkpoint = (task.checkpoint || "") + "\n" + note;
         if (computer) task.computerSession = session;
         else task.workSession = session;
-      }
-      this.busy.get(task.id)!.session = session;
-      const duties = state.duties.filter((d) => d.enabled);
-      state.runs.push({
-        taskId: task.id,
-        session,
-        scene,
-        at: Date.now(),
-        status: "running",
-        notes: [],
+        s.runs.push({ taskId: task.id, session, scene, at: Date.now(), status: "running", notes: [] });
+        s.runs = s.runs.slice(-200);
+        task.completion = "";
+        task.summary = "";
+        task.deliverable = "";
+        task.deliverableRefs = [];
+        task.supplementPending = false;
+        return s;
       });
-      state.runs = state.runs.slice(-200);
-      task.completion = "";
-      task.summary = "";
-      task.deliverable = "";
-      task.deliverableRefs = [];
-      task.supplementPending = false;
-      await this.save(state);
+      let task = this.task(state, job.id);
+      const duties = state.duties.filter((d) => d.enabled);
       if (computer && !this.runtime.isolated) stopMonitor = this.monitorComputer(task.id, session);
       const rowsBefore = (await this.store.sharedMessages(session)).rows, continuing = rowsBefore.some((message) => message.role === "user");
       const previous = {
@@ -1741,8 +1749,9 @@ export class Employee {
         scope: task.cwd || state.cwd || "global",
         touchUsed: false,
       });
-      task.recalledMemoryIds = memories.map((m) => m.id);
-      await this.save(state);
+      const recalled = memories.map((m) => m.id);
+      state = await this.update((s) => { this.task(s, job.id).recalledMemoryIds = recalled; return s; });
+      task = this.task(state, job.id);
       const memoryBlock = formatMemoriesForPrompt(memories);
       const context = continuing
         ? `[牛马任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n当前计划和恢复点：${snapshot}${memoryBlock}`

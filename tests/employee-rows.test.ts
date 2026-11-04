@@ -128,7 +128,7 @@ test("lastMessage and findMessage read only the newest matching message", async 
     assert.equal((await store.lastMessage(s, "assistant"))!.text, "new reply");
     assert.equal((await store.lastMessage(s, "images"))!.text, "with image");
     assert.equal(await store.lastMessage((await store.newSession({})).id), undefined);
-    const delivery = async (id: string) => await store.findMessage(s, "$.delivery", 1, (m) => m.role === "assistant" && !!(m as any).tasks?.some((t: any) => t.id === id));
+    const delivery = async (id: string) => await store.findMessage(s, "$.delivery", true, (m) => m.role === "assistant" && !!(m as any).tasks?.some((t: any) => t.id === id));
     assert.equal((await delivery("t1"))!.seq, 1);
     assert.equal((await delivery("t2"))!.seq, 3);
     assert.equal(await delivery("t3"), undefined);

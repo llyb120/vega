@@ -24,9 +24,10 @@ async function same(store: Store, id: string, mode: "acp" | "auto" = "acp") {
   return cached;
 }
 
-test("cached and incremental context status matches a full recomputation after appends, folds, usage and clears", async () => {
-  const store = await Store.open(":memory:"),
-    { id } = await store.newSession();
+test("cached and incremental context status matches a full recomputation after appends, folds, usage and clears", async (t) => {
+  const store = await Store.open(":memory:");
+  t.after(() => store.close());
+  const { id } = await store.newSession();
   await same(store, id);
   for (let n = 0; n < 12; n++) {
     await turn(store, id, n);
@@ -55,9 +56,10 @@ test("cached and incremental context status matches a full recomputation after a
   assert.equal(cleared.blocks.length, 0);
 });
 
-test("shared rows are frozen and loaded incrementally", async () => {
-  const store = await Store.open(":memory:"),
-    { id } = await store.newSession();
+test("shared rows are frozen and loaded incrementally", async (t) => {
+  const store = await Store.open(":memory:");
+  t.after(() => store.close());
+  const { id } = await store.newSession();
   await turn(store, id, 1);
   const first = await store.sharedMessages(id);
   assert.ok(Object.isFrozen(first.rows[0]));
@@ -69,9 +71,10 @@ test("shared rows are frozen and loaded incrementally", async () => {
   assert.notEqual(second.revision, first.revision);
 });
 
-test("status on a long session is served from cache and recomputes far faster than the old full scan", async () => {
-  const store = await Store.open(":memory:"),
-    { id } = await store.newSession();
+test("status on a long session is served from cache and recomputes far faster than the old full scan", async (test) => {
+  const store = await Store.open(":memory:");
+  test.after(() => store.close());
+  const { id } = await store.newSession();
   for (let n = 0; n < 300; n++) await turn(store, id, n, 1200);
   const ctx = await Context.open(store, id, "auto");
   // Old behaviour: re-read every row and build the prompt view three times per call.

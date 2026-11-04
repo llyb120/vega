@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../server/core/store";
 
-test("SQLite runs in WAL with synchronous=NORMAL off the main thread, with an index for per-session grant cleanup", async () => {
+test("SQLite runs in WAL with synchronous=NORMAL off the main thread, with an index for per-session grant cleanup", { skip: process.env.DB_TYPE === "mysql" && "SQLite only" }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-sqlite-"));
   const store = await Store.open(join(dir, "vega.db"));
   try {

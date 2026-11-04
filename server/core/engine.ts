@@ -688,9 +688,11 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       let memoryQuery = await recentAsk();
       const reinforceMemory = async () => {
         if (!worker || session?.taskId) return;
-        const state = await worker.state();
-        recallMemory(state, memoryQuery);
-        await worker.save(state);
+        await this.store.transaction(async () => {
+          const state = await worker.state();
+          recallMemory(state, memoryQuery);
+          await worker.save(state);
+        });
       };
       await reinforceMemory();
       const employeePrompt = employee ? `\n[当前数字牛马] ${employee.name}\n${employee.instruction}\n你只管理当前牛马。用户向你交代工作时可直接用 employee_task_create 派单，无需“交给牛马”口令。独立工作放到任务中执行；沟通会话用于回答、派单、补充和恢复任务。参考启用职责，不重复派单、不扩大授权。\n${EMPLOYEE_SCENE_RULES}\n${EMPLOYEE_MEMORY_RULES}\n` : "";
@@ -1093,14 +1095,14 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
   }
   private budgets = new Map<string, { at: number; timer?: ReturnType<typeof setTimeout> }>();
   /** context_budget is informational: at most one per session per second, the latest state always arrives. */
-  budget(key: string, context: { status(): Obj }, emit: Emit) {
+  budget(key: string, context: { status(): Promise<Obj> }, emit: Emit) {
     const entry = this.budgets.get(key) || { at: 0 };
     this.budgets.set(key, entry);
     if (entry.timer) return;
     const send = () => {
       entry.timer = undefined;
       entry.at = Date.now();
-      try { emit("context_budget", context.status()); } catch {}
+      context.status().then((status) => emit("context_budget", status), () => {});
       if (!this.active.has(key)) this.budgets.delete(key);
     };
     const wait = entry.at + 1000 - Date.now();

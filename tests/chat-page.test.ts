@@ -1,23 +1,24 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../server/core/store";
 import { chatHistory } from "../server/core/chat-page";
 
+const stores: Store[] = [];
+after(async () => { for (const store of stores) await store.close(); });
 async function fixture(count: number) {
   const store = await Store.open(":memory:");
+  stores.push(store);
   const session = await store.newSession({ cwd: "/tmp" });
   for (let i = 1; i <= count; i++) await store.append(session.id, { role: i % 2 ? "user" : "assistant", text: "m" + i } as any);
   return { store, id: session.id };
 }
 test("incremental chat sync exposes the server tail so stale caches can detect deleted history", async () => {
   const { store, id } = await fixture(5);
-  try {
-    assert.equal((await chatHistory(store, id, q({ after: "5" })) as any).lastSeq, 5);
-    await store.run("DELETE FROM messages WHERE session=? AND seq>?", id, 2);
-    const rolledBack = await chatHistory(store, id, q({ after: "5" })) as any;
-    assert.equal(rolledBack.lastSeq, 2);
-    assert.deepEqual(rolledBack.messages, []);
-  } finally { await store.close(); }
+  assert.equal((await chatHistory(store, id, q({ after: "5" })) as any).lastSeq, 5);
+  await store.run("DELETE FROM messages WHERE session=? AND seq>?", id, 2);
+  const rolledBack = await chatHistory(store, id, q({ after: "5" })) as any;
+  assert.equal(rolledBack.lastSeq, 2);
+  assert.deepEqual(rolledBack.messages, []);
 });
 
 const q = (params: Record<string, string> = {}) => new URLSearchParams(params);

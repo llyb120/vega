@@ -80,10 +80,12 @@ test("a database from an older schema version is refused and left unchanged (no 
     await old.run("UPDATE settings SET value='5' WHERE name='schema'");
     await old.close();
     await assert.rejects(async () => await Store.open(path), /Not a supported Vega database/);
-    const reopened = new DatabaseSync(path);
-    assert.equal((reopened.prepare("SELECT value FROM settings WHERE name='schema'").get() as any).value, "5");
-    assert.ok(reopened.prepare("SELECT 1 FROM sessions WHERE id=?").get(session.id));
-    reopened.close();
+    if (process.env.DB_TYPE !== "mysql") {
+      const reopened = new DatabaseSync(path);
+      assert.equal((reopened.prepare("SELECT value FROM settings WHERE name='schema'").get() as any).value, "5");
+      assert.ok(reopened.prepare("SELECT 1 FROM sessions WHERE id=?").get(session.id));
+      reopened.close();
+    }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
