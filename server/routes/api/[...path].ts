@@ -15,12 +15,14 @@ import { createHash } from "node:crypto";
 import {
   defineEventHandler,
   getRequestURL,
+  getRequestHeaders,
   readBody,
   createError,
   setHeader,
   send,
 } from "h3";
 import { app, employeeLive } from "../../core/application";
+import { CLIENT_BODY_LIMIT } from "../../core/client-socket";
 import { assert, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
@@ -82,6 +84,16 @@ export default defineEventHandler(async (event) => {
       return body.clientId ? app().clientSockets.pair(body) : engine.localAgents.verify(body.ticket, auth);
     }
     catch { throw createError({ statusCode: 401, statusMessage: "Local agent ticket invalid or expired" }); }
+  }
+  if (path[0] === "local-agent" && path[1] === "result" && method === "POST") {
+    setHeader(event, "Cache-Control", "no-store");
+    // Only headers and URL are needed; reading the body stays with bodyJSON.
+    const request = { headers: new Headers(getRequestHeaders(event) as Record<string, string>), url: getRequestURL(event).href } as unknown as Request;
+    try { app().clientSockets.authorize(request); }
+    catch { throw createError({ statusCode: 403, statusMessage: "Client credential invalid or revoked" }); }
+    const body = await bodyJSON(event, CLIENT_BODY_LIMIT);
+    try { return app().clientSockets.upload(request, body); }
+    catch (e: any) { throw createError({ statusCode: 409, statusMessage: e.message }); }
   }
   const who = principal(event),
     user = who.user;

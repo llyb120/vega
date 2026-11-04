@@ -189,7 +189,7 @@ func TestUpdateIdleWaitsForJobsResultsQuietPeriodAndBrowserLease(t *testing.T) {
 		t.Fatal("a running session is not idle during model thinking or between tool calls")
 	}
 	runner.sessionBusy = false
-	runner.tasks["pending"] = &localJob{result: map[string]any{"done": true}}
+	runner.tasks["pending"] = &localJob{result: []byte(`{"done":true}`)}
 	if idleConnections(connections, now) {
 		t.Fatal("unacknowledged result is not idle")
 	}

@@ -5,7 +5,8 @@ import type { Store } from "./store";
 import { CLIENT_HEARTBEAT_TIMEOUT, LocalAgents, validateClient, type Agent } from "./local-agent";
 import { assert, type Obj } from "./util";
 
-export const CLIENT_BODY_LIMIT = 48 << 20;
+/** Large results are posted over HTTP (up to CLIENT_BODY_LIMIT); socket messages stay small so heartbeats never queue behind them. */
+export const CLIENT_BODY_LIMIT = 48 << 20, CLIENT_SOCKET_LIMIT = 1 << 20;
 type Socket = Pick<Peer, "id" | "request" | "send" | "close">;
 type Grant = { hash: string; userId: string; clientId: string; createdAt: number };
 type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj; transport?: Agent["transport"]; updating?: boolean };
@@ -65,7 +66,7 @@ export class ClientSockets {
     let accepted = false;
     try {
       assert(this.valid(connection.grant), "Client authorization revoked");
-      assert(Buffer.byteLength(raw) <= CLIENT_BODY_LIMIT, "Client message too large");
+      assert(Buffer.byteLength(raw) <= CLIENT_SOCKET_LIMIT, "Client message too large");
       const value = JSON.parse(raw);
       assert(value && typeof value === "object" && !Array.isArray(value), "Invalid client message");
       connection.lastAt = Date.now();
@@ -113,6 +114,14 @@ export class ClientSockets {
         if (connection.details.resume) socket.send(JSON.stringify({ type: "ack", id: value.id }));
       }
     } catch { this.close(socket.id, !accepted); }
+  }
+  /** A result posted over HTTP; the response is its acknowledgement. */
+  upload(request: Socket["request"], value: Obj) {
+    const grant = this.authorize(request), instance = request.headers.get("x-vega-instance");
+    assert(this.valid(grant), "Client authorization revoked");
+    assert(value && typeof value === "object" && value.type === "result", "Invalid client result");
+    assert(this.hub.active(grant.userId, grant.clientId)?.instance === instance, "Agent disconnected");
+    return this.hub.result(grant.userId, { id: value.id, result: value.result, instance });
   }
   revoke(userId: string, clientId?: string) {
     for (const grant of this.store.objects<Grant>("client-token")) {

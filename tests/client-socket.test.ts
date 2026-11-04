@@ -383,3 +383,21 @@ test("revocation and password changes erase device grants and terminate native s
   assert.equal(native.closed.length, 1);
   assert.equal(f.store.objects("client-token").length, 0);
 });
+
+test("large results arrive over HTTP from the same device and instance; the socket only takes small messages", async (t) => {
+  const f = await fixture(t);
+  const { deviceToken } = f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
+  const socket = f.peer(deviceToken);
+  f.sockets.open(socket);
+  f.sockets.message(socket, JSON.stringify({ type: "hello", ...details }));
+  const operation = f.hub.request(f.hub.active(f.login.principal.user.id, details.clientId)!, "file", { op: "read", path: "big.bin" }, new AbortController().signal);
+  const job = socket.messages.at(-1);
+  const content = "x".repeat(4 << 20);
+  const post = (token: string, instance = details.instance) => new Request("http://localhost/api/local-agent/result", { method: "POST", headers: { authorization: "Bearer " + token, "x-vega-instance": instance } });
+  assert.throws(() => f.sockets.upload(post("A".repeat(43)), { type: "result", id: job.id, result: { content } }), "a wrong device token is refused");
+  assert.throws(() => f.sockets.upload(post(deviceToken, "b".repeat(32)), { type: "result", id: job.id, result: { content } }), "another instance cannot answer");
+  assert.deepEqual(f.sockets.upload(post(deviceToken), { type: "result", id: job.id, result: { content } }), { ok: true });
+  assert.equal((await operation as any).content.length, content.length);
+  f.sockets.message(socket, JSON.stringify({ type: "result", id: job.id, result: { content } }));
+  assert.equal(socket.closed.length, 1, "an oversized socket message is refused");
+});
