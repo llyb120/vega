@@ -29,10 +29,10 @@ export function employeeChatMessages(messages) {
     (message.role === "assistant" && !!(message.text?.trim() || message.images?.length)));
 }
 
-/** A bubble continues the previous one (no repeated avatar/name) inside one reply run; deliveries, progress notices and colleague messages stand alone. */
+/** A bubble continues the previous one (no repeated avatar/name) inside one reply run of one author; deliveries, progress and group notices stand alone. */
 export function continuesPrevious(previous, message) {
-  const standalone = (m) => m.delivery || m.progress || m.colleague;
-  return !!previous && previous.role !== "user" && message.role !== "user" && !standalone(previous) && !standalone(message);
+  const standalone = (m) => m.delivery || m.progress || m.notice;
+  return !!previous && previous.role !== "user" && message.role !== "user" && !standalone(previous) && !standalone(message) && previous.author?.id === message.author?.id;
 }
 
 /** Match Nova: adjacent thoughts/tools form one process segment; text breaks it. */

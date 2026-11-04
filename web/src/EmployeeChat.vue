@@ -258,7 +258,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         </article>
       </div>
     </div>
-    <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号仅可查看团队牛马的对话和任务。</p>
+    <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号只能查看这个牛马的对话和任务。</p>
     <form v-else class="chat-composer" @submit.prevent="send">
       <div v-if="quoted" class="composer-quote"><Icon name="reply" :size="14" /><button type="button" @click="jumpTo(quoted.seq)"><strong>引用 {{ quoted.role === 'user' ? '我' : name }}</strong><span>{{ quoted.text }}</span></button><button type="button" class="icon sm" aria-label="取消引用" @click="quoted = undefined"><Icon name="close" :size="14" /></button></div>
       <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon name="image" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>

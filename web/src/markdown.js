@@ -21,11 +21,15 @@ function imageURL(value) {
   } catch {}
 }
 
-/** "@名称" of known employees, active only during one renderMarkdown call ({ name, id } list; names are unique per user). */
+/**
+ * "@名称" of known people, active only during one renderMarkdown call ({ name, id, link? } list; names are unique per
+ * user and per group). Employees the reader can open become links; `link: false` (users, other people's employees in
+ * a group) renders a highlighted mention only.
+ */
 let mentionPattern, mentionIds;
 function useMentions(people) {
   const named = (people || []).filter((p) => p?.id && String(p.name || "").trim());
-  mentionIds = new Map(named.map((p) => [String(p.name).trim(), String(p.id)]));
+  mentionIds = new Map(named.map((p) => [String(p.name).trim(), { id: String(p.id), link: p.link !== false }]));
   const names = [...mentionIds.keys()].sort((a, b) => b.length - a.length).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   // Longest name first, so "@测试牛马处理" finds 测试牛马; "@" right after a letter or digit (an email) does not count.
   mentionPattern = names.length ? new RegExp(`(^|[^\\p{L}\\p{N}_])@(${names.join("|")})`, "gu") : undefined;
@@ -55,8 +59,8 @@ export function renderInline(text) {
       (_, prefix, url) => prefix + protect(`<img src="${escape(imageURL(url))}" alt="存档图片" loading="lazy" decoding="async" referrerpolicy="no-referrer">`, url),
     )
     .replace(mentionPattern || /(?!)()()/gu, (match, prefix, name) => {
-      const id = mentionIds.get(name);
-      return prefix + protect(`<a class="mention" href="?employee=${encodeURIComponent(id)}" data-employee="${escape(id)}">@${escape(name)}</a>`, "@" + name);
+      const { id, link } = mentionIds.get(name);
+      return prefix + protect(link ? `<a class="mention" href="?employee=${encodeURIComponent(id)}" data-employee="${escape(id)}">@${escape(name)}</a>` : `<span class="mention">@${escape(name)}</span>`, "@" + name);
     });
   const html = escape(source)
     .replace(

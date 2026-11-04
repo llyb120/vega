@@ -14,7 +14,7 @@ import EmployeeTasks from "./EmployeeTasks.vue";
 import EmployeeDuties from "./EmployeeDuties.vue";
 import EmployeeMemories from "./EmployeeMemories.vue";
 import EmployeeSettings from "./EmployeeSettings.vue";
-import MentionTextarea from "./MentionTextarea.vue";
+import GroupChat from "./GroupChat.vue";
 import EmployeeCapabilities from "./EmployeeCapabilities.vue";
 import EmployeeVault from "./EmployeeVault.vue";
 import WorkPanel from "./WorkPanel.vue";
@@ -68,6 +68,7 @@ function retryLocalPairing() {
 const mobileTitles = {
   chat: "对话",
   employee: "数字牛马",
+  group: "群聊",
   debug: "调试会话",
   browser: "浏览器",
   experiences: "经验图谱",
@@ -234,6 +235,10 @@ const employee = ref({
   debugRevision = ref(0),
   employees = ref([]),
   selectedEmployee = ref(""),
+  // 群聊: the viewer's groups (sidebar), the open one ("" with view "group" = the create form) and its live revision.
+  groups = ref([]),
+  selectedGroup = ref(""),
+  groupRevision = ref(0),
   employeeEvent = ref(null),
   employeeComposers = ref({}),
   creatingEmployee = ref(false),
@@ -378,9 +383,9 @@ function showTasks(filter = "active") {
   workRailOpen.value = false;
   employeeTab.value = "tasks";
 }
-// A new employee is a team employee when an admin creates it (reaches the team), else the user's personal one (reaches the list: team + own).
-const newEmployeeColleagues = computed(() => employees.value.filter((entry) => !isAdmin.value || entry.scope === "team"));
-const employeeGroups = computed(() => [['team', '团队牛马'], ['personal', isAdmin.value ? '个人牛马' : '我的牛马']].map(([scope, label]) => ({ scope, label, entries: employees.value.filter((employee) => employee.scope === scope) })).filter((group) => group.entries.length));
+// Every employee belongs to its owner; administrators also see everyone else's (to oversee them).
+const employeeGroups = computed(() => [['mine', '我的牛马', true], ['others', '其他用户的牛马', false]].map(([key, label, mine]) => ({ key, label, entries: employees.value.filter((employee) => !!employee.mine === mine) })).filter((group) => group.entries.length));
+const myEmployees = computed(() => employees.value.filter((employee) => employee.mine));
 const labels = {
   queued: "排队中",
   running: "执行中",
@@ -594,14 +599,29 @@ function toast(text) {
 }
 async function bootstrap() {
   const b = await api("/bootstrap");
-  user.value = b.user;
   sessions.value = (b.sessions || []).filter((session) => !session.taskId);
   running.value = b.running || {};
   onlineClients.value = b.clients || [];
   clientListReady.value = true;
   config.value = b.config || {};
+  user.value = { ...b.user, avatar: b.avatar || "" };
   if (!project.value) project.value = b.cwd;
+  await loadGroups();
   return b;
+}
+async function loadGroups() {
+  try { groups.value = await api("/groups"); } catch (e) { if (!e.network) error.value = e.message; }
+}
+function openGroup(id = "") {
+  selectedGroup.value = id;
+  creatingEmployee.value = false;
+  view.value = "group";
+  closeNavigation();
+}
+async function groupClosed() {
+  selectedGroup.value = "";
+  await loadGroups();
+  view.value = "employee";
 }
 async function enter(result) {
   user.value = result.user;
@@ -696,6 +716,8 @@ function resetLogin() {
   employeeSession.value = "";
   employees.value = [];
   selectedEmployee.value = "";
+  groups.value = [];
+  selectedGroup.value = "";
   employeeEvent.value = null;
   employeeComposers.value = {};
   employeeError.value = "";
@@ -984,6 +1006,7 @@ function background(promise) {
 }
 const refreshCurrentSoon = coalesced(() => refreshCurrent()),
   bootstrapSoon = coalesced(() => bootstrap()),
+  loadGroupsSoon = coalesced(() => loadGroups()),
   refreshEmployeeSoon = coalesced(() => refreshEmployee());
 /** Streamed tokens are buffered and painted once per frame (hidden tabs: every 250ms). */
 let pendingLive = "", pendingThinking = "", liveFrame = 0, liveTimer, liveEpoch = 0;
@@ -1022,6 +1045,15 @@ function handleEvent(event) {
   if (view.value === "debug" && ["started", "message_end", "tool_end", "done", "employee_changed"].includes(event.type)) debugRevision.value++;
   if (event.session && event.session === employee.value.chatSession) {
     employeeEvent.value = event;
+    return;
+  }
+  if (event.type === "group_changed") {
+    background((async () => {
+      await loadGroupsSoon();
+      if (view.value !== "group" || event.data?.groupId !== selectedGroup.value) return;
+      if (groups.value.some((g) => g.id === selectedGroup.value)) groupRevision.value++;
+      else { toast("你已不在这个群聊中（被移出或群聊已解散）"); selectedGroup.value = ""; view.value = "employee"; }
+    })());
     return;
   }
   if (event.type === "clients_changed") {
@@ -1320,11 +1352,14 @@ async function openEmployeeTask(id) {
   employeeTaskFocus.value = id;
   employeeTab.value = "tasks";
 }
-/** 转交 links: open a task on another employee (only one the current user can see). */
-async function openColleagueTask({ employeeId, taskId }) {
+/** A task link in a group chat: open it on the (own) employee that runs it. */
+async function openEmployeeTaskOf({ employeeId, taskId }) {
   if (!employees.value.some((entry) => entry.id === employeeId)) { toast("你没有权限查看这个牛马"); return; }
-  if (selectedEmployee.value !== employeeId) await chooseEmployee(employeeId);
+  if (selectedEmployee.value !== employeeId || view.value !== "employee") await chooseEmployee(employeeId);
   if (selectedEmployee.value === employeeId) await openEmployeeTask(taskId);
+}
+function openGroupEmployee(id) {
+  if (employees.value.some((entry) => entry.id === id)) void chooseEmployee(id);
 }
 async function employeeTabChanged(id) {
   employeeTab.value = id;
@@ -1398,8 +1433,6 @@ async function saveEmployeeSettings() {
       action: "settings",
       name: employee.value.name,
       instruction: employee.value.instruction,
-      publicSummary: employee.value.publicSummary || "",
-      acceptsColleagues: employee.value.acceptsColleagues !== false,
       cwd: employee.value.cwd,
     });
     toast("牛马设置已保存");
@@ -1465,6 +1498,8 @@ onBeforeUnmount(() => {
         :is-admin="isAdmin"
         :can-execute="canExecute"
         :groups="employeeGroups"
+        :chats="groups"
+        :selected-group="selectedGroup"
         :selected-employee="selectedEmployee"
         :view="view"
         :creating="view === 'employee' && creatingEmployee"
@@ -1478,6 +1513,7 @@ onBeforeUnmount(() => {
         :running="running"
         :current-root="rootSession?.id"
         @choose="chooseEmployee"
+        @open-group="openGroup"
         @create="creatingEmployee = true; openEmployee()"
         @navigate="view = $event"
         @logout="logout"
@@ -1539,6 +1575,7 @@ onBeforeUnmount(() => {
           <p v-if="executionUnavailable" class="execution-warning" role="status">所选客户端已离线或尚未选择，请选择在线客户端或切换到服务端；不会自动切换或重试操作。</p>
         </div>
       </template>
+      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" />
       <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
       <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" />
       <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" />
@@ -1547,12 +1584,12 @@ onBeforeUnmount(() => {
           <PageHeader :title="canExecute ? '创建新牛马' : '数字牛马'" :subtitle="canExecute ? '取个名字，交代工作方向，就可以开始了。' : ''" :back="employees.length ? '返回' : ''" @back="creatingEmployee = false" />
           <div class="page-scroll create-page">
             <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭牛马错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
-            <div v-if="!canExecute" class="empty-state"><Icon name="users" :size="28" /><strong>还没有团队牛马</strong><span>管理员创建的团队牛马会出现在这里。</span></div>
+            <div v-if="!canExecute" class="empty-state"><Icon name="users" :size="28" /><strong>只读账号不能创建牛马</strong><span>被拉进群聊后，可以在群里查看大家和牛马的协作。</span></div>
             <form v-else class="card create-card" @submit.prevent="createEmployee">
-              <div class="create-head"><span class="create-icon" aria-hidden="true"><Icon name="users" :size="22" /></span><div><h3>你想把什么交给他？</h3><p class="hint">{{ isAdmin ? '团队牛马 · 所有成员可见' : '个人牛马 · 仅本人和管理员可见' }}</p></div></div>
+              <div class="create-head"><span class="create-icon" aria-hidden="true"><Icon name="users" :size="22" /></span><div><h3>你想把什么交给他？</h3><p class="hint">仅你和管理员可见；需要和别人或别的牛马协作时，拉个群聊。</p></div></div>
               <div class="form-grid">
                 <label>牛马名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
-                <label>工作方向<MentionTextarea v-model="newEmployeeInstruction" :colleagues="newEmployeeColleagues" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果；发布相关的工作转交给 @发布助手。" /></label>
+                <label>工作方向<textarea v-model="newEmployeeInstruction" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
               </div>
               <ul class="create-facts">
                 <li><Icon name="check" :size="14" />创建后即可接活，无需设置启用或工作时间</li>
@@ -1609,7 +1646,6 @@ onBeforeUnmount(() => {
             @select="employeeTaskFocus = $event"
             @inspect="openEmployee($event)"
             @chat="employeeTab = 'chat'"
-            @open-task="openColleagueTask"
           />
           <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
           <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" /></div>

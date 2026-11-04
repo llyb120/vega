@@ -11,7 +11,6 @@ export const TASK_LABELS = {
   stopped: "已停止",
   cancelled: "已取消",
   sealed: "已封存",
-  lost: "已失效",
   pending: "待执行",
   in_progress: "进行中",
   completed: "已完成",
@@ -25,8 +24,6 @@ const TONES = {
 };
 export const taskTone = (status) => TONES[status] || "neutral";
 export const taskLabel = (status) => TASK_LABELS[status] || status || "";
-/** A handoff record: "sent" (waiting for the colleague's chat), "replied" (answered without a task), else its task's status. */
-export const handoffLabel = (status) => ({ sent: "已发送", replied: "已答复" })[status] || taskLabel(status);
 /** Actively being worked on right now: the statuses the shared mapping shows in the "info" tone. */
 export const isInProgress = (status) => taskTone(status) === "info";
 export const isEnded = (status) => ["done", "failed", "cancelled", "stopped", "sealed"].includes(status);

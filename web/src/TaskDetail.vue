@@ -3,10 +3,10 @@ import { computed, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import MessageText from "./MessageText.vue";
 import { formatBeijing } from "../../shared/time";
-import { handoffLabel, taskLabel, taskTone, isEnded, planProgress } from "./task-status";
+import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
 import { exportResult, exportTitleOf } from "./export-result.js";
 const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function });
-const emit = defineEmits(["inspect", "back", "open-task"]);
+const emit = defineEmits(["inspect", "back"]);
 const busy = ref(false), answer = ref(""), exportOpen = ref(false), exportError = ref(""), settleSelected = ref([]), settling = ref(false);
 const suggestions = computed(() => props.task.memorySuggestions || []);
 watch(() => props.task.id, () => { answer.value = ""; exportOpen.value = false; exportError.value = ""; });
@@ -57,14 +57,11 @@ async function run(action) {
       <div class="detail-badges">
         <span :class="['badge', taskTone(task.status)]"><span :class="['dot', taskTone(task.status), { pulse: task.status === 'running' }]" aria-hidden="true"></span>{{ taskLabel(task.status) }}</span>
         <span v-if="task.dutyId" class="badge"><Icon name="repeat" :size="12" />职责触发</span>
-        <button v-if="task.handoffFrom?.taskId" type="button" class="badge handoff-link" @click="emit('open-task', { employeeId: task.handoffFrom.employeeId, taskId: task.handoffFrom.taskId })">转交自 {{ task.handoffFrom.name }}</button>
-        <span v-else-if="task.handoffFrom" class="badge">转交自 {{ task.handoffFrom.name }}（沟通）</span>
         <span class="badge"><Icon :name="task.execution?.localAgent ? 'laptop' : 'server'" :size="12" />{{ task.execution?.localAgent ? '客户端 · ' + (task.execution.clientName || '已绑定设备') : '服务端' }}</span>
         <time class="detail-time">{{ formatBeijing(task.createdAt) }}</time>
       </div>
       <h2 class="sr-only">任务详情</h2>
       <MessageText :text="task.text" />
-      <p v-if="task.handoffs?.length" class="detail-note handoffs">已转交给：<template v-for="h in task.handoffs" :key="h.id"><button v-if="h.taskId" type="button" class="ghost sm handoff-link" @click="emit('open-task', { employeeId: h.employeeId, taskId: h.taskId })">{{ h.name }} · {{ handoffLabel(h.status) }}</button><span v-else class="badge" :title="h.result || ''">{{ h.name }} · {{ handoffLabel(h.status) }}</span></template></p>
       <p v-if="task.status === 'queued' && task.queueReason" class="detail-note" role="status"><Icon name="clock" :size="14" />{{ task.queueReason }}</p>
     </header>
 
@@ -154,8 +151,6 @@ async function run(action) {
 .detail-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .detail-time { margin-left: auto; color: var(--muted); font-size: 12px; }
 .detail-note { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
-.detail-note.handoffs { flex-wrap: wrap; }
-.handoff-link { cursor: pointer; }
 .attention-block { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px 16px; border: 1px solid var(--warn-border); border-radius: var(--r-lg); background: var(--warn-soft); }
 .attention-block h3 { display: flex; align-items: center; gap: 6px; color: var(--warn); font-size: 13px; }
 .attention-block textarea { width: 100%; background: var(--surface); }

@@ -2,6 +2,7 @@
 import { ref, onMounted } from "vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
+import UserAvatar from "./UserAvatar.vue";
 import { formatBeijing } from "../../shared/time";
 const props = defineProps({ api: Function, user: Object });
 const emit = defineEmits(["error", "notice", "signed-out", "changed"]);
@@ -13,6 +14,22 @@ const users = ref([]),
   newPassword = ref(""),
   creating = ref(false);
 const labels = { admin: "管理员", operator: "操作用户", viewer: "只读用户" };
+// My avatar: shown on my messages and as my tile in group avatars.
+const avatarInput = ref(null), avatarBusy = ref(false);
+async function saveAvatar(payload) {
+  avatarBusy.value = true;
+  try { await props.api("/me/avatar", "POST", payload); emit("changed"); }
+  catch (e) { emit("error", e.message); }
+  finally { avatarBusy.value = false; }
+}
+async function uploadAvatar(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type) || file.size > 5 * 1024 * 1024) { emit("error", "请使用 5MiB 以内的 PNG、JPEG、WebP 或 GIF 图片"); return; }
+  const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1]); reader.onerror = () => reject(Error("读取头像失败")); reader.readAsDataURL(file); }).catch((e) => { emit("error", e.message); return ""; });
+  if (data) await saveAvatar({ mime: file.type, data });
+}
 async function run(fn) {
   busy.value = true;
   try {
@@ -79,8 +96,13 @@ onMounted(() => void run(refresh));
     <div class="accounts-inner">
       <section class="card me-card">
         <div class="me-head">
-          <span class="me-avatar" aria-hidden="true">{{ user.username.slice(0, 1).toUpperCase() }}</span>
+          <span class="me-avatar" aria-hidden="true"><UserAvatar :user-id="user.id" :name="user.username" :avatar="user.avatar" /></span>
           <div><h3>{{ user.username }}</h3><p class="hint">{{ labels[user.role] }} · 退出登录不影响已提交任务。</p></div>
+          <div class="avatar-actions">
+            <input ref="avatarInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden @change="uploadAvatar" />
+            <button type="button" class="sm" :disabled="avatarBusy" @click="avatarInput.click()"><Icon name="image" :size="14" />{{ user.avatar ? '更换头像' : '上传头像' }}</button>
+            <button v-if="user.avatar" type="button" class="sm ghost" :disabled="avatarBusy" @click="saveAvatar({ clear: true })">移除</button>
+          </div>
         </div>
         <form class="password-form" @submit.prevent="changePassword">
           <div class="form-head"><strong>修改我的密码</strong><span class="hint">修改后需在所有设备重新登录。</span></div>
@@ -124,7 +146,7 @@ onMounted(() => void run(refresh));
             </form>
           </template>
         </div>
-        <p class="hint isolation-note"><Icon name="lock" :size="12" />每个用户的会话和 Stage 仅本人可见；数字牛马由管理员共享管理。</p>
+        <p class="hint isolation-note"><Icon name="lock" :size="12" />每个用户的会话和 Stage 仅本人可见；数字牛马属于创建者本人（管理员可查看和管理）；和别人协作请拉群聊。</p>
       </section>
     </div>
   </div>
@@ -138,6 +160,8 @@ onMounted(() => void run(refresh));
 .me-head { display: flex; align-items: center; gap: 12px; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
 .me-avatar { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--text); color: #fff; font-size: 18px; font-weight: 600; }
 .me-head h3 { font-size: 16px; }
+.me-avatar { overflow: hidden; flex: none; }
+.me-head .avatar-actions { display: flex; gap: 6px; margin-left: auto; }
 .form-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .form-head strong { font-size: 13px; }
 .form-grid.three { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; }

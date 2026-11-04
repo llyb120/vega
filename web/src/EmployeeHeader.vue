@@ -33,7 +33,7 @@ function choose(localAgent, clientId) { close(place); emit("execution", localAge
       <span class="identity-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employee.id" :name="employee.name" :avatar="employee.avatar" :animate="working" /></span>
       <div class="identity-text">
         <h2 class="truncate">{{ employee.name || "加载中…" }}</h2>
-        <span :class="['identity-status', tone]" :title="employee.instruction || '把目标交给我，任务由我安排。'"><span class="dot" :class="[tone, { pulse: tone === 'info' }]" aria-hidden="true"></span>{{ status }}<span class="identity-scope"> · {{ employee.scope === 'personal' ? '个人牛马' : '团队牛马' }}</span></span>
+        <span :class="['identity-status', tone]" :title="employee.instruction || '把目标交给我，任务由我安排。'"><span class="dot" :class="[tone, { pulse: tone === 'info' }]" aria-hidden="true"></span>{{ status }}</span>
       </div>
     </div>
     <nav class="employee-tabs" aria-label="牛马工作区">
@@ -75,7 +75,6 @@ function choose(localAgent, clientId) { close(place); emit("execution", localAge
 .identity-status { display: flex; align-items: center; gap: 6px; overflow: hidden; color: var(--muted); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
 .identity-status.warn { color: var(--warn); }
 .identity-status.info { color: var(--accent-text); }
-.identity-scope { color: var(--muted); }
 .employee-tabs { display: flex; align-self: stretch; flex: 1; min-width: 0; gap: 2px; overflow-x: auto; scrollbar-width: none; }
 .employee-tabs::-webkit-scrollbar { display: none; }
 .employee-tabs button { position: relative; gap: 6px; height: auto; min-height: 0; padding: 0 10px; border: 0; border-radius: 0; background: transparent; color: var(--text-2); font-weight: 500; }
@@ -117,7 +116,7 @@ function choose(localAgent, clientId) { close(place); emit("execution", localAge
   .employee-header { gap: 0 8px; padding: 6px 8px 0 12px; }
   .header-menu { display: inline-flex; }
   .identity-avatar { width: 32px; height: 32px; border-radius: 9px; }
-  .identity-scope, .work-toggle, .place-chip { display: none; }
+  .work-toggle, .place-chip { display: none; }
   .employee-tabs { height: 44px; margin: 0 -8px 0 -12px; padding: 0 4px; }
   .employee-tabs button { padding: 0 10px; }
   .employee-tabs button .icon-svg { display: none; }
