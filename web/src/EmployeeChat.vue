@@ -4,7 +4,6 @@ import ChatMessage from "./ChatMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { employeeChatMessages, continuesPrevious } from "./conversation";
-import { createLiveReply } from "./live-reply.js";
 import { createChatHistory } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
 const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array, remember: Function });
@@ -29,15 +28,12 @@ watch([messages, running], ([rows, active]) => {
   });
 });
 const visible = computed(() => employeeChatMessages(messages.value));
-// Streamed text of the reply being written, plus replies that ended but are not merged from the server yet.
-const reply = createLiveReply({ onPaint: () => { if (nearBottom()) void scroll(); } });
 const displayed = computed(() => {
   const rows = [...visible.value];
   for (const message of outbox.value) {
     const next = rows.findIndex((row) => !row.sendStatus && row.seq > message.afterSeq);
     rows.splice(next < 0 ? rows.length : next, 0, message);
   }
-  rows.push(...reply.rows.value);
   return rows.map((message, index) => ({ message, continued: continuesPrevious(rows[index - 1], message) }));
 });
 const typingContinued = computed(() => continuesPrevious(displayed.value.at(-1)?.message, { role: "assistant" }));
@@ -130,7 +126,6 @@ function finishTurn() {
   return refresh(() => {
     if (current !== turn) return; // a new turn already started; it owns the typing row now
     easeIn(employeeChatMessages(messages.value).filter((message) => message.role !== "user" && !before.has(message.seq)).map((message) => message.seq));
-    reply.clear();
     running.value = false;
   });
 }
@@ -214,13 +209,7 @@ function handleEvent(event) {
       error.value = "";
       break;
     case "message_start":
-      reply.start();
-      running.value = true;
-      break;
     case "text_delta":
-      reply.append(event.data);
-      running.value = true;
-      break;
     case "thinking_delta":
       running.value = true;
       break;
@@ -230,12 +219,10 @@ function handleEvent(event) {
     case "done":
       void finishTurn();
       break;
-    case "message_end": {
-      // The streamed bubble stays until the persisted copy is merged in the same tick, so it never shows twice.
-      const ended = reply.end();
-      void refresh(() => reply.settle(ended), false);
+    case "message_end":
+      // No streaming here: each reply appears whole once it is persisted; the typing dots cover the wait.
+      void refresh(undefined, false);
       break;
-    }
     case "compacted":
     case "user":
     case "steer":
@@ -248,7 +235,7 @@ watch(() => props.revision, () => refresh());
 // the last of them, so every event is handled synchronously as it is assigned.
 watch(() => props.event, handleEvent, { flush: "sync" });
 onMounted(load);
-onBeforeUnmount(() => { disposed = true; history.dispose(); reply.dispose(); });
+onBeforeUnmount(() => { disposed = true; history.dispose(); });
 </script>
 <template>
   <section class="employee-chat">
@@ -265,7 +252,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); reply.dispose(); });
           </div>
         </div>
         <ChatMessage v-for="{ message, continued } in displayed" :key="message.clientMessageId || message.seq || message.liveKey" :message="message" :continued="continued" :name="name" :avatar="avatar" :employee-id="employeeId" :enter-from="entering[message.seq]" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
-        <article v-if="running && !reply.writing.value" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
+        <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
           <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>
           <span v-else class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" animate @pose="typingPose = $event" /></span>
           <div class="chat-content">

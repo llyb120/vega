@@ -6,7 +6,6 @@ import { webcrypto } from "node:crypto";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
 import { employeeChatMessages, continuesPrevious } from "../web/src/conversation.js";
-import { createLiveReply } from "../web/src/live-reply.js";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
 const between = (start: string, end: string) => chat.slice(chat.indexOf(start), chat.indexOf(end));
@@ -16,7 +15,7 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
   const context: any = {
     console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
     props: { employeeId: "fixture", api, composer: reactive({ text: "", images: [], quote: undefined }) },
-    employeeChatMessages, continuesPrevious, createLiveReply, frozen: [] as any[],
+    employeeChatMessages, continuesPrevious, frozen: [] as any[],
   };
   context.easeIn = (seqs: number[]) => context.frozen.push(...seqs);
   const methods = vm.runInNewContext([
@@ -27,7 +26,7 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
     between("async function refresh(apply", "async function upload("),
     between("async function send()", "async function stop()"),
     between("function handleEvent(event)", "watch(() => props.revision"),
-    "({ refresh, handleEvent, finishTurn, send, retry, outbox, displayed, visible, reply, typingContinued })",
+    "({ refresh, handleEvent, finishTurn, send, retry, outbox, displayed, visible, typingContinued })",
   ].join("\n"), context);
   return { ...context, ...methods, dispose: () => { context.disposed = true; } };
 }
@@ -110,48 +109,36 @@ test("in-flight and persisted tool calls share a single entry in the detailed ex
 const tick = async (n = 10) => { for (let i = 0; i < n; i++) await Promise.resolve(); };
 const texts = (state: any) => Array.from(state.displayed.value, (row: any) => row.message.text);
 
-test("streamed text shows as a live bubble at once; thinking and tool events never reach the chat", async () => {
+test("no streaming in the employee chat: deltas, thinking and tool events never show; typing dots cover the wait", async () => {
   const state = mount();
   state.handleEvent({ type: "started" });
   state.handleEvent({ type: "message_start" });
-  for (const type of ["thinking_delta", "tool_start", "tool_end"]) state.handleEvent({ type, data: "process details" });
-  assert.equal(state.reply.writing.value, false, "no text yet: the typing dots stay");
-  state.handleEvent({ type: "text_delta", data: "好的，" });
-  state.handleEvent({ type: "text_delta", data: "我去安排" });
+  for (const type of ["text_delta", "thinking_delta", "tool_start", "tool_end"]) state.handleEvent({ type, data: "process details" });
   await new Promise((resolve) => setTimeout(resolve, 300));
-  assert.deepEqual(texts(state), ["好的，我去安排"], "deltas accumulate into one bubble, painted per frame");
-  assert.equal(state.displayed.value[0].message.streaming, true);
-  assert.equal(state.reply.writing.value, true, "the live bubble replaces the typing dots");
+  assert.deepEqual(texts(state), []);
   assert.equal(state.running.value, true);
+  assert(!chat.includes("live-reply"));
 });
 
-test("message_end swaps the live bubble for the persisted message in one tick, never showing it twice", async () => {
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => release = resolve);
+test("message_end shows the persisted message (text with tool calls) once, while the turn keeps running", async () => {
   const persisted = { seq: 2, role: "assistant", text: "好的，我去安排", calls: [{ id: "c", name: "employee_task_create" }] };
-  const api = async (path: string) => path.includes("after=") ? (await gate, { session: { id: "s" }, messages: [persisted], running: true })
+  const api = async (path: string) => path.includes("after=") ? { session: { id: "s" }, messages: [persisted], running: true }
     : { session: { id: "s" }, messages: [{ seq: 1, role: "user", text: "work" }], running: true };
   const state = mount(api);
   await state.refresh();
   state.handleEvent({ type: "started" });
   state.handleEvent({ type: "message_start" });
   state.handleEvent({ type: "text_delta", data: "好的，我去安排" });
-  const seen: string[] = [];
-  // Rendering flushes once per tick (pre-flush), like the chat page.
-  watch(() => texts(state).join("|"), (value: string) => seen.push(value));
+  assert.deepEqual(texts(state), ["work"]);
   state.handleEvent({ type: "message_end" });
-  state.handleEvent({ type: "message_start" });
-  assert.deepEqual(texts(state), ["work", "好的，我去安排"], "the ended text stays while the persisted copy loads");
-  assert.equal(state.reply.writing.value, false, "the next message starts with typing dots");
-  release();
   await tick(40);
   await nextTick();
   assert.deepEqual(texts(state), ["work", "好的，我去安排"]);
-  assert.equal(state.displayed.value[1].message.seq, 2, "the persisted copy (with tool calls) is what remains");
-  assert(!seen.some((value) => value.split("|").filter((text) => text === "好的，我去安排").length > 1), "never two copies: " + JSON.stringify(seen));
+  assert.equal(state.displayed.value[1].message.seq, 2);
+  assert.equal(state.running.value, true, "typing dots stay for the rest of the turn");
 });
 
-test("masked turns stream no deltas: the bubble appears when the persisted message is merged", async () => {
+test("a reply appears when the persisted message is merged", async () => {
   const state = mount(async () => ({ session: { id: "s" }, messages: [{ seq: 1, role: "assistant", text: "已核对" }], running: true }));
   state.handleEvent({ type: "started" });
   state.handleEvent({ type: "message_start" });
