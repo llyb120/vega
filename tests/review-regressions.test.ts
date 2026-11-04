@@ -112,6 +112,7 @@ test("deleting a root clears a selected descendant Stage and invalidates pending
     activeTools: { value: ["stale"] }, draft: { value: "stale" }, attachments: { value: ["stale"] },
     drafts: new Map([["leaf", { text: "private draft" }], ["root", { text: "root draft" }]]),
     restoreDraft: () => { state.draft.value = ""; state.attachments.value = []; },
+    resetLive: () => { state.live.value = ""; state.thinking.value = ""; },
     sessionRequest: 4, confirm: () => true, attempt: (fn: any) => fn(), api: async () => ({ ok: true }), bootstrap: async () => {},
   };
   state.bootstrap = async () => { state.sessions.value = []; };
