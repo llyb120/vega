@@ -728,8 +728,7 @@ async function selectSession(session) {
   folds.value = [];
   contextBudget.value = null;
   fireState.value = null;
-  live.value = "";
-  thinking.value = "";
+  resetLive();
   activeTools.value = [];
   restoreDraft();
   view.value = "chat";
@@ -809,8 +808,7 @@ async function removeSession(s) {
       folds.value = [];
       contextBudget.value = null;
       fireState.value = null;
-      live.value = "";
-      thinking.value = "";
+      resetLive();
       activeTools.value = [];
       restoreDraft();
     }
@@ -951,24 +949,75 @@ async function refreshCurrent() {
   fireState.value = data.fire;
   running.value[current.value.id] = data.running;
 }
-async function handleEvent(event) {
+/** Runs fn at most once at a time; calls made meanwhile collapse into one trailing run. */
+function coalesced(fn) {
+  let running = null, again = false;
+  return function run() {
+    if (running) { again = true; return running; }
+    running = (async () => {
+      try { do { again = false; await fn(); } while (again); }
+      finally { running = null; }
+    })();
+    return running;
+  };
+}
+function background(promise) {
+  promise.catch((e) => { if (!e?.network) error.value = e.message; });
+}
+const refreshCurrentSoon = coalesced(() => refreshCurrent()),
+  bootstrapSoon = coalesced(() => bootstrap()),
+  refreshEmployeeSoon = coalesced(() => refreshEmployee());
+/** Streamed tokens are buffered and painted once per frame (hidden tabs: every 250ms). */
+let pendingLive = "", pendingThinking = "", liveFrame = 0, liveTimer, liveEpoch = 0;
+function nearBottom() {
+  const el = transcript.value;
+  return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+}
+function flushLive() {
+  if (liveFrame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(liveFrame);
+  clearTimeout(liveTimer);
+  liveFrame = 0;
+  liveTimer = undefined;
+  if (!pendingLive && !pendingThinking) return;
+  const follow = nearBottom();
+  if (pendingLive) live.value += pendingLive;
+  if (pendingThinking) thinking.value += pendingThinking;
+  pendingLive = pendingThinking = "";
+  if (follow) void scrollBottom();
+}
+function scheduleLive() {
+  if (liveFrame || liveTimer) return;
+  if (typeof requestAnimationFrame === "function" && document.visibilityState !== "hidden")
+    liveFrame = requestAnimationFrame(flushLive);
+  // rAF never fires in a hidden tab; the timer also covers a frame that is dropped.
+  liveTimer = setTimeout(flushLive, 250);
+}
+function resetLive() {
+  pendingLive = pendingThinking = "";
+  flushLive();
+  live.value = "";
+  thinking.value = "";
+  liveEpoch++;
+}
+/** Event handlers never wait for the network: refreshes are coalesced and run in the background. */
+function handleEvent(event) {
   if (view.value === "debug" && ["started", "message_end", "tool_end", "done", "employee_changed"].includes(event.type)) debugRevision.value++;
   if (event.session && event.session === employee.value.chatSession) {
     employeeEvent.value = event;
     return;
   }
   if (event.type === "clients_changed") {
-    await bootstrap();
-    if (view.value === "employee") await refreshEmployee();
+    background(bootstrapSoon());
+    if (view.value === "employee") background(refreshEmployeeSoon());
     return;
   }
   if (event.type === "execution_changed") {
-    await bootstrap();
-    if (event.session === current.value?.id) await refreshCurrent();
+    background(bootstrapSoon());
+    if (event.session === current.value?.id) background(refreshCurrentSoon());
     return;
   }
   if (event.type === "config_changed") {
-    await Promise.all([bootstrap(), loadModels()]);
+    background(Promise.all([bootstrapSoon(), loadModels()]));
     return;
   }
   if (event.type === "fire") {
@@ -978,14 +1027,16 @@ async function handleEvent(event) {
       (current.value.id === state.root || current.value.fireRoot === state.root)
     ) {
       fireState.value = state;
-      await bootstrap();
-      if (state.latest !== current.value.id) {
-        const text = draft.value,
-          files = attachments.value;
-        await selectSession({ id: state.latest });
-        draft.value = text;
-        attachments.value = files;
-      } else await refreshCurrent();
+      background((async () => {
+        await bootstrapSoon();
+        if (state.latest !== current.value?.id) {
+          const text = draft.value,
+            files = attachments.value;
+          await selectSession({ id: state.latest });
+          draft.value = text;
+          attachments.value = files;
+        } else await refreshCurrentSoon();
+      })());
     }
     return;
   }
@@ -994,16 +1045,11 @@ async function handleEvent(event) {
     return;
   }
   if (event.type === "employee_takeover") {
-    if (confirm(`数字牛马申请控制 Chrome：\n${event.data.text}\n允许吗？`))
-      await api("/employee/takeover", "POST", {
-        id: event.data.id,
-        accepted: true,
-      });
-    else
-      await api("/employee/takeover", "POST", {
-        id: event.data.id,
-        accepted: false,
-      });
+    // confirm() blocks; deferring it keeps later events flowing while the dialog is open.
+    setTimeout(() => background(api("/employee/takeover", "POST", {
+      id: event.data.id,
+      accepted: confirm(`数字牛马申请控制 Chrome：\n${event.data.text}\n允许吗？`),
+    })));
     return;
   }
   if (event.taskId) {
@@ -1034,22 +1080,23 @@ async function handleEvent(event) {
   if (!selected) {
     if (event.type === "done") {
       running.value[event.session] = false;
-      await bootstrap();
+      background(bootstrapSoon());
     }
     return;
   }
+  if (event.type === "text_delta") {
+    pendingLive += event.data;
+    return scheduleLive();
+  }
+  if (event.type === "thinking_delta") {
+    pendingThinking += event.data;
+    return scheduleLive();
+  }
+  flushLive();
   switch (event.type) {
     case "message_start":
-      live.value = "";
-      thinking.value = "";
+      resetLive();
       model.value = event.data.model;
-      break;
-    case "text_delta":
-      live.value += event.data;
-      await scrollBottom();
-      break;
-    case "thinking_delta":
-      thinking.value += event.data;
       break;
     case "tool_start":
       activeTools.value.push(event.data);
@@ -1069,21 +1116,30 @@ async function handleEvent(event) {
       toast(`当前场景：${event.data.scene} · ${event.data.model || ""}`);
       break;
     case "message_end":
-    case "compacted":
-      await refreshCurrent();
-      live.value = "";
-      thinking.value = "";
-      await scrollBottom();
+    case "compacted": {
+      // The streamed text stays until the stored message replaces it, unless a new message started meanwhile.
+      const epoch = liveEpoch, follow = nearBottom();
+      background(refreshCurrentSoon().then(() => {
+        if (epoch !== liveEpoch || !selectedNow(event.session)) return;
+        resetLive();
+        if (follow) return scrollBottom();
+      }));
       break;
-    case "done":
+    }
+    case "done": {
       running.value[event.session] = false;
-      live.value = "";
-      thinking.value = "";
+      resetLive();
       activeTools.value = [];
-      await Promise.all([refreshCurrent(), bootstrap()]);
-      await scrollBottom();
+      const follow = nearBottom();
+      background(Promise.all([refreshCurrentSoon(), bootstrapSoon()]).then(() => {
+        if (follow && selectedNow(event.session)) return scrollBottom();
+      }));
       break;
+    }
   }
+}
+function selectedNow(session) {
+  return current.value?.id === session;
 }
 let employeeLoadVersion = 0;
 function employeeLocationChanged() {

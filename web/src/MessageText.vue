@@ -1,8 +1,10 @@
 <script setup vapor>
-import { computed } from "vue";
+import { computed, onBeforeUnmount } from "vue";
 import { renderMarkdown } from "./markdown";
+import { useStreamingText } from "./streaming-text.js";
 const props = defineProps({ text: String, streaming: Boolean });
-const rendered = computed(() => renderMarkdown(props.text || ""));
+const text = useStreamingText(() => props.text || "", () => props.streaming, 120, onBeforeUnmount);
+const rendered = computed(() => renderMarkdown(text.value));
 async function copy(event) {
   const button = event.target.closest?.(".code-copy");
   if (!button) return;

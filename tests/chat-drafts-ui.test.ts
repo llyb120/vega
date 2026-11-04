@@ -34,7 +34,7 @@ function mount(handler: (path: string, method: string, data: any) => any = () =>
     },
     localBridge: null, stopPresence() {}, employeeLoadVersion: 0, clearChatCache: async () => {}, employeeRefreshTimer: undefined, closed: false, eventGeneration: 0,
     eventReconnect: undefined, eventsWatchdog: undefined, eventCursor: "", eventsSocket: null, eventsReady: false, eventsWasConnected: false,
-    clearTimeout, clearInterval, authenticated: ref(true), password: ref(""), setupToken: ref(""),
+    resetLive() {}, clearTimeout, clearInterval, authenticated: ref(true), password: ref(""), setupToken: ref(""),
     employees: ref([]), selectedEmployee: ref(""), employeeEvent: ref(null), employeeComposers: ref({}),
     employeeTab: ref("chat"), creatingEmployee: ref(false), newEmployeeName: ref(""), newEmployeeInstruction: ref(""), vaultEntries: ref([]), employee: ref({}), taskText: ref(""), memoryText: ref(""), memoryID: ref(""), dutyOpen: ref(false), duty: ref({}), emptyDuty: () => ({}),
     onlineClients: ref([]), localPairing: ref(null), clientListReady: ref(true), config: ref({}), catalogModels: ref([]), activeTaskCount: ref(null), employeeSession: ref(""), employeeError: ref(""),
