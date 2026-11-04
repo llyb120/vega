@@ -12,6 +12,8 @@ import { Vault } from "../server/core/vault";
 
 const details = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Office PC", cwd: "C:\\only-on-client", platform: "windows" };
 const idle = () => new AbortController().signal;
+/** Jobs reach a client only through its own socket transport; captured as { data: { instance, ...job } }. */
+const wire = (jobs: any[], instance = details.instance, reply?: (job: any) => void) => ({ send: (job: any) => { jobs.push({ data: { instance, ...job } }); reply?.(job); }, close() {} });
 
 test("local login tickets are one-use, bounded, expire and follow website revocation without API keys", () => {
   const hub = new LocalAgents();
@@ -32,14 +34,12 @@ test("local login tickets are one-use, bounded, expire and follow website revoca
 });
 
 test("browser bridge routes only to its owner and instance, never another user or competing tab", async () => {
-  const events: any[] = [], hub = new LocalAgents((event) => { if (event.type === "local_agent_request") events.push(event); });
-  hub.connect("alice", details);
-  hub.connect("bob", { ...details, instance: "b".repeat(32) });
+  const events: any[] = [], hub = new LocalAgents();
+  hub.connect("alice", details, wire(events));
+  hub.connect("bob", { ...details, instance: "b".repeat(32) }, wire([], "b".repeat(32)));
   assert.throws(() => hub.connect("alice", { ...details, instance: "c".repeat(32) }));
   const pending = hub.request(hub.active("alice")!, "file", { op: "read" }, idle());
   const event = events[0];
-  assert.equal(eventAllowed({ id: "alice" } as any, event), true);
-  assert.equal(eventAllowed({ id: "bob", role: "admin" } as any, event), false);
   assert.throws(() => hub.result("bob", { ...event.data, result: { content: "stolen" } }));
   hub.result("alice", { ...event.data, result: { content: "ok" } });
   assert.deepEqual(await pending, { content: "ok" });
@@ -51,12 +51,12 @@ test("browser bridge routes only to its owner and instance, never another user o
 });
 
 test("multiple owned clients route by device and expire independently without falling back", async (t) => {
-  const events: any[] = [], hub = new LocalAgents((event) => { if (event.type === "local_agent_request") events.push(event); });
+  const events: any[] = [], hub = new LocalAgents();
   t.after(() => hub.close());
   const other = { ...details, clientId: "e".repeat(32), instance: "b".repeat(32), name: "Home PC" };
-  hub.connect("alice", details);
-  hub.connect("alice", other);
-  hub.connect("bob", { ...details, instance: "c".repeat(32) });
+  hub.connect("alice", details, wire(events));
+  hub.connect("alice", other, wire(events, other.instance));
+  hub.connect("bob", { ...details, instance: "c".repeat(32) }, wire(events, "c".repeat(32)));
   assert.deepEqual(hub.list("alice").map((c) => c.name), ["Office PC", "Home PC"]);
   assert.equal(hub.list("bob").length, 1);
   assert.equal(hub.active("alice"), undefined, "multiple clients require an explicit selection");
@@ -104,8 +104,8 @@ test("unbound historical local sessions pause instead of guessing which computer
 });
 
 test("session cancellation sends a WebSocket cancel job and rejects the original pending request", async () => {
-  const events: any[] = [], hub = new LocalAgents((event) => { if (event.type === "local_agent_request") events.push(event); });
-  hub.connect("alice", details);
+  const events: any[] = [], hub = new LocalAgents();
+  hub.connect("alice", details, wire(events));
   const controller = new AbortController();
   const request = hub.request(hub.active("alice")!, "exec", { command: "fixture", timeout: 10 }, controller.signal);
   controller.abort(Error("Cancelled by user"));
@@ -141,8 +141,8 @@ test("lost local response pauses for user confirmation, without replay or server
 test("local file reads resolve on the client rather than statting server paths", async () => {
   const store = new Store(":memory:");
   let hub: LocalAgents;
-  hub = new LocalAgents((event) => { if (event.type === "local_agent_request") queueMicrotask(() => hub.result("alice", { ...event.data, result: { path: "C:\\only-on-client\\note.txt", content: Buffer.from("hello\nworld").toString("base64") } })); });
-  hub.connect("alice", details);
+  hub = new LocalAgents();
+  hub.connect("alice", details, wire([], details.instance, (job) => queueMicrotask(() => hub.result("alice", { id: job.id, instance: details.instance, result: { path: "C:\\only-on-client\\note.txt", content: Buffer.from("hello\nworld").toString("base64") } }))));
   const session = store.newSession({ ownerId: "alice", cwd: details.cwd, localAgent: true, clientId: details.clientId });
   const tools = new Tools({ store, localAgents: hub, vault: new Vault(store), mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, idle(), () => {});
   const result = await tools.execute({ id: "read", name: "read", arguments: { path: "note.txt" } }, {} as any);

@@ -117,9 +117,9 @@ test("forbidden shell input is rejected before server spawn or local job dispatc
   const signal = new AbortController().signal;
   const command = "throw 'must not execute'; [Native]::SetCursorPos(10, 20)";
   let sent = 0;
-  const hub = new LocalAgents((event) => { if (event.type === "local_agent_request") sent++; });
+  const hub = new LocalAgents();
   t.after(() => hub.close());
-  hub.connect("alice", { instance: "a".repeat(32), clientId: "b".repeat(32), platform: "windows", cwd: "C:\\client" });
+  hub.connect("alice", { instance: "a".repeat(32), clientId: "b".repeat(32), platform: "windows", cwd: "C:\\client" }, { send: () => { sent++; }, close() {} });
   const agent = hub.active("alice")!;
   await assert.rejects(shell(process.cwd(), { command }, signal, () => {}), { message: SHELL_POLICY_ERROR });
   await assert.rejects(localShell(hub, agent, agent.cwd, { command }, signal), { message: SHELL_POLICY_ERROR });

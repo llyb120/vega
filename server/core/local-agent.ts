@@ -127,8 +127,8 @@ export class LocalAgents {
   }
   private send(agent: Agent, job: Obj) {
     if (agent.reconnecting) throw new LocalAgentUnavailable();
-    if (agent.transport) agent.transport.send(job);
-    else this.emit({ type: "local_agent_request", targetUser: agent.userId, data: { instance: agent.instance, ...job } });
+    if (!agent.transport) throw new LocalAgentUnavailable();
+    agent.transport.send(job);
   }
   request(agent: Agent, op: "exec" | "file" | "browser", args: Obj, signal: AbortSignal) {
     if (op === "exec") {
