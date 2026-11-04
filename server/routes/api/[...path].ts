@@ -323,8 +323,7 @@ export default defineEventHandler(async (event) => {
           session,
           canWrite: !session.taskId && auth.canWrite(user, session),
           ...history,
-          folds: engine.store.db
-            .prepare("SELECT data FROM folds WHERE session=?")
+          folds: engine.store.sql("SELECT data FROM folds WHERE session=?")
             .all(key)
             .map((r: any) => JSON.parse(r.data)),
           fire: engine.fire.forSession(key),

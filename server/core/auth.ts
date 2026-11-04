@@ -115,14 +115,13 @@ export class Auth {
   hasUsers() {
     return (
       Number(
-        (this.store.db.prepare("SELECT count(*) n FROM web_users").get() as any)
+        (this.store.sql("SELECT count(*) n FROM web_users").get() as any)
           .n,
       ) > 0
     );
   }
   user(id: string): User | undefined {
-    const row = this.store.db
-      .prepare(
+    const row = this.store.sql(
         "SELECT id,username,role,disabled,createdAt,lastLogin FROM web_users WHERE id=?",
       )
       .get(id) as any;
@@ -130,8 +129,7 @@ export class Auth {
   }
   users() {
     return (
-      this.store.db
-        .prepare(
+      this.store.sql(
           "SELECT id,username,role,disabled,createdAt,lastLogin FROM web_users ORDER BY createdAt,id",
         )
         .all() as any[]
@@ -173,19 +171,15 @@ export class Auth {
       hash = digest(token),
       csrf = randomBytes(32).toString("base64url"),
       expiresAt = Date.now() + TTL;
-    this.store.db
-      .prepare("DELETE FROM web_sessions WHERE expiresAt<=?")
+    this.store.sql("DELETE FROM web_sessions WHERE expiresAt<=?")
       .run(Date.now());
-    this.store.db
-      .prepare(
+    this.store.sql(
         "DELETE FROM web_sessions WHERE hash IN (SELECT hash FROM web_sessions WHERE userId=? ORDER BY createdAt DESC LIMIT -1 OFFSET 19)",
       )
       .run(user.id);
-    this.store.db
-      .prepare("INSERT INTO web_sessions VALUES(?,?,?,?,?)")
+    this.store.sql("INSERT INTO web_sessions VALUES(?,?,?,?,?)")
       .run(hash, user.id, csrf, Date.now(), expiresAt);
-    this.store.db
-      .prepare("UPDATE web_users SET lastLogin=? WHERE id=?")
+    this.store.sql("UPDATE web_users SET lastLogin=? WHERE id=?")
       .run(Date.now(), user.id);
     return {
       token,
@@ -193,8 +187,7 @@ export class Auth {
     };
   }
   resolveHash(hash: string): Principal | undefined {
-    const row = this.store.db
-      .prepare("SELECT userId,csrf,expiresAt FROM web_sessions WHERE hash=?")
+    const row = this.store.sql("SELECT userId,csrf,expiresAt FROM web_sessions WHERE hash=?")
       .get(hash) as any;
     if (!row || row.expiresAt <= Date.now()) return;
     const user = this.user(row.userId);
@@ -206,11 +199,11 @@ export class Auth {
     return this.resolveHash(digest(token));
   }
   revoke(id: string) {
-    this.store.db.prepare("DELETE FROM web_sessions WHERE userId=?").run(id);
+    this.store.sql("DELETE FROM web_sessions WHERE userId=?").run(id);
     this.events.emit("revoke", id);
   }
   logout(hash: string) {
-    this.store.db.prepare("DELETE FROM web_sessions WHERE hash=?").run(hash);
+    this.store.sql("DELETE FROM web_sessions WHERE hash=?").run(hash);
     this.events.emit("logout", hash);
   }
   async setup(a: Record<string, any>, ip = "local") {
@@ -227,8 +220,7 @@ export class Auth {
     return this.store.transaction(() => {
       check(!this.hasUsers(), 409, "Initial administrator already exists");
       const id = randomBytes(16).toString("hex");
-      this.store.db
-        .prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)")
+      this.store.sql("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)")
         .run(id, name, hash, "admin", 0, Date.now(), 0);
       return this.issue(this.user(id)!);
     });
@@ -244,8 +236,7 @@ export class Auth {
       401,
       "Invalid username or password",
     );
-    const row = this.store.db
-      .prepare(
+    const row = this.store.sql(
         "SELECT id,password FROM web_users WHERE username=? COLLATE NOCASE",
       )
       .get(name) as any;
@@ -254,8 +245,7 @@ export class Auth {
     const user = row && this.user(row.id),
       current =
         row &&
-        (this.store.db
-          .prepare("SELECT password FROM web_users WHERE id=?")
+        (this.store.sql("SELECT password FROM web_users WHERE id=?")
           .get(row.id) as any);
     check(
       valid && user && !user.disabled && current?.password === stored,
@@ -278,8 +268,7 @@ export class Auth {
         "Username already exists",
       );
       const id = randomBytes(16).toString("hex");
-      this.store.db
-        .prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)")
+      this.store.sql("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)")
         .run(id, name, hash, a.role, 0, Date.now(), 0);
       return this.user(id)!;
     });
@@ -318,12 +307,10 @@ export class Auth {
           409,
           "Cannot disable or demote the last enabled administrator",
         );
-      this.store.db
-        .prepare("UPDATE web_users SET role=?,disabled=? WHERE id=?")
+      this.store.sql("UPDATE web_users SET role=?,disabled=? WHERE id=?")
         .run(next.role, next.disabled ? 1 : 0, id);
       if (hash)
-        this.store.db
-          .prepare("UPDATE web_users SET password=? WHERE id=?")
+        this.store.sql("UPDATE web_users SET password=? WHERE id=?")
           .run(hash, id);
       return this.user(id)!;
     });
@@ -331,8 +318,7 @@ export class Auth {
     return user;
   }
   async changePassword(id: string, current: unknown, next: unknown) {
-    const row = this.store.db
-      .prepare("SELECT password FROM web_users WHERE id=?")
+    const row = this.store.sql("SELECT password FROM web_users WHERE id=?")
       .get(id) as any;
     check(row, 401, "Please sign in again");
     check(
@@ -343,16 +329,14 @@ export class Auth {
     const valid = await this.crypto(() => verify(current, row.password));
     check(valid, 401, "Current password invalid");
     const hash = await this.crypto(() => encoded(password(next)));
-    const latest = this.store.db
-      .prepare("SELECT password FROM web_users WHERE id=?")
+    const latest = this.store.sql("SELECT password FROM web_users WHERE id=?")
       .get(id) as any;
     check(
       latest?.password === row.password,
       409,
       "Password changed concurrently; sign in again",
     );
-    this.store.db
-      .prepare("UPDATE web_users SET password=? WHERE id=?")
+    this.store.sql("UPDATE web_users SET password=? WHERE id=?")
       .run(hash, id);
     this.revoke(id);
   }
@@ -403,9 +387,8 @@ export class Auth {
     try { return this.canRead(user, this.store.session(bucket)); } catch { return false; }
   }
   canBlob(user: User, id: string) {
-    if (this.store.db.prepare("SELECT 1 FROM blob_user_access WHERE blob=? AND user=?").get(id, user.id)) return true;
-    const rows = this.store.db
-      .prepare("SELECT session FROM blob_access WHERE blob=?")
+    if (this.store.sql("SELECT 1 FROM blob_user_access WHERE blob=? AND user=?").get(id, user.id)) return true;
+    const rows = this.store.sql("SELECT session FROM blob_access WHERE blob=?")
       .all(id) as any[];
     return rows.some((row) => {
       try {

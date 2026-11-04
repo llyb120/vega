@@ -323,7 +323,7 @@ export class Engine {
     if (!message.clientMessageId) return send();
     const key = JSON.stringify([session, message.actorId, message.clientMessageId]);
     const pending = this.chatSubmissions.get(key);
-    const row = this.store.db.prepare("SELECT data FROM messages WHERE session=? AND json_extract(data,'$.actorId')=? AND json_extract(data,'$.clientMessageId')=?").get(session, message.actorId!, message.clientMessageId) as { data: string } | undefined;
+    const row = this.store.sql("SELECT data FROM messages WHERE session=? AND json_extract(data,'$.actorId')=? AND json_extract(data,'$.clientMessageId')=?").get(session, message.actorId!, message.clientMessageId) as { data: string } | undefined;
     const queued = this.active.get(session)?.steer.find((entry) => entry.actorId === message.actorId && entry.clientMessageId === message.clientMessageId);
     const previous: Message | undefined = row ? JSON.parse(row.data) : pending?.message || queued;
     if (previous) {
@@ -366,7 +366,7 @@ export class Engine {
       await this.browsers.remove(key);
       this.store.transaction(() => {
         for (const session of sessions) {
-          this.store.db.prepare("DELETE FROM sessions WHERE id=?").run(session.id);
+          this.store.sql("DELETE FROM sessions WHERE id=?").run(session.id);
           this.store.remove("context-state", session.id);
           this.providers.reset(session.id);
         }
@@ -400,7 +400,7 @@ export class Engine {
       for (const session of work) await this.releaseSession(session.id);
       this.store.transaction(() => {
         for (const session of work) {
-          this.store.db.prepare("DELETE FROM sessions WHERE id=?").run(session.id);
+          this.store.sql("DELETE FROM sessions WHERE id=?").run(session.id);
           this.store.remove("context-state", session.id);
           this.providers.reset(session.id);
         }

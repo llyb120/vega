@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -89,7 +89,7 @@ export class Store {
       "Not a supported Vega database; existing data left unchanged",
     );
     this.db
-      .exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; BEGIN;
+      .exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; BEGIN;
    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,data TEXT NOT NULL,updated INTEGER NOT NULL);
    CREATE TABLE IF NOT EXISTS messages(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,seq INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,seq));
@@ -102,10 +102,18 @@ export class Store {
    CREATE INDEX IF NOT EXISTS web_sessions_user ON web_sessions(userId);
    CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated DESC);
    CREATE TABLE IF NOT EXISTS blob_access(blob TEXT NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(blob,session));
+   CREATE INDEX IF NOT EXISTS blob_access_session ON blob_access(session);
    CREATE TABLE IF NOT EXISTS blob_user_access(blob TEXT NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,user TEXT NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,PRIMARY KEY(blob,user));
    ${version < 4 ? "INSERT OR IGNORE INTO blob_access(blob,session) SELECT b.id,m.session FROM messages m,json_each(m.data,'$.images') image JOIN blobs b ON b.id=json_extract(image.value,'$.blobId');" : ""}
    PRAGMA application_id=1447380801; PRAGMA user_version=4; COMMIT;`);
     if (path !== ":memory:") chmodSync(path, 0o600);
+  }
+  /** Prepared statements are compiled once per SQL text and reused (one long-lived connection). */
+  private statements = new Map<string, StatementSync>();
+  sql(text: string) {
+    let statement = this.statements.get(text);
+    if (!statement) this.statements.set(text, statement = this.db.prepare(text));
+    return statement;
   }
   close() {
     this.db.close();
@@ -130,59 +138,51 @@ export class Store {
     }
   }
   get<T>(key: string, fallback: T): T {
-    const row = this.db
-      .prepare("SELECT value FROM settings WHERE key=?")
+    const row = this.sql("SELECT value FROM settings WHERE key=?")
       .get(key) as any;
     return row ? JSON.parse(row.value) : structuredClone(fallback);
   }
   put(key: string, value: any) {
-    this.db
-      .prepare(
+    this.sql(
         "INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
       )
       .run(key, JSON.stringify(value));
   }
   objects<T = any>(kind: string): T[] {
-    return this.db
-      .prepare("SELECT data FROM objects WHERE kind=?")
+    return this.sql("SELECT data FROM objects WHERE kind=?")
       .all(kind)
       .map((r: any) => JSON.parse(r.data));
   }
   object<T = any>(kind: string, key: string): T | undefined {
-    const r = this.db
-      .prepare("SELECT data FROM objects WHERE kind=? AND id=?")
+    const r = this.sql("SELECT data FROM objects WHERE kind=? AND id=?")
       .get(kind, key) as any;
     return r ? JSON.parse(r.data) : undefined;
   }
   save(kind: string, key: string, value: any) {
-    this.db
-      .prepare(
+    this.sql(
         "INSERT INTO objects VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
       )
       .run(kind, key, JSON.stringify(value));
   }
   remove(kind: string, key: string) {
-    this.db.prepare("DELETE FROM objects WHERE kind=? AND id=?").run(kind, key);
+    this.sql("DELETE FROM objects WHERE kind=? AND id=?").run(kind, key);
   }
   blob(mime: string, data: Uint8Array) {
     const key = id("blob-");
-    this.db
-      .prepare("INSERT INTO blobs VALUES(?,?,?,?)")
+    this.sql("INSERT INTO blobs VALUES(?,?,?,?)")
       .run(key, mime, data, Date.now());
     return key;
   }
   grantBlob(blob: string, session: string) {
-    if (this.db.prepare("SELECT id FROM sessions WHERE id=?").get(session))
-      this.db
-        .prepare("INSERT OR IGNORE INTO blob_access VALUES(?,?)")
+    if (this.sql("SELECT id FROM sessions WHERE id=?").get(session))
+      this.sql("INSERT OR IGNORE INTO blob_access VALUES(?,?)")
         .run(blob, session);
   }
   grantBlobUser(blob: string, userId: string) {
-    this.db.prepare("INSERT OR IGNORE INTO blob_user_access VALUES(?,?)").run(blob, userId);
+    this.sql("INSERT OR IGNORE INTO blob_user_access VALUES(?,?)").run(blob, userId);
   }
   blobData(key: string) {
-    return this.db
-      .prepare("SELECT mime,data FROM blobs WHERE id=?")
+    return this.sql("SELECT mime,data FROM blobs WHERE id=?")
       .get(key) as { mime: string; data: Uint8Array } | undefined;
   }
   // Resolve an image reference ({mime,blobId} or legacy {mime,data}) to the
@@ -220,22 +220,19 @@ export class Store {
     return s;
   }
   saveSession(s: Session) {
-    this.db
-      .prepare(
+    this.sql(
         "INSERT INTO sessions VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated",
       )
       .run(s.id, JSON.stringify(s), Date.now());
   }
   session(key: string): Session {
-    const row = this.db
-      .prepare("SELECT data FROM sessions WHERE id=?")
+    const row = this.sql("SELECT data FROM sessions WHERE id=?")
       .get(key) as any;
     assert(row, "Session not found");
     return JSON.parse(row.data);
   }
   sessions(): Session[] {
-    return this.db
-      .prepare("SELECT data FROM sessions ORDER BY updated DESC")
+    return this.sql("SELECT data FROM sessions ORDER BY updated DESC")
       .all()
       .map((r: any) => JSON.parse(r.data));
   }
@@ -255,7 +252,7 @@ export class Store {
   }
   deleteSession(key: string) {
     for (const s of this.sessionFamily(key)) {
-      this.db.prepare("DELETE FROM sessions WHERE id=?").run(s.id);
+      this.sql("DELETE FROM sessions WHERE id=?").run(s.id);
       this.files.remove(this.files.dir(s));
     }
   }
@@ -264,15 +261,15 @@ export class Store {
     this.files.remove(this.files.dir(this.session(key)));
     this.rowCache.delete(key);
     this.transaction(() => {
-      this.db.prepare("DELETE FROM messages WHERE session=?").run(key);
-      this.db.prepare("DELETE FROM folds WHERE session=?").run(key);
-      this.db.prepare("DELETE FROM blob_access WHERE session=?").run(key);
+      this.sql("DELETE FROM messages WHERE session=?").run(key);
+      this.sql("DELETE FROM folds WHERE session=?").run(key);
+      this.sql("DELETE FROM blob_access WHERE session=?").run(key);
       this.remove("context-state", key);
-      this.db.prepare("UPDATE sessions SET updated=? WHERE id=?").run(Date.now(), key);
+      this.sql("UPDATE sessions SET updated=? WHERE id=?").run(Date.now(), key);
     });
   }
   message(key: string, seq: number): Message | undefined {
-    const row = this.db.prepare("SELECT data FROM messages WHERE session=? AND seq=?").get(key, seq) as { data: string } | undefined;
+    const row = this.sql("SELECT data FROM messages WHERE session=? AND seq=?").get(key, seq) as { data: string } | undefined;
     return row ? { ...JSON.parse(row.data), seq } : undefined;
   }
   quote(key: string, seq: number): NonNullable<Message["quote"]> {
@@ -283,8 +280,7 @@ export class Store {
     return { seq, role: message.role, text: text.length > 160 ? text.slice(0, 160) + "…" : text, taskId: message.tasks?.length === 1 ? message.tasks[0].id : undefined };
   }
   messages(key: string): Message[] {
-    return this.db
-      .prepare("SELECT seq,data FROM messages WHERE session=? ORDER BY seq")
+    return this.sql("SELECT seq,data FROM messages WHERE session=? ORDER BY seq")
       .all(key)
       .map((r: any) => ({ ...JSON.parse(r.data), seq: r.seq }));
   }
@@ -293,13 +289,11 @@ export class Store {
    * are parsed; any other change (clear, delete) is detected by the count/maximum and reloads the session.
    */
   sharedMessages(key: string): { rows: readonly Readonly<Message>[]; revision: string } {
-    const top = this.db
-      .prepare("SELECT COALESCE(MAX(seq),0) m, COUNT(*) n FROM messages WHERE session=?")
+    const top = this.sql("SELECT COALESCE(MAX(seq),0) m, COUNT(*) n FROM messages WHERE session=?")
       .get(key) as { m: number; n: number };
     let cached = this.rowCache.get(key);
     if (cached && top.m > cached.max) {
-      for (const r of this.db
-        .prepare("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq")
+      for (const r of this.sql("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq")
         .all(key, cached.max) as any[])
         cached.rows.push(Object.freeze({ ...JSON.parse(r.data), seq: r.seq }));
       cached.max = top.m;
@@ -316,34 +310,30 @@ export class Store {
   messagePage(key: string, { before, after, limit }: { before?: number; after?: number; limit?: number }): { messages: Message[]; hasMore: boolean } {
     const parse = (r: any) => ({ ...JSON.parse(r.data), seq: r.seq });
     if (after !== undefined) {
-      const rows = this.db.prepare("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq").all(key, after);
+      const rows = this.sql("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq").all(key, after);
       const first = (rows[0] as any)?.seq ?? after + 1;
-      return { messages: rows.map(parse), hasMore: !!this.db.prepare("SELECT 1 FROM messages WHERE session=? AND seq<? LIMIT 1").get(key, first) };
+      return { messages: rows.map(parse), hasMore: !!this.sql("SELECT 1 FROM messages WHERE session=? AND seq<? LIMIT 1").get(key, first) };
     }
-    const rows = this.db
-      .prepare("SELECT seq,data FROM messages WHERE session=? AND seq<? ORDER BY seq DESC LIMIT ?")
+    const rows = this.sql("SELECT seq,data FROM messages WHERE session=? AND seq<? ORDER BY seq DESC LIMIT ?")
       .all(key, before ?? Number.MAX_SAFE_INTEGER, limit ?? -1)
       .reverse();
     const first = (rows[0] as any)?.seq;
-    return { messages: rows.map(parse), hasMore: first !== undefined && !!this.db.prepare("SELECT 1 FROM messages WHERE session=? AND seq<? LIMIT 1").get(key, first) };
+    return { messages: rows.map(parse), hasMore: first !== undefined && !!this.sql("SELECT 1 FROM messages WHERE session=? AND seq<? LIMIT 1").get(key, first) };
   }
   append(key: string, m: Message) {
     return this.transaction(() => {
       const seq = Number(
         (
-          this.db
-            .prepare(
+          this.sql(
               "SELECT COALESCE(MAX(seq),0)+1 n FROM messages WHERE session=?",
             )
             .get(key) as any
         ).n,
       );
       const row = { ...m, seq, at: m.at || Date.now() };
-      this.db
-        .prepare("INSERT INTO messages VALUES(?,?,?)")
+      this.sql("INSERT INTO messages VALUES(?,?,?)")
         .run(key, seq, JSON.stringify(row));
-      this.db
-        .prepare("UPDATE sessions SET updated=? WHERE id=?")
+      this.sql("UPDATE sessions SET updated=? WHERE id=?")
         .run(Date.now(), key);
       return row;
     });
@@ -367,12 +357,10 @@ export class Store {
       if (existsSync(from)) cpSync(from, to, { recursive: true });
       const moved = (text: string) => [[from, to], [JSON.stringify(from).slice(1, -1), JSON.stringify(to).slice(1, -1)]].reduce((t, [a, b]) => t.replaceAll(a, b), text);
       for (const m of this.messages(key)) this.append(copy.id, JSON.parse(moved(JSON.stringify(m))));
-      this.db.prepare("INSERT INTO blob_access SELECT blob,? FROM blob_access WHERE session=?").run(copy.id, key);
-      for (const row of this.db
-        .prepare("SELECT id,data FROM folds WHERE session=?")
+      this.sql("INSERT INTO blob_access SELECT blob,? FROM blob_access WHERE session=?").run(copy.id, key);
+      for (const row of this.sql("SELECT id,data FROM folds WHERE session=?")
         .all(key) as any[])
-        this.db
-          .prepare("INSERT INTO folds VALUES(?,?,?)")
+        this.sql("INSERT INTO folds VALUES(?,?,?)")
           .run(copy.id, row.id, row.data);
       const state = this.object<any>("context-state", key);
       if (state)

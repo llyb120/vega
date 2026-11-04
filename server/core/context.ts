@@ -157,8 +157,7 @@ export class Context {
   }
   folds() {
     return (
-      this.store.db
-        .prepare("SELECT data FROM folds WHERE session=?")
+      this.store.sql("SELECT data FROM folds WHERE session=?")
         .all(this.session) as any[]
     )
       .map((r) => JSON.parse(r.data) as Fold)
@@ -331,12 +330,10 @@ export class Context {
     this.store.transaction(() => {
       for (const c of children) {
         c.active = false;
-        this.store.db
-          .prepare("UPDATE folds SET data=? WHERE session=? AND id=?")
+        this.store.sql("UPDATE folds SET data=? WHERE session=? AND id=?")
           .run(JSON.stringify(c), this.session, c.id);
       }
-      this.store.db
-        .prepare("INSERT INTO folds VALUES(?,?,?)")
+      this.store.sql("INSERT INTO folds VALUES(?,?,?)")
         .run(this.session, fold.id, JSON.stringify(fold));
       s.nextId = Math.max(s.nextId, Number(fold.id.slice(1)) || 0);
       s.generation++;
@@ -454,8 +451,7 @@ export class Context {
       for (const fold of folds) {
         if (fold.id === f.id) fold.active = false;
         if (f.children.includes(fold.id)) fold.active = true;
-        this.store.db
-          .prepare("UPDATE folds SET data=? WHERE session=? AND id=?")
+        this.store.sql("UPDATE folds SET data=? WHERE session=? AND id=?")
           .run(JSON.stringify(fold), this.session, fold.id);
       }
       const s = this.state();
@@ -738,8 +734,7 @@ export class Context {
         this.reserved,
         this.overhead,
         s,
-        this.store.db
-          .prepare("SELECT id,data FROM folds WHERE session=? ORDER BY id")
+        this.store.sql("SELECT id,data FROM folds WHERE session=? ORDER BY id")
           .all(this.session),
       ]),
       cached = statusCache.get(this.session);

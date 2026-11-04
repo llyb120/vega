@@ -395,12 +395,12 @@ export class Employee {
     const state = this.state();
     this.store.transaction(() => {
       for (const task of state.tasks) this.vault.dropTemp(task.id);
-      this.store.db.prepare("DELETE FROM objects WHERE kind=?").run(this.vault.kind);
-      this.store.db.prepare("DELETE FROM objects WHERE kind=?").run("experience:" + this.employeeId);
-      this.store.db.prepare("DELETE FROM objects WHERE kind=?").run("skill:" + this.employeeId);
+      this.store.sql("DELETE FROM objects WHERE kind=?").run(this.vault.kind);
+      this.store.sql("DELETE FROM objects WHERE kind=?").run("experience:" + this.employeeId);
+      this.store.sql("DELETE FROM objects WHERE kind=?").run("skill:" + this.employeeId);
       this.store.remove("employee-capabilities", this.employeeId);
       if (this.employeeId === "default") {
-        this.store.db.prepare("DELETE FROM settings WHERE key='employee'").run();
+        this.store.sql("DELETE FROM settings WHERE key='employee'").run();
         this.store.put("employee:default-deleted", true);
       } else this.store.remove("employee", this.employeeId);
     });
@@ -556,11 +556,11 @@ export class Employee {
       : this.store.object<EmployeeState>("employee", this.employeeId) || fallback;
     // The built-in legacy employee belongs to the account that originally initialized the server.
     if (this.employeeId === "default" && !state.ownerId) {
-      const creator = this.store.db.prepare("SELECT id FROM web_users WHERE role='admin' ORDER BY createdAt,id LIMIT 1").get() as { id: string } | undefined;
+      const creator = this.store.sql("SELECT id FROM web_users WHERE role='admin' ORDER BY createdAt,id LIMIT 1").get() as { id: string } | undefined;
       if (creator) { state.ownerId = creator.id; this.save(state); }
     }
     if (!state.scope) {
-      const owner = this.store.db.prepare("SELECT role FROM web_users WHERE id=?").get(state.ownerId) as { role: string } | undefined;
+      const owner = this.store.sql("SELECT role FROM web_users WHERE id=?").get(state.ownerId) as { role: string } | undefined;
       state.scope = this.employeeId === "default" || owner?.role === "admin" ? "team" : "personal";
       this.save(state);
     }
@@ -586,13 +586,15 @@ export class Employee {
   }
   update<T>(fn: (s: EmployeeState) => T): T {
     assert(!this.deleting, "Employee is being deleted");
+    let state!: EmployeeState;
     const result = this.store.transaction(() => {
-      const s = this.state(),
+      const s = state = this.state(),
         value = fn(s);
       this.save(s);
       return value;
     });
-    this.emitChanged(this.state());
+    // The saved state is what was just written: no second read and parse of the whole record.
+    this.emitChanged(state);
     this.schedule();
     return result;
   }

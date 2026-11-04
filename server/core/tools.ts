@@ -87,7 +87,7 @@ export class Tools {
   }
   canManageEmployee() {
     if (!this.actorId) return false;
-    const user = this.engine.store.db.prepare("SELECT id,role,disabled FROM web_users WHERE id=?").get(this.actorId) as { id: string; role: string; disabled: number } | undefined;
+    const user = this.engine.store.sql("SELECT id,role,disabled FROM web_users WHERE id=?").get(this.actorId) as { id: string; role: string; disabled: number } | undefined;
     return !!user && !user.disabled && this.engine.employeeFor(this.session).manageable(user);
   }
   /** Which employee/vault tools and branches this session may see; mirrors the runtime permission checks. */
