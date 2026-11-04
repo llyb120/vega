@@ -6,6 +6,7 @@ import { webcrypto } from "node:crypto";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
 import { employeeChatMessages, continuesPrevious } from "../web/src/conversation.js";
+import { attachmentPayload, isImage } from "../web/src/attachments.js";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
 const between = (start: string, end: string) => chat.slice(chat.indexOf(start), chat.indexOf(end));
@@ -14,8 +15,8 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
   const history = createChatHistory({ api, path: () => "/employees/fixture/chat", messages, running, hasMore });
   const context: any = {
     console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
-    props: { employeeId: "fixture", api, composer: reactive({ text: "", images: [], quote: undefined }) },
-    employeeChatMessages, continuesPrevious,
+    props: { employeeId: "fixture", api, composer: reactive({ text: "", attachments: [], quote: undefined }) },
+    employeeChatMessages, continuesPrevious, attachmentPayload, isImage,
   };
   const methods = vm.runInNewContext([
     "let turn = 0;",
@@ -230,7 +231,7 @@ test("chat history pages backwards and merges without duplicates", async () => {
   assert.deepEqual(mergeMessages([{ seq: 1 }, { seq: 3 }] as any, [{ seq: 2 }, { seq: 3, text: "x" }] as any), [{ seq: 1 }, { seq: 2 }, { seq: 3, text: "x" }]);
 });
 
-test("offline messages appear immediately; retry preserves ID, images and quote without touching the next draft", async () => {
+test("offline messages appear immediately; retry preserves ID, attachments and quote without touching the next draft", async () => {
   const calls: any[] = [];
   let fail = true, finish!: (value: any) => void;
   const state = mount(async (_path: string, method: string, body: any) => {
@@ -241,18 +242,20 @@ test("offline messages appear immediately; retry preserves ID, images and quote 
   });
   const composer = state.props.composer;
   composer.text = "explain this";
-  composer.images = [{ mime: "image/png", data: "YQ==" }];
+  composer.attachments = [{ name: "a.png", size: 1, mime: "image/png", data: "YQ==" }, { name: "notes.pdf", size: 1, mime: "application/pdf", data: "Yg==" }];
   composer.quote = { seq: 7, text: "source" };
   const sending = state.send();
   assert.equal(state.outbox.value[0].text, "explain this");
   assert.equal(state.outbox.value[0].sendStatus, "sending");
   assert.equal(composer.text, "");
-  assert.equal(composer.images.length, 0);
+  assert.equal(composer.attachments.length, 0);
   await sending;
   const message = state.outbox.value[0];
   assert.equal(message.sendStatus, "failed");
   assert.equal(state.error.value, "", "delivery failures stay on the message, not in a banner");
   assert.equal(calls[0].quoteSeq, 7);
+  assert.deepEqual(calls[0].images, [{ mime: "image/png", data: "YQ==" }], "images still go as images");
+  assert.deepEqual(calls[0].files, [{ name: "notes.pdf", size: 1, mime: "application/pdf", data: "Yg==" }], "any other type goes as a file");
   assert.equal(calls[0].quote, undefined);
   fail = false;
   const retry = state.retry(message);

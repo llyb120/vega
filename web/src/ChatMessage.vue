@@ -4,6 +4,7 @@ import UserMessage from "./UserMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import UserAvatar from "./UserAvatar.vue";
 import Icon from "./Icon.vue";
+import FileCard from "./FileCard.vue";
 import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
@@ -57,6 +58,7 @@ async function runExport(format) {
         <UserMessage v-if="message.role === 'user' && message.text" :text="message.displayText || message.text" />
         <MessageText v-else-if="message.text" :text="message.displayText || message.text" :streaming="message.streaming" />
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
+        <FileCard v-for="(file, index) in message.files || []" :key="'f' + index" :file="file" />
       </div>
       <div v-if="message.sendStatus" class="chat-send-status" role="status">
         <span v-if="message.sendStatus === 'sending'"><span class="spinner" aria-hidden="true"></span>发送中…</span>

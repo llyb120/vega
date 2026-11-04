@@ -9,10 +9,11 @@ import MentionTextarea from "./MentionTextarea.vue";
 import Icon from "./Icon.vue";
 import { continuesPrevious } from "./conversation";
 import { groupMembers, groupMentionPeople } from "./group.js";
+import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
 const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number });
 const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel"]);
-const group = ref(null), messages = ref([]), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), transcript = ref(null), input = ref(null);
+const group = ref(null), messages = ref([]), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
 const directory = ref([]), form = ref({ name: "", bulletin: "", users: [], employees: [] }), edit = ref({ name: "", bulletin: "" }), invite = ref(""), bring = ref("");
 const readonly = computed(() => props.user?.role === "viewer");
 const members = computed(() => groupMembers(group.value, props.user?.id));
@@ -20,7 +21,7 @@ provide("mentions", { people: computed(() => groupMentionPeople(group.value)), o
 // Authors carry ids and names; avatars come from the current member list (a member who left keeps the initial / default bot).
 const avatars = computed(() => new Map([...(group.value?.users || []), ...(group.value?.employees || [])].map((p) => [p.id, p.avatar || ""])));
 const shown = computed(() => {
-  const rows = messages.value.filter((m) => m.notice || m.text?.trim() || m.tasks?.length)
+  const rows = messages.value.filter((m) => m.notice || m.text?.trim() || m.tasks?.length || m.images?.length || m.files?.length)
     .map((m) => m.author ? { ...m, author: { ...m.author, avatar: avatars.value.get(m.author.id) || "" } } : m);
   return rows.map((message, index) => ({ message, continued: !message.notice && continuesPrevious(rows[index - 1], message) }));
 });
@@ -50,13 +51,20 @@ async function load(scroll = false) {
 async function loadDirectory() {
   try { directory.value = (await props.api("/groups/directory")).filter((u) => u.id !== props.user?.id); } catch { directory.value = []; }
 }
+async function upload(event) {
+  await run(async () => { files.value = [...files.value, ...await readAttachments(event.target.files, files.value)]; });
+  event.target.value = "";
+}
 async function send() {
-  const text = draft.value.trim();
-  if (!text || sending.value) return;
+  const text = draft.value.trim(), items = files.value;
+  if ((!text && !items.length) || sending.value) return;
   sending.value = true;
   await run(async () => {
-    await props.api(`/groups/${props.groupId}/messages`, "POST", { text, clientMessageId: crypto.randomUUID().replaceAll("-", "") });
+    // getRandomValues also works over LAN HTTP, where randomUUID is unavailable.
+    const clientMessageId = [...crypto.getRandomValues(new Uint8Array(16))].map((n) => n.toString(16).padStart(2, "0")).join("");
+    await props.api(`/groups/${props.groupId}/messages`, "POST", { text, ...attachmentPayload(items), clientMessageId });
     draft.value = "";
+    if (files.value === items) files.value = [];
     await load(true);
   });
   sending.value = false;
@@ -145,9 +153,12 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
           </div>
           <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />只读账号只能查看群聊。</p>
           <form v-else class="chat-composer" @submit.prevent="send">
+            <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon :name="isImage(file) ? 'image' : 'file'" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
             <div class="composer-row">
+              <input ref="fileInput" type="file" hidden multiple @change="upload" />
+              <button type="button" class="icon attach" aria-label="添加附件" title="附件（图片或文件）" @click="fileInput.click()"><Icon name="paperclip" /></button>
               <MentionTextarea ref="input" v-model="draft" class="composer-input" :members="members" rows="1" maxlength="20000" placeholder="输入消息，@ 牛马让它干活…" @keydown="keydown" />
-              <button class="primary send" :disabled="!draft.trim() || sending" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
+              <button class="primary send" :disabled="(!draft.trim() && !files.length) || sending" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
             </div>
             <p class="composer-hint">@ 牛马才会回复 · Enter 发送 · Shift + Enter 换行</p>
           </form>
@@ -221,6 +232,9 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
 .composer-input :deep(textarea) { min-height: 36px; max-height: 200px; padding: 8px 6px; border: 0; box-shadow: none; resize: none; font-size: 14px; line-height: 1.45; }
 .composer-input :deep(textarea:focus), .composer-input :deep(textarea:focus-visible) { box-shadow: none; outline: none; }
 .send { width: 36px; min-height: 36px; padding: 0; border-radius: 10px; }
+.attach { width: 36px; min-height: 36px; color: var(--muted); }
+.attachments { padding: 2px 4px 6px; }
+.attachments button { gap: 4px; }
 .composer-hint { padding: 0 8px; color: var(--faint); font-size: 11px; }
 .group-panel { display: grid; align-content: start; gap: 18px; flex: none; width: 300px; padding: 16px; overflow-y: auto; border-left: 1px solid var(--border); background: var(--surface); }
 .group-panel h3 { margin: 0 0 8px; font-size: 13px; }
@@ -246,7 +260,7 @@ legend { padding: 0 4px; color: var(--text-2); font-size: 12px; }
   .chat-column { padding: 12px 12px 4px; }
   .chat-composer { width: calc(100% - 16px); margin: 0 8px max(8px, env(safe-area-inset-bottom, 0px)); border-radius: 12px; }
   .composer-input :deep(textarea) { font-size: 16px; }
-  .send { width: 40px; min-height: 40px; }
+  .attach, .send { width: 40px; min-height: 40px; }
   .composer-hint { display: none; }
   .group-panel { width: min(320px, 100%); }
 }
