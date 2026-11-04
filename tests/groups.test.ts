@@ -415,8 +415,9 @@ test("旁白: a user message without @ goes to the member it is for; @ bypasses 
     assert.deepEqual(seen.map((s) => s.employeeId), [b], "only the real member it named answers");
     assert.match(JSON.stringify(seen[0].messages), /\[旁白\] 这条消息没有 @ 谁，旁白判断交给你：公告：测试用例找测试牛马/);
     const messages = await groupMessages(engine, group.id);
-    const notice = messages.find((m) => m.notice && /^旁白：/.test(String(m.text)))!;
-    assert.equal(notice.text, "旁白：交给 @测试牛马（公告：测试用例找测试牛马）");
+    assert(!messages.some((m) => /旁白|交给/.test(String(m.text)) && m.author?.kind !== "user"), "the 旁白 only judges: nothing is posted to the group");
+    assert.deepEqual(messages.filter((m) => !m.notice).map((m) => m.author?.name), ["alice", "测试牛马"]);
+    assert(!JSON.stringify(seen[0].messages).includes("旁白：交给"), "the member's turn does not rely on a group post");
     assert.deepEqual(messages.at(-1)?.[ "author" as "author"]?.name, "测试牛马");
     assert.equal(messages.at(-1)?.hop, 1, "a routed turn is one hop from the user message, as a mention would be");
     // An @ goes straight to that member; the 旁白 is not asked. The reply (no @) does not reach the 旁白 either.

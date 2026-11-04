@@ -494,7 +494,8 @@ export class Groups {
     if (opened && opened !== result.session) await this.dropSession(opened);
     if (!result.targets.length) return;
     const chosen = employees.filter((p) => result.targets.some((t) => t.id === p.id));
-    await this.notice(group.id, `旁白：交给 ${chosen.map((p) => "@" + p.name).join(" ")}${result.reason ? `（${result.reason}）` : ""}`);
+    // The 旁白 only judges: nothing goes into the group; the decision is in its own session (and this log line).
+    console.info(`[Vega] 旁白 ${group.id} #${message.seq} → ${chosen.map((p) => p.name).join("、")}${result.reason ? `（${result.reason}）` : ""}`);
     for (const member of chosen) {
       try { await this.turn(group, member, message, result.reason || "按群公告和职责判断"); }
       catch (error: any) { if (!error?.groupReported) await this.notice(group.id, `牛马「${member.name}」没能开始回复：${String(error?.message || error)}`); }
