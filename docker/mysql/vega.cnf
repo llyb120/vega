@@ -1,5 +1,0 @@
-[mysqld]
-character-set-server = utf8mb4
-collation-server = utf8mb4_bin
-max_allowed_packet = 64M
-skip-name-resolve

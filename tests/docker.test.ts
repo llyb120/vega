@@ -163,3 +163,15 @@ test("Docker image builds Linux-native artifacts, runs non-root, persists state 
     "/data/downloads",
   );
 });
+
+test("Dockerfile.mysql differs from Dockerfile only by its header comment and MySQL ENV defaults", () => {
+  const strip = (text: string) =>
+    text
+      .split("\n")
+      .filter((line) => !/^# (Vega 镜像|运行时传|  docker build -f)/.test(line))
+      .join("\n")
+      .replace(/ \\\n {4}DB_TYPE=mysql \\\n {4}MYSQL_HOST=mysql \\\n {4}MYSQL_PORT=3306 \\\n {4}MYSQL_USER=vega \\\n {4}MYSQL_DATABASE=vega\n/, "\n");
+  const mysql = readFileSync("Dockerfile.mysql", "utf8");
+  assert.match(mysql, /DB_TYPE=mysql/);
+  assert.equal(strip(mysql), readFileSync("Dockerfile", "utf8"));
+});
