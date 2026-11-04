@@ -7,13 +7,14 @@ import UserAvatar from "./UserAvatar.vue";
 import GroupAvatar from "./GroupAvatar.vue";
 import MentionTextarea from "./MentionTextarea.vue";
 import Icon from "./Icon.vue";
+import GroupWork from "./GroupWork.vue";
 import { continuesPrevious } from "./conversation";
 import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
 const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number });
 const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel"]);
-const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
+const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), work = ref(false), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
 const directory = ref([]), form = ref({ name: "", bulletin: "", users: [], employees: [] }), edit = ref({ name: "", bulletin: "" }), invite = ref(""), bring = ref("");
 const readonly = computed(() => props.user?.role === "viewer");
 const members = computed(() => groupMembers(group.value, props.user?.id));
@@ -108,8 +109,18 @@ function openTask(message, taskId) {
   if (author?.mine) emit("open-task", { employeeId: author.id, taskId });
   else error.value = "这是其他用户的牛马的任务，只有它的主人能查看详情";
 }
-watch(() => props.groupId, () => { group.value = null; messages.value = []; panel.value = false; draft.value = ""; void run(() => load(true)); });
-watch(() => props.revision, () => void run(() => load()));
+// 工作面板: the group's tasks by member, reloaded with the group (task status changes bump the revision too).
+async function loadWork() {
+  if (!work.value || !props.groupId) return;
+  const id = props.groupId;
+  workLoading.value = true;
+  try { const result = await props.api(`/groups/${id}/tasks`); if (props.groupId === id) workMembers.value = result.members; }
+  finally { workLoading.value = false; }
+}
+function toggleWork() { work.value = !work.value; if (work.value) { panel.value = false; void run(loadWork); } }
+watch(panel, (open) => { if (open) work.value = false; });
+watch(() => props.groupId, () => { group.value = null; messages.value = []; panel.value = false; work.value = false; workMembers.value = []; draft.value = ""; void run(() => load(true)); });
+watch(() => props.revision, () => { void run(() => load()); void run(loadWork); });
 watch(panel, (open) => { if (open && !directory.value.length) void loadDirectory(); });
 onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadDirectory(); });
 </script>
@@ -135,6 +146,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
       <PageHeader :title="group?.name || '群聊'" :subtitle="group ? `${group.users.length} 位用户 · ${group.employees.length} 个牛马` : ''">
         <template #title-extra><span v-if="group" class="header-avatar"><GroupAvatar :group="group" /></span></template>
         <button type="button" class="sm" :class="{ active: panel }" :aria-expanded="panel" @click="panel = !panel"><Icon name="users" :size="15" /><span class="hide-mobile">群成员与公告</span></button>
+        <button type="button" class="sm" :class="{ active: work }" :aria-expanded="work" @click="toggleWork"><Icon name="tasks" :size="15" /><span class="hide-mobile">工作面板</span></button>
       </PageHeader>
       <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span><button class="icon" aria-label="关闭" @click="error = ''"><Icon name="close" :size="14" /></button></p>
       <div class="group-body">
@@ -167,6 +179,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
             <p class="composer-hint">@ 牛马才会回复 · Enter 发送 · Shift + Enter 换行</p>
           </form>
         </section>
+        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" @open="emit('open-task', $event)" @close="work = false" />
         <aside v-if="panel && group" class="group-panel" aria-label="群成员与公告">
           <section>
             <h3>群公告</h3>

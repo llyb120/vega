@@ -252,3 +252,37 @@ test("group panel: invite and bring rows always show, with a reason when empty; 
   assert.match(source, /<fieldset><legend>邀请用户<\/legend>/);
   assert.match(source, /:task-status="taskStatus"/);
 });
+
+test("工作面板: the group's tasks by member, open ones first; guests see a projection; members only", async () => {
+  const { engine, make, close } = await fixture();
+  try {
+    const a = await make("小A", "u1"), b = await make("小B", "u2");
+    const group = await engine.groups.create(u1, { name: "面板", users: ["u2"], employees: [a] });
+    await engine.groups.addEmployee(u2, group.id, b);
+    const employeeA = await engine.employee.for(a);
+    const from = (name: string, status: string, at: number) => ({ id: "t-" + name, text: name, status, createdAt: at, cwd: "/tmp", profile: "lightweight", owner: { token: "", name: "" }, workSession: "secret-session",
+      group: { groupId: group.id, name: "面板", hop: 0, requester: { kind: "user", id: "u2", name: "bob" }, byOwner: false } });
+    await employeeA.update((state) => {
+      state.tasks.push(from("done-old", "done", 1), from("queued", "queued", 2), from("waiting", "waiting", 3), from("running", "running", 4), from("done-new", "done", 5));
+      state.tasks.push({ ...from("elsewhere", "queued", 6), group: undefined });
+    });
+    const owner = await engine.groups.tasks(u1, group.id), guest = await engine.groups.tasks(u2, group.id);
+    assert.deepEqual(owner.members.map((m) => [m.name, m.mine]), [["小A", true], ["小B", false]]);
+    assert.deepEqual(owner.members[0].tasks.map((t: any) => t.text), ["waiting", "running", "queued", "done-new", "done-old"], "needs-attention, running, queued, then newest ended; other tasks excluded");
+    assert.equal(owner.members[0].tasks[0].workSession, "secret-session", "the owner gets the full task");
+    const seen = guest.members[0].tasks[0] as any;
+    assert.deepEqual([seen.text, seen.status, seen.requester.name, seen.workSession, seen.cwd], ["waiting", "waiting", "bob", undefined, undefined], "other members see no sessions or location");
+    await assert.rejects(engine.groups.tasks(u3, group.id), /群聊不存在|不在/);
+  } finally { await close(); }
+});
+
+test("工作面板 UI: a header button opens it beside the chat; owners open tasks in the employee view, others read them inline", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const chat = await readFile("web/src/GroupChat.vue", "utf8"), panel = await readFile("web/src/GroupWork.vue", "utf8");
+  assert.match(chat, /@click="toggleWork"><Icon name="tasks" :size="15" \/><span class="hide-mobile">工作面板<\/span>/);
+  assert.match(chat, /<GroupWork v-if="work && group" :members="workMembers"/);
+  assert.match(chat, /props\.api\(`\/groups\/\$\{id\}\/tasks`\)/);
+  assert.match(panel, /if \(member\.mine\) emit\("open", \{ employeeId: member\.id, taskId: task\.id \}\);\n  else selected\.value = task;/);
+  assert.match(panel, /<TaskDetail :task="selected" readonly/);
+  assert.match(panel, /\{\{ requester\(task\) \}\} 发起/);
+});

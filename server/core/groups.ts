@@ -1,5 +1,5 @@
 import type { Engine } from "./engine";
-import type { Employee, GroupAuthor, TaskGroup } from "./employee";
+import { ended, type Employee, type GroupAuthor, type TaskGroup } from "./employee";
 import type { Message, Session } from "./store";
 import { nameKey, parseMentions } from "./names";
 import { assert, id } from "./util";
@@ -33,6 +33,8 @@ type Person = { kind: "user" | "employee"; id: string; name: string; avatar: str
 
 export const GROUP_NAME_MAX = 40, GROUP_BULLETIN_MAX = 4000, GROUP_USERS_MAX = 20, GROUP_EMPLOYEES_MAX = 20;
 /** Employee turns handed on by @mentions after one user message before the relay stops for a human to step in. */
+/** The 工作面板 lists every open task and this many recent ended ones per member. */
+export const GROUP_TASKS_ENDED = 20;
 export const GROUP_HOPS_MAX = 6;
 /** Group messages an employee is shown per turn (only those since its previous turn). */
 const CONTEXT_MESSAGES = 20, CONTEXT_CHARS = 1500;
@@ -330,6 +332,30 @@ export class Groups {
     const extra = wake && task.requester.kind === "employee" && task.requester.id !== employeeId ? [task.requester.id] : [];
     this.store.afterCommit(() => void this.dispatch(group.id, saved, extra).catch((error) => this.report(group.id, error)));
     return true;
+  }
+  /**
+   * The group's 工作面板: tasks started from this group, by current member employee. Each member's list puts what needs
+   * someone first (waiting/approval), then running, queued, and the most recent ended ones. The owner of an employee
+   * gets the full task (and opens it in the employee view); other members see what the group may see: no execution
+   * sessions, location or memory suggestions.
+   */
+  async tasks(viewer: Viewer, groupId: string) {
+    const group = await this.mine(viewer, groupId);
+    const rank = (status: string) => ["waiting", "approval"].includes(status) ? 0 : ["running", "recovering"].includes(status) ? 1 : ended(status) ? 3 : 2;
+    const SHARED = ["id", "text", "status", "createdAt", "finishedAt", "queueReason", "approval", "waiting", "progress", "plan", "result", "completion", "summary", "checkpoint", "error"];
+    const members = [];
+    for (const person of (await this.people(group)).filter((p) => p.kind === "employee")) {
+      const employee = (await this.employee(person.id))!, mine = person.ownerId === viewer.id;
+      const all = (await employee.state()).tasks.filter((t) => t.group?.groupId === group.id)
+        .sort((a, b) => rank(a.status) - rank(b.status) || (b.finishedAt || b.createdAt || 0) - (a.finishedAt || a.createdAt || 0));
+      const open = all.filter((t) => !ended(t.status)), done = all.filter((t) => ended(t.status));
+      const tasks = [...open, ...done.slice(0, GROUP_TASKS_ENDED)].map((t) => ({
+        ...(mine ? t : Object.fromEntries(SHARED.filter((k) => k in t).map((k) => [k, t[k]]))),
+        requester: t.group!.requester,
+      }));
+      members.push({ id: person.id, name: person.name, avatar: person.avatar, mine, tasks, endedHidden: Math.max(0, done.length - GROUP_TASKS_ENDED) });
+    }
+    return { members };
   }
   /** Live status of the tasks linked from these group messages (a card's stored status is only a snapshot). */
   async taskStatus(messages: Message[]) {
