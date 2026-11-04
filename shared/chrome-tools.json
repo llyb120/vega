@@ -29,9 +29,9 @@
         },
         "maxTextChars": {
           "type": "integer",
-          "minimum": 100,
-          "maximum": 100000,
-          "description": "摘要正文字数 100–100000，默认 3000；全量用 read 按 offset/limit 分页读 documentPath"
+          "minimum": 0,
+          "maximum": 65536,
+          "description": "摘要正文字数 0–65536，默认 3000，0 表示不要正文；全量用 read 按 offset/limit 分页读 documentPath"
         }
       },
       "required": [],
@@ -127,9 +127,9 @@
         },
         "maxTextChars": {
           "type": "integer",
-          "minimum": 100,
-          "maximum": 100000,
-          "description": "摘要正文字数 100–100000，默认 3000；全量用 read 按 offset/limit 分页读 documentPath"
+          "minimum": 0,
+          "maximum": 65536,
+          "description": "摘要正文字数 0–65536，默认 3000，0 表示不要正文；全量用 read 按 offset/limit 分页读 documentPath"
         }
       },
       "required": [
@@ -191,9 +191,9 @@
         },
         "maxTextChars": {
           "type": "integer",
-          "minimum": 100,
-          "maximum": 100000,
-          "description": "摘要正文字数 100–100000，默认 3000；全量用 read 按 offset/limit 分页读 documentPath"
+          "minimum": 0,
+          "maximum": 65536,
+          "description": "摘要正文字数 0–65536，默认 3000，0 表示不要正文；全量用 read 按 offset/limit 分页读 documentPath"
         }
       },
       "required": [
@@ -242,9 +242,9 @@
         },
         "maxTextChars": {
           "type": "integer",
-          "minimum": 100,
-          "maximum": 100000,
-          "description": "摘要正文字数 100–100000，默认 3000；全量用 read 按 offset/limit 分页读 documentPath"
+          "minimum": 0,
+          "maximum": 65536,
+          "description": "摘要正文字数 0–65536，默认 3000，0 表示不要正文；全量用 read 按 offset/limit 分页读 documentPath"
         }
       },
       "required": [
@@ -438,9 +438,9 @@
         },
         "maxTextChars": {
           "type": "integer",
-          "minimum": 100,
-          "maximum": 100000,
-          "description": "摘要正文字数 100–100000，默认 3000；全量用 read 按 offset/limit 分页读 documentPath"
+          "minimum": 0,
+          "maximum": 65536,
+          "description": "摘要正文字数 0–65536，默认 3000，0 表示不要正文；全量用 read 按 offset/limit 分页读 documentPath"
         }
       },
       "required": [
@@ -906,9 +906,9 @@
         },
         "maxTextChars": {
           "type": "integer",
-          "minimum": 100,
-          "maximum": 100000,
-          "description": "摘要正文字数 100–100000，默认 3000；全量用 read 按 offset/limit 分页读 documentPath"
+          "minimum": 0,
+          "maximum": 65536,
+          "description": "摘要正文字数 0–65536，默认 3000，0 表示不要正文；全量用 read 按 offset/limit 分页读 documentPath"
         }
       },
       "required": [
@@ -961,9 +961,9 @@
         },
         "maxTextChars": {
           "type": "integer",
-          "minimum": 100,
-          "maximum": 100000,
-          "description": "摘要正文字数 100–100000，默认 3000；全量用 read 按 offset/limit 分页读 documentPath"
+          "minimum": 0,
+          "maximum": 65536,
+          "description": "摘要正文字数 0–65536，默认 3000，0 表示不要正文；全量用 read 按 offset/limit 分页读 documentPath"
         }
       },
       "required": [

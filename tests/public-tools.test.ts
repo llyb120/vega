@@ -40,6 +40,7 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["chrome_act", { tabTag: "C1", maxItems: null, actions: [{ action: "wait" }] }, { operation: "act", tabTag: "C1", actions: [{ action: "wait" }] }],
     ["chrome_screenshot", { tabTag: "C1", maxItems: 1, capture: { kind: "viewport" } }, { operation: "screenshot", tabTag: "C1", maxItems: 1 }],
     ["chrome_navigate", { url: "https://a.test", target: { kind: "new_tab" }, maxTextChars: 100 }, { operation: "open", url: "https://a.test", maxTextChars: 100 }],
+    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, maxTextChars: 0 }, { operation: "screenshot", tabTag: "C1", maxTextChars: 0 }],
     ["chrome_tab_control", { tabTag: "C1", command: "reload", maxItems: 2 }, { operation: "reload", tabTag: "C1", maxItems: 2 }],
     ["chrome_evaluate", { tabTag: "C1", expression: "1", maxItems: 3 }, { operation: "evaluate", tabTag: "C1", expression: "1", maxItems: 3 }],
     ["chrome_tabs", { query: "jira", maxItems: 4 }, { operation: "tabs", query: "jira", maxItems: 4 }],
