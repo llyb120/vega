@@ -302,7 +302,7 @@ test(
       assert.equal(preview.tabTag, tag);
       assert(preview.image.width > 0);
       assert.equal(preview.title, "Vega complete browser fixture");
-      assert(existsSync(store.files.fromUrl(preview.image.url.slice("/api/files/".length).split("/"))));
+      assert(existsSync(store.files.fromUrl(preview.image.url.slice("/api/files/".length).split("?")[0].split("/"))));
       assert.equal(
         engine.observations.get("owner:" + tag)!.id,
         shot.snapshotId,

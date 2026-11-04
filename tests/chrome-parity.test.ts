@@ -330,6 +330,16 @@ test("unchanged screenshots detect small pixel changes and keep frame streams se
   f.page.document = "new-document";
   const navigated = await f.observe(); await f.chrome.capture("owner", navigated, {}, first);
   assert.equal(navigated.images[0].unchanged, false);
+  // The browser view overwrites one file per tab; each new frame gets a new address.
+  const live1 = await f.observe(); await f.chrome.capture("browser-view:u", live1, {});
+  pixels = await sharp({ create: { width: 640, height: 480, channels: 3, background: "black" } }).png().toBuffer();
+  const live2 = await f.observe(); await f.chrome.capture("browser-view:u", live2, {}, live1);
+  assert.equal(live2.images[0].path, live1.images[0].path);
+  assert.equal(live2.images[0].path, f.store.files.dir("browser-view:u") + "/live-tab-0.webp");
+  assert.notEqual(live2.images[0].url, live1.images[0].url);
+  assert.equal(live2.images[0].url, f.store.files.url(live2.images[0].path) + "?v=" + live2.id);
+  const raw2 = await sharp(f.store.files.read(live2.images[0].path)).raw().toBuffer();
+  assert.equal(raw2[0], 0, "the file holds the latest frame");
 });
 
 test("expanded scroll retains original pixels and remains read-only; ordinary images stay bounded", async (t) => {

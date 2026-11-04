@@ -203,6 +203,13 @@ export class Chrome {
   }
   /** Screenshot files go to the owner's directory: the session (task) or the user's browser view. */
   private fileOwner(owner: string) { return owner.startsWith("browser-view:") ? owner : this.store.session(owner); }
+  /**
+   * File name of an image or DOM record. The browser view only ever needs the current frame, so it overwrites one
+   * file per tab (and tile); sessions keep every capture by id for read-back.
+   */
+  private fileName(owner: string, tag: string, id: string, slot: string) {
+    return owner.startsWith("browser-view:") ? `live-${tag.replace(/[^\w-]/g, "_")}${slot}` : id + slot.replace(/^-\d+/, "");
+  }
   async capture(owner: string, o: Observation, a: Obj, prior?: Observation) {
     const tag = o.tabTag,
       page = o.pages[0],
@@ -361,12 +368,14 @@ export class Chrome {
             }
           }
         }
-        path ||= this.store.files.write(this.fileOwner(owner), imageID + ".webp", data);
+        const fresh = !path;
+        path ||= this.store.files.write(this.fileOwner(owner), this.fileName(owner, tag, imageID, `-${o.images.length}.webp`), data);
         o.images.push({
           imageId: imageID,
           snapshotId: o.id,
           path,
-          url: this.store.files.url(path),
+          // An overwritten browser-view frame gets a new address so caches never show the previous one.
+          url: fresh ? this.store.files.url(path) + (owner.startsWith("browser-view:") ? "?v=" + o.id : "") : previous!.url,
           x: imageX,
           y: imageY,
           width: w,
@@ -475,7 +484,7 @@ export class Chrome {
         shot = { screenshotError: error.message };
       }
     }
-    o.documentPath = this.store.files.write(this.fileOwner(owner), o.id + ".json", JSON.stringify({ ...o, frames: undefined }));
+    o.documentPath = this.store.files.write(this.fileOwner(owner), this.fileName(owner, tag, o.id, ".json"), JSON.stringify({ ...o, frames: undefined }));
     this.observations.set(key, o);
     const origin = new URL(o.pages[0].url).origin;
     // Identifiers and images first: an oversized result is clipped from the end, never these.
