@@ -253,14 +253,14 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         status: str("", { enum: ["all", "active", "draft", "conflict", "archived", "pending"] }),
         memoryScene: str("适用场景过滤", { enum: ["chat", "coding", "computer", "any"] }) }));
     out.push(tool("memory_propose",
-      "写入一条跨任务仍成立的稳定事实：claim 1–200 字，一条一事；同向近义自动合并，矛盾的进入 conflict，高风险的可能先进 draft；带 memoryId 时改写该条。声称“已记住”前必须调用成功；临时进度、验证码、一次性链接和凭据不进记忆。确认、合并、归档、钉选或删除用 memory_manage。",
+      "写入一条跨任务仍成立的稳定事实：claim 1–200 字，一条一事；同向近义自动合并，矛盾的进入 conflict，person_org 人事类先进 draft 待用户确认，其余直接生效；带 memoryId 时改写该条。声称“已记住”前必须调用成功；临时进度、验证码、一次性链接和凭据不进记忆。确认、合并、归档、钉选或删除用 memory_manage。",
       { claim: str("稳定主张，1–200 字", { minLength: 1, maxLength: 200 }),
         memoryKind: str("preference 偏好、convention 约定、procedure 流程、environment 环境、person_org 人事、correction 纠错；省略时按主张内容自动推断（改写已有条目时也会重新推断）", { enum: ["preference", "convention", "procedure", "environment", "person_org", "correction"] }),
         scope: str("作用域：global、项目路径、站点 host 或职责 id；省略时任务中为工作目录，否则 global", { maxLength: 500 }),
         memoryScene: str("适用场景；省略时任务中按当前场景，否则 chat", { enum: ["chat", "coding", "computer", "any"] }),
         evidence: str("简短核实依据", { maxLength: 500 }),
         memoryId: str("要改写的记忆 ID；省略为新写入", { minLength: 1 }),
-        pinned: { type: "boolean", description: "true 钉选（衰减更慢、更优先注入），false 取消钉选；省略不改" } },
+        pinned: { type: "boolean", description: "true 钉选：在适用场景和作用域内每轮都注入、不看相关度（与偏好、纠错类同属常驻记忆，共最多 8 条，钉选优先），也不会被自动归档；false 取消钉选；省略不改" } },
       ["claim"]));
     out.push(tool("memory_manage",
       "改变已有记忆的状态，request.command 选一种：confirm 把草稿或冲突确认为生效（可同时改写 claim，与它冲突的其它条归档）；merge 合并 memoryIds（≥2 条，保留 keepId 或最有用的一条，其余归档）；keep 设为生效并钉选（冲突时保留双方）；archive 归档；restore 恢复为生效；feedback 记录使用反馈 signal（signal=correction 时另建一条纠错记忆，claim 写纠正后的主张，省略为“不再沿用原主张”）；pin / unpin 钉选或取消；forget 删除这一条。写入新内容用 memory_propose。",

@@ -1137,7 +1137,6 @@ export class Employee {
               pinned: a.pinned,
               ttl: a.ttl,
               source: a.source || (caller ? "model" : "user"),
-              highRisk: a.highRisk,
             },
             now,
           );

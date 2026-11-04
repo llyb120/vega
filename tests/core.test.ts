@@ -338,12 +338,14 @@ test("memory relevance floor, migration and feedback-driven usefulness", () => {
   const state: any = {
     memories: [
       { id: "perm", text: "午餐偏好麻辣烫", importance: 3, at: now - 40 * 86400000 },
+      { id: "lunch", text: "食堂周五供应麻辣烫", importance: 1, at: now - 40 * 86400000 },
       { id: "code", text: "长期项目使用TS", importance: 2, strength: 1, at: now - 3 * 86400000, usedAt: now - 3 * 86400000 },
     ],
   };
   const result = recallMemory(state, "长期项目使用TS", now, true);
   assert(result.some((m: any) => m.id === "code"));
-  assert(!result.some((m: any) => m.id === "perm"), "unrelated permanent preference must not enter TopK");
+  assert(result.some((m: any) => m.id === "perm"), "standing preferences are injected regardless of relevance");
+  assert(!result.some((m: any) => m.id === "lunch"), "unrelated ordinary facts stay behind the relevance floor");
   assert.equal(state.memories.find((m: any) => m.id === "code").claim, "长期项目使用TS");
   assert(state.memories.find((m: any) => m.id === "code").usefulness > 0.3);
   assert.equal(retention(state.memories.find((m: any) => m.id === "perm"), now), 1);

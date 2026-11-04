@@ -50,9 +50,12 @@ export type MemoryRecord = {
   usedAt?: number;
 };
 
-export const ACTIVE_MEMORY_CAP = 120;
+export const ACTIVE_MEMORY_CAP = 300;
+/** Tier 1: pinned, preference and correction memories are injected every turn, regardless of the query. */
+export const MEMORY_ALWAYS_K = 8;
+/** Tier 2: the remaining memories, ranked by relevance to the query. */
 export const MEMORY_TOP_K = 6;
-export const MEMORY_RELEVANCE_FLOOR = 0.14;
+export const MEMORY_RELEVANCE_FLOOR = 0.08;
 export const MEMORY_CLAIM_MAX = 200;
 export const MEMORY_MERGE_SIM = 0.72;
 export const MEMORY_CONFLICT_SIM = 0.55;
@@ -69,6 +72,11 @@ const KIND_LABEL: Record<MemoryKind, string> = {
 };
 
 const SLOW_DECAY = new Set<MemoryKind>(["preference", "correction"]);
+
+/** Standing memories hold every turn, so recall never gates them on the wording of the current query. */
+export function isStandingMemory(m: MemoryRecord) {
+  return !!m.pinned || SLOW_DECAY.has(m.kind);
+}
 
 export function isMemoryKind(v: any): v is MemoryKind {
   return MEMORY_KINDS.includes(v);
@@ -352,6 +360,9 @@ export type RecallOptions = {
   scene?: MemoryScene;
   scope?: string;
   now?: number;
+  /** tier-1 cap (pinned/preference/correction) */
+  alwaysK?: number;
+  /** tier-2 cap (relevance-ranked) */
   topK?: number;
   floor?: number;
   /** apply mild lastUsed bump only when rel is high — never large strengthen solely for TopK */
@@ -364,17 +375,21 @@ export function recallMemories(
   opts: RecallOptions = {},
 ) {
   const now = opts.now ?? Date.now();
-  const topK = opts.topK ?? MEMORY_TOP_K;
   const floor = opts.floor ?? MEMORY_RELEVANCE_FLOOR;
-  const pool = memories.filter((m) => m.status === "active" || m.status === "conflict");
-  const scored = pool
-    .map((m) => {
-      const { rel, score } = memoryScore(m, query, { scene: opts.scene, scope: opts.scope, now });
-      return { m, rel, score };
-    })
-    .filter((row) => row.rel >= floor)
-    .sort((a, b) => b.score - a.score || b.rel - a.rel)
-    .slice(0, topK);
+  const fits = (m: MemoryRecord) =>
+    (!opts.scene || m.scene === "any" || m.scene === opts.scene) && (!opts.scope || scopeCompatible(m.scope, opts.scope));
+  const rows = memories
+    .filter((m) => m.status === "active" || m.status === "conflict")
+    .map((m) => ({ m, ...memoryScore(m, query, { scene: opts.scene, scope: opts.scope, now }) }))
+    .sort((a, b) => b.score - a.score || b.rel - a.rel);
+  const standing = rows
+    .filter((row) => isStandingMemory(row.m) && fits(row.m))
+    .sort((a, b) => Number(!!b.m.pinned) - Number(!!a.m.pinned))
+    .slice(0, opts.alwaysK ?? MEMORY_ALWAYS_K);
+  const relevant = rows
+    .filter((row) => !standing.includes(row) && row.rel >= floor)
+    .slice(0, opts.topK ?? MEMORY_TOP_K);
+  const scored = [...standing, ...relevant];
   if (opts.touchUsed) {
     for (const row of scored) {
       if (row.rel >= Math.max(floor + 0.08, 0.22)) {
@@ -473,9 +488,8 @@ export type ProposeInput = {
   pinned?: boolean;
   ttl?: number;
   links?: MemoryLinks;
-  /** user explicit write skips draft for low-risk kinds */
+  /** user/ui writes are always active; model writes are active except person_org; extract writes are always draft */
   source?: "user" | "model" | "extract" | "ui";
-  highRisk?: boolean;
 };
 
 export type ProposeResult =
@@ -499,11 +513,9 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
   const scene = input.scene && isMemoryScene(input.scene) ? input.scene : "any";
   const scope = String(input.scope || "global").trim() || "global";
   const source = input.source || "model";
-  const highRisk =
-    input.highRisk ||
-    kind === "environment" ||
-    kind === "person_org" ||
-    (source === "extract" && kind !== "preference" && kind !== "convention");
+  const byUser = source === "user" || source === "ui";
+  // Heuristic extraction is only a suggestion; model-written people facts need the user's confirmation.
+  const asDraft = source === "extract" || (!byUser && kind === "person_org");
 
   if (input.id) {
     const existing = memories.find((m) => m.id === input.id);
@@ -519,7 +531,7 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
     existing.updatedAt = now;
     existing.confidence = clamp01(existing.confidence + 0.05);
     applyFeedback(existing, "edited", now);
-    if (existing.status === "archived" || existing.status === "draft" || (existing.status === "conflict" && (source === "user" || source === "ui")))
+    if (existing.status === "archived" || existing.status === "draft" || (existing.status === "conflict" && byUser))
       existing.status = "active";
     return { ok: true, memory: existing, action: "updated" };
   }
@@ -541,8 +553,7 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
     target.updatedAt = now;
     target.lastVerifiedAt = now;
     target.links.mergedFrom = [...new Set([...(target.links.mergedFrom || []), ...(input.links?.mergedFrom || [])])];
-    if (target.status === "draft" && (source === "user" || source === "ui")) target.status = "active";
-    if (target.status === "archived") target.status = "active";
+    if (target.status === "draft" && byUser) target.status = "active";
     return { ok: true, memory: target, action: "merged" };
   }
 
@@ -552,7 +563,8 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
     .filter((m) => m.status !== "archived" && m.kind === kind && scopeCompatible(m.scope, scope) && contradiction(m.claim, claim))
     .map((m) => ({ m, sim: similarity(m.claim, claim) }))
     .sort((a, b) => b.sim - a.sim)[0];
-  if (opposed && opposed.sim >= 0.35) {
+  const clash = opposed && opposed.sim >= 0.35 ? opposed.m : undefined;
+  if (clash && source !== "extract") {
     const created = normalizeRecord(
       {
         id: id("m"),
@@ -561,10 +573,10 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
         evidence: input.evidence,
         scope,
         scene,
-        confidence: source === "user" || source === "ui" ? 0.7 : 0.45,
+        confidence: byUser ? 0.7 : 0.45,
         usefulness: 0.35,
         status: "conflict",
-        links: { conflictsWith: [opposed.m.id], ...(input.links || {}) },
+        links: { conflictsWith: [clash.id], ...(input.links || {}) },
         pinned: !!input.pinned,
         ttl: input.ttl,
         createdAt: now,
@@ -572,9 +584,9 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
       },
       now,
     );
-    opposed.m.status = "conflict";
-    opposed.m.links.conflictsWith = [...new Set([...(opposed.m.links.conflictsWith || []), created.id])];
-    opposed.m.updatedAt = now;
+    clash.status = "conflict";
+    clash.links.conflictsWith = [...new Set([...(clash.links.conflictsWith || []), created.id])];
+    clash.updatedAt = now;
     memories.push(created);
     return { ok: true, memory: created, action: "conflict" };
   }
@@ -589,12 +601,10 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
     target.updatedAt = now;
     target.lastVerifiedAt = now;
     target.links.mergedFrom = [...new Set([...(target.links.mergedFrom || []), ...(input.links?.mergedFrom || [])])];
-    if (target.status === "draft" && (source === "user" || source === "ui")) target.status = "active";
-    if (target.status === "archived") target.status = "active";
+    if (target.status === "draft" && byUser) target.status = "active";
     return { ok: true, memory: target, action: "merged" };
   }
 
-  const asDraft = highRisk && source !== "user" && source !== "ui";
   const created = normalizeRecord(
     {
       id: id("m"),
@@ -603,15 +613,16 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
       evidence: input.evidence,
       scope,
       scene,
-      confidence: source === "user" || source === "ui" ? 0.75 : asDraft ? 0.4 : 0.55,
-      usefulness: source === "user" || source === "ui" ? 0.55 : 0.4,
+      confidence: byUser ? 0.75 : asDraft ? 0.4 : 0.55,
+      usefulness: byUser ? 0.55 : 0.4,
       status: asDraft ? "draft" : "active",
-      links: input.links || {},
-      pinned: !!input.pinned || kind === "correction" && (source === "user" || source === "ui"),
+      // An extracted contradiction stays a draft; confirming it archives the memory it contradicts.
+      links: clash ? { conflictsWith: [clash.id], ...(input.links || {}) } : input.links || {},
+      pinned: !!input.pinned || kind === "correction" && byUser,
       ttl: input.ttl,
       createdAt: now,
       updatedAt: now,
-      lastVerifiedAt: source === "user" || source === "ui" ? now : undefined,
+      lastVerifiedAt: byUser ? now : undefined,
     },
     now,
   );
@@ -783,7 +794,7 @@ export function searchMemories(
     .map((row) => row.m);
 }
 
-/** Heuristic 0–3 candidates from task delivery text. Never emits OTP/secrets (gate). */
+/** Heuristic 0–3 draft candidates from task delivery text; they only take effect once the user confirms. Never emits OTP/secrets (gate). */
 export function extractMemoryCandidates(input: {
   summary?: string;
   result?: string;
@@ -801,10 +812,11 @@ export function extractMemoryCandidates(input: {
   for (const s of sentences) {
     let kind: MemoryKind | undefined;
     let weight = 0;
-    if (/(偏好|默认|希望|请用|习惯|尽量使用)/.test(s)) {
+    // Only explicit rule wording: "默认/希望/必须" also describe one-off actions ("默认使用了第一页结果").
+    if (/(偏好|请用|习惯|尽量使用)/.test(s)) {
       kind = "preference";
       weight = 3;
-    } else if (/(约定|统一|固定使用|必须|一律|规范)/.test(s)) {
+    } else if (/(约定|统一(?:使用|用|走|采用)|固定使用|一律|规范)/.test(s)) {
       kind = "convention";
       weight = 3;
     } else if (/(流程|步骤|先.*再|打开.*核对|evaluate|relay)/i.test(s)) {
@@ -831,7 +843,6 @@ export function extractMemoryCandidates(input: {
       scene: input.scene || "any",
       source: "extract",
       evidence: "任务交付自动提炼",
-      highRisk: row.kind === "environment" || row.kind === "procedure",
     });
     if (uniq.length >= 3) break;
   }

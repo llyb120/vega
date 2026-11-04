@@ -635,8 +635,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         trimRecovered = false;
       const worker = session.employeeId ? this.employeeFor(session) : undefined;
       const employee = worker?.state();
-      const memoryInput = input || this.store.messages(key).findLast((message) => message.role === "user");
-      let memoryQuery = [memoryInput?.text, memoryInput?.quote?.text].filter(Boolean).join("\n");
+      // Recall by the last three user turns so a short follow-up ("好的，继续") still carries its topic.
+      const recentAsk = () => this.store.messages(key).filter((message) => message.role === "user").slice(-3)
+        .flatMap((message) => [message.text, message.quote?.text]).filter(Boolean).join("\n");
+      let memoryQuery = recentAsk();
       const reinforceMemory = () => {
         if (!worker || session?.taskId) return;
         const state = worker.state();
@@ -658,11 +660,11 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       while (true) {
         control.signal.throwIfAborted();
         for (const m of state.steer.splice(0)) {
-          memoryQuery = [m.text, m.quote?.text].filter(Boolean).join("\n");
-          reinforceMemory();
           chatTasks.clear();
           tools.actorId = m.actorId;
           this.store.append(key, redactMessage(m, redact));
+          memoryQuery = recentAsk();
+          reinforceMemory();
           emit("steer", m);
         }
         if (session.employeeId && session.taskId && session.scene === "coding" && !await this.employeeFor(session).claimWorkspace(session, true)) return;
