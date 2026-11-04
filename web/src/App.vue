@@ -86,6 +86,7 @@ async function openNavigation() {
   (navigation.value?.querySelector(".close-navigation") || navigation.value?.querySelector("button"))?.focus();
 }
 provide("openNavigation", openNavigation);
+provide("mentions", { people: computed(() => employees.value.map((e) => ({ id: e.id, name: e.name }))), open: (id) => { if (employees.value.some((e) => e.id === id)) void chooseEmployee(id); } });
 function navigationKey(event) {
   if (!navigationOpen.value) return;
   if (event.key === "Escape") {

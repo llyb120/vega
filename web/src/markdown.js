@@ -21,6 +21,16 @@ function imageURL(value) {
   } catch {}
 }
 
+/** "@名称" of known employees, active only during one renderMarkdown call ({ name, id } list; names are unique per user). */
+let mentionPattern, mentionIds;
+function useMentions(people) {
+  const named = (people || []).filter((p) => p?.id && String(p.name || "").trim());
+  mentionIds = new Map(named.map((p) => [String(p.name).trim(), String(p.id)]));
+  const names = [...mentionIds.keys()].sort((a, b) => b.length - a.length).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // Longest name first, so "@测试牛马处理" finds 测试牛马; "@" right after a letter or digit (an email) does not count.
+  mentionPattern = names.length ? new RegExp(`(^|[^\\p{L}\\p{N}_])@(${names.join("|")})`, "gu") : undefined;
+}
+
 export function renderInline(text) {
   const fragments = [];
   const protect = (html, plain) => {
@@ -43,7 +53,11 @@ export function renderInline(text) {
     .replace(
       /(^|[\s：:])((?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32})(?=$|[\s，。；！？、]|[.,;!?](?=\s|$))/gi,
       (_, prefix, url) => prefix + protect(`<img src="${escape(imageURL(url))}" alt="存档图片" loading="lazy" decoding="async" referrerpolicy="no-referrer">`, url),
-    );
+    )
+    .replace(mentionPattern || /$^/, (match, prefix, name) => {
+      const id = mentionIds.get(name);
+      return prefix + protect(`<a class="mention" href="?employee=${encodeURIComponent(id)}" data-employee="${escape(id)}">@${escape(name)}</a>`, "@" + name);
+    });
   const html = escape(source)
     .replace(
       /\[([^\]\n]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g,
@@ -75,7 +89,11 @@ function tableRow(line) {
 
 // shortcut: chat-oriented Markdown subset (no raw HTML or reference-style images);
 // upgrade to a full parser if richer message formatting is required.
-export function renderMarkdown(text) {
+export function renderMarkdown(text, options = {}) {
+  useMentions(options.mentions);
+  try { return renderBlocks(text); } finally { useMentions(); }
+}
+function renderBlocks(text) {
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n"),
     html = [],
     codes = [];
