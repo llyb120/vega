@@ -1312,6 +1312,12 @@ async function openEmployeeTask(id) {
   employeeTaskFocus.value = id;
   employeeTab.value = "tasks";
 }
+/** 转交 links: open a task on another employee (only one the current user can see). */
+async function openColleagueTask({ employeeId, taskId }) {
+  if (!employees.value.some((entry) => entry.id === employeeId)) { toast("你没有权限查看这个牛马"); return; }
+  if (selectedEmployee.value !== employeeId) await chooseEmployee(employeeId);
+  if (selectedEmployee.value === employeeId) await openEmployeeTask(taskId);
+}
 async function employeeTabChanged(id) {
   employeeTab.value = id;
 }
@@ -1384,6 +1390,8 @@ async function saveEmployeeSettings() {
       action: "settings",
       name: employee.value.name,
       instruction: employee.value.instruction,
+      publicSummary: employee.value.publicSummary || "",
+      acceptsColleagues: employee.value.acceptsColleagues !== false,
       cwd: employee.value.cwd,
     });
     toast("牛马设置已保存");
@@ -1592,6 +1600,7 @@ onBeforeUnmount(() => {
             @select="employeeTaskFocus = $event"
             @inspect="openEmployee($event)"
             @chat="employeeTab = 'chat'"
+            @open-task="openColleagueTask"
           />
           <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
           <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" /></div>

@@ -4,7 +4,7 @@ import Icon from "./Icon.vue";
 import TaskDetail from "./TaskDetail.vue";
 import { taskLabel, taskTone, planProgress, shortTime, needsAttention } from "./task-status";
 const props = defineProps({ active: Array, attention: Array, history: Array, filter: String, focus: String, readonly: Boolean, act: Function, saveMemory: Function });
-const emit = defineEmits(["filter", "select", "inspect", "chat"]);
+const emit = defineEmits(["filter", "select", "inspect", "chat", "open-task"]);
 const list = ref(null);
 const media = window.matchMedia("(min-width: 1024px)"), twoPane = ref(media.matches);
 const sync = () => { twoPane.value = media.matches; };
@@ -50,7 +50,7 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
       <p class="task-tip"><Icon name="zap" :size="13" />新任务先由轻量模型起步，涉及编码再在原会话升级。</p>
     </section>
     <section class="task-detail-pane" aria-label="任务详情">
-      <TaskDetail v-if="selected" :key="selected.id" :task="selected" :readonly="readonly" :back="!twoPane" :act="(action, answer) => act(selected, action, answer)" :save-memory="saveMemory" @inspect="emit('inspect', $event)" @back="emit('select', '')" />
+      <TaskDetail v-if="selected" :key="selected.id" :task="selected" :readonly="readonly" :back="!twoPane" :act="(action, answer) => act(selected, action, answer)" :save-memory="saveMemory" @inspect="emit('inspect', $event)" @back="emit('select', '')" @open-task="emit('open-task', $event)" />
       <div v-else class="detail-empty"><Icon name="tasks" :size="32" /><p>选择左侧任务查看进度、计划与结果</p></div>
     </section>
   </div>
