@@ -13,7 +13,7 @@ import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
 const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number });
 const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel"]);
-const group = ref(null), messages = ref([]), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
+const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
 const directory = ref([]), form = ref({ name: "", bulletin: "", users: [], employees: [] }), edit = ref({ name: "", bulletin: "" }), invite = ref(""), bring = ref("");
 const readonly = computed(() => props.user?.role === "viewer");
 const members = computed(() => groupMembers(group.value, props.user?.id));
@@ -28,6 +28,9 @@ const shown = computed(() => {
 const runningMembers = computed(() => (group.value?.employees || []).filter((e) => group.value.running?.includes(e.id)));
 const available = computed(() => (props.myEmployees || []).filter((e) => !group.value?.employees.some((m) => m.id === e.id)));
 const invitable = computed(() => directory.value.filter((u) => !group.value?.users.some((m) => m.id === u.id)));
+// Both add rows always show, so users find them; when empty they say why.
+const noUsersHint = computed(() => props.user?.role === "admin" ? "没有可邀请的用户（在左下角「账号与安全」→ 成员里新建账号）" : "没有可邀请的用户（请管理员在「账号与安全」里新建账号）");
+const noEmployeesHint = computed(() => props.myEmployees?.length ? "你的牛马都已在群里" : "你还没有牛马（先在左侧「数字牛马」里新建）");
 const canStop = (e) => e.mine || group.value?.isCreator;
 
 async function run(fn) {
@@ -44,6 +47,7 @@ async function load(scroll = false) {
   const result = await props.api(`/groups/${id}/messages?limit=200`);
   if (props.groupId !== id) return;
   messages.value = result.messages;
+  taskStatus.value = result.taskStatus || {};
   group.value = result.group;
   edit.value = { name: result.group.name, bulletin: result.group.bulletin };
   if (stick) { await nextTick(); transcript.value?.scrollTo({ top: transcript.value.scrollHeight }); }
@@ -119,9 +123,9 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
           <div class="form-grid">
             <label>群名<input v-model="form.name" required maxlength="40" placeholder="例如：发布小组、周报协作" autofocus /></label>
             <label>群公告<textarea v-model="form.bulletin" rows="5" maxlength="4000" placeholder="写清分工和协作方式，例如：研发助手负责写代码；测试助手负责验证，发现问题 @研发助手 修复；发布前 @我 确认。"></textarea><small class="hint">群里的牛马每次回复都会按公告干活。</small></label>
-            <fieldset v-if="directory.length"><legend>邀请用户</legend><label v-for="u in directory" :key="u.id" class="check"><input v-model="form.users" type="checkbox" :value="u.id" />{{ u.name }}</label></fieldset>
-            <fieldset v-if="myEmployees?.length"><legend>拉入我的牛马</legend><label v-for="e in myEmployees" :key="e.id" class="check"><input v-model="form.employees" type="checkbox" :value="e.id" />{{ e.name }}</label></fieldset>
-            <p class="hint">每个人只能拉自己的牛马进群；被邀请的用户进群后可以拉他们自己的牛马。</p>
+            <fieldset><legend>邀请用户</legend><label v-for="u in directory" :key="u.id" class="check"><input v-model="form.users" type="checkbox" :value="u.id" />{{ u.name }}</label><small v-if="!directory.length" class="hint">{{ noUsersHint }}</small></fieldset>
+            <fieldset><legend>拉入我的牛马</legend><label v-for="e in myEmployees" :key="e.id" class="check"><input v-model="form.employees" type="checkbox" :value="e.id" />{{ e.name }}</label><small v-if="!myEmployees?.length" class="hint">{{ noEmployeesHint }}</small></fieldset>
+            <p class="hint">每个人只能拉自己的牛马进群；被邀请的用户进群后，在群里右上角「群成员与公告」面板拉入他们自己的牛马。</p>
           </div>
           <div class="actions end"><button type="button" class="ghost" @click="emit('cancel')">取消</button><button class="primary" :disabled="!form.name.trim()">创建群聊</button></div>
         </form>
@@ -140,7 +144,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
               <div v-if="group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
               <template v-for="{ message, continued } in shown" :key="message.seq">
                 <p v-if="message.notice" class="group-notice">{{ message.text }}</p>
-                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" />
+                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" />
               </template>
               <article v-for="e in runningMembers" :key="'typing-' + e.id" class="chat-message assistant chat-typing" role="status" :aria-label="e.name + ' 正在回复'">
                 <span class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" animate /></span>
@@ -179,7 +183,8 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
               <li v-for="u in group.users" :key="u.id"><span class="member-avatar"><UserAvatar :user-id="u.id" :name="u.name" :avatar="u.avatar" /></span><span class="member-name truncate">{{ u.name }}<small v-if="u.id === group.creatorId">群主</small><small v-if="u.id === user?.id">我</small></span>
                 <button v-if="group.isCreator && u.id !== user?.id && !readonly" type="button" class="icon sm" :aria-label="'移出 ' + u.name" title="移出群聊" @click="removeUser(u)"><Icon name="close" :size="14" /></button></li>
             </ul>
-            <div v-if="!readonly && invitable.length" class="add-row"><select v-model="invite" aria-label="邀请用户"><option value="">邀请用户…</option><option v-for="u in invitable" :key="u.id" :value="u.id">{{ u.name }}</option></select><button type="button" class="sm" :disabled="!invite" @click="addUser">邀请</button></div>
+            <div v-if="!readonly" class="add-row"><select v-model="invite" aria-label="邀请用户" :disabled="!invitable.length"><option value="">{{ invitable.length ? "邀请用户…" : "没有可邀请的用户" }}</option><option v-for="u in invitable" :key="u.id" :value="u.id">{{ u.name }}</option></select><button type="button" class="sm" :disabled="!invite" @click="addUser">邀请</button></div>
+            <p v-if="!readonly && !invitable.length" class="hint">{{ noUsersHint }}</p>
           </section>
           <section>
             <h3>牛马 · {{ group.employees.length }}</h3>
@@ -189,8 +194,8 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
                 <span v-else class="member-name truncate">{{ e.name }}<small>{{ e.ownerName || '其他用户' }}的</small></span>
                 <button v-if="(e.mine || group.isCreator) && !readonly" type="button" class="icon sm" :aria-label="'移出 ' + e.name" title="移出群聊" @click="removeEmployee(e)"><Icon name="close" :size="14" /></button></li>
             </ul>
-            <div v-if="!readonly && available.length" class="add-row"><select v-model="bring" aria-label="拉入我的牛马"><option value="">拉入我的牛马…</option><option v-for="e in available" :key="e.id" :value="e.id">{{ e.name }}</option></select><button type="button" class="sm" :disabled="!bring" @click="addEmployee">拉入</button></div>
-            <p class="hint">只能拉你自己的牛马。别人的牛马在群里只接派单（查询、补充、续做、停止任务），不会用主人的职责、记忆和密码本。</p>
+            <div v-if="!readonly" class="add-row"><select v-model="bring" aria-label="拉入我的牛马" :disabled="!available.length"><option value="">{{ available.length ? "拉入我的牛马…" : noEmployeesHint }}</option><option v-for="e in available" :key="e.id" :value="e.id">{{ e.name }}</option></select><button type="button" class="sm" :disabled="!bring" @click="addEmployee">拉入</button></div>
+            <p class="hint">只能拉你自己的牛马；被邀请的用户在这个面板里拉入他们自己的牛马。别人的牛马在群里只接派单（查询、补充、续做、停止任务），不会用主人的职责、记忆和密码本。</p>
           </section>
           <section class="panel-actions">
             <button type="button" class="ghost sm danger-text" @click="leave"><Icon name="logout" :size="14" />退出群聊</button>

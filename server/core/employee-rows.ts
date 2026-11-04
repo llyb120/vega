@@ -29,14 +29,19 @@ export function baseRecord(state: Obj) {
   return Object.fromEntries(Object.keys(state).filter((key) => key !== "tasks" && key !== "runs").map((key) => [key, state[key]]));
 }
 
+/** Returns the tasks whose status changed (or that were added). */
 export async function saveRows(store: Store, employee: string, state: Obj, active: (task: Obj) => boolean) {
   const rows: Rows | undefined = (state as any)[ROWS];
-  if (!rows) return;
+  const moved: Obj[] = [];
+  if (!rows) return moved;
   const kept = new Set<string>();
   for (const task of state.tasks as Obj[]) {
-    const data = JSON.stringify(task);
+    const data = JSON.stringify(task), before = rows.tasks.get(task.id);
     kept.add(task.id);
-    if (rows.tasks.get(task.id) !== data) await store.putEmployeeTask(employee, task.id, active(task), task.createdAt || Date.now(), data);
+    if (before !== data) {
+      await store.putEmployeeTask(employee, task.id, active(task), task.createdAt || Date.now(), data);
+      if (before === undefined || JSON.parse(before).status !== task.status) moved.push(task);
+    }
     rows.tasks.set(task.id, data);
   }
   for (const id of [...rows.tasks.keys()]) if (!kept.has(id)) { await store.deleteEmployeeTask(id); rows.tasks.delete(id); }
@@ -50,4 +55,5 @@ export async function saveRows(store: Store, employee: string, state: Obj, activ
     keptRuns.add(id);
   }
   for (const id of [...rows.runs.keys()]) if (!keptRuns.has(id)) { await store.deleteEmployeeRun(id); rows.runs.delete(id); }
+  return moved;
 }

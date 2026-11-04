@@ -241,7 +241,8 @@ export class Engine {
       isolated: true,
       groups: {
         post: (group, employeeId, message, wake) => this.groups.post(group, employeeId, message, wake),
-        bulletin: (groupId) => this.groups.bulletin(groupId),
+        taskContext: (groupId, employeeId) => this.groups.taskContext(groupId, employeeId),
+        changed: (groupId) => this.groups.changed(groupId),
         checkName: (employeeId, name) => this.groups.checkName(employeeId, name),
       },
     };

@@ -193,3 +193,62 @@ test("only group users read the group conversation; member sessions stay private
     assert(await engine.groups.sharesGroup("u2", { user: "u1" }));
   } finally { await close(); }
 });
+
+test("division of labour: the prompt tells members to @ whoever the bulletin assigns; a task's @ in its notices relays too", async () => {
+  const { engine, make, close } = await fixture();
+  try {
+    const a = await make("默认牛马", "u1"), b = await make("测试牛马", "u1");
+    const group = await engine.groups.create(u1, { name: "牛马小分队", bulletin: "如果要测试，找测试牛马", employees: [a, b] });
+    const prompt = await engine.groups.prompt(group.id, a);
+    assert.match(prompt, /\[群公告\]（本群的工作规则，谁做什么以它为准；不扩大授权）\n如果要测试，找测试牛马/);
+    assert.match(prompt, /动手前先按群公告的分工判断这件事该谁做：全部或部分属于别的牛马时，不要自己做、也不要替它派单，在回复里写「@名称」交给它/);
+    // A task started in the group knows the other members and hands sub-work on with @ in its notices.
+    const employeeA = await engine.employee.for(a);
+    const taskGroup = { groupId: group.id, name: group.name, hop: 1, requester: { kind: "user" as const, id: "u1", name: "alice" }, byOwner: true };
+    const note = await (employeeA as any).groupTaskNote(taskGroup);
+    assert.match(note, /群里的其他牛马：测试牛马。按群公告，本任务中属于它们的部分不要自己做：在 tellUser 进展或最终结果里写「@名称」/);
+    const seen = script(engine, { [b]: ["测试用例设计好了"] });
+    await employeeA.toChat(undefined, taskGroup, { role: "assistant", text: "需求已读完，@测试牛马 请按需求设计测试用例" }, false);
+    await settle(engine);
+    assert.equal(seen.length, 1, "an @ in a task's progress notice starts that member's turn");
+    assert.deepEqual((await groupMessages(engine, group.id)).at(-1)?.text, "测试用例设计好了");
+  } finally { await close(); }
+});
+
+test("task cards in a group show the live task status, and a status change refreshes the group", async () => {
+  const { engine, make, close } = await fixture();
+  try {
+    const a = await make("小A", "u1");
+    const group = await engine.groups.create(u1, { name: "状态", employees: [a] });
+    script(engine, { [a]: [{ text: "", calls: [{ id: "c1", name: "employee_task_create", arguments: { instructions: "设计测试用例" } }] }, "已安排"] });
+    await engine.groups.send(u1, group.id, { text: "@小A 设计测试用例" });
+    await settle(engine);
+    const employeeA = await engine.employee.for(a);
+    const task = (await employeeA.state()).tasks[0];
+    const messages = await groupMessages(engine, group.id);
+    assert.equal(messages.find((m) => m.tasks?.length)!.tasks![0].status, "queued", "the stored card is a snapshot");
+    const events: any[] = [];
+    const emit = engine.emit.bind(engine);
+    engine.emit = ((event: any) => { events.push(event); return emit(event); }) as any;
+    await employeeA.update((state) => { employeeA.task(state, task.id).status = "running"; });
+    await sleep(10);
+    assert(events.some((e) => e.type === "group_changed" && e.data?.groupId === group.id), "the group view reloads on a task status change");
+    const count = events.length;
+    await employeeA.update((state) => { employeeA.task(state, task.id).queueReason = "x"; });
+    await sleep(10);
+    assert(!events.slice(count).some((e) => e.type === "group_changed"), "no reload when no group task changed status");
+    assert.deepEqual(await engine.groups.taskStatus(messages), { [task.id]: "running" });
+  } finally { await close(); }
+});
+
+test("group panel: invite and bring rows always show, with a reason when empty; cards get the live status", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile("web/src/GroupChat.vue", "utf8");
+  assert.match(source, /<div v-if="!readonly" class="add-row"><select v-model="invite" aria-label="邀请用户" :disabled="!invitable.length">/);
+  assert.match(source, /<div v-if="!readonly" class="add-row"><select v-model="bring" aria-label="拉入我的牛马" :disabled="!available.length">/);
+  assert.match(source, /在左下角「账号与安全」→ 成员里新建账号/);
+  assert.match(source, /你的牛马都已在群里/);
+  assert.match(source, /被邀请的用户在这个面板里拉入他们自己的牛马/);
+  assert.match(source, /<fieldset><legend>邀请用户<\/legend>/);
+  assert.match(source, /:task-status="taskStatus"/);
+});

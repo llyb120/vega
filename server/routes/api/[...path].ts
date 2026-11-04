@@ -606,7 +606,10 @@ async function groupRoute(path: string[], method: string, a: Obj, user: { id: st
   }
   if (path[2] === "messages" && path.length === 3) {
     const group = await groups.mine(user, id);
-    if (method === "GET") return { ...await chatHistory(store, group.session, query), group: await groups.view(group, user) };
+    if (method === "GET") {
+      const page = await chatHistory(store, group.session, query);
+      return { ...page, group: await groups.view(group, user), taskStatus: await groups.taskStatus(page.messages) };
+    }
     if (method === "POST") {
       const input = await inputMessage({ text: typeof a.text === "string" ? a.text : "", images: a.images, files: a.files }, store, group.session);
       return await groups.send(user, id, { text: input.text, clientMessageId: a.clientMessageId, images: input.images, files: input.files });
