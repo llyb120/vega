@@ -4,18 +4,10 @@
 # Database rows live in MySQL; uploaded/archived files stay in the vega-data volume (next to VEGA_DB).
 services:
   mysql:
-    image: mysql:8.4
+    build: ./mysql
     environment:
-      MYSQL_DATABASE: vega
-      MYSQL_USER: vega
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD}
-      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin"]
     volumes: [mysql-data:/var/lib/mysql]
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
-      interval: 5s
-      retries: 30
   vega:
     build: ..
     shm_size: 1g
