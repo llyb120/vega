@@ -38,8 +38,8 @@ export class Experiences {
     );
     return u.origin;
   }
-  all() {
-    return this.store.objects<any>(this.kind);
+  async all() {
+    return await this.store.objects<any>(this.kind);
   }
   summary(e: Obj) {
     return {
@@ -115,7 +115,7 @@ export class Experiences {
     }
     return { roots, routes: entries.map((e) => this.summary(e)) };
   }
-  execute(owner: string, args: Obj, observed?: { id: string; origin: string }) {
+  async execute(owner: string, args: Obj, observed?: { id: string; origin: string }) {
     const op = args.operation,
       r = objectRequest(args.experience),
       scope = this.scope(r.scope);
@@ -123,7 +123,7 @@ export class Experiences {
       typeof r.task === "string" && r.task.trim() && r.task.length <= 300,
       "Experience task required, max 300 characters",
     );
-    const all = this.all();
+    const all = await this.all();
     if (op === "experience_search") {
       const query = terms(r.task);
       let matches = all
@@ -248,7 +248,7 @@ export class Experiences {
               a.successes.length - b.successes.length ||
               a.updatedAt - b.updatedAt,
           )[0];
-          this.store.remove(this.kind, worst.id);
+          await this.store.remove(this.kind, worst.id);
         }
         entry = {
           id: id(),
@@ -298,16 +298,16 @@ export class Experiences {
     entry.evidence = r.evidence || "";
     entry.snapshotId = args.snapshotId;
     entry.updatedAt = Date.now();
-    this.store.save(this.kind, entry.id, entry);
+    await this.store.save(this.kind, entry.id, entry);
     const trail = this.trails.get(owner + ":" + scope);
     if (trail && !args.auto) trail.modelSaved = true;
     return { experience: this.summary(entry), saved: true };
   }
-  hint(owner: string, origin: string) {
+  async hint(owner: string, origin: string) {
     const key = owner + ":" + origin;
     if (this.shown.has(key)) return;
     this.shown.add(key);
-    const entries = this.all()
+    const entries = (await this.all())
       .filter((e) => e.scope === origin && !e.disabled)
       .sort(
         (a, b) =>
@@ -355,12 +355,12 @@ export class Experiences {
     }
     trail.steps = trail.steps.slice(0, 12);
   }
-  finish(owner: string, success: boolean) {
+  async finish(owner: string, success: boolean) {
     for (const [key, trail] of this.trails) {
       if (!key.startsWith(owner + ":")) continue;
       this.trails.delete(key);
       if (!success || trail.modelSaved || trail.steps.length < 2) continue;
-      const autos = this.all().filter(
+      const autos = (await this.all()).filter(
         (e) => e.scope === trail.scope && e.source === "auto",
       );
       const existing = autos.find(
@@ -387,11 +387,11 @@ export class Experiences {
       entry.successes = [...new Set([...entry.successes, owner])].slice(0, 32);
       entry.updatedAt = Date.now();
       if (!existing && autos.length >= 10)
-        this.store.remove(
-          this.kind,
-          autos.sort((a, b) => a.updatedAt - b.updatedAt)[0].id,
-        );
-      this.store.save(this.kind, entry.id, entry);
+        await this.store.remove(
+                    this.kind,
+                    autos.sort((a, b) => a.updatedAt - b.updatedAt)[0].id,
+                  );
+      await this.store.save(this.kind, entry.id, entry);
     }
     for (const key of this.shown)
       if (key.startsWith(owner + ":")) this.shown.delete(key);

@@ -1,7 +1,7 @@
-import { DatabaseSync, type StatementSync } from "node:sqlite";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, chmodSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { Db, Sqlite, type Dialect } from "./db";
 import { Files } from "./files";
 import { assert, id } from "./util";
 export type Part = { type: string; [key: string]: any };
@@ -54,309 +54,310 @@ export type Session = {
   fireRole?: "work" | "judge";
   createdAt: number;
 };
+/** Schema version kept in settings; a database of another version is refused (no migrations). */
+const SCHEMA = 6;
+/**
+ * The schema for either backend. Only key/indexed columns are VARCHAR on MySQL (index length limits); JSON documents
+ * are LONGTEXT, timestamps BIGINT, and MySQL tables use utf8mb4 with binary (case-sensitive, like SQLite) collation.
+ */
+function schema(d: Dialect) {
+  const my = d === "mysql", K = my ? "VARCHAR(255)" : "TEXT", T = my ? "LONGTEXT" : "TEXT", I = my ? "BIGINT" : "INTEGER";
+  const auto = my ? "BIGINT AUTO_INCREMENT PRIMARY KEY" : "INTEGER PRIMARY KEY", table = my ? " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin" : "";
+  return [
+    `CREATE TABLE settings(name ${K} PRIMARY KEY,value ${T} NOT NULL)`,
+    `CREATE TABLE sessions(id ${K} PRIMARY KEY,data ${T} NOT NULL,updated ${I} NOT NULL,employee ${K},task ${K},owner ${K},source ${K})`,
+    "CREATE INDEX sessions_employee ON sessions(employee)",
+    "CREATE INDEX sessions_task ON sessions(task)",
+    "CREATE INDEX sessions_owner ON sessions(owner,updated)",
+    "CREATE INDEX sessions_source ON sessions(source)",
+    "CREATE INDEX sessions_updated ON sessions(updated DESC)",
+    // seq keeps insertion order for tasks created in the same millisecond.
+    `CREATE TABLE employee_tasks(seq ${auto},id ${K} NOT NULL UNIQUE,employee ${K} NOT NULL,active ${I} NOT NULL,created ${I} NOT NULL,data ${T} NOT NULL)`,
+    "CREATE INDEX employee_tasks_employee ON employee_tasks(employee,active,created)",
+    `CREATE TABLE employee_runs(id ${auto},employee ${K} NOT NULL,task ${K} NOT NULL,data ${T} NOT NULL)`,
+    "CREATE INDEX employee_runs_employee ON employee_runs(employee,id)",
+    "CREATE INDEX employee_runs_task ON employee_runs(task)",
+    // actor/client: the sender's idempotency key (actorId, clientMessageId), copied out of data for an index.
+    `CREATE TABLE messages(session ${K} NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,seq ${I} NOT NULL,data ${T} NOT NULL,actor ${K},client ${K},PRIMARY KEY(session,seq))`,
+    "CREATE INDEX messages_client ON messages(session,actor,client)",
+    `CREATE TABLE folds(session ${K} NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,id ${K} NOT NULL,data ${T} NOT NULL,PRIMARY KEY(session,id))`,
+    `CREATE TABLE objects(kind ${K} NOT NULL,id ${K} NOT NULL,data ${T} NOT NULL,PRIMARY KEY(kind,id))`,
+    `CREATE TABLE blobs(id ${K} PRIMARY KEY,mime ${K} NOT NULL,data ${my ? "LONGBLOB" : "BLOB"} NOT NULL,created ${I} NOT NULL)`,
+    `CREATE TABLE web_users(id ${K} PRIMARY KEY,username ${K} NOT NULL UNIQUE ${my ? "COLLATE utf8mb4_general_ci" : "COLLATE NOCASE"},password ${K} NOT NULL,role ${K} NOT NULL CHECK(role IN ('admin','operator','viewer')),disabled ${I} NOT NULL DEFAULT 0,createdAt ${I} NOT NULL,lastLogin ${I} NOT NULL DEFAULT 0)`,
+    `CREATE TABLE web_sessions(hash ${K} PRIMARY KEY,userId ${K} NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,csrf ${K} NOT NULL,createdAt ${I} NOT NULL,expiresAt ${I} NOT NULL)`,
+    "CREATE INDEX web_sessions_user ON web_sessions(userId)",
+    `CREATE TABLE blob_access(blob_id ${K} NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,session ${K} NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(blob_id,session))`,
+    "CREATE INDEX blob_access_session ON blob_access(session)",
+    `CREATE TABLE blob_user_access(blob_id ${K} NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,user ${K} NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,PRIMARY KEY(blob_id,user))`,
+  ].map((statement) => (statement.startsWith("CREATE TABLE") ? statement + table : statement));
+}
+
+/**
+ * All persistent state. Every method is async: SQLite runs in a worker thread and MySQL over a pool, so the event loop
+ * never waits on the database. Read-modify-write sequences belong in `transaction` (see Db).
+ */
 export class Store {
-  db: DatabaseSync;
   /** Screenshots, DOM records and oversized tool results live in files next to the database (see Files). */
   files: Files;
-  private memory: boolean;
   private rowCache = new Map<string, { max: number; rows: Readonly<Message>[] }>();
-  depth = 0;
-  constructor(path = process.env.VEGA_DB || "vega.db") {
-    if (path !== ":memory:")
-      mkdirSync(dirname(resolve(path)), { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(path);
-    this.memory = path === ":memory:";
-    this.files = new Files(this.memory ? mkdtempSync(join(tmpdir(), "vega-files-")) : join(dirname(resolve(path)), "files"));
-    const app = Number(
-        (this.db.prepare("PRAGMA application_id").get() as any).application_id,
-      ),
-      version = Number(
-        (this.db.prepare("PRAGMA user_version").get() as any).user_version,
-      ),
-      tables = Number(
-        (
-          this.db
-            .prepare(
-              "SELECT count(*) n FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-            )
-            .get() as any
-        ).n,
-      );
-    assert(
-      (app === 0 || app === 1447380801) &&
-        !(app === 0 && tables > 0) &&
-        (tables === 0 || version === 5),
-      "Not a supported Vega database; existing data left unchanged",
-    );
-    this.db
-      .exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; BEGIN;
-   CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-   CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,data TEXT NOT NULL,updated INTEGER NOT NULL,employee TEXT,task TEXT,owner TEXT,source TEXT);
-   CREATE INDEX IF NOT EXISTS sessions_employee ON sessions(employee);
-   CREATE INDEX IF NOT EXISTS sessions_task ON sessions(task);
-   CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner,updated);
-   CREATE INDEX IF NOT EXISTS sessions_source ON sessions(source);
-   CREATE TABLE IF NOT EXISTS employee_tasks(id TEXT PRIMARY KEY,employee TEXT NOT NULL,active INTEGER NOT NULL,created INTEGER NOT NULL,data TEXT NOT NULL);
-   CREATE INDEX IF NOT EXISTS employee_tasks_employee ON employee_tasks(employee,active,created);
-   CREATE TABLE IF NOT EXISTS employee_runs(id INTEGER PRIMARY KEY,employee TEXT NOT NULL,task TEXT NOT NULL,data TEXT NOT NULL);
-   CREATE INDEX IF NOT EXISTS employee_runs_employee ON employee_runs(employee,id);
-   CREATE INDEX IF NOT EXISTS employee_runs_task ON employee_runs(task);
-   CREATE TABLE IF NOT EXISTS messages(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,seq INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,seq));
-   CREATE INDEX IF NOT EXISTS messages_client_id ON messages(session,json_extract(data,'$.actorId'),json_extract(data,'$.clientMessageId')) WHERE json_extract(data,'$.clientMessageId') IS NOT NULL;
-   CREATE TABLE IF NOT EXISTS folds(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,id));
-   CREATE TABLE IF NOT EXISTS objects(kind TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(kind,id));
-   CREATE TABLE IF NOT EXISTS blobs(id TEXT PRIMARY KEY,mime TEXT NOT NULL,data BLOB NOT NULL,created INTEGER NOT NULL);
-   CREATE TABLE IF NOT EXISTS web_users(id TEXT PRIMARY KEY,username TEXT NOT NULL UNIQUE COLLATE NOCASE,password TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','operator','viewer')),disabled INTEGER NOT NULL DEFAULT 0,createdAt INTEGER NOT NULL,lastLogin INTEGER NOT NULL DEFAULT 0);
-   CREATE TABLE IF NOT EXISTS web_sessions(hash TEXT PRIMARY KEY,userId TEXT NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,csrf TEXT NOT NULL,createdAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL);
-   CREATE INDEX IF NOT EXISTS web_sessions_user ON web_sessions(userId);
-   CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated DESC);
-   CREATE TABLE IF NOT EXISTS blob_access(blob TEXT NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(blob,session));
-   CREATE INDEX IF NOT EXISTS blob_access_session ON blob_access(session);
-   CREATE TABLE IF NOT EXISTS blob_user_access(blob TEXT NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,user TEXT NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,PRIMARY KEY(blob,user));
-   PRAGMA application_id=1447380801; PRAGMA user_version=5; COMMIT;`);
-    if (path !== ":memory:") chmodSync(path, 0o600);
+  private constructor(readonly db: Db, files: string, private temporary: boolean) {
+    this.files = new Files(files);
   }
-  /** Prepared statements are compiled once per SQL text and reused (one long-lived connection). */
-  private statements = new Map<string, StatementSync>();
-  sql(text: string) {
-    let statement = this.statements.get(text);
-    if (!statement) this.statements.set(text, statement = this.db.prepare(text));
-    return statement;
-  }
-  close() {
-    this.db.close();
-    // An in-memory database's files are as temporary as it is.
-    if (this.memory) rmSync(this.files.root, { recursive: true, force: true });
-  }
-  transaction<T>(fn: () => T) {
-    const outer = this.depth === 0,
-      name = "vega_" + this.depth;
-    this.db.exec(outer ? "BEGIN IMMEDIATE" : "SAVEPOINT " + name);
-    this.depth++;
-    try {
-      const v = fn();
-      this.db.exec(outer ? "COMMIT" : "RELEASE " + name);
-      return v;
-    } catch (e) {
-      this.db.exec(outer ? "ROLLBACK" : "ROLLBACK TO " + name);
-      if (!outer) this.db.exec("RELEASE " + name);
-      throw e;
-    } finally {
-      this.depth--;
+  /**
+   * Open the configured database: DB_TYPE=sqlite (default, file VEGA_DB or `target`).
+   * ":memory:" is a throwaway database (and file directory) removed on close, on either backend.
+   */
+  static async open(target = process.env.VEGA_DB || "vega.db") {
+    const temporary = target === ":memory:";
+    const files = temporary ? await mkdtemp(join(tmpdir(), "vega-files-")) : join(dirname(resolve(target)), "files");
+    let db: Db;
+    {
+      if (!temporary) await mkdir(dirname(resolve(target)), { recursive: true, mode: 0o700 });
+      db = new Sqlite(target);
     }
+    const store = new Store(db, files, temporary);
+    try {
+      await store.prepareSchema();
+      if (db.dialect === "sqlite" && !temporary) await chmod(target, 0o600);
+    } catch (e) {
+      await store.close();
+      throw e;
+    }
+    return store;
   }
-  get<T>(key: string, fallback: T): T {
-    const row = this.sql("SELECT value FROM settings WHERE key=?")
-      .get(key) as any;
+  private async prepareSchema() {
+    const tables = Number((await this.db.get(this.db.dialect === "sqlite"
+      ? "SELECT count(*) n FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+      : "SELECT count(*) n FROM information_schema.tables WHERE table_schema=DATABASE()"))!.n);
+    if (tables) {
+      const version = await this.db.get("SELECT value FROM settings WHERE name='schema'").catch(() => undefined);
+      assert(version && Number(version.value) === SCHEMA, "Not a supported Vega database; existing data left unchanged");
+      return;
+    }
+    await this.db.transaction(async () => {
+      for (const statement of schema(this.db.dialect)) await this.db.exec(statement);
+      await this.db.run("INSERT INTO settings VALUES(?,?)", ["schema", String(SCHEMA)]);
+    });
+  }
+  async close() {
+    await this.db.close();
+    // A throwaway database's files are as temporary as it is.
+    if (this.temporary) await rm(this.files.root, { recursive: true, force: true });
+  }
+  /** Run fn atomically, serialized with other transactions; nested calls become savepoints. */
+  transaction<T>(fn: () => Promise<T>) { return this.db.transaction(fn); }
+  // Raw statements in the portable SQL subset (see Db / Mysql.translate).
+  all(sql: string, ...params: unknown[]) { return this.db.all(sql, params); }
+  one(sql: string, ...params: unknown[]) { return this.db.get(sql, params); }
+  run(sql: string, ...params: unknown[]) { return this.db.run(sql, params); }
+  /** A JSON field of messages.data as text (the only dialect-specific expressions, used by lastMessage/findMessage). */
+  private json(path: string) {
+    assert(/^\$(\.\w+)+$/.test(path), "Invalid message field");
+    return this.db.dialect === "sqlite" ? `json_extract(data,'${path}')` : `JSON_UNQUOTE(JSON_EXTRACT(data,'${path}'))`;
+  }
+  private jsonLength(path: string) {
+    return (this.db.dialect === "sqlite" ? "json_array_length" : "JSON_LENGTH") + `(data,'${path}')`;
+  }
+  async get<T>(key: string, fallback: T): Promise<T> {
+    const row = await this.one("SELECT value FROM settings WHERE name=?", key);
     return row ? JSON.parse(row.value) : structuredClone(fallback);
   }
-  put(key: string, value: any) {
-    this.sql(
-        "INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-      )
-      .run(key, JSON.stringify(value));
+  async put(key: string, value: any) {
+    await this.run("INSERT INTO settings VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", key, JSON.stringify(value));
   }
-  objects<T = any>(kind: string): T[] {
-    return this.sql("SELECT data FROM objects WHERE kind=?")
-      .all(kind)
-      .map((r: any) => JSON.parse(r.data));
+  async unset(key: string) { await this.run("DELETE FROM settings WHERE name=?", key); }
+  async objects<T = any>(kind: string): Promise<T[]> {
+    return (await this.all("SELECT data FROM objects WHERE kind=?", kind)).map((r) => JSON.parse(r.data));
   }
-  object<T = any>(kind: string, key: string): T | undefined {
-    const r = this.sql("SELECT data FROM objects WHERE kind=? AND id=?")
-      .get(kind, key) as any;
+  async object<T = any>(kind: string, key: string): Promise<T | undefined> {
+    const r = await this.one("SELECT data FROM objects WHERE kind=? AND id=?", kind, key);
     return r ? JSON.parse(r.data) : undefined;
   }
-  save(kind: string, key: string, value: any) {
-    this.sql(
-        "INSERT INTO objects VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
-      )
-      .run(kind, key, JSON.stringify(value));
+  async save(kind: string, key: string, value: any) {
+    await this.run("INSERT INTO objects VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data", kind, key, JSON.stringify(value));
   }
-  remove(kind: string, key: string) {
-    this.sql("DELETE FROM objects WHERE kind=? AND id=?").run(kind, key);
-  }
-  blob(mime: string, data: Uint8Array) {
+  async remove(kind: string, key: string) { await this.run("DELETE FROM objects WHERE kind=? AND id=?", kind, key); }
+  async removeKind(kind: string) { await this.run("DELETE FROM objects WHERE kind=?", kind); }
+  async blob(mime: string, data: Uint8Array) {
     const key = id("blob-");
-    this.sql("INSERT INTO blobs VALUES(?,?,?,?)")
-      .run(key, mime, data, Date.now());
+    await this.run("INSERT INTO blobs VALUES(?,?,?,?)", key, mime, data, Date.now());
     return key;
   }
-  grantBlob(blob: string, session: string) {
-    if (this.sql("SELECT id FROM sessions WHERE id=?").get(session))
-      this.sql("INSERT OR IGNORE INTO blob_access VALUES(?,?)")
-        .run(blob, session);
+  async grantBlob(blob: string, session: string) {
+    await this.run("INSERT OR IGNORE INTO blob_access SELECT ?,id FROM sessions WHERE id=?", blob, session);
   }
-  grantBlobUser(blob: string, userId: string) {
-    this.sql("INSERT OR IGNORE INTO blob_user_access VALUES(?,?)").run(blob, userId);
+  async grantBlobUser(blob: string, userId: string) {
+    await this.run("INSERT OR IGNORE INTO blob_user_access VALUES(?,?)", blob, userId);
   }
-  blobData(key: string) {
-    return this.sql("SELECT mime,data FROM blobs WHERE id=?")
-      .get(key) as { mime: string; data: Uint8Array } | undefined;
+  async blobData(key: string) {
+    return (await this.one("SELECT mime,data FROM blobs WHERE id=?", key)) as { mime: string; data: Uint8Array } | undefined;
   }
-  // Resolve an image reference ({mime,blobId} or legacy {mime,data}) to the
-  // {mime,data:base64} the model providers expect. Central lazy materialization
-  // point: only images that survive history trimming reach here.
-  imageData(image: { mime: string; data?: string; blobId?: string; path?: string }): {
-    mime: string;
-    data: string;
-  } {
+  // Resolve an image reference ({mime,blobId}, {mime,path} or inline {mime,data}) to the {mime,data:base64} the model
+  // providers expect. Central lazy materialization point: only images that survive history trimming reach here.
+  async imageData(image: { mime: string; data?: string; blobId?: string; path?: string }): Promise<{ mime: string; data: string }> {
     if (typeof image.data === "string") return { mime: image.mime, data: image.data };
     if (image.path) {
-      try { return { mime: image.mime, data: this.files.read(image.path).toString("base64") }; }
+      try { return { mime: image.mime, data: (await this.files.read(image.path)).toString("base64") }; }
       catch { return { mime: image.mime, data: "" }; }
     }
-    if (!image.blobId) return { mime: image.mime, data: "" };
-    const blob = this.blobData(image.blobId);
+    const blob = image.blobId ? await this.blobData(image.blobId) : undefined;
     if (!blob) return { mime: image.mime, data: "" };
-    return {
-      mime: blob.mime,
-      data: Buffer.from(blob.data).toString("base64"),
-    };
+    return { mime: blob.mime, data: Buffer.from(blob.data).toString("base64") };
   }
-  newSession(input: Partial<Session> = {}) {
+  async newSession(input: Partial<Session> = {}) {
     const cwd = input.localAgent ? input.cwd! : resolve(input.cwd || process.cwd());
     assert(typeof cwd === "string" && cwd.length > 0, "cwd required");
-    if (!input.localAgent) assert(statSync(cwd).isDirectory(), "cwd must be an existing directory");
-    const s: Session = {
-      ...input,
-      id: id(),
-      title: input.title || "新会话",
-      cwd,
-      createdAt: Date.now(),
-    };
-    this.saveSession(s);
+    if (!input.localAgent) assert((await stat(cwd)).isDirectory(), "cwd must be an existing directory");
+    const s: Session = { ...input, id: id(), title: input.title || "新会话", cwd, createdAt: Date.now() };
+    await this.saveSession(s);
     return s;
   }
-  saveSession(s: Session) {
-    this.sql(
-        "INSERT INTO sessions VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated,employee=excluded.employee,task=excluded.task,owner=excluded.owner,source=excluded.source",
-      )
-      .run(s.id, JSON.stringify(s), Date.now(), s.employeeId || null, s.taskId || null, s.ownerId || null, s.stageSource || null);
+  async saveSession(s: Session) {
+    await this.run(
+      "INSERT INTO sessions VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated,employee=excluded.employee,task=excluded.task,owner=excluded.owner,source=excluded.source",
+      s.id, JSON.stringify(s), Date.now(), s.employeeId || null, s.taskId || null, s.ownerId || null, s.stageSource || null,
+    );
   }
-  session(key: string): Session {
-    const row = this.sql("SELECT data FROM sessions WHERE id=?")
-      .get(key) as any;
+  async session(key: string): Promise<Session> {
+    const row = await this.one("SELECT data FROM sessions WHERE id=?", key);
     assert(row, "Session not found");
     return JSON.parse(row.data);
   }
+  async hasSession(key: string) { return !!(await this.one("SELECT 1 FROM sessions WHERE id=?", key)); }
   /** Every session, newest first: a full scan, so server paths use the indexed queries below instead. */
-  sessions(): Session[] {
-    return this.parseSessions(this.sql("SELECT data FROM sessions ORDER BY updated DESC").all());
+  async sessions(): Promise<Session[]> {
+    return this.parseSessions(await this.all("SELECT data FROM sessions ORDER BY updated DESC"));
   }
-  private parseSessions(rows: unknown[]): Session[] {
-    return rows.map((r: any) => JSON.parse(r.data));
+  private parseSessions(rows: any[]): Session[] {
+    return rows.map((r) => JSON.parse(r.data));
   }
   /** Sessions of one employee, task, owner or stage source (indexed columns), newest first. */
-  sessionsBy(column: "employee" | "task" | "owner" | "source", value: string): Session[] {
-    return this.parseSessions(this.sql(`SELECT data FROM sessions WHERE ${column}=? ORDER BY updated DESC`).all(value));
+  async sessionsBy(column: "employee" | "task" | "owner" | "source", value: string): Promise<Session[]> {
+    return this.parseSessions(await this.all(`SELECT data FROM sessions WHERE ${column}=? ORDER BY updated DESC`, value));
   }
   /** Ordinary conversations (no employee or task), newest first. */
-  plainSessions(): Session[] {
-    return this.parseSessions(this.sql("SELECT data FROM sessions WHERE employee IS NULL AND task IS NULL ORDER BY updated DESC").all());
+  async plainSessions(): Promise<Session[]> {
+    return this.parseSessions(await this.all("SELECT data FROM sessions WHERE employee IS NULL AND task IS NULL ORDER BY updated DESC"));
   }
   /** Employee chats and task sessions, newest first. */
-  employeeSessions(): Session[] {
-    return this.parseSessions(this.sql("SELECT data FROM sessions WHERE employee IS NOT NULL OR task IS NOT NULL ORDER BY updated DESC").all());
+  async employeeSessions(): Promise<Session[]> {
+    return this.parseSessions(await this.all("SELECT data FROM sessions WHERE employee IS NOT NULL OR task IS NOT NULL ORDER BY updated DESC"));
   }
   /** A session and the stage sessions derived from it, transitively. */
-  sessionFamily(key: string): Session[] {
-    const out = [this.session(key)];
-    for (let i = 0; i < out.length; i++) out.push(...this.sessionsBy("source", out[i].id));
+  async sessionFamily(key: string): Promise<Session[]> {
+    const out = [await this.session(key)];
+    for (let i = 0; i < out.length; i++) out.push(...(await this.sessionsBy("source", out[i].id)));
     return out;
   }
-  deleteSession(key: string) {
-    for (const s of this.sessionFamily(key)) {
-      this.sql("DELETE FROM sessions WHERE id=?").run(s.id);
-      this.files.remove(this.files.dir(s));
+  async deleteSession(key: string) {
+    for (const s of await this.sessionFamily(key)) {
+      this.rowCache.delete(s.id);
+      await this.run("DELETE FROM sessions WHERE id=?", s.id);
+      await this.files.remove(this.files.dir(s));
     }
   }
   /** Keep the session row; drop messages, folds, blob grants, context ledger and files. */
-  clearSessionHistory(key: string) {
-    this.files.remove(this.files.dir(this.session(key)));
+  async clearSessionHistory(key: string) {
+    await this.files.remove(this.files.dir(await this.session(key)));
     this.rowCache.delete(key);
-    this.transaction(() => {
-      this.sql("DELETE FROM messages WHERE session=?").run(key);
-      this.sql("DELETE FROM folds WHERE session=?").run(key);
-      this.sql("DELETE FROM blob_access WHERE session=?").run(key);
-      this.remove("context-state", key);
-      this.sql("UPDATE sessions SET updated=? WHERE id=?").run(Date.now(), key);
+    await this.transaction(async () => {
+      await this.run("DELETE FROM messages WHERE session=?", key);
+      await this.run("DELETE FROM folds WHERE session=?", key);
+      await this.run("DELETE FROM blob_access WHERE session=?", key);
+      await this.remove("context-state", key);
+      await this.run("UPDATE sessions SET updated=? WHERE id=?", Date.now(), key);
     });
   }
   // Employee tasks and runs (see employee-rows.ts): plain rows keyed by id, JSON data, indexed by employee.
-  employeeTasks(employee: string) {
-    return this.sql("SELECT id,data FROM employee_tasks WHERE employee=? ORDER BY created,rowid").all(employee) as { id: string; data: string }[];
+  async employeeTasks(employee: string) {
+    return (await this.all("SELECT id,data FROM employee_tasks WHERE employee=? ORDER BY created,seq", employee)) as { id: string; data: string }[];
   }
-  putEmployeeTask(employee: string, id: string, active: boolean, created: number, data: string) {
-    this.sql("INSERT INTO employee_tasks VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET employee=excluded.employee,active=excluded.active,data=excluded.data")
-      .run(id, employee, active ? 1 : 0, created, data);
+  async putEmployeeTask(employee: string, id: string, active: boolean, created: number, data: string) {
+    await this.run(
+      "INSERT INTO employee_tasks(id,employee,active,created,data) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET employee=excluded.employee,active=excluded.active,data=excluded.data",
+      id, employee, active ? 1 : 0, created, data,
+    );
   }
-  deleteEmployeeTask(id: string) { this.sql("DELETE FROM employee_tasks WHERE id=?").run(id); }
+  async deleteEmployeeTask(id: string) { await this.run("DELETE FROM employee_tasks WHERE id=?", id); }
   /** One task without loading the employee's others. */
-  employeeTask(id: string): { employee: string; task: any } | undefined {
-    const row = this.sql("SELECT employee,data FROM employee_tasks WHERE id=?").get(id) as { employee: string; data: string } | undefined;
+  async employeeTask(id: string): Promise<{ employee: string; task: any } | undefined> {
+    const row = await this.one("SELECT employee,data FROM employee_tasks WHERE id=?", id);
     return row && { employee: row.employee, task: JSON.parse(row.data) };
   }
-  activeTaskCount(employee: string) {
-    return Number((this.sql("SELECT count(*) n FROM employee_tasks WHERE employee=? AND active=1").get(employee) as any).n);
+  async activeTaskCount(employee: string) {
+    return Number((await this.one("SELECT count(*) n FROM employee_tasks WHERE employee=? AND active=1", employee))!.n);
   }
-  employeeRuns(employee: string) {
-    return this.sql("SELECT id,data FROM employee_runs WHERE employee=? ORDER BY id").all(employee) as { id: number; data: string }[];
+  async employeeRuns(employee: string) {
+    return (await this.all("SELECT id,data FROM employee_runs WHERE employee=? ORDER BY id", employee)) as { id: number; data: string }[];
   }
-  insertEmployeeRun(employee: string, task: string, data: string) {
-    return Number(this.sql("INSERT INTO employee_runs(employee,task,data) VALUES(?,?,?)").run(employee, task, data).lastInsertRowid);
+  async insertEmployeeRun(employee: string, task: string, data: string) {
+    return (await this.run("INSERT INTO employee_runs(employee,task,data) VALUES(?,?,?)", employee, task, data)).lastId;
   }
-  updateEmployeeRun(id: number, data: string) { this.sql("UPDATE employee_runs SET data=? WHERE id=?").run(data, id); }
-  deleteEmployeeRun(id: number) { this.sql("DELETE FROM employee_runs WHERE id=?").run(id); }
-  dropEmployeeRows(employee: string) {
-    this.sql("DELETE FROM employee_tasks WHERE employee=?").run(employee);
-    this.sql("DELETE FROM employee_runs WHERE employee=?").run(employee);
+  async updateEmployeeRun(id: number, data: string) { await this.run("UPDATE employee_runs SET data=? WHERE id=?", data, id); }
+  async deleteEmployeeRun(id: number) { await this.run("DELETE FROM employee_runs WHERE id=?", id); }
+  async dropEmployeeRows(employee: string) {
+    await this.run("DELETE FROM employee_tasks WHERE employee=?", employee);
+    await this.run("DELETE FROM employee_runs WHERE employee=?", employee);
   }
+  private parseMessage(row: any): Message { return { ...JSON.parse(row.data), seq: Number(row.seq) }; }
   /** Newest message of a session, optionally only an assistant message or one with images. */
-  lastMessage(key: string, only?: "assistant" | "images"): Message | undefined {
-    const where = only === "assistant" ? " AND json_extract(data,'$.role')='assistant'" : only === "images" ? " AND json_array_length(data,'$.images')>0" : "";
-    const row = this.sql(`SELECT seq,data FROM messages WHERE session=?${where} ORDER BY seq DESC LIMIT 1`).get(key) as any;
-    return row ? { ...JSON.parse(row.data), seq: row.seq } : undefined;
+  async lastMessage(key: string, only?: "assistant" | "images"): Promise<Message | undefined> {
+    const where = only === "assistant" ? ` AND ${this.json("$.role")}='assistant'` : only === "images" ? ` AND ${this.jsonLength("$.images")}>0` : "";
+    const row = await this.one(`SELECT seq,data FROM messages WHERE session=?${where} ORDER BY seq DESC LIMIT 1`, key);
+    return row && this.parseMessage(row);
   }
-  /** Newest-first messages whose JSON field equals value; parsed one at a time until `match` accepts one. */
-  findMessage(key: string, field: string, value: string | number, match: (m: Message) => boolean = () => true): Message | undefined {
-    assert(/^\$(\.\w+)+$/.test(field), "Invalid message field");
-    for (const row of this.sql(`SELECT seq,data FROM messages WHERE session=? AND json_extract(data,'${field}')=? ORDER BY seq DESC`).all(key, value) as any[]) {
-      const m = { ...JSON.parse(row.data), seq: row.seq };
+  /**
+   * Newest-first messages whose JSON field equals value (or is present, when value is undefined); parsed one at a time
+   * until `match` accepts one.
+   */
+  async findMessage(key: string, field: string, value: string | number | undefined, match: (m: Message) => boolean = () => true): Promise<Message | undefined> {
+    const test = value === undefined ? `${this.json(field)} IS NOT NULL` : `${this.json(field)}=?`;
+    for (const row of await this.all(`SELECT seq,data FROM messages WHERE session=? AND ${test} ORDER BY seq DESC`, key, ...(value === undefined ? [] : [value]))) {
+      const m = this.parseMessage(row);
       if (match(m)) return m;
     }
   }
-  message(key: string, seq: number): Message | undefined {
-    const row = this.sql("SELECT data FROM messages WHERE session=? AND seq=?").get(key, seq) as { data: string } | undefined;
-    return row ? { ...JSON.parse(row.data), seq } : undefined;
+  /** The message a sender already stored under its idempotency key (actorId + clientMessageId). */
+  async clientMessage(key: string, actor: string, client: string) {
+    const row = await this.one("SELECT seq,data FROM messages WHERE session=? AND actor=? AND client=?", key, actor, client);
+    return row && this.parseMessage(row);
   }
-  quote(key: string, seq: number): NonNullable<Message["quote"]> {
+  async lastSeq(key: string) {
+    return Number((await this.one("SELECT COALESCE(MAX(seq),0) n FROM messages WHERE session=?", key))!.n);
+  }
+  async message(key: string, seq: number): Promise<Message | undefined> {
+    const row = await this.one("SELECT seq,data FROM messages WHERE session=? AND seq=?", key, seq);
+    return row && this.parseMessage(row);
+  }
+  async quote(key: string, seq: number): Promise<NonNullable<Message["quote"]>> {
     assert(Number.isSafeInteger(seq) && seq > 0, "Invalid quoted message");
-    const message = this.message(key, seq);
+    const message = await this.message(key, seq);
     assert(message && ["user", "assistant"].includes(message.role) && (message.text?.trim() || message.images?.length), "Quoted message not found in this conversation");
     const text = (message.displayText || message.text || "[图片]").replace(/[`*_#>]/g, "").replace(/\s+/g, " ").trim();
     return { seq, role: message.role, text: text.length > 160 ? text.slice(0, 160) + "…" : text, taskId: message.tasks?.length === 1 ? message.tasks[0].id : undefined };
   }
-  messages(key: string): Message[] {
-    return this.sql("SELECT seq,data FROM messages WHERE session=? ORDER BY seq")
-      .all(key)
-      .map((r: any) => ({ ...JSON.parse(r.data), seq: r.seq }));
+  async messages(key: string): Promise<Message[]> {
+    return (await this.all("SELECT seq,data FROM messages WHERE session=? ORDER BY seq", key)).map((r) => this.parseMessage(r));
   }
   /**
    * Read-only rows shared across callers (frozen). Messages are append-only, so only rows after the cached maximum
    * are parsed; any other change (clear, delete) is detected by the count/maximum and reloads the session.
    */
-  sharedMessages(key: string): { rows: readonly Readonly<Message>[]; revision: string } {
-    const top = this.sql("SELECT COALESCE(MAX(seq),0) m, COUNT(*) n FROM messages WHERE session=?")
-      .get(key) as { m: number; n: number };
+  async sharedMessages(key: string): Promise<{ rows: readonly Readonly<Message>[]; revision: string }> {
+    const top = (await this.one("SELECT COALESCE(MAX(seq),0) m, COUNT(*) n FROM messages WHERE session=?", key)) as { m: number; n: number };
+    const max = Number(top.m), count = Number(top.n);
     let cached = this.rowCache.get(key);
-    if (cached && top.m > cached.max) {
-      for (const r of this.sql("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq")
-        .all(key, cached.max) as any[])
-        cached.rows.push(Object.freeze({ ...JSON.parse(r.data), seq: r.seq }));
-      cached.max = top.m;
+    if (cached && max > cached.max) {
+      const from = cached.max, more = await this.all("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq", key, from);
+      // Another caller may have extended the same cache meanwhile.
+      if (cached.max === from) {
+        for (const r of more) cached.rows.push(Object.freeze(this.parseMessage(r)));
+        cached.max = Math.max(from, ...more.map((r) => Number(r.seq)));
+      }
     }
-    if (!cached || cached.max !== top.m || cached.rows.length !== top.n) {
-      cached = { max: top.m, rows: this.messages(key).map((m) => Object.freeze(m)) };
+    if (!cached || cached.max !== max || cached.rows.length !== count) {
+      cached = { max, rows: (await this.messages(key)).map((m) => Object.freeze(m)) };
+      cached.max = cached.rows.at(-1)?.seq ?? 0;
     }
     this.rowCache.delete(key);
     this.rowCache.set(key, cached);
@@ -364,95 +365,61 @@ export class Store {
     return { rows: cached.rows, revision: `${cached.max}:${cached.rows.length}` };
   }
   /** Chat history window: the newest `limit` messages before `before`, or every message after `after`. */
-  messagePage(key: string, { before, after, limit }: { before?: number; after?: number; limit?: number }): { messages: Message[]; hasMore: boolean } {
-    const parse = (r: any) => ({ ...JSON.parse(r.data), seq: r.seq });
+  async messagePage(key: string, { before, after, limit }: { before?: number; after?: number; limit?: number }): Promise<{ messages: Message[]; hasMore: boolean }> {
+    const older = async (seq: number | undefined) => seq !== undefined && !!(await this.one("SELECT 1 FROM messages WHERE session=? AND seq<? LIMIT 1", key, seq));
     if (after !== undefined) {
-      const rows = this.sql("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq").all(key, after);
-      const first = (rows[0] as any)?.seq ?? after + 1;
-      return { messages: rows.map(parse), hasMore: !!this.sql("SELECT 1 FROM messages WHERE session=? AND seq<? LIMIT 1").get(key, first) };
+      const messages = (await this.all("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq", key, after)).map((r) => this.parseMessage(r));
+      return { messages, hasMore: await older(messages[0]?.seq ?? after + 1) };
     }
-    const rows = this.sql("SELECT seq,data FROM messages WHERE session=? AND seq<? ORDER BY seq DESC LIMIT ?")
-      .all(key, before ?? Number.MAX_SAFE_INTEGER, limit ?? -1)
-      .reverse();
-    const first = (rows[0] as any)?.seq;
-    return { messages: rows.map(parse), hasMore: first !== undefined && !!this.sql("SELECT 1 FROM messages WHERE session=? AND seq<? LIMIT 1").get(key, first) };
+    const rows = await this.all(`SELECT seq,data FROM messages WHERE session=? AND seq<? ORDER BY seq DESC${limit === undefined ? "" : " LIMIT " + Math.max(0, Math.floor(limit))}`, key, before ?? Number.MAX_SAFE_INTEGER);
+    const messages = rows.reverse().map((r) => this.parseMessage(r));
+    return { messages, hasMore: await older(messages[0]?.seq) };
   }
-  append(key: string, m: Message) {
-    return this.transaction(() => {
-      const seq = Number(
-        (
-          this.sql(
-              "SELECT COALESCE(MAX(seq),0)+1 n FROM messages WHERE session=?",
-            )
-            .get(key) as any
-        ).n,
-      );
-      const row = { ...m, seq, at: m.at || Date.now() };
-      this.sql("INSERT INTO messages VALUES(?,?,?)")
-        .run(key, seq, JSON.stringify(row));
-      this.sql("UPDATE sessions SET updated=? WHERE id=?")
-        .run(Date.now(), key);
-      return row;
-    });
-  }
-  fork(key: string) {
-    const source = this.session(key);
-    assert(
-      !source.taskId && !source.employeeId,
-      "Employee history must continue through its workspace",
-    );
-    return this.transaction(() => {
-      const copy = this.newSession({
-        ...source,
-        title: source.title + "（分叉）",
-        taskId: undefined,
-        fireRoot: undefined,
-        fireRole: undefined,
-      });
-      // The copy owns its files: copy the directory and point the copied history at it.
-      const from = this.files.dir(source), to = this.files.dir(copy);
-      if (existsSync(from)) cpSync(from, to, { recursive: true });
-      const moved = (text: string) => [[from, to], [JSON.stringify(from).slice(1, -1), JSON.stringify(to).slice(1, -1)]].reduce((t, [a, b]) => t.replaceAll(a, b), text);
-      for (const m of this.messages(key)) this.append(copy.id, JSON.parse(moved(JSON.stringify(m))));
-      this.sql("INSERT INTO blob_access SELECT blob,? FROM blob_access WHERE session=?").run(copy.id, key);
-      for (const row of this.sql("SELECT id,data FROM folds WHERE session=?")
-        .all(key) as any[])
-        this.sql("INSERT INTO folds VALUES(?,?,?)")
-          .run(copy.id, row.id, row.data);
-      const state = this.object<any>("context-state", key);
-      if (state)
-        this.save("context-state", copy.id, {
-          ...state,
-          model: "",
-          anchor: undefined,
-          calibration: 1,
-          lastUsage: undefined,
-          baseline: 0,
-          nudgeShown: 0,
-          shownByTier: [0, 0, 0, 0],
+  async append(key: string, m: Message) {
+    // In a transaction, so concurrent appends to one session get distinct, gapless seq numbers.
+    return await this.transaction(async () => {
+          const seq = (await this.lastSeq(key)) + 1, row = { ...m, seq, at: m.at || Date.now() };
+          const client = m.actorId && m.clientMessageId ? [m.actorId, m.clientMessageId] : [null, null];
+          await this.run("INSERT INTO messages VALUES(?,?,?,?,?)", key, seq, JSON.stringify(row), ...client);
+          await this.run("UPDATE sessions SET updated=? WHERE id=?", Date.now(), key);
+          return row;
         });
+  }
+  async fork(key: string) {
+    const source = await this.session(key);
+    assert(!source.taskId && !source.employeeId, "Employee history must continue through its workspace");
+    const copy = await this.transaction(async () => {
+      const copy = await this.newSession({ ...source, title: source.title + "（分叉）", taskId: undefined, fireRoot: undefined, fireRole: undefined });
+      // The copy owns its files: the copied history points at its own directory (copied below).
+      const from = this.files.dir(source), to = this.files.dir(copy);
+      const moved = (text: string) => [[from, to], [JSON.stringify(from).slice(1, -1), JSON.stringify(to).slice(1, -1)]].reduce((t, [a, b]) => t.replaceAll(a, b), text);
+      for (const m of await this.messages(key)) await this.append(copy.id, JSON.parse(moved(JSON.stringify(m))));
+      await this.run("INSERT INTO blob_access SELECT blob_id,? FROM blob_access WHERE session=?", copy.id, key);
+      await this.run("INSERT INTO folds SELECT ?,id,data FROM folds WHERE session=?", copy.id, key);
+      const state = await this.object<any>("context-state", key);
+      if (state)
+        await this.save("context-state", copy.id, { ...state, model: "", anchor: undefined, calibration: 1, lastUsage: undefined, baseline: 0, nudgeShown: 0, shownByTier: [0, 0, 0, 0] });
       return copy;
     });
+    await this.files.copy(this.files.dir(source), this.files.dir(copy));
+    return copy;
   }
-  stage(key: string, inherit = false) {
-    const source = this.session(key);
-    assert(
-      !source.taskId && !source.employeeId,
-      "Employee history must continue through its workspace",
-    );
-    return this.newSession({
-      cwd: source.cwd,
-      title: "Stage",
-      stageSource: key,
-      ownerId: source.ownerId,
-      localAgent: source.localAgent,
-      localPlatform: source.localPlatform,
-      clientId: source.clientId,
-      clientName: source.clientName,
-      executionCwds: source.executionCwds,
-      readerIds: source.readerIds,
-      model: inherit ? source.model : undefined,
-      readOnly: source.readOnly,
-    });
+  async stage(key: string, inherit = false) {
+    const source = await this.session(key);
+    assert(!source.taskId && !source.employeeId, "Employee history must continue through its workspace");
+    return await this.newSession({
+          cwd: source.cwd,
+          title: "Stage",
+          stageSource: key,
+          ownerId: source.ownerId,
+          localAgent: source.localAgent,
+          localPlatform: source.localPlatform,
+          clientId: source.clientId,
+          clientName: source.clientName,
+          executionCwds: source.executionCwds,
+          readerIds: source.readerIds,
+          model: inherit ? source.model : undefined,
+          readOnly: source.readOnly,
+        });
   }
 }

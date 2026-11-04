@@ -53,16 +53,16 @@ export class EventsSocket {
   constructor(
     public engine: Pick<Engine, "events">,
     public auth: Auth,
-    public allow: typeof eventAllowed = eventAllowed,
+    public allow: (...args: Parameters<typeof eventAllowed>) => boolean | Promise<boolean> = eventAllowed,
     options: EventsOptions = {},
   ) {
     this.options = { heartbeatMs: 20000, coalesceMs: 40, perUser: 12, replayMs: 120000, replayEvents: 5000, ...options };
     engine.events.on("event", this.ingest);
-    this.heartbeat = setInterval(() => this.beat(), this.options.heartbeatMs);
+    this.heartbeat = setInterval(async () => await this.beat(), this.options.heartbeatMs);
     this.heartbeat.unref?.();
   }
-  ticket(principal: Principal) {
-    assert(this.auth.resolveHash(principal.hash), "登录已失效");
+  async ticket(principal: Principal) {
+    assert(await this.auth.resolveHash(principal.hash), "登录已失效");
     for (const [id, ticket] of this.tickets)
       if (ticket.until < Date.now()) this.tickets.delete(id);
     assert(this.tickets.size < 256, "实时连接票据过多");
@@ -70,7 +70,7 @@ export class EventsSocket {
     this.tickets.set(id, { hash: principal.hash, until: Date.now() + 15000 });
     return { ticket: id };
   }
-  authorize(request: Socket["request"], consume = false) {
+  async authorize(request: Socket["request"], consume = false) {
     const url = new URL(request.url),
       origin = process.env.VEGA_PUBLIC_URL
         ? new URL(process.env.VEGA_PUBLIC_URL).origin
@@ -85,7 +85,7 @@ export class EventsSocket {
       .map((v) => v.trim())
       .find((v) => v.startsWith("vega_session="))
       ?.slice("vega_session=".length);
-    const principal = this.auth.authenticate(token),
+    const principal = await this.auth.authenticate(token),
       id = url.searchParams.get("ticket") || "",
       ticket = this.tickets.get(id);
     assert(principal && ticket?.hash === principal.hash, "连接票据已失效");
@@ -93,8 +93,8 @@ export class EventsSocket {
     if (consume) this.tickets.delete(id);
     return { principal };
   }
-  open(socket: Socket) {
-    const { principal } = this.authorize(socket.request, true);
+  async open(socket: Socket) {
+    const { principal } = await this.authorize(socket.request, true);
     const mine = [...this.sessions.values()].filter((s) => s.principal.user.id === principal.user.id);
     if (mine.length >= this.options.perUser) {
       socket.close(4429, "实时连接过多，请关闭部分页面");
@@ -112,9 +112,11 @@ export class EventsSocket {
       first = this.log[0]?.seq ?? this.seq + 1,
       replay = epoch === this.epoch && Number.isSafeInteger(from) && from >= first - 1 && from <= this.seq;
     if (replay) for (const entry of this.log) if (entry.seq > from) session.deliver(entry);
-    session.send({ type: "ready", epoch: this.epoch, seq: this.seq, replayed: replay });
+    const ready = { type: "ready", epoch: this.epoch, seq: this.seq, replayed: replay };
+    session.ordered(() => session.send(ready));
   }
   session(socket: Socket, principal: Principal) {
+    let tail: Promise<unknown> = Promise.resolve();
     const subscribed = new Set<string>(),
       allowed = new Map<string, { ok: boolean; until: number }>(),
       liveness: Probe | undefined = probe(socket),
@@ -126,28 +128,30 @@ export class EventsSocket {
       send = (value: Obj) => {
         if (this.sessions.has(socket.id)) socket.send(JSON.stringify(value));
       },
-      permitted = (value: Obj) => {
+      permitted = async (value: Obj) => {
         // Session events dominate (token streams); their permission is stable for a few seconds.
         const key = typeof value.session === "string" && !value.targetUser ? value.session : "";
         const hit = key && allowed.get(key);
         if (hit && hit.until > Date.now()) return hit.ok;
-        const ok = this.allow(principal.user, value);
+        const ok = await this.allow(principal.user, value);
         if (key) {
           if (allowed.size > 256) allowed.clear();
           allowed.set(key, { ok, until: Date.now() + 5000 });
         }
         return ok;
       },
-      deliver = (entry: Entry) => {
+      // Permission checks may read the database; one chain per socket keeps events in order.
+      ordered = (fn: () => unknown) => { tail = tail.then(fn).catch(() => {}); },
+      deliver = (entry: Entry) => ordered(async () => {
         if (!this.sessions.has(socket.id)) return;
         if (STREAM.has(entry.value.type) && !subscribed.has(entry.value.session)) return;
-        if (!permitted(entry.value)) return;
+        if (!(await permitted(entry.value))) return;
         const buffered = liveness?.buffered ?? 0;
         if (buffered > HARD_BUFFER) return close(4408, "网络拥堵，实时连接已重置");
         // A slow link sheds token streams first; message_end/done still arrive and trigger a refresh.
         if (buffered > SOFT_BUFFER && STREAM.has(entry.value.type)) return;
         socket.send(entry.json);
-      },
+      }),
       subscribe = (ids: unknown) => {
         subscribed.clear();
         if (Array.isArray(ids))
@@ -160,7 +164,7 @@ export class EventsSocket {
       revoke = (userId: string) => {
         if (userId === principal.user.id) close(4401, "账号权限已变化");
       };
-    return { close, send, deliver, subscribe, logout, revoke, principal, liveness, subscribed };
+    return { close, send, deliver, ordered, subscribe, logout, revoke, principal, liveness, subscribed };
   }
   message(socket: Socket, raw: string) {
     const session = this.sessions.get(socket.id);
@@ -212,9 +216,9 @@ export class EventsSocket {
     for (const session of [...this.sessions.values()]) session.deliver(entry);
   }
   /** Reap dead peers, re-check logins and give every page a cursor even when nothing it may see happened. */
-  beat() {
+  async beat() {
     for (const [id, session] of [...this.sessions]) {
-      if (!this.auth.resolveHash(session.principal.hash)) {
+      if (!await this.auth.resolveHash(session.principal.hash)) {
         session.close(4401, "登录已失效");
         continue;
       }

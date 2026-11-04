@@ -92,10 +92,10 @@ export class Subscriptions {
   ) {
     this.vault = new Vault(store);
   }
-  saveLogin(source: string, value: Obj) {
-    this.store.put("subscription:" + source, {
-      encrypted: this.vault.sealObject(value),
-    });
+  async saveLogin(source: string, value: Obj) {
+    await this.store.put("subscription:" + source, {
+            encrypted: await this.vault.sealObject(value),
+          });
   }
   origin(source: string, site = "global") {
     assert(["codebuddy", "workbuddy"].includes(source), "Invalid login source");
@@ -135,12 +135,12 @@ export class Subscriptions {
     return gate.run(() => this.readSaved(source));
   }
   async readSaved(source: string) {
-    const persisted = this.store.get<Obj | null>(
-      "subscription:" + source,
-      null,
-    );
+    const persisted = await this.store.get<Obj | null>(
+          "subscription:" + source,
+          null,
+        );
     const saved: Obj | null = persisted?.encrypted
-      ? this.vault.openObject(persisted.encrypted)
+      ? await this.vault.openObject(persisted.encrypted)
       : persisted;
     assert(saved, `Login to ${source} first`);
     if (source !== "devin" && saved.auth.expiresAt <= Date.now() + 300000) {
@@ -164,7 +164,7 @@ export class Subscriptions {
         },
       );
       saved.auth = this.normalizeAuth(data.data, saved.auth.domain);
-      this.saveLogin(source, saved);
+      await this.saveLogin(source, saved);
     }
     return saved;
   }
@@ -343,10 +343,10 @@ export class Subscriptions {
         },
       );
       assert(data.token, "Devin did not return a token");
-      this.saveLogin("devin", {
-        windsurf_api_key: "devin-session-token$" + data.token,
-        api_server_url: "https://server.codeium.com",
-      });
+      await this.saveLogin("devin", {
+                windsurf_api_key: "devin-session-token$" + data.token,
+                api_server_url: "https://server.codeium.com",
+              });
       this.pending.set(state, p);
       this.completeLogin(state);
       return true;
@@ -379,12 +379,12 @@ export class Subscriptions {
       account && typeof account === "object",
       "Cannot read account after login",
     );
-    this.saveLogin(source, {
-      origin: p.origin,
-      site: p.site,
-      auth,
-      account,
-    });
+    await this.saveLogin(source, {
+            origin: p.origin,
+            site: p.site,
+            auth,
+            account,
+          });
     this.completeLogin(state);
     return true;
   }
@@ -405,8 +405,8 @@ export class Subscriptions {
     expiry.unref();
     p.close = () => clearTimeout(expiry);
   }
-  logout(source: string) {
-    this.store.put("subscription:" + source, null);
+  async logout(source: string) {
+    await this.store.put("subscription:" + source, null);
     for (const [key, p] of this.pending)
       if (p.source === source) {
         p.close?.();
@@ -492,7 +492,7 @@ export class Subscriptions {
       );
       version = product.genieVersion || version;
     }
-    if (!key && this.store.get<Obj | null>("subscription:" + source, null))
+    if (!key && await this.store.get<Obj | null>("subscription:" + source, null))
       session = await this.saved(source);
     else if (!key) {
       try {
@@ -611,10 +611,10 @@ export class Subscriptions {
         : process.platform === "darwin"
           ? join(homedir(), "Library/Application Support")
           : process.env.XDG_DATA_HOME || join(homedir(), ".local/share");
-    let saved: Obj | undefined = this.store.get<Obj | null>(
-      "subscription:devin",
-      null,
-    )
+    let saved: Obj | undefined = await this.store.get<Obj | null>(
+          "subscription:devin",
+          null,
+        )
       ? await this.saved("devin")
       : undefined;
     for (const root of saved ? [] : [configRoot, dataRoot])

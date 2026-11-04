@@ -220,34 +220,34 @@ export async function importSkill(
     /^[\p{L}\p{N}_.-]{1,100}$/u.test(name) && name !== "." && name !== "..",
     "Invalid skill name",
   );
-  const kind = skillKind(employeeId), old = store.object<any>(kind, name);
-  if (employeeId) assert(employeeId === "default" ? !store.get("employee:default-deleted", false) : !!store.object("employee", employeeId), "Employee not found");
+  const kind = skillKind(employeeId), old = await store.object<any>(kind, name);
+  if (employeeId) assert(employeeId === "default" ? !await store.get("employee:default-deleted", false) : !!await store.object("employee", employeeId), "Employee not found");
   assert(
     !old || replace,
     "Skill already exists; confirm replace=true to update it and its resources",
   );
   const assets: Obj[] = [],
     digest = createHash("sha256");
-  store.transaction(() => {
-    for (const file of files) {
-      digest.update(file.path).update(file.data);
-      assets.push({
-        path: file.path,
-        blob: store.blob("application/octet-stream", file.data),
-        mode: file.mode,
+  await store.transaction(async () => {
+        for (const file of files) {
+          digest.update(file.path).update(file.data);
+          assets.push({
+            path: file.path,
+            blob: await store.blob("application/octet-stream", file.data),
+            mode: file.mode,
+          });
+        }
+        await store.save(kind, name, {
+                ...metadata,
+                employeeId,
+                id: name,
+                name,
+                content,
+                sourcePath: source,
+                assets,
+                digest: digest.digest("hex"),
+              });
       });
-    }
-    store.save(kind, name, {
-      ...metadata,
-      employeeId,
-      id: name,
-      name,
-      content,
-      sourcePath: source,
-      assets,
-      digest: digest.digest("hex"),
-    });
-  });
   return {
     id: name,
     name,
@@ -287,7 +287,7 @@ export async function materializeSkill(store: Store, skill: Obj) {
           !relative(root, target).startsWith(".." + sep),
         "Skill cache escape",
       );
-      const blob = store.blobData(asset.blob);
+      const blob = await store.blobData(asset.blob);
       assert(blob, "Skill resource blob missing");
       let current: Buffer | undefined;
       try {

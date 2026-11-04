@@ -11,22 +11,22 @@ import type { Task } from "../server/core/employee";
 import { EMPLOYEE_DECISION_RULES } from "../server/core/prompt";
 import { chromeCall, employeeCall } from "./public-call";
 
-function fixture() {
-  const store = new Store(":memory:");
-  const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+async function fixture() {
+  const store = await Store.open(":memory:");
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { model: "p/code", scenes: { lightweight: ["p/light"], coding: ["p/code"], computer: ["p/vision"] }, provider: { p: { api: "openai-completions", baseURL: "https://unused.test", models: Object.fromEntries(["light", "code", "vision", "failed"].map(id => [id, { modalities: { input: id === "vision" ? ["text", "image"] : ["text"] }, limit: { context: 128000, output: 8192 } }])) } } });
-  const employee = engine.employee.for(engine.employee.create({ name: "Scene employee" }, "owner").id);
+  await store.put("config", { model: "p/code", scenes: { lightweight: ["p/light"], coding: ["p/code"], computer: ["p/vision"] }, provider: { p: { api: "openai-completions", baseURL: "https://unused.test", models: Object.fromEntries(["light", "code", "vision", "failed"].map(id => [id, { modalities: { input: id === "vision" ? ["text", "image"] : ["text"] }, limit: { context: 128000, output: 8192 } }])) } } });
+  const employee = await engine.employee.for((await engine.employee.create({ name: "Scene employee" }, "owner")).id);
   const add = async (text: string, profile = "lightweight") => {
     const created = await employee.execute("", { action: "add", kind: "todo", text, profile });
-    return employee.task(employee.state(), created.value.id);
+    return employee.task(await employee.state(), created.value.id);
   };
   const segment = async (job: Task) => {
-    employee.update(state => { employee.task(state, job.id).status = "running"; });
-    const current = employee.task(employee.state(), job.id);
+    await employee.update(state => { employee.task(state, job.id).status = "running"; });
+    const current = employee.task(await employee.state(), job.id);
     employee.busy.set(job.id, { computer: current.side === "computer", session: "" });
     await employee.run(current);
-    return employee.task(employee.state(), job.id);
+    return employee.task(await employee.state(), job.id);
   };
   return { store, engine, employee, add, segment };
 }
@@ -36,7 +36,7 @@ const verified = () => call("verify", "employee", { action: "progress", text: "v
 const completed = () => call("complete", "employee", { action: "complete", deliverableRef: [], text: "goal verified", summary: "已验证完成。" });
 
 test("employee chat receives low-risk defaults without losing explicit device constraints or approval boundaries", async () => {
-  const { store, engine, employee } = fixture();
+  const { store, engine, employee } = await fixture();
   let requests = 0;
   engine.providers.chat = async (_model, system) => {
     requests++;
@@ -52,13 +52,13 @@ test("employee chat receives low-risk defaults without losing explicit device co
     return { role: "assistant", text: "按当前授权环境处理。" };
   };
   try {
-    await engine.run(employee.chat("owner").id, { role: "user", text: "打开百度" });
+    await engine.run((await employee.chat("owner")).id, { role: "user", text: "打开百度" });
     assert.equal(requests, 1);
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("even a coding-profile task starts lightweight, upgrades in the same work session and retains coding after browser handoff", async () => {
-  const { store, engine, employee, add, segment } = fixture();
+  const { store, engine, employee, add, segment } = await fixture();
   const selected: string[] = [];
   let phase = 0;
   engine.providers.chat = async (model, system, messages, definitions) => {
@@ -90,16 +90,16 @@ test("even a coding-profile task starts lightweight, upgrades in the same work s
     let job = await add("实现功能并在浏览器验证", "coding");
     job = await segment(job);
     const work = job.workSession;
-    assert.equal(store.session(work).scene, "coding");
+    assert.equal((await store.session(work)).scene, "coding");
     assert.equal(job.side, "computer");
     job = await segment(job);
     assert.equal(job.side, "work");
     job = await segment(job);
     assert.equal(job.status, "done");
     assert.equal(job.workSession, work);
-    assert.equal(store.sessions().length, 2);
+    assert.equal((await store.sessions()).length, 2);
     assert.deepEqual(selected, ["p/light", "p/code", "p/vision", "p/code", "p/code"]);
-    assert.deepEqual(employee.state().runs.map(run => run.scene), ["lightweight", "computer", "coding"], "run records reflect their actual starting scenes");
+    assert.deepEqual((await employee.state()).runs.map(run => run.scene), ["lightweight", "computer", "coding"], "run records reflect their actual starting scenes");
 
     let requests = 0;
     engine.providers.chat = async model => {
@@ -107,11 +107,11 @@ test("even a coding-profile task starts lightweight, upgrades in the same work s
       return requests++ === 0 ? verified() : completed();
     };
     assert.equal((await segment(await add("查询任务状态和实际请求地址"))).status, "done");
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("an employee task can return to lightweight for ordinary work and later upgrade again without changing sessions or repeating work", async () => {
-  const { store, engine, employee, add, segment } = fixture();
+  const { store, engine, employee, add, segment } = await fixture();
   const selected: string[] = []; let phase = 0;
   engine.providers.chat = async (model, system, _messages, definitions) => {
     selected.push(model.selection);
@@ -137,22 +137,22 @@ test("an employee task can return to lightweight for ordinary work and later upg
   try {
     let job = await segment(await add("实现代码后查询外部作业并反馈"));
     const session = job.workSession;
-    assert.equal(store.session(session).scene, "coding");
+    assert.equal((await store.session(session)).scene, "coding");
     await employee.control({ action: "resume", id: job.id, text: "代码已完成，接下来只查询原作业状态" });
     job = await segment(job);
-    assert.equal(store.session(session).scene, "lightweight");
+    assert.equal((await store.session(session)).scene, "lightweight");
     await employee.control({ action: "resume", id: job.id, text: "现在再修改一处代码并验证" });
     job = await segment(job);
     assert.equal(job.status, "done");
     assert.equal(job.workSession, session);
-    assert.equal(store.sessions().length, 1);
+    assert.equal((await store.sessions()).length, 1);
     assert.deepEqual(selected, ["p/light", "p/code", "p/code", "p/light", "p/light", "p/code", "p/code"]);
-    assert.deepEqual(employee.state().runs.map(run => run.scene), ["lightweight", "coding", "lightweight"]);
-  } finally { await engine.close(); store.close(); }
+    assert.deepEqual((await employee.state()).runs.map(run => run.scene), ["lightweight", "coding", "lightweight"]);
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("explicitly returning to a retained lightweight caller preserves its pending work without a second automatic return", async () => {
-  const { store, engine, add, segment } = fixture();
+  const { store, engine, add, segment } = await fixture();
   let requests = 0;
   engine.providers.chat = async (model, _system, messages, definitions) => {
     if (requests++ === 0) return call("code", "switch_scene", { scene: "coding", message: "完成编码验证", resume: "只查询原作业job-retained并协调反馈" });
@@ -170,19 +170,19 @@ test("explicitly returning to a retained lightweight caller preserves its pendin
   try {
     const job = await segment(await add("编码并检查既有作业"));
     assert.equal(job.status, "done");
-    assert.equal(store.session(job.workSession).scene, "lightweight");
-    assert.equal(store.sessions().length, 1);
+    assert.equal((await store.session(job.workSession)).scene, "lightweight");
+    assert.equal((await store.sessions()).length, 1);
     assert.equal(requests, 4);
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("lightweight stays unavailable when its scene models are empty (no default-model fallback)", async () => {
-  const { store, engine, employee, add, segment } = fixture();
-  const config = engine.config(); config.scenes!.lightweight = []; store.put("config", config);
+  const { store, engine, employee, add, segment } = await fixture();
+  const config = await engine.config(); config.scenes!.lightweight = []; await store.put("config", config);
   try {
     const job = await add("只读代码分析后查询状态");
-    const session = store.newSession({ employeeId: employee.employeeId, taskId: job.id, model: "p/code", scene: "coding", readOnly: true });
-    employee.update(state => { state.tasks[0].workSession = session.id; });
+    const session = await store.newSession({ employeeId: employee.employeeId, taskId: job.id, model: "p/code", scene: "coding", readOnly: true });
+    await employee.update(state => { state.tasks[0].workSession = session.id; });
     let requests = 0;
     engine.providers.chat = async (model, _system, _messages, definitions) => {
       assert.equal(model.selection, "p/code");
@@ -192,16 +192,16 @@ test("lightweight stays unavailable when its scene models are empty (no default-
       return { role: "assistant", text: "轻量场景未配置，保持只读编码模型。" };
     };
     const result = await segment(job);
-    assert.equal(store.session(session.id).scene, "coding");
-    assert.equal(store.session(session.id).model, "p/code");
+    assert.equal((await store.session(session.id)).scene, "coding");
+    assert.equal((await store.session(session.id)).model, "p/code");
     assert.equal(requests, 1);
     assert.notEqual(result.status, "done");
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("employee execution refuses to start when the target scene has no model", async () => {
-  const { store, engine, employee } = fixture();
-  const config = engine.config(); config.scenes!.computer = []; store.put("config", config);
+  const { store, engine, employee } = await fixture();
+  const config = await engine.config(); config.scenes!.computer = []; await store.put("config", config);
   try {
     let threw = false;
     try {
@@ -214,11 +214,11 @@ test("employee execution refuses to start when the target scene has no model", a
     }
     assert(threw);
     assert.equal(config.scenes!.lightweight?.[0], "p/light");
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("explicit caller work still resumes in order across coding and lightweight transitions", async () => {
-  const { store, engine, add, segment } = fixture();
+  const { store, engine, add, segment } = await fixture();
   const selected: string[] = []; let requests = 0;
   engine.providers.chat = async (model, _system, messages) => {
     selected.push(model.selection);
@@ -240,16 +240,16 @@ test("explicit caller work still resumes in order across coding and lightweight 
     const job = await segment(await add("编码与协调分段完成"));
     assert.equal(job.status, "done");
     assert.deepEqual(selected, ["p/light", "p/code", "p/light", "p/code", "p/light", "p/light"]);
-    assert.equal(store.sessions().length, 1);
-  } finally { await engine.close(); store.close(); }
+    assert.equal((await store.sessions()).length, 1);
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("ordinary manual sessions and isolated computer task sessions cannot use the employee-only lightweight transition", async () => {
-  const { store, engine, employee, add } = fixture();
+  const { store, engine, employee, add } = await fixture();
   try {
     for (const computer of [false, true]) {
       const task = computer ? await add("browser-only work") : undefined;
-      const session = store.newSession({ scene: computer ? "computer" : "coding", model: computer ? "p/vision" : "p/code", ...(task ? { taskId: task.id, employeeId: employee.employeeId } : {}) });
+      const session = await store.newSession({ scene: computer ? "computer" : "coding", model: computer ? "p/vision" : "p/code", ...(task ? { taskId: task.id, employeeId: employee.employeeId } : {}) });
       let requests = 0;
       engine.providers.chat = async (model, _system, messages, definitions) => {
         assert.equal(model.selection, computer ? "p/vision" : "p/code");
@@ -259,16 +259,16 @@ test("ordinary manual sessions and isolated computer task sessions cannot use th
         return { role: "assistant", text: "transition rejected without side effects" };
       };
       await engine.run(session.id, { role: "user", text: "stay within this session's permissions" });
-      assert.equal(store.session(session.id).scene, computer ? "computer" : "coding");
+      assert.equal((await store.session(session.id)).scene, computer ? "computer" : "coding");
     }
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("employee communication reselects the configured lightweight model instead of keeping a stale coding selection", async () => {
-  const { store, engine, employee } = fixture();
+  const { store, engine, employee } = await fixture();
   try {
-    const chat = employee.chat("owner");
-    chat.model = "p/code"; chat.scene = "coding"; store.saveSession(chat);
+    const chat = await employee.chat("owner");
+    chat.model = "p/code"; chat.scene = "coding"; await store.saveSession(chat);
     engine.providers.chat = async (model, system, _messages, definitions) => {
       assert.equal(model.selection, "p/light");
       assert(!definitions.some(tool => tool.name === "switch_scene"));
@@ -276,17 +276,17 @@ test("employee communication reselects the configured lightweight model instead 
       return { role: "assistant", text: "这是普通问答。" };
     };
     await engine.run(chat.id, { role: "user", text: "目前有哪些待处理事项？" });
-    assert.equal(store.session(chat.id).model, "p/light");
-    assert.equal(store.session(chat.id).scene, "lightweight");
-    const ordinary = store.newSession({ model: "p/code", scene: "coding" });
+    assert.equal((await store.session(chat.id)).model, "p/light");
+    assert.equal((await store.session(chat.id)).scene, "lightweight");
+    const ordinary = await store.newSession({ model: "p/code", scene: "coding" });
     engine.providers.chat = async model => { assert.equal(model.selection, "p/code"); return { role: "assistant", text: "用户手动选择保持不变。" }; };
     await engine.run(ordinary.id, { role: "user", text: "ordinary manual session" });
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("lightweight candidate failures stay within the lightweight list instead of borrowing a coding model", async () => {
-  const { store, engine, add, segment } = fixture();
-  const config = engine.config(); config.scenes!.lightweight = ["p/failed", "p/light"]; store.put("config", config);
+  const { store, engine, add, segment } = await fixture();
+  const config = await engine.config(); config.scenes!.lightweight = ["p/failed", "p/light"]; await store.put("config", config);
   const selected: string[] = []; let requests = 0;
   engine.providers.chat = async model => {
     selected.push(model.selection);
@@ -298,13 +298,13 @@ test("lightweight candidate failures stay within the lightweight list instead of
     const job = await segment(await add("只读取现有配置并总结"));
     assert.equal(job.status, "done");
     assert.deepEqual(selected, ["p/failed", "p/light", "p/light"]);
-    assert.equal(store.session(job.workSession).scene, "lightweight");
-  } finally { await engine.close(); store.close(); }
+    assert.equal((await store.session(job.workSession)).scene, "lightweight");
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("a scene covered by the current preferred model does not expose a redundant switch just because it has a different backup", async () => {
-  const { store, engine, add, segment } = fixture();
-  const config = engine.config(); config.scenes!.coding = ["p/light", "p/code"]; store.put("config", config);
+  const { store, engine, add, segment } = await fixture();
+  const config = await engine.config(); config.scenes!.coding = ["p/light", "p/code"]; await store.put("config", config);
   let requests = 0;
   engine.providers.chat = async (model, _system, _messages, definitions) => {
     assert.equal(model.selection, "p/light");
@@ -312,5 +312,5 @@ test("a scene covered by the current preferred model does not expose a redundant
     return requests++ === 0 ? verified() : completed();
   };
   try { assert.equal((await segment(await add("按已覆盖场景完成工作"))).status, "done"); }
-  finally { await engine.close(); store.close(); }
+  finally { await engine.close(); await store.close(); }
 });

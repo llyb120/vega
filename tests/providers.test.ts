@@ -239,7 +239,7 @@ test("truncated, malformed or incomplete streams never dispatch tools", async ()
     );
   }
 });
-test("wire history preserves tool-call IDs, images and signed reasoning without leaking connection options", () => {
+test("wire history preserves tool-call IDs, images and signed reasoning without leaking connection options", async () => {
   for (const api of [
     "openai-completions",
     "openai-responses",
@@ -252,27 +252,27 @@ test("wire history preserves tool-call IDs, images and signed reasoning without 
       baseURL: "https://example.com/v1",
       reasoningEffort: "high",
     };
-    const { body } = bodyFor(
-      m,
-      "sys",
-      [
-        {
-          role: "assistant",
-          model: m.selection,
-          thinking: "why",
-          opaque: [{ type: "thinking", thinking: "why", signature: "sig" }],
-          calls: [{ id: "call|item", name: "read", arguments: { path: "x" } }],
-        },
-        {
-          role: "tool",
-          callId: "call|item",
-          name: "read",
-          text: "done",
-          images: [{ mime: "image/png", data: "abc" }],
-        },
-      ],
-      [tool],
-    );
+    const { body } = await bodyFor(
+          m,
+          "sys",
+          [
+            {
+              role: "assistant",
+              model: m.selection,
+              thinking: "why",
+              opaque: [{ type: "thinking", thinking: "why", signature: "sig" }],
+              calls: [{ id: "call|item", name: "read", arguments: { path: "x" } }],
+            },
+            {
+              role: "tool",
+              callId: "call|item",
+              name: "read",
+              text: "done",
+              images: [{ mime: "image/png", data: "abc" }],
+            },
+          ],
+          [tool],
+        );
     assert(!JSON.stringify(body).includes("private-key"));
     assert(
       JSON.stringify(body).includes("data") ||
@@ -281,7 +281,7 @@ test("wire history preserves tool-call IDs, images and signed reasoning without 
     assert(!JSON.stringify(body).includes("call|item"));
   }
 });
-test("Chrome history keeps only the latest two image results per tab through ACP and every provider", () => {
+test("Chrome history keeps only the latest two image results per tab through ACP and every provider", async () => {
   const rows: Message[] = [];
   const observe = (tab: string, images: { path: string; frameStream?: string; tile?: number; readOnlyImage?: boolean }[], name = "chrome_act") => {
     const callId = "shot-" + rows.length;
@@ -330,10 +330,10 @@ test("Chrome history keeps only the latest two image results per tab through ACP
   for (const api of ["openai-completions", "openai-responses", "anthropic-messages"]) {
     for (const history of [rows, projected]) {
       const resolved: string[] = [];
-      bodyFor(model(api, "https://example.test/v1"), "", history, [], image => {
-        resolved.push(image.path || image.blobId!);
-        return { mime: image.mime, data: "AA==" };
-      });
+      await bodyFor(model(api, "https://example.test/v1"), "", history, [], async image => {
+                resolved.push(image.path || image.blobId!);
+                return { mime: image.mime, data: "AA==" };
+              });
       assert.deepEqual(resolved, expected, api);
     }
   }
@@ -371,7 +371,7 @@ test("oversized Chrome results stay prunable after archiving", () => {
   assert.deepEqual(projected.flatMap(m => (m.images || []).map(image => image.path)), ["a", "b"]);
 });
 
-test("native reasoning is replayed only to its source model and remains untouched in history", () => {
+test("native reasoning is replayed only to its source model and remains untouched in history", async () => {
   for (const api of ["openai-responses", "anthropic-messages"]) {
     const m = model(api, "https://example.test/v1");
     const opaque = api === "openai-responses"
@@ -379,14 +379,14 @@ test("native reasoning is replayed only to its source model and remains untouche
       : { type: "thinking", thinking: "visible", signature: "native-secret" };
     const history = [{ role: "assistant" as const, model: m.selection, text: "answer", opaque: [opaque] }];
     const before = structuredClone(history);
-    assert(JSON.stringify(bodyFor(m, "sys", history, []).body).includes("native-secret"));
-    assert(!JSON.stringify(bodyFor({ ...m, selection: "other/model" }, "sys", history, []).body).includes("native-secret"));
+    assert(JSON.stringify((await bodyFor(m, "sys", history, [])).body).includes("native-secret"));
+    assert(!JSON.stringify((await bodyFor({ ...m, selection: "other/model" }, "sys", history, [])).body).includes("native-secret"));
     assert.deepEqual(history, before);
   }
 });
 test("Devin model resolution enables native reasoning replay for configured models", async () => {
-  const store = new Store(":memory:");
-  cleanup.push(() => store.close());
+  const store = await Store.open(":memory:");
+  cleanup.push(async () => await store.close());
   const catalog = new Catalog(store, new Subscriptions(store, ""));
   catalog.models = async () => ({
     models: {}, raw: [{ variants: [{ model_uid: "m" }] }], version: "fixture-version",
@@ -395,7 +395,7 @@ test("Devin model resolution enables native reasoning replay for configured mode
     model: "p/m", provider: { p: { api: "devin", baseURL: "https://fixture.test", models: { m: {} } } },
   });
   assert.equal(m.options.requiresReasoningContentOnAssistantMessages, true);
-  const { body } = bodyFor(m, "sys", [{ role: "assistant", text: "answer", thinking: "visible reasoning" }], []);
+  const { body } = await bodyFor(m, "sys", [{ role: "assistant", text: "answer", thinking: "visible reasoning" }], []);
   assert.equal(body.messages[1].reasoning_content, "visible reasoning");
   const wire = encodeDevin(body, "fixture-key", "fixture-version");
   const message = decodeProto(wire.subarray(5)).find(([f]) => f === 3)![1] as Buffer;
@@ -559,8 +559,8 @@ test("CodeBuddy and WorkBuddy identities remain separate, CLI env credentials an
       else process.env[k] = v;
     }
   });
-  const s = new Store(":memory:");
-  cleanup.push(() => s.close());
+  const s = await Store.open(":memory:");
+  cleanup.push(async () => await s.close());
   const auth = new Subscriptions(s, "");
   const code = await auth.load("codebuddy"),
     work = await auth.load("workbuddy");
@@ -655,8 +655,8 @@ test("WorkBuddy original encrypted envelope decoder rejects key substitution", (
   assert.throws(() => decodeWorkBuddyToken(envelope, "wrong"));
 });
 test("Devin login callback requires matching state and PKCE is persisted only as pending memory", async () => {
-  const s = new Store(":memory:");
-  cleanup.push(() => s.close());
+  const s = await Store.open(":memory:");
+  cleanup.push(async () => await s.close());
   const auth = new Subscriptions(s, "");
   cleanup.push(() => auth.close());
   const start = await auth.loginStart("devin"),
@@ -670,5 +670,5 @@ test("Devin login callback requires matching state and PKCE is persisted only as
   assert.equal(good.status, 200);
   await good.text();
   assert.equal(auth.pending.get(start.state)?.code, "good");
-  assert(!JSON.stringify(s.objects("model-cache")).includes("code_verifier"));
+  assert(!JSON.stringify(await s.objects("model-cache")).includes("code_verifier"));
 });

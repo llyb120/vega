@@ -23,6 +23,6 @@ export default defineNitroPlugin(async (nitro) => {
     await Promise.all([...employeeLives.values()].map((live) => live.close()));
     await headless.close();
     await engine.close();
-    store.close();
+    await store.close();
   });
 });

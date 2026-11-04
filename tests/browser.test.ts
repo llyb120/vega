@@ -195,10 +195,10 @@ test(
       ],
       { windowsHide: true, stdio: "ignore" },
     );
-    const store = new Store(":memory:"),
+    const store = await Store.open(":memory:"),
       bridge = new FixtureBridge();
-    store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
-    store.db.prepare("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)").run("fixture", "fixture", "test-only", "admin", 0, Date.now(), 0);
+    await store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
+    await store.run("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)", "fixture", "fixture", "test-only", "admin", 0, Date.now(), 0);
     let submitted = 0, liveSubmitted = 0,
       live: BrowserLive | undefined;
     const server = createServer((req, res) => {
@@ -574,11 +574,11 @@ test(
           messages.push(value);
           if (value.type === "frame") {
             frames.push(value);
-            queueMicrotask(() =>
-              live!.message(
-                peer,
-                JSON.stringify({ type: "frame_ack", frameId: value.frameId }),
-              ),
+            queueMicrotask(async () =>
+              await live!.message(
+                                peer,
+                                JSON.stringify({ type: "frame_ack", frameId: value.frameId }),
+                              ),
             );
           }
         },
@@ -600,31 +600,31 @@ test(
         );
       };
       const beforeFrames = Number(
-        store.db.prepare("SELECT COUNT(*) AS n FROM blobs").get()!.n,
+        (await store.one("SELECT COUNT(*) AS n FROM blobs"))!.n,
       );
-      live.open(peer);
+      await live.open(peer);
       await until(() => frames.length >= 2);
       assert.equal(
         frames.at(-1)!.width,
         1568,
         "high-DPR frames are resized independently of CSS coordinates",
       );
-      live.message(peer, JSON.stringify({ type: "mode", mode: "control" }));
+      await live.message(peer, JSON.stringify({ type: "mode", mode: "control" }));
       await until(() =>
         messages.some((m) => m.type === "mode" && m.mode === "control"),
       );
       let sequence = 0;
       const input = async (action: Obj) => {
         const seq = ++sequence;
-        live!.message(
-          peer,
-          JSON.stringify({
-            type: "input",
-            seq,
-            frameId: frames.at(-1)!.frameId,
-            action,
-          }),
-        );
+        await live!.message(
+                    peer,
+                    JSON.stringify({
+                      type: "input",
+                      seq,
+                      frameId: frames.at(-1)!.frameId,
+                      action,
+                    }),
+                  );
         await until(() =>
           messages.some((m) => m.type === "input_result" && m.seq === seq),
         );
@@ -704,11 +704,11 @@ test(
         frameId: frames.at(-1)!.frameId,
         action: { action: "click_at", ...(await point("button")) },
       };
-      live.message(peer, JSON.stringify(duplicate));
+      await live.message(peer, JSON.stringify(duplicate));
       await engine.gate.run(async () => {});
       assert.equal(submitted, 3, "duplicate WS input cannot submit twice");
       assert.equal(
-        Number(store.db.prepare("SELECT COUNT(*) AS n FROM blobs").get()!.n),
+        Number((await store.one("SELECT COUNT(*) AS n FROM blobs"))!.n),
         beforeFrames,
         "continuous live frames must never be saved to SQLite",
       );
@@ -721,7 +721,7 @@ test(
     } finally {
       await live?.close();
       bridge.close();
-      store.close();
+      await store.close();
       await new Promise<void>((yes) => {
         server.closeAllConnections();
         server.close(() => yes());
@@ -749,8 +749,8 @@ test(
     assert(binary, "Set VEGA_CHROME_PATH");
     const dir = await mkdtemp(join(tmpdir(), "vega-chrome-")), profile = join(dir, "profile");
     const child = spawn(binary, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0", "--user-data-dir=" + profile, "--no-sandbox", "about:blank"], { windowsHide: true, stdio: "ignore" });
-    const store = new Store(":memory:"), bridge = new FixtureBridge();
-    store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
+    const store = await Store.open(":memory:"), bridge = new FixtureBridge();
+    await store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
     let verified = "", slowImage = 0;
     const server = createServer((req, res) => {
       if (req.url === "/slow.png") { slowImage++; setTimeout(() => { res.setHeader("Content-Type", "image/png"); res.end(); }, 1200); return; }
@@ -832,7 +832,7 @@ test(
       assert.equal(verified, "");
     } finally {
       bridge.close();
-      store.close();
+      await store.close();
       await new Promise<void>((yes) => { server.closeAllConnections(); server.close(() => yes()); });
       child.kill();
       await new Promise<void>((yes) => { if (child.exitCode !== null) yes(); else child.once("exit", () => yes()); });
@@ -849,8 +849,8 @@ test(
     assert(binary, "Set VEGA_CHROME_PATH");
     const dir = await mkdtemp(join(tmpdir(), "vega-chrome-")), profile = join(dir, "profile");
     const child = spawn(binary, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0", "--user-data-dir=" + profile, "--no-sandbox", "--window-size=1000,700", "about:blank"], { windowsHide: true, stdio: "ignore" });
-    const store = new Store(":memory:"), bridge = new FixtureBridge();
-    store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
+    const store = await Store.open(":memory:"), bridge = new FixtureBridge();
+    await store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
     const server = createServer((_req, res) => {
       res.setHeader("Content-Type", "text/html");
       res.end(`<!doctype html><title>Hover</title><body style="margin:0">
@@ -904,7 +904,7 @@ test(
       assert.equal((await engine.execute("owner", dir, { operation: "evaluate", tabTag: tag, expression: "document.title", feedback: "none" })).value, "moved");
     } finally {
       bridge.close();
-      store.close();
+      await store.close();
       await new Promise<void>((yes) => { server.closeAllConnections(); server.close(() => yes()); });
       child.kill();
       await new Promise<void>((yes) => { if (child.exitCode !== null) yes(); else child.once("exit", () => yes()); });

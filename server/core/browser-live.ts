@@ -35,7 +35,7 @@ export class BrowserLive {
   constructor(
     public chrome: Chrome,
     public auth: Auth,
-    public canUse: (principal: Principal) => boolean = (principal) => principal.user.role === "admin",
+    public canUse: (principal: Principal) => boolean | Promise<boolean> = (principal) => principal.user.role === "admin",
   ) {
     auth.events.on("logout", this.logout);
     auth.events.on("revoke", this.revoke);
@@ -50,7 +50,7 @@ export class BrowserLive {
   };
   async ticket(principal: Principal, tabTag: unknown) {
     assert(
-      !!this.auth.resolveHash(principal.hash) && this.canUse(this.auth.resolveHash(principal.hash)!),
+      !!await this.auth.resolveHash(principal.hash) && await this.canUse((await this.auth.resolveHash(principal.hash))!),
       "无权查看和操作此浏览器",
     );
     const tab = await this.chrome
@@ -67,7 +67,7 @@ export class BrowserLive {
     });
     return { ticket };
   }
-  authorize(request: Socket["request"], consume = false) {
+  async authorize(request: Socket["request"], consume = false) {
     const url = new URL(request.url),
       origin = process.env.VEGA_PUBLIC_URL
         ? new URL(process.env.VEGA_PUBLIC_URL).origin
@@ -84,11 +84,11 @@ export class BrowserLive {
       .map((v) => v.trim())
       .find((v) => v.startsWith("vega_session="))
       ?.slice("vega_session=".length);
-    const principal = this.auth.authenticate(token),
+    const principal = await this.auth.authenticate(token),
       id = url.searchParams.get("ticket") || "",
       ticket = this.tickets.get(id);
     assert(
-      principal && this.canUse(principal) &&
+      principal && (await this.canUse(principal)) &&
         ticket &&
         ticket.hash === principal.hash &&
         ticket.until >= Date.now(),
@@ -97,8 +97,8 @@ export class BrowserLive {
     if (consume) this.tickets.delete(id);
     return { principal, ticket };
   }
-  open(socket: Socket) {
-    const { principal, ticket } = this.authorize(socket.request, true);
+  async open(socket: Socket) {
+    const { principal, ticket } = await this.authorize(socket.request, true);
     assert(this.sessions.size < 4, "实时浏览器连接过多");
     for (const session of this.sessions.values())
       if (session.principal.hash === principal.hash)
@@ -107,15 +107,19 @@ export class BrowserLive {
     this.sessions.set(socket.id, session);
     void session.run();
   }
-  message(socket: Socket, raw: string) {
+  async message(socket: Socket, raw: string) {
     const session = this.sessions.get(socket.id);
     if (!session) return;
-    try {
-      assert(Buffer.byteLength(raw) <= 65536, "消息过大");
-      session.message(JSON.parse(raw));
-    } catch {
-      void session.close(4400, "实时操作消息无效，请重新连接");
-    }
+    // Messages are handled one at a time in arrival order, even though each check awaits storage.
+    const handle = async () => {
+      try {
+        assert(Buffer.byteLength(raw) <= 65536, "消息过大");
+        await session.message(JSON.parse(raw));
+      } catch {
+        void session.close(4400, "实时操作消息无效，请重新连接");
+      }
+    };
+    await (session.inbox = session.inbox.then(handle));
   }
   async close() {
     this.auth.events.off("logout", this.logout);
@@ -132,6 +136,7 @@ class LiveSession {
   wantsControl = false;
   stopping = false;
   claimTask?: Promise<void>;
+  inbox = Promise.resolve();
   release?: () => void;
   io = new Mutex();
   observation?: Awaited<ReturnType<Chrome["observe"]>>;
@@ -161,11 +166,11 @@ class LiveSession {
   send(value: Obj) {
     if (this.active) this.socket.send(JSON.stringify(value));
   }
-  valid() {
+  async valid() {
     return (
       this.active &&
-      !!this.hub.auth.resolveHash(this.principal.hash) &&
-      this.hub.canUse(this.hub.auth.resolveHash(this.principal.hash)!)
+      !!await this.hub.auth.resolveHash(this.principal.hash) &&
+      await this.hub.canUse((await this.hub.auth.resolveHash(this.principal.hash))!)
     );
   }
   async run() {
@@ -173,7 +178,7 @@ class LiveSession {
       this.send({ type: "ready", tabTag: this.tabTag, mode: "view" });
       let captureFailedAt = 0;
       while (this.active) {
-        assert(this.valid(), "登录已失效");
+        assert(await this.valid(), "登录已失效");
         assert(Date.now() - this.lastMessage < 20000, "连接已中断，请重新连接");
         if (this.wantsControl && Date.now() - this.lastInput > 30000)
           this.releaseControl("闲置已退出远程操作");
@@ -309,8 +314,8 @@ class LiveSession {
       ...(data ? { data: data.toString("base64") } : { same: true }),
     });
   }
-  message(message: Obj) {
-    assert(this.valid(), "登录已失效");
+  async message(message: Obj) {
+    assert(await this.valid(), "登录已失效");
     this.lastMessage = Date.now();
     assert(
       message && typeof message === "object" && !Array.isArray(message),
@@ -461,7 +466,7 @@ class LiveSession {
     let attempted = false;
     try {
       assert(
-        this.valid() && this.locked && this.wantsControl,
+        await this.valid() && this.locked && this.wantsControl,
         "远程控制已停止",
       );
       const chrome = this.hub.chrome,

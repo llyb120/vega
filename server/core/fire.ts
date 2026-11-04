@@ -41,29 +41,29 @@ export class Fire {
     public cancel: (session: string) => void,
     public emit: (type: string, data: any) => void,
   ) {}
-  get(root: string) {
-    return this.store.object<FireState>("fire", root);
+  async get(root: string) {
+    return await this.store.object<FireState>("fire", root);
   }
-  forSession(session: string) {
-    const root = this.store.session(session).fireRoot;
-    return root ? this.get(root) : undefined;
+  async forSession(session: string) {
+    const root = (await this.store.session(session)).fireRoot;
+    return root ? await this.get(root) : undefined;
   }
-  save(s: FireState) {
-    this.store.save("fire", s.root, s);
+  async save(s: FireState) {
+    await this.store.save("fire", s.root, s);
     this.emit("fire", s);
   }
-  recover() {
-    for (const s of this.store.objects<FireState>("fire"))
+  async recover() {
+    for (const s of await this.store.objects<FireState>("fire"))
       if (s.status === "running") {
         s.status = "paused";
         s.reason =
           "Service restarted; continue the latest phase, inspect interrupted tools, never replay submissions automatically";
-        this.save(s);
+        await this.save(s);
       }
   }
-  start(session: string, text: string, images: Message["images"] = []) {
+  async start(session: string, text: string, images: Message["images"] = []) {
     assert(!images?.length, "/fire does not support attachments");
-    const root = this.store.session(session);
+    const root = await this.store.session(session);
     assert(
       !root.taskId && !root.stageSource,
       "Fire starts from an ordinary local session",
@@ -84,18 +84,18 @@ export class Fire {
     root.fireRoot = root.id;
     root.fireRole = "work";
     root.title = "[Fire] 目标 · " + [...goal].slice(0, 28).join("");
-    this.store.saveSession(root);
-    this.save(s);
+    await this.store.saveSession(root);
+    await this.save(s);
     this.drive(s, { role: "user", text: fireWork(goal), displayText: text });
     return { id: root.id, fire: s };
   }
-  resume(session: string, input: Message) {
-    const s = this.forSession(session);
+  async resume(session: string, input: Message) {
+    const s = await this.forSession(session);
     if (!s || s.latest !== session) return false;
     assert(!this.running.has(s.root), "Fire chain already running");
     s.status = "running";
     s.reason = undefined;
-    this.save(s);
+    await this.save(s);
     const message =
       s.role === "judge"
         ? {
@@ -109,22 +109,22 @@ export class Fire {
   }
   drive(s: FireState, input: Message) {
     const task = this.advance(s, input)
-      .catch((error) => {
-        const current = this.get(s.root) || s;
+      .catch(async (error) => {
+        const current = await this.get(s.root) || s;
         current.status = "paused";
         current.reason = error.message;
-        this.save(current);
+        await this.save(current);
         this.emit("error", { fireRoot: s.root, error: error.message });
       })
       .finally(() => this.running.delete(s.root));
     this.running.set(s.root, task);
   }
   async advance(s: FireState, message: Message) {
-    while (!this.closed && this.get(s.root)?.status === "running") {
+    while (!this.closed && (await this.get(s.root))?.status === "running") {
       await this.run(s.latest, message);
-      if (this.closed || this.get(s.root)?.status !== "running") return;
+      if (this.closed || (await this.get(s.root))?.status !== "running") return;
       const conclusion =
-        [...this.store.messages(s.latest)]
+        [...await this.store.messages(s.latest)]
           .reverse()
           .find((m) => m.role === "assistant" && m.text && !m.calls?.length)
           ?.text || "";
@@ -136,13 +136,13 @@ export class Fire {
         /^FIRE_ACCEPTED$/i.test(conclusion.trim().split(/\r?\n/).at(-1) || "")
       ) {
         s.status = "accepted";
-        this.save(s);
+        await this.save(s);
         return;
       }
       if (s.role === "judge" && s.attempt >= 20) {
         s.status = "rejected";
         s.reason = "Maximum20 attempts reached";
-        this.save(s);
+        await this.save(s);
         return;
       }
       if (s.role === "work") {
@@ -153,42 +153,42 @@ export class Fire {
         s.attempt++;
         message = { role: "user", text: fireWork(s.goal, conclusion) };
       }
-      const root = this.store.session(s.root),
-        next = this.store.newSession({
-          cwd: root.cwd,
-          ownerId: root.ownerId,
-          localAgent: root.localAgent,
-          localPlatform: root.localPlatform,
-          clientId: root.clientId,
-          clientName: root.clientName,
-          executionCwds: root.executionCwds,
-          readerIds: root.readerIds,
-          model: root.model,
-          title: `[Fire] ${s.role === "judge" ? "判断" : "阶段"} ${s.attempt}`,
-          fireRoot: s.root,
-          fireRole: s.role,
-          readOnly: false,
-        });
+      const root = await this.store.session(s.root),
+        next = await this.store.newSession({
+                  cwd: root.cwd,
+                  ownerId: root.ownerId,
+                  localAgent: root.localAgent,
+                  localPlatform: root.localPlatform,
+                  clientId: root.clientId,
+                  clientName: root.clientName,
+                  executionCwds: root.executionCwds,
+                  readerIds: root.readerIds,
+                  model: root.model,
+                  title: `[Fire] ${s.role === "judge" ? "判断" : "阶段"} ${s.attempt}`,
+                  fireRoot: s.root,
+                  fireRole: s.role,
+                  readOnly: false,
+                });
       s.latest = next.id;
       s.phases.push({ session: next.id, role: s.role, attempt: s.attempt });
-      this.save(s);
+      await this.save(s);
     }
   }
-  pause(session: string) {
-    const s = this.forSession(session);
+  async pause(session: string) {
+    const s = await this.forSession(session);
     if (!s || s.latest !== session) return;
     s.status = "paused";
     s.reason = "Paused by user; continue latest phase in the same session";
-    this.save(s);
+    await this.save(s);
     this.cancel(s.latest);
   }
   async close() {
     this.closed = true;
-    for (const s of this.store.objects<FireState>("fire"))
+    for (const s of await this.store.objects<FireState>("fire"))
       if (s.status === "running") {
         s.status = "paused";
         s.reason = "Service stopped; explicitly resume latest phase";
-        this.save(s);
+        await this.save(s);
         this.cancel(s.latest);
       }
     await Promise.all([...this.running.values()]);

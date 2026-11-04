@@ -109,8 +109,8 @@ test("close escalates to killing the process group when Chromium ignores Browser
 
 test("repeated launch failures back off, are reported by status, and reset on success", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
-  const store = new Store(":memory:"), browsers = new EmployeeBrowsers(store, "");
-  t.after(async () => { await browsers.close(); store.close(); });
+  const store = await Store.open(":memory:"), browsers = new EmployeeBrowsers(store, "");
+  t.after(async () => { await browsers.close(); await store.close(); });
   const entry = { chrome: new Chrome(store, new ChromeBridge(true), ""), browser: new HeadlessBrowser() } as any;
   browsers.entries.set("ea", entry);
   t.mock.method(entry.chrome.bridge, "start", async () => {});

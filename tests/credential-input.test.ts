@@ -12,8 +12,8 @@ import { chromeCall, vaultCall } from "./public-call";
 
 const site = "https://databrain.example", other = "https://partner.example";
 const credentials: CredentialBinding[] = [{ site, values: credentialValues("账号：sample@example.test\n密码：password-example") }];
-function fixture() {
-  const store = new Store(":memory:"), bridge = new ChromeBridge(), chrome = new Chrome(store, bridge, "");
+async function fixture() {
+  const store = await Store.open(":memory:"), bridge = new ChromeBridge(), chrome = new Chrome(store, bridge, "");
   const sent: any[] = [], urls = new Map([[1, site], [2, other]]);
   const observation: any = {
     id: "snapshot", tabTag: "tab", frames: [{ id: "main", context: 1 }, { id: "child", context: 2, parent: "main" }],
@@ -41,7 +41,7 @@ function fixture() {
 }
 
 test("redacted placeholders are rejected before any action in a batch, run plan or evaluated script", async () => {
-  const { store, chrome, sent } = fixture();
+  const { store, chrome, sent } = await fixture();
   try {
     for (const text of ["[credential redacted]", "[redacted]", "__stored_secret__", "[withheld from transcript; available only to current turn]"]) {
       const result = await chrome.execute("owner", ".", { operation: "act", tabTag: "tab", actions: [{ action: "click", ref: "email" }, { action: "fill", ref: "email", text }] });
@@ -52,11 +52,11 @@ test("redacted placeholders are rejected before any action in a batch, run plan 
       await assert.rejects(chrome.execute("owner", ".", { operation: "evaluate", tabTag: "tab", expression: `document.querySelector('input').value=${JSON.stringify(text)}` }), /占位符/);
     }
     assert.deepEqual(sent, []);
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("credential fill checks the live URL, not a stale observation, and refuses a different SSO frame", async () => {
-  const { store, chrome, sent, urls } = fixture();
+  const { store, chrome, sent, urls } = await fixture();
   try {
     urls.set(1, other);
     let result = await chrome.execute("owner", ".", { operation: "act", tabTag: "tab", action: { action: "fill", ref: "email", text: "sample@example.test" }, visual: "none" }, undefined, credentials);
@@ -70,11 +70,11 @@ test("credential fill checks the live URL, not a stale observation, and refuses 
     result = await chrome.execute("owner", ".", { operation: "act", tabTag: "tab", action: { action: "fill", ref: "email", text: "sample@example.test" }, visual: "none" }, undefined, credentials);
     assert.equal(result.status, "executed", result.reason);
     assert.equal(sent.find((event) => event.method === "Input.insertText")?.text, "sample@example.test", "actual input is not replaced with a redacted label");
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("typing, evaluated inputs and guided fill all enforce the bound site while ordinary non-secret text remains usable", async () => {
-  const { store, chrome, sent, urls } = fixture();
+  const { store, chrome, sent, urls } = await fixture();
   try {
     urls.set(1, other);
     const typed = await chrome.execute("owner", ".", { operation: "act", tabTag: "tab", action: { action: "type", text: "password-example" }, visual: "none" }, undefined, credentials);
@@ -85,11 +85,11 @@ test("typing, evaluated inputs and guided fill all enforce the bound site while 
     assert.equal(sent.length, 0);
     const plain = await chrome.execute("owner", ".", { operation: "act", tabTag: "tab", action: { action: "type", text: "ordinary search query" }, visual: "none" }, undefined, credentials);
     assert.equal(plain.status, "executed", plain.reason);
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("credentials read without page context must be rechecked; equal usernames on approved pages do not conflict", async () => {
-  const { store, chrome, sent } = fixture();
+  const { store, chrome, sent } = await fixture();
   try {
     const action = { operation: "act", tabTag: "tab", action: { action: "fill", ref: "email", text: "sample@example.test" }, visual: "none" };
     const withoutUrl = await chrome.execute("owner", ".", action, undefined, [{ ...credentials[0], site: "" }]);
@@ -98,22 +98,22 @@ test("credentials read without page context must be rechecked; equal usernames o
     assert.match(withoutUrl.reason, /无需补网站配置/);
     const allowed = await chrome.execute("owner", ".", action, undefined, [{ ...credentials[0], site: "" }, ...credentials, { site: other, values: ["sample@example.test"] }]);
     assert.equal(allowed.status, "executed", allowed.reason);
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("a redirect after focusing the field is checked again before credential text is inserted", async () => {
-  const { store, chrome, sent, urls } = fixture();
+  const { store, chrome, sent, urls } = await fixture();
   try {
     (chrome as any).mouse = async () => { urls.set(1, other); };
     const result = await chrome.execute("owner", ".", { operation: "act", tabTag: "tab", action: { action: "fill", ref: "email", text: "password-example" }, visual: "none" }, undefined, credentials);
     assert.equal(result.status, "needs_review");
     assert.match(result.reason, /当前页面/);
     assert(!sent.some((event) => event.method === "Input.insertText"));
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("stopping after focus prevents credential insertion and the remaining batch", async () => {
-  const { store, chrome, sent } = fixture();
+  const { store, chrome, sent } = await fixture();
   const control = new AbortController();
   try {
     (chrome as any).mouse = async () => { control.abort(Error("user stop")); };
@@ -121,30 +121,30 @@ test("stopping after focus prevents credential insertion and the remaining batch
     assert.match(result.reason, /user stop/);
     assert.equal(result.completedActions, 0);
     assert(!sent.some((event) => event.method === "Input.insertText" || event.method === "key"));
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("successful vault reads pass observed-page credential scope into Chrome for this execution only", async () => {
-  const store = new Store(":memory:");
-  const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  const store = await Store.open(":memory:");
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: {} });
+  await store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: {} });
   engine.catalog.resolve = async () => ({ selection: "fixture/model" } as any);
   engine.providers.chat = async () => ({ role: "assistant", calls: [{ id: "check", name: "check_credential_use", arguments: { allowed: true, reason: "当前用途符合邮箱登录条件" } }] });
   // Vault entries belong to an employee, so the read happens in that employee's computer task session.
-  const worker = engine.employee.for(engine.employee.create({ name: "Worker" }, "owner").id);
+  const worker = await engine.employee.for((await engine.employee.create({ name: "Worker" }, "owner")).id);
   const job = await worker.execute("", { action: "add", kind: "todo", text: "登录邮箱" });
-  worker.update((state) => { state.tasks[0].status = "running"; });
-  const session = store.newSession({ cwd: ".", scene: "computer", employeeId: worker.employeeId, taskId: job.value.id });
+  await worker.update((state) => { state.tasks[0].status = "running"; });
+  const session = await store.newSession({ cwd: ".", scene: "computer", employeeId: worker.employeeId, taskId: job.value.id });
   worker.busy.set(job.value.id, { session: session.id, computer: true });
   let passed: CredentialBinding[] = [];
   (engine as any).chromeFor = async () => ({ execute: async (_owner: any, _cwd: any, _args: any, _signal: any, bindings: CredentialBinding[]) => { passed = bindings; return { images: [] }; } });
   try {
-    const entry = worker.vault.save({ name: "account", condition: "email login", content: "账号：sample@example.test\n密码：password-example" });
-    const tools = new Tools(engine, session, engine.config(session), new AbortController().signal, () => {});
+    const entry = await worker.vault.save({ name: "account", condition: "email login", content: "账号：sample@example.test\n密码：password-example" });
+    const tools = await Tools.create(engine, session, await engine.config(session), new AbortController().signal, () => {});
     await tools.execute({ id: "vault", ...vaultCall({ action: "get", id: entry.id, text: "login", url: site }) }, { supportsImages: true } as any);
     await tools.execute({ id: "browser", ...chromeCall({ operation: "inspect", tabTag: "tab" }) }, { supportsImages: true } as any);
     assert.equal(passed[0].site, site);
     assert(passed[0].values.includes("sample@example.test") && passed[0].values.includes("password-example"));
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });

@@ -6,212 +6,212 @@ import { join } from "node:path";
 import { Store, type Message } from "../server/core/store";
 import { Context, estimate, ACP_GUIDE } from "../server/core/context";
 import { units, protectedStart, promptHistory } from "../server/core/history";
-function fixture(count = 10, size = 6000) {
-  const store = new Store(":memory:"),
-    session = store.newSession(),
-    ctx = new Context(store, session.id);
-  store.append(session.id, { role: "user", text: "original requirement" });
+async function fixture(count = 10, size = 6000) {
+  const store = await Store.open(":memory:"),
+    session = await store.newSession(),
+    ctx = await Context.open(store, session.id);
+  await store.append(session.id, { role: "user", text: "original requirement" });
   for (let n = 0; n < count; n++) {
-    store.append(session.id, {
-      role: "assistant",
-      calls: [{ id: "c" + n, name: "read", arguments: { path: "f" + n } }],
-    });
-    store.append(session.id, {
-      role: "tool",
-      callId: "c" + n,
-      name: "read",
-      text: ("evidence " + n + "\n").repeat(size),
-    });
-    store.append(session.id, {
-      role: "assistant",
-      text: "observed result " + n,
-    });
+    await store.append(session.id, {
+            role: "assistant",
+            calls: [{ id: "c" + n, name: "read", arguments: { path: "f" + n } }],
+          });
+    await store.append(session.id, {
+            role: "tool",
+            callId: "c" + n,
+            name: "read",
+            text: ("evidence " + n + "\n").repeat(size),
+          });
+    await store.append(session.id, {
+            role: "assistant",
+            text: "observed result " + n,
+          });
   }
-  store.append(session.id, { role: "user", text: "continue unfinished work" });
+  await store.append(session.id, { role: "user", text: "continue unfinished work" });
   return { store, session, ctx };
 }
 const summary =
   "Finished inspection: required files were read, relevant evidence and decisions recorded. No changes or external submissions are inferred.";
-test("ACP uses stable atomic refs, protects two units and never splits multi-tool calls/results", () => {
-  const { store, session, ctx } = fixture(5, 100);
+test("ACP uses stable atomic refs, protects two units and never splits multi-tool calls/results", async () => {
+  const { store, session, ctx } = await fixture(5, 100);
   try {
-    const all = store.messages(session.id);
+    const all = await store.messages(session.id);
     const atomic = units(all);
     assert.equal(atomic[1].start, 2);
     assert.equal(atomic[1].ref, 3);
     assert.equal(atomic[1].end, 4);
     assert.equal(protectedStart(all), 14);
-    assert.match(ctx.view()[2].text!, /^\[m00003\]/);
-    assert.throws(() =>
-      ctx.compress([{ startRef: "m00002", endRef: "m00002", summary }]),
+    assert.match((await ctx.view())[2].text!, /^\[m00003\]/);
+    await assert.rejects(async () =>
+      await ctx.compress([{ startRef: "m00002", endRef: "m00002", summary }]),
     );
-    assert.throws(() =>
-      ctx.compress([{ startRef: "m00015", endRef: "m00015", summary }]),
+    await assert.rejects(async () =>
+      await ctx.compress([{ startRef: "m00015", endRef: "m00015", summary }]),
     );
-    const blocks = ctx.compress([
-      { startRef: "m00003", endRef: "m00006", summary },
-    ]);
+    const blocks = await ctx.compress([
+          { startRef: "m00003", endRef: "m00006", summary },
+        ]);
     assert.equal(blocks[0].start, 2);
     assert.equal(blocks[0].end, 7);
-    assert.deepEqual(store.messages(session.id), all);
+    assert.deepEqual(await store.messages(session.id), all);
   } finally {
-    store.close();
+    await store.close();
   }
 });
-test("ACP partial range success, 70% benefit guard and minimum summary are enforced", () => {
-  const { store, ctx } = fixture(7, 100);
+test("ACP partial range success, 70% benefit guard and minimum summary are enforced", async () => {
+  const { store, ctx } = await fixture(7, 100);
   try {
-    const blocks = ctx.compress([
-      { startRef: "m00003", endRef: "m00006", summary },
-      { startRef: "m00009", endRef: "m00012", summary: "too short" },
-    ]);
+    const blocks = await ctx.compress([
+          { startRef: "m00003", endRef: "m00006", summary },
+          { startRef: "m00009", endRef: "m00012", summary: "too short" },
+        ]);
     assert.equal(blocks.length, 1);
     assert.equal(blocks.rejected?.length, 1);
-    assert.throws(
-      () =>
-        ctx.compress([
-          {
-            startRef: "m00009",
-            endRef: "m00012",
-            summary: "verbose ".repeat(10000),
-          },
-        ]),
+    await assert.rejects(
+      async () =>
+        await ctx.compress([
+                      {
+                        startRef: "m00009",
+                        endRef: "m00012",
+                        summary: "verbose ".repeat(10000),
+                      },
+                    ]),
       /70%/,
     );
-    assert.equal(ctx.live().length, 1);
+    assert.equal((await ctx.live()).length, 1);
     assert.match(
-      ctx.view().find((m) => m.text?.includes("<acp-block"))!.text!,
+      (await ctx.view()).find((m) => m.text?.includes("<acp-block"))!.text!,
       /b1/,
     );
   } finally {
-    store.close();
+    await store.close();
   }
 });
-test("T1/T2/T3 nested blocks restore exact earlier blocks and canonical history", () => {
-  const { store, ctx, session } = fixture(10, 200);
+test("T1/T2/T3 nested blocks restore exact earlier blocks and canonical history", async () => {
+  const { store, ctx, session } = await fixture(10, 200);
   try {
-    const originals = store.messages(session.id),
-      a = ctx.compress([{ startRef: "m00003", endRef: "m00006", summary }])[0],
-      b = ctx.compress([{ startRef: "m00009", endRef: "m00012", summary }])[0];
-    assert.equal(ctx.groups(1)[0].count, 2);
-    const t2 = ctx.compress([{ startRef: a.id, endRef: b.id, summary }])[0];
+    const originals = await store.messages(session.id),
+      a = (await ctx.compress([{ startRef: "m00003", endRef: "m00006", summary }]))[0],
+      b = (await ctx.compress([{ startRef: "m00009", endRef: "m00012", summary }]))[0];
+    assert.equal((await ctx.groups(1))[0].count, 2);
+    const t2 = (await ctx.compress([{ startRef: a.id, endRef: b.id, summary }]))[0];
     assert.equal(t2.tier, 2);
-    const t3 = ctx.compress([
-      { startRef: t2.id, endRef: "m00018", summary },
-    ])[0];
+    const t3 = (await ctx.compress([
+          { startRef: t2.id, endRef: "m00018", summary },
+        ]))[0];
     assert.equal(t3.tier, 3);
-    ctx.decompress(t3.id);
-    assert(ctx.live().some((f) => f.id === t2.id));
-    ctx.decompress(t2.id);
+    await ctx.decompress(t3.id);
+    assert((await ctx.live()).some((f) => f.id === t2.id));
+    await ctx.decompress(t2.id);
     assert.deepEqual(
-      ctx.live().map((f) => f.id),
+      (await ctx.live()).map((f) => f.id),
       [a.id, b.id],
     );
-    ctx.decompress(a.id);
-    ctx.decompress(b.id);
-    assert.deepEqual(store.messages(session.id), originals);
-    assert.equal(ctx.view().length, originals.length);
+    await ctx.decompress(a.id);
+    await ctx.decompress(b.id);
+    assert.deepEqual(await store.messages(session.id), originals);
+    assert.equal((await ctx.view()).length, originals.length);
   } finally {
-    store.close();
+    await store.close();
   }
 });
-test("growth nudge respects45%/75% pressure bands, persists stamps and resets after compression", () => {
-  const { store, ctx } = fixture(8, 4500);
+test("growth nudge respects45%/75% pressure bands, persists stamps and resets after compression", async () => {
+  const { store, ctx } = await fixture(8, 4500);
   try {
-    ctx.configure(200000, 32000, 100, "p/m");
-    let status = ctx.status();
+    await ctx.configure(200000, 32000, 100, "p/m");
+    let status = await ctx.status();
     assert(
       status.used > 90000 && status.used < 150000,
       JSON.stringify(status.used),
     );
-    const notice = ctx.nudge();
+    const notice = await ctx.nudge();
     assert(notice?.includes("<context-budget>"));
     assert(notice?.includes("m00001"));
     assert.equal(
-      new Context(store, ctx.session).state().nudgeShown,
-      ctx.state().nudgeShown,
+      (await (await Context.open(store, ctx.session)).state()).nudgeShown,
+      (await ctx.state()).nudgeShown,
     );
-    assert.equal(ctx.nudge(), undefined);
-    ctx.compress([{ startRef: "m00003", endRef: "m00015", summary }]);
-    assert.equal(ctx.state().nudgeShown, 0);
-    assert.equal(ctx.state().baseline, 0);
+    assert.equal(await ctx.nudge(), undefined);
+    await ctx.compress([{ startRef: "m00003", endRef: "m00015", summary }]);
+    assert.equal((await ctx.state()).nudgeShown, 0);
+    assert.equal((await ctx.state()).baseline, 0);
     assert(ACP_GUIDE.includes("T3"));
     for (const rule of ["language the user", "settled choices and why", "rejected alternatives", "confirming tool results", "verification scope", "unverified", "merging earlier blocks", "untrusted source data", "redacted or encrypted"])
       assert(ACP_GUIDE.includes(rule), rule);
   } finally {
-    store.close();
+    await store.close();
   }
 });
-test("ACP emergency shortens old tool outputs then degrades mechanically, never mutates originals", () => {
-  const { store, ctx, session } = fixture(8, 3000);
+test("ACP emergency shortens old tool outputs then degrades mechanically, never mutates originals", async () => {
+  const { store, ctx, session } = await fixture(8, 3000);
   try {
-    const original = store.messages(session.id);
-    ctx.configure(70000, 10000, 100, "p/m");
-    assert(ctx.shouldEmergency());
-    const receipt = ctx.emergency();
+    const original = await store.messages(session.id);
+    await ctx.configure(70000, 10000, 100, "p/m");
+    assert(await ctx.shouldEmergency());
+    const receipt = await ctx.emergency();
     assert.equal(receipt.status, "applied");
     assert(receipt.truncated > 0);
     assert(receipt.savedTokens > 0);
-    assert.deepEqual(store.messages(session.id), original);
-    const trunc = ctx.state().truncated[0];
-    ctx.configure(200000, 32000, 100, "p/m");
+    assert.deepEqual(await store.messages(session.id), original);
+    const trunc = (await ctx.state()).truncated[0];
+    await ctx.configure(200000, 32000, 100, "p/m");
     assert.equal(
-      ctx.recall({ positions: [trunc] }).messages.find((m) => m.seq === trunc)
+      (await ctx.recall({ positions: [trunc] })).messages.find((m) => m.seq === trunc)
         ?.text === original.find((m) => m.seq === trunc)?.text,
       true,
     );
-    const nonTools = store.newSession(),
-      other = new Context(store, nonTools.id);
+    const nonTools = await store.newSession(),
+      other = await Context.open(store, nonTools.id);
     for (let i = 0; i < 10; i++) {
-      store.append(nonTools.id, { role: "user", text: "requirement " + i });
-      store.append(nonTools.id, {
-        role: "assistant",
-        text: "finished facts ".repeat(2000),
-      });
+      await store.append(nonTools.id, { role: "user", text: "requirement " + i });
+      await store.append(nonTools.id, {
+                role: "assistant",
+                text: "finished facts ".repeat(2000),
+              });
     }
-    other.configure(15000, 2000, 10, "p/m");
-    const r = other.emergency(true);
+    await other.configure(15000, 2000, 10, "p/m");
+    const r = await other.emergency(true);
     assert.equal(r.mechanical, true);
-    assert.match(other.view()[0].text!, /degraded="mechanical"/);
-    const before = other.folds()[0];
-    other.decompress(before.id);
-    assert.equal(store.messages(nonTools.id).length, 20);
+    assert.match((await other.view())[0].text!, /degraded="mechanical"/);
+    const before = (await other.folds())[0];
+    await other.decompress(before.id);
+    assert.equal((await store.messages(nonTools.id)).length, 20);
   } finally {
-    store.close();
+    await store.close();
   }
 });
 test("provider usage anchors token estimates, scene changes reset calibration, ledger survives restart", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-acp-")),
     path = join(dir, "state.db");
-  let store = new Store(path);
+  let store = await Store.open(path);
   try {
-    const session = store.newSession(),
-      ctx = new Context(store, session.id);
-    store.append(session.id, { role: "user", text: "request" });
-    ctx.configure(200000, 32000, 200, "p/m");
-    const sent = ctx.promptView(),
+    const session = await store.newSession(),
+      ctx = await Context.open(store, session.id);
+    await store.append(session.id, { role: "user", text: "request" });
+    await ctx.configure(200000, 32000, 200, "p/m");
+    const sent = await ctx.promptView(),
       local = estimate(sent) + 200;
-    ctx.recordUsage(sent, {
-      input: local,
-      cacheRead: local / 2,
-      cacheWrite: local / 2,
-    });
-    assert.equal(ctx.promptTokens(sent), local * 2);
-    store.append(session.id, { role: "assistant", text: "new output" });
-    assert(ctx.promptTokens() > local * 2);
-    const before = ctx.state().lastUsage;
-    ctx.recordUsage(sent, {});
-    assert.deepEqual(ctx.state().lastUsage, before);
-    store.close();
-    store = new Store(path);
-    const restored = new Context(store, session.id);
-    restored.configure(200000, 32000, 200, "p/m");
-    assert.equal(restored.state().calibration, 2);
-    restored.configure(200000, 32000, 200, "p/new-model");
-    assert.equal(restored.state().calibration, 1);
-    assert.equal(restored.state().anchor, undefined);
+    await ctx.recordUsage(sent, {
+            input: local,
+            cacheRead: local / 2,
+            cacheWrite: local / 2,
+          });
+    assert.equal(await ctx.promptTokens(sent), local * 2);
+    await store.append(session.id, { role: "assistant", text: "new output" });
+    assert(await ctx.promptTokens() > local * 2);
+    const before = (await ctx.state()).lastUsage;
+    await ctx.recordUsage(sent, {});
+    assert.deepEqual((await ctx.state()).lastUsage, before);
+    await store.close();
+    store = await Store.open(path);
+    const restored = await Context.open(store, session.id);
+    await restored.configure(200000, 32000, 200, "p/m");
+    assert.equal((await restored.state()).calibration, 2);
+    await restored.configure(200000, 32000, 200, "p/new-model");
+    assert.equal((await restored.state()).calibration, 1);
+    assert.equal((await restored.state()).anchor, undefined);
   } finally {
-    store.close();
+    await store.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -265,33 +265,33 @@ test("projection repairs missing/orphan pairs and trims old Chrome DOM without r
   assert(rows[0].thinking === "old secret reasoning");
   assert(rows.at(-7)?.text?.includes("dom-0"));
 });
-test("new user turns preserve native reasoning prefixes and usage anchors in ACP and auto modes", () => {
+test("new user turns preserve native reasoning prefixes and usage anchors in ACP and auto modes", async () => {
   for (const mode of ["acp", "auto"] as const) {
-    const store = new Store(":memory:"), session = store.newSession(), ctx = new Context(store, session.id, mode);
+    const store = await Store.open(":memory:"), session = await store.newSession(), ctx = await Context.open(store, session.id, mode);
     try {
-      store.append(session.id, { role: "user", text: "first" });
-      store.append(session.id, {
-        role: "assistant", text: "answer", thinking: "visible reasoning",
-        signature: "signature", opaque: [{ type: "reasoning", encrypted_content: "opaque" }],
-      });
-      ctx.configure(200000, 32000, 200, "p/m");
-      const before = ctx.promptView();
-      ctx.recordUsage(before, { input: 800, cacheRead: 200 });
-      store.append(session.id, { role: "user", text: "next" });
+      await store.append(session.id, { role: "user", text: "first" });
+      await store.append(session.id, {
+                role: "assistant", text: "answer", thinking: "visible reasoning",
+                signature: "signature", opaque: [{ type: "reasoning", encrypted_content: "opaque" }],
+              });
+      await ctx.configure(200000, 32000, 200, "p/m");
+      const before = await ctx.promptView();
+      await ctx.recordUsage(before, { input: 800, cacheRead: 200 });
+      await store.append(session.id, { role: "user", text: "next" });
       ctx.completedBefore = 3;
-      ctx.configure(200000, 32000, 200, "p/m");
-      const after = ctx.promptView();
+      await ctx.configure(200000, 32000, 200, "p/m");
+      const after = await ctx.promptView();
       assert.deepEqual(after.slice(0, before.length), before);
-      assert.equal(ctx.promptTokens(after), 1000 + Math.ceil(estimate(after.slice(before.length)) * ctx.state().calibration));
-      const anchor = ctx.state().anchor;
-      ctx.tool("context_budget", {});
-      assert.deepEqual(ctx.state().anchor, anchor, "context tools must not change the accounting policy");
-      const legacy = ctx.state();
+      assert.equal(await ctx.promptTokens(after), 1000 + Math.ceil(estimate(after.slice(before.length)) * (await ctx.state()).calibration));
+      const anchor = (await ctx.state()).anchor;
+      await ctx.tool("context_budget", {});
+      assert.deepEqual((await ctx.state()).anchor, anchor, "context tools must not change the accounting policy");
+      const legacy = await ctx.state();
       legacy.model = "p/m:true";
-      ctx.save(legacy);
-      ctx.configure(200000, 32000, 200, "p/m");
-      assert.equal(ctx.state().anchor, undefined, "discard estimates calibrated against stripped reasoning");
-      assert.equal(ctx.state().calibration, 1);
-    } finally { store.close(); }
+      await ctx.save(legacy);
+      await ctx.configure(200000, 32000, 200, "p/m");
+      assert.equal((await ctx.state()).anchor, undefined, "discard estimates calibrated against stripped reasoning");
+      assert.equal((await ctx.state()).calibration, 1);
+    } finally { await store.close(); }
   }
 });

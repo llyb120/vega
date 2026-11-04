@@ -21,20 +21,20 @@ const triggerTool = {
 export async function prepareDutyInput(engine: Engine, employee: Employee, input: Obj, caller = "", signal?: AbortSignal) {
   if (input.condition === undefined) return input;
   // Models often attach condition when creating todos; only duties compile triggers.
-  const forDuty = (input.action === "add" && input.kind === "duty") || (input.action === "update" && !!employee.state().duties.find(duty => duty.id === input.id));
+  const forDuty = (input.action === "add" && input.kind === "duty") || (input.action === "update" && !!(await employee.state()).duties.find(duty => duty.id === input.id));
   if (!forDuty) {
     const { condition: _ignored, ...rest } = input;
     return rest;
   }
   assert(!employee.deleting && !employee.deleted, "牛马已删除或正在删除，职责未保存");
-  const state = employee.state(), existing = input.action === "update" ? state.duties.find(duty => duty.id === input.id) : undefined;
+  const state = await employee.state(), existing = input.action === "update" ? state.duties.find(duty => duty.id === input.id) : undefined;
   assert((input.action === "add" && input.kind === "duty") || existing, "触发条件只用于新增或修改职责");
   employee.authorize(state, caller, input);
   assert(typeof input.condition === "string" && input.condition.trim() && [...input.condition.trim()].length <= 2000, "触发条件需要 1–2000 字");
   const condition = input.condition.trim();
   const output: Obj = { ...input, condition };
   if (existing && condition === dutyCondition(existing)) return output;
-  const config = engine.config(), selections = sceneModels(config, "lightweight");
+  const config = await engine.config(), selections = sceneModels(config, "lightweight");
   assert(selections.some(Boolean), "请先配置沟通与任务起步模型，以识别触发条件");
   const abort = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(30000)]);
   let reply: Message | undefined, failure: unknown;

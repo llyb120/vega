@@ -4,7 +4,7 @@ import { zipSync, strToU8 } from "fflate";
 import { Store } from "../server/core/store";
 import { uploadSkill } from "../server/core/skill-upload";
 test("skill upload snapshots ZIP resources without exposing server directory configuration", async () => {
-  const store = new Store(":memory:");
+  const store = await Store.open(":memory:");
   try {
     const zip = zipSync({
       "remote-skill/SKILL.md": strToU8(
@@ -31,6 +31,6 @@ test("skill upload snapshots ZIP resources without exposing server directory con
       "upload-fixture",
     );
   } finally {
-    store.close();
+    await store.close();
   }
 });

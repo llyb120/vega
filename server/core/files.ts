@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, relative, resolve, sep } from "node:path";
 import type { Session } from "./store";
 import { assert } from "./util";
@@ -28,10 +28,10 @@ export class Files {
   }
   /** What a session may read back. */
   scope(session: Session) { return session.employeeId ? this.employee(session.employeeId) : this.user(session.ownerId); }
-  write(owner: Session | string, name: string, data: Uint8Array | string) {
+  async write(owner: Session | string, name: string, data: Uint8Array | string) {
     const dir = this.dir(owner), path = join(dir, name);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(path, data, { mode: 0o600 });
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFile(path, data, { mode: 0o600 });
     return path;
   }
   /** The web address of a file under root. */
@@ -53,10 +53,15 @@ export class Files {
     assert(full && this.inside(full, this.scope(session)), "只能读取本牛马（普通会话为本人）的存档文件");
     return full;
   }
-  read(path: string) { return readFileSync(path); }
+  read(path: string) { return readFile(path); }
   mime(path: string) { return IMAGE_TYPES[extname(path).toLowerCase()]; }
-  remove(dir: string) {
+  async remove(dir: string) {
     assert(this.inside(dir, this.root), "Invalid file directory");
-    rmSync(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
+  }
+  /** Copy a directory (a forked session's files), if it exists. */
+  async copy(from: string, to: string) {
+    assert(this.inside(from, this.root) && this.inside(to, this.root), "Invalid file directory");
+    await cp(from, to, { recursive: true }).catch((e) => { if (e.code !== "ENOENT") throw e; });
   }
 }

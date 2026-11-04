@@ -95,33 +95,36 @@ const short = (s: string, n: number) =>
     ? s
     : [...s].slice(0, n).join("") + "… [clipped; recall original]";
 const STATUS_CACHE_SESSIONS = 64;
-const statusCache = new Map<string, { key: string; value: ReturnType<Context["computeStatus"]> }>();
+const statusCache = new Map<string, { key: string; value: Awaited<ReturnType<Context["computeStatus"]>> }>();
 export class Context {
   window = 200000;
   reserved = 32000;
   overhead = 0;
   completedBefore = 0;
   accounting = "";
-  constructor(
+  /** A session's context with its saved budget (window, reserved output, fixed overhead). */
+  static async open(store: Store, session: string, mode: "auto" | "acp" = "acp") {
+    const context = new Context(store, session, mode), s = await context.state();
+    context.window = s.window || 200000;
+    context.reserved = s.reserved ?? 32000;
+    context.overhead = s.overhead || 0;
+    return context;
+  }
+  private constructor(
     public store: Store,
     public session: string,
     public mode: "auto" | "acp" = "acp",
-  ) {
-    const s = this.state();
-    this.window = s.window || 200000;
-    this.reserved = s.reserved ?? 32000;
-    this.overhead = s.overhead || 0;
-  }
-  state(): State {
+  ) {}
+  async state(): Promise<State> {
     return {
       ...fresh(),
-      ...this.store.object<State>("context-state", this.session),
+      ...await this.store.object<State>("context-state", this.session),
     };
   }
-  save(s: State) {
-    this.store.save("context-state", this.session, s);
+  async save(s: State) {
+    await this.store.save("context-state", this.session, s);
   }
-  configure(
+  async configure(
     window: number,
     reserved: number,
     overhead: number,
@@ -135,7 +138,7 @@ export class Context {
     this.overhead = overhead;
     const key = model + ":preserve-reasoning";
     this.accounting = key;
-    const s = this.state();
+    const s = await this.state();
     const changed =
       s.window !== this.window ||
       s.reserved !== this.reserved ||
@@ -143,7 +146,7 @@ export class Context {
     s.window = this.window;
     s.reserved = this.reserved;
     s.overhead = this.overhead;
-    if (changed) this.save(s);
+    if (changed) await this.save(s);
     if (s.model !== key) {
       s.model = key;
       s.anchor = undefined;
@@ -152,20 +155,20 @@ export class Context {
       s.baseline = 0;
       s.nudgeShown = 0;
       s.shownByTier = [0, 0, 0, 0];
-      this.save(s);
+      await this.save(s);
     }
   }
-  folds() {
+  async folds() {
     return (
-      this.store.sql("SELECT data FROM folds WHERE session=?")
-        .all(this.session) as any[]
+      await this.store.all("SELECT data FROM folds WHERE session=?", this.session) as any[]
     )
       .map((r) => JSON.parse(r.data) as Fold)
       .sort((a, b) => a.start - b.start || a.end - b.end);
   }
-  live(rows = this.store.messages(this.session)) {
+  async live(rows?: Message[]) {
+    rows ??= await this.store.messages(this.session);
     const out: Fold[] = [];
-    for (const f of this.folds()) {
+    for (const f of await this.folds()) {
       const span = rows.filter((m) => m.seq! >= f.start && m.seq! <= f.end);
       if (
         !f.active ||
@@ -179,7 +182,8 @@ export class Context {
     }
     return out;
   }
-  protectedStart(rows = this.store.messages(this.session)) {
+  async protectedStart(rows?: Message[]) {
+    rows ??= await this.store.messages(this.session);
     return protectedStart(rows);
   }
   block(f: Fold, rows: Message[]): Message {
@@ -217,9 +221,10 @@ export class Context {
       m.text = `[${refName(m.seq!)}] ${m.text || ""}`;
     return m;
   }
-  view(rows = this.store.messages(this.session)) {
-    const live = this.live(rows),
-      s = this.state(),
+  async view(rows?: Message[]) {
+    rows ??= await this.store.messages(this.session);
+    const live = await this.live(rows),
+      s = await this.state(),
       refs = new Set(
         units(rows)
           .map((u) => u.ref)
@@ -237,13 +242,15 @@ export class Context {
     }
     return out;
   }
-  promptView(rows = this.store.messages(this.session)) {
-    return promptHistory(this.view(rows), {
-      trimImages: this.state().trimImages,
+  async promptView(rows?: Message[]) {
+    rows ??= await this.store.messages(this.session);
+    return promptHistory(await this.view(rows), {
+      trimImages: (await this.state()).trimImages,
     });
   }
-  promptTokens(view = this.promptView()) {
-    const s = this.state(),
+  async promptTokens(view?: Message[]) {
+    view ??= await this.promptView();
+    const s = await this.state(),
       scale = s.calibration >= 0.2 && s.calibration <= 5 ? s.calibration : 1,
       anchor = s.anchor;
     if (
@@ -262,11 +269,11 @@ export class Context {
       );
     return Math.ceil((estimate(view) + this.overhead) * scale);
   }
-  recordUsage(sent: Message[], usage: Obj) {
+  async recordUsage(sent: Message[], usage: Obj) {
     const actual =
       (usage.input || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0);
     if (!Number.isFinite(actual) || actual <= 0) return;
-    const s = this.state(),
+    const s = await this.state(),
       raw = estimate(sent) + this.overhead,
       ratio = actual / Math.max(1, raw);
     if (ratio >= 0.2 && ratio <= 5) s.calibration = ratio;
@@ -283,12 +290,12 @@ export class Context {
       calibrationAccepted: ratio >= 0.2 && ratio <= 5,
       at: Date.now(),
     };
-    this.save(s);
+    await this.save(s);
   }
-  clearAnchor() {
-    const s = this.state();
+  async clearAnchor() {
+    const s = await this.state();
     s.anchor = undefined;
-    this.save(s);
+    await this.save(s);
   }
   closed(rows: Message[], start: number, end: number) {
     const calls = new Set<string>();
@@ -302,12 +309,14 @@ export class Context {
     }
     return !calls.size;
   }
-  position(
+  async position(
     ref: string,
-    folds = this.live(),
-    rows = this.store.messages(this.session),
+    folds?: Fold[],
+    rows?: Message[],
     start = true,
   ) {
+    folds ??= await this.live();
+    rows ??= await this.store.messages(this.session);
     const value = String(ref)
       .trim()
       .replace(/^\[|\]$/g, "");
@@ -326,34 +335,33 @@ export class Context {
     assert(block, "Unknown active block reference " + value);
     return [block.start, block.end];
   }
-  commit(fold: Fold, children: Fold[], s = this.state()) {
-    this.store.transaction(() => {
-      for (const c of children) {
-        c.active = false;
-        this.store.sql("UPDATE folds SET data=? WHERE session=? AND id=?")
-          .run(JSON.stringify(c), this.session, c.id);
-      }
-      this.store.sql("INSERT INTO folds VALUES(?,?,?)")
-        .run(this.session, fold.id, JSON.stringify(fold));
-      s.nextId = Math.max(s.nextId, Number(fold.id.slice(1)) || 0);
-      s.generation++;
-      s.anchor = undefined;
-      s.baseline = 0;
-      s.nudgeShown = 0;
-      s.shownByTier = [0, 0, 0, 0];
-      this.save(s);
-    });
+  async commit(fold: Fold, children: Fold[], s?: State) {
+    s ??= await this.state();
+    await this.store.transaction(async () => {
+            for (const c of children) {
+              c.active = false;
+              await this.store.run("UPDATE folds SET data=? WHERE session=? AND id=?", JSON.stringify(c), this.session, c.id);
+            }
+            await this.store.run("INSERT INTO folds VALUES(?,?,?)", this.session, fold.id, JSON.stringify(fold));
+            s.nextId = Math.max(s.nextId, Number(fold.id.slice(1)) || 0);
+            s.generation++;
+            s.anchor = undefined;
+            s.baseline = 0;
+            s.nudgeShown = 0;
+            s.shownByTier = [0, 0, 0, 0];
+            await this.save(s);
+          });
   }
-  nextID(s: State) {
+  async nextID(s: State) {
     const maximum = Math.max(
       s.nextId,
-      ...this.folds().map((f) =>
+      ...(await this.folds()).map((f) =>
         /^b\d+$/.test(f.id) ? Number(f.id.slice(1)) : 0,
       ),
     );
     return "b" + (maximum + 1);
   }
-  compress(ranges: Obj[]) {
+  async compress(ranges: Obj[]) {
     assert(
       Array.isArray(ranges) && ranges.length >= 1 && ranges.length <= 8,
       "Use1–8 ranges",
@@ -362,24 +370,24 @@ export class Context {
     const rejected: Obj[] = [];
     for (const [index, r] of ranges.entries()) {
       try {
-        const rows = this.store.messages(this.session),
-          live = this.live(rows),
+        const rows = await this.store.messages(this.session),
+          live = await this.live(rows),
           summary = String(r.summary || "").trim();
         assert(
           [...summary].length >= 40 && summary.length <= 131072,
           "Summary must contain at least40 characters and be self-contained",
         );
-        let start = this.position(
-            r.startRef ?? r.start_ref ?? r.start,
-            live,
-            rows,
-          )[0],
-          end = this.position(
-            r.endRef ?? r.end_ref ?? r.end,
-            live,
-            rows,
-            false,
-          )[1];
+        let start = (await this.position(
+                    r.startRef ?? r.start_ref ?? r.start,
+                    live,
+                    rows,
+                  ))[0],
+          end = (await this.position(
+                      r.endRef ?? r.end_ref ?? r.end,
+                      live,
+                      rows,
+                      false,
+                    ))[1];
         assert(start <= end, "startRef is after endRef");
         const children: Fold[] = [];
         for (const b of live)
@@ -389,16 +397,16 @@ export class Context {
             children.push(b);
           }
         assert(
-          end < this.protectedStart(rows) && this.closed(rows, start, end),
+          end < await this.protectedStart(rows) && this.closed(rows, start, end),
           "Range reaches protected recent units, unfinished tools, or splits call/results",
         );
-        const before = this.view(rows).filter(
+        const before = (await this.view(rows)).filter(
           (m) => m.seq !== undefined && m.seq >= start && m.seq <= end,
         );
         const current =
           estimate(before) +
           children.reduce((n, b) => n + estimate(this.block(b, rows)), 0);
-        const s = this.state(),
+        const s = await this.state(),
           boundary = [
             r.startRef ?? r.start_ref ?? r.start,
             r.endRef ?? r.end_ref ?? r.end,
@@ -406,7 +414,7 @@ export class Context {
             String(ref).trim().replace(/^\[/, "").startsWith("b"),
           );
         const fold: Fold = {
-          id: this.nextID(s),
+          id: await this.nextID(s),
           start,
           end,
           summary,
@@ -425,7 +433,7 @@ export class Context {
           replacement <= current * 0.7,
           `Block (~${replacement} tokens incl. kept user words) must be <=70% of replaced view (~${current}); use a denser summary or larger finished range`,
         );
-        this.commit(fold, children, s);
+        await this.commit(fold, children, s);
         applied.push(fold);
       } catch (e: any) {
         rejected.push({ range: index + 1, error: e.message });
@@ -438,36 +446,36 @@ export class Context {
     applied.rejected = rejected;
     return applied;
   }
-  decompress(key: string | number) {
-    const rows = this.store.messages(this.session),
-      folds = this.folds(),
+  async decompress(key: string | number) {
+    const rows = await this.store.messages(this.session),
+      folds = await this.folds(),
       name =
         typeof key === "number"
           ? "b" + key
           : String(key).replace(/^\[|\]$/g, ""),
-      f = this.live(rows).find((f) => f.id === name);
+      f = (await this.live(rows)).find((f) => f.id === name);
     assert(f, "Active block not found; restore its parent first");
-    this.store.transaction(() => {
-      for (const fold of folds) {
-        if (fold.id === f.id) fold.active = false;
-        if (f.children.includes(fold.id)) fold.active = true;
-        this.store.sql("UPDATE folds SET data=? WHERE session=? AND id=?")
-          .run(JSON.stringify(fold), this.session, fold.id);
-      }
-      const s = this.state();
-      s.generation++;
-      s.anchor = undefined;
-      this.save(s);
-    });
+    await this.store.transaction(async () => {
+            for (const fold of folds) {
+              if (fold.id === f.id) fold.active = false;
+              if (f.children.includes(fold.id)) fold.active = true;
+              await this.store.run("UPDATE folds SET data=? WHERE session=? AND id=?", JSON.stringify(fold), this.session, fold.id);
+            }
+            const s = await this.state();
+            s.generation++;
+            s.anchor = undefined;
+            await this.save(s);
+          });
     return {
       restored: f.id,
       reactivated: f.children,
       messages: f.end - f.start + 1,
     };
   }
-  runs(rows = this.store.messages(this.session)) {
-    const limit = this.protectedStart(rows),
-      blocks = this.live(rows),
+  async runs(rows?: Message[]) {
+    rows ??= await this.store.messages(this.session);
+    const limit = await this.protectedStart(rows),
+      blocks = await this.live(rows),
       all = units(rows),
       out: Obj[] = [];
     let current: typeof all = [];
@@ -499,7 +507,8 @@ export class Context {
     flush();
     return out;
   }
-  groups(tier: number, rows = this.store.messages(this.session)) {
+  async groups(tier: number, rows?: Message[]) {
+    rows ??= await this.store.messages(this.session);
     const out: Obj[] = [];
     let cur: Fold[] = [];
     const flush = () => {
@@ -513,20 +522,20 @@ export class Context {
         });
       cur = [];
     };
-    for (const b of this.live(rows)) {
+    for (const b of await this.live(rows)) {
       if ((b.tier || 1) === tier) cur.push(b);
       else flush();
     }
     flush();
     return out;
   }
-  nudge() {
-    const rows = this.store.messages(this.session),
-      used = this.promptTokens(),
+  async nudge() {
+    const rows = await this.store.messages(this.session),
+      used = await this.promptTokens(),
       ratio = used / this.window,
-      s = this.state(),
-      runs = this.runs(rows),
-      groups = [this.groups(1, rows), this.groups(2, rows)],
+      s = await this.state(),
+      runs = await this.runs(rows),
+      groups = [await this.groups(1, rows), await this.groups(2, rows)],
       pending = [
         runs.reduce((n, r) => n + r.tokens, 0),
         ...groups.map((g) => g.reduce((n, r) => n + r.tokens, 0)),
@@ -567,7 +576,7 @@ export class Context {
       s.nudgeShown = used;
       s.shownByTier[tier] = used;
     }
-    this.save(s);
+    await this.save(s);
     if (!tier) return;
     const ranges =
       tier === 1
@@ -583,23 +592,23 @@ export class Context {
     if (text.length < 2400 && !m.images?.length) return text;
     return `${text.slice(0, 1000)}\n[Tool output shortened for emergency context recovery; original ${refName(m.seq!)} remains in SQLite. Use recall to read exact details; no action is declared successful.]\n${text.slice(-600)}`;
   }
-  trimOldImages() {
-    const s = this.state();
+  async trimOldImages() {
+    const s = await this.state();
     if (s.trimImages) return false;
-    const before = this.promptView();
+    const before = await this.promptView();
     s.trimImages = true;
-    this.save(s);
-    if (estimate(this.promptView()) >= estimate(before)) {
+    await this.save(s);
+    if (estimate(await this.promptView()) >= estimate(before)) {
       s.trimImages = false;
-      this.save(s);
+      await this.save(s);
       return false;
     }
-    this.clearAnchor();
+    await this.clearAnchor();
     return true;
   }
-  emergency(force = false) {
-    const rows = this.store.messages(this.session),
-      used = this.promptTokens(),
+  async emergency(force = false) {
+    const rows = await this.store.messages(this.session),
+      used = await this.promptTokens(),
       target = this.window * 0.75,
       need = force ? Math.max(used - target, used / 4) : used - target;
     const receipt: Obj = {
@@ -617,9 +626,9 @@ export class Context {
       return receipt;
     }
     if (need <= 0) return receipt;
-    const s = this.state(),
-      live = this.live(rows),
-      limit = this.protectedStart(rows),
+    const s = await this.state(),
+      live = await this.live(rows),
+      limit = await this.protectedStart(rows),
       covered = (n: number) => live.some((b) => b.start <= n && n <= b.end);
     let freed = 0;
     const candidates = rows
@@ -645,7 +654,7 @@ export class Context {
     }
     s.truncated = [...new Set(s.truncated)].sort((a, b) => a - b);
     s.anchor = undefined;
-    this.save(s);
+    await this.save(s);
     if (freed < need) {
       const stretch = [] as ReturnType<typeof units>;
       for (const u of units(rows).filter((u) => u.start < limit)) {
@@ -683,7 +692,7 @@ export class Context {
             lines.push("- " + m.name + " failed: " + short(m.text || "", 160));
         }
         const fold: Fold = {
-          id: this.nextID(s),
+          id: await this.nextID(s),
           start,
           end,
           summary: lines.slice(0, 80).join("\n"),
@@ -694,14 +703,14 @@ export class Context {
           hash: hash(span),
           at: Date.now(),
         };
-        if (estimate(this.block(fold, rows)) < estimate(this.view(span))) {
-          this.commit(fold, [], s);
+        if (estimate(this.block(fold, rows)) < estimate(await this.view(span))) {
+          await this.commit(fold, [], s);
           receipt.mechanical = true;
           receipt.block = fold.id;
         }
       }
     }
-    receipt.resultTokens = this.promptTokens();
+    receipt.resultTokens = await this.promptTokens();
     receipt.savedTokens = Math.max(0, used - receipt.resultTokens);
     receipt.status = receipt.savedTokens > 0 ? "applied" : "rejected";
     receipt.reason = receipt.mechanical
@@ -709,14 +718,14 @@ export class Context {
       : receipt.truncated
         ? "Old tool outputs shortened; originals preserved"
         : "No finished content outside protected tail";
-    const latest = this.state();
+    const latest = await this.state();
     latest.lastReceipt = receipt;
-    this.save(latest);
+    await this.save(latest);
     return receipt;
   }
-  shouldEmergency() {
+  async shouldEmergency() {
     return (
-      this.promptTokens() >=
+      await this.promptTokens() >=
       Math.min(this.window * 0.92, this.window - this.reserved - 256)
     );
   }
@@ -724,9 +733,9 @@ export class Context {
    * Context budget for UIs and tools. Messages are append-only, so the result is cached per session and keyed by
    * the message/fold/state fingerprint; a miss reuses the store's incrementally loaded rows and one prompt view.
    */
-  status() {
-    const { rows, revision } = this.store.sharedMessages(this.session),
-      s = this.state(),
+  async status() {
+    const { rows, revision } = await this.store.sharedMessages(this.session),
+      s = await this.state(),
       key = JSON.stringify([
         revision,
         this.mode,
@@ -734,8 +743,7 @@ export class Context {
         this.reserved,
         this.overhead,
         s,
-        this.store.sql("SELECT id,data FROM folds WHERE session=? ORDER BY id")
-          .all(this.session),
+        await this.store.all("SELECT id,data FROM folds WHERE session=? ORDER BY id", this.session),
       ]),
       cached = statusCache.get(this.session);
     if (cached?.key === key) {
@@ -743,7 +751,7 @@ export class Context {
       statusCache.set(this.session, cached);
       return { ...cached.value };
     }
-    const value = this.computeStatus(rows as Message[], s);
+    const value = await this.computeStatus(rows as Message[], s);
     statusCache.delete(this.session);
     statusCache.set(this.session, { key, value });
     while (statusCache.size > STATUS_CACHE_SESSIONS)
@@ -751,9 +759,11 @@ export class Context {
     return { ...value };
   }
   /** Uncached status over the given rows; `status()` must always equal this on fresh rows. */
-  computeStatus(rows = this.store.messages(this.session), s = this.state()) {
-    const view = this.promptView(rows),
-      used = this.promptTokens(view);
+  async computeStatus(rows?: Message[], s?: State) {
+    rows ??= await this.store.messages(this.session);
+    s ??= await this.state();
+    const view = await this.promptView(rows),
+      used = await this.promptTokens(view);
     return {
       estimated: true,
       method:
@@ -778,30 +788,30 @@ export class Context {
         this.window - this.reserved - 256,
       ),
       generation: s.generation,
-      blocks: this.live(rows).map(({ summary, hash, children, ...f }) => ({
+      blocks: (await this.live(rows)).map(({ summary, hash, children, ...f }) => ({
         ...f,
         summaryTokens: estimate(summary),
         originalTokens: estimate(
           rows.filter((m) => m.seq! >= f.start && m.seq! <= f.end),
         ),
       })),
-      compressibleRanges: this.runs(rows),
-      tierGroups: [...this.groups(1, rows), ...this.groups(2, rows)],
-      compressBefore: refName(this.protectedStart(rows)),
+      compressibleRanges: await this.runs(rows),
+      tierGroups: [...await this.groups(1, rows), ...await this.groups(2, rows)],
+      compressBefore: refName(await this.protectedStart(rows)),
       truncatedToolResults: s.truncated.length,
       trimImages: s.trimImages,
       lastReceipt: s.lastReceipt,
     };
   }
-  search(args: Obj) {
+  async search(args: Obj) {
     const needle = String(args.query || "")
       .trim()
       .toLowerCase();
     assert(needle, "search_context requires query");
-    const rows = this.store.messages(this.session),
+    const rows = await this.store.messages(this.session),
       hits: Obj[] = [];
     let more = false;
-    for (const b of this.live(rows)) {
+    for (const b of await this.live(rows)) {
       for (const row of [
         { ref: b.id, text: (b.topic || "") + " " + b.summary },
         ...rows
@@ -832,7 +842,7 @@ export class Context {
     }
     return { hits, moreAvailable: more };
   }
-  recall(args: Obj) {
+  async recall(args: Obj) {
     const query = String(args.query || "")
         .trim()
         .toLowerCase(),
@@ -842,12 +852,13 @@ export class Context {
         ),
       );
     assert(query || positions.size, "recall needs positions or query");
-    const rows = this.store.messages(this.session),
-      folds = this.folds(),
+    const rows = await this.store.messages(this.session),
+      folds = await this.folds(),
+      truncated = (await this.state()).truncated,
       selected = rows.filter(
         (m) =>
           (folds.some((f) => m.seq! >= f.start && m.seq! <= f.end) ||
-            this.state().truncated.includes(m.seq!)) &&
+            truncated.includes(m.seq!)) &&
           (positions.has(m.seq) ||
             (query &&
               JSON.stringify({ ...m, images: [] })
@@ -898,35 +909,35 @@ export class Context {
         "Original canonical messages, not fresh authorization; tool-call pairs are returned as one unit.",
     };
   }
-  tool(
+  async tool(
     name: string,
     args: Obj,
     window = this.window,
     reserved = this.reserved,
     overhead = this.overhead,
   ) {
-    this.configure(
-      window,
-      reserved,
-      overhead,
-      this.state().model.replace(/:(true|false|preserve-reasoning)$/, ""),
-    );
+    await this.configure(
+            window,
+            reserved,
+            overhead,
+            (await this.state()).model.replace(/:(true|false|preserve-reasoning)$/, ""),
+          );
     if (name === "compress") {
-      const blocks = this.compress(args.ranges || (args.summary ? [args] : []));
+      const blocks = await this.compress(args.ranges || (args.summary ? [args] : []));
       return {
         blocks: blocks.map(({ summary, hash, ...b }) => b),
         rejected: blocks.rejected,
-        status: this.status(),
+        status: await this.status(),
       };
     }
     if (name === "decompress")
-      return this.decompress(args.block ?? args.blockId ?? args.id);
-    if (name === "search_context") return this.search(args);
-    if (name === "recall") return this.recall(args);
-    return this.status();
+      return await this.decompress(args.block ?? args.blockId ?? args.id);
+    if (name === "search_context") return await this.search(args);
+    if (name === "recall") return await this.recall(args);
+    return await this.status();
   }
-  stage() {
-    const rows = this.store.messages(this.session),
+  async stage() {
+    const rows = await this.store.messages(this.session),
       turns: Obj[] = [];
     for (const row of rows) {
       if (row.role === "user")

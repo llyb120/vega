@@ -16,12 +16,12 @@ function seqParam(query: URLSearchParams, name: string, min: number, max = Numbe
  * `limit` (1–500) with optional `before` returns the newest messages older than `before`;
  * `after` returns every message newer than `after` (used to append after stream events).
  */
-export function chatHistory(store: Store, session: string, query: URLSearchParams) {
+export async function chatHistory(store: Store, session: string, query: URLSearchParams) {
   const limit = seqParam(query, "limit", 1, CHAT_PAGE_MAX), before = seqParam(query, "before", 1), after = seqParam(query, "after", 0);
-  if (limit === undefined && before === undefined && after === undefined) return { messages: store.messages(session) };
+  if (limit === undefined && before === undefined && after === undefined) return { messages: await store.messages(session) };
   check(after === undefined || (before === undefined && limit === undefined), 400, "after cannot be combined with before or limit");
-  const page = store.messagePage(session, { before, after, limit: limit ?? 100 });
+  const page = await store.messagePage(session, { before, after, limit: limit ?? 100 });
   if (after === undefined) return page;
-  const lastSeq = (store.sql("SELECT COALESCE(MAX(seq),0) seq FROM messages WHERE session=?").get(session) as { seq: number }).seq;
+  const lastSeq = (await store.one("SELECT COALESCE(MAX(seq),0) seq FROM messages WHERE session=?", session) as { seq: number }).seq;
   return { ...page, lastSeq };
 }

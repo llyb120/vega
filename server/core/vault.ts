@@ -38,44 +38,35 @@ export const decrypt = (key: Buffer, aad: string, blob: string) => {
 /** Each employee keeps its own credential book in this object kind. */
 export const vaultKind = (employeeId: string) => "vault:" + employeeId;
 export class Vault {
-  key: Buffer;
-  /** kind "vault" is the key holder (and the pre-migration global book); employees use scoped(). */
-  constructor(public store: Store, public kind = "vault", key?: Buffer) {
-    if (key) {
-      this.key = key;
-      return;
+  /** kind "vault" is the key holder; employees use scoped(). */
+  constructor(public store: Store, public kind = "vault", private keyLoad?: Promise<Buffer>) {}
+  /** The encryption key: VEGA_VAULT_KEY, or one generated once and kept in settings. */
+  key(): Promise<Buffer> {
+    let key = this.keyLoad || keys.get(this.store);
+    if (!key) {
+      keys.set(this.store, (key = loadKey(this.store)));
+      key.catch(() => {}); // reported to whoever uses the key
     }
-    const env = process.env.VEGA_VAULT_KEY;
-    this.key = env
-      ? Buffer.from(env, /^[a-f0-9]{64}$/i.test(env) ? "hex" : "base64")
-      : Buffer.from(store.get("vault:key", ""), "base64");
-    if (!this.key.length) {
-      this.key = randomBytes(32);
-      store.put("vault:key", this.key.toString("base64"));
-    }
-    assert(
-      this.key.length === 32,
-      "VEGA_VAULT_KEY must encode exactly 32 bytes",
-    );
+    return (this.keyLoad = key);
   }
   /** The credential book of one employee; same key and encryption, separate entries. */
   scoped(employeeId: string) {
-    return new Vault(this.store, vaultKind(employeeId), this.key);
+    return new Vault(this.store, vaultKind(employeeId), this.key());
   }
-  sealObject(value: any, aad = "subscription") {
-    return encrypt(this.key, aad, JSON.stringify(value));
+  async sealObject(value: any, aad = "subscription") {
+    return encrypt(await this.key(), aad, JSON.stringify(value));
   }
-  openObject(raw: string, aad = "subscription") {
-    return JSON.parse(decrypt(this.key, aad, raw).toString());
+  async openObject(raw: string, aad = "subscription") {
+    return JSON.parse(decrypt(await this.key(), aad, raw).toString());
   }
-  list() {
+  async list() {
     const now = Date.now();
-    for (const e of this.store.objects<any>(this.kind))
+    for (const e of await this.store.objects<any>(this.kind))
       if (e.tempFor && now - e.createdAt > 86400000)
-        this.store.remove(this.kind, e.id);
-    return this.store.objects<any>(this.kind).map(({ secret, ...e }) => e);
+        await this.store.remove(this.kind, e.id);
+    return (await this.store.objects<any>(this.kind)).map(({ secret, ...e }) => e);
   }
-  save(a: Obj) {
+  async save(a: Obj) {
     assert(
       typeof a.name === "string" && a.name.trim() && a.name.length <= 100,
       "Vault name required, max 100",
@@ -91,28 +82,28 @@ export class Vault {
         (typeof a.content === "string" && a.content.length <= 16000),
       "Vault content too long",
     );
-    const old = a.id ? this.store.object<any>(this.kind, a.id) : undefined;
+    const old = a.id ? await this.store.object<any>(this.kind, a.id) : undefined;
     if (a.id) assert(old, "Vault entry not found");
     assert(old || a.content, "New entry requires content");
-    assert(old || this.list().length < 200, "Vault capacity reached");
+    assert(old || (await this.list()).length < 200, "Vault capacity reached");
     const entry = {
       ...old,
       id: old?.id || id("v"),
       name: a.name,
       condition: a.condition,
-      secret: a.content ? encrypt(this.key, "vault", a.content) : old.secret,
+      secret: a.content ? encrypt(await this.key(), "vault", a.content) : old.secret,
       share: a.share ?? old?.share ?? false,
       createdAt: old?.createdAt || Date.now(),
     };
-    this.store.save(this.kind, entry.id, entry);
+    await this.store.save(this.kind, entry.id, entry);
     return { id: entry.id };
   }
-  get(key: string, purpose: string, task = "") {
+  async get(key: string, purpose: string, task = "") {
     assert(
       typeof purpose === "string" && purpose.trim(),
       "Vault purpose required",
     );
-    const e = this.store.object<any>(this.kind, key);
+    const e = await this.store.object<any>(this.kind, key);
     assert(e, "Vault entry not found");
     assert(
       !e.tempFor || e.tempFor === task,
@@ -120,10 +111,10 @@ export class Vault {
     );
     assert(!e.tempFor || Date.now() - e.createdAt <= 86400000, "Temporary credential expired");
 
-    const content = decrypt(this.key, "vault", e.secret).toString();
+    const content = decrypt(await this.key(), "vault", e.secret).toString();
     e.usedAt = Date.now();
     e.usedFor = purpose.slice(0, 100);
-    this.store.save(this.kind, key, e);
+    await this.store.save(this.kind, key, e);
     return {
       id: e.id,
       name: e.name,
@@ -132,11 +123,11 @@ export class Vault {
       next: VAULT_USAGE,
     };
   }
-  remove(key: string) {
-    assert(this.store.object(this.kind, key), "Vault entry not found");
-    this.store.remove(this.kind, key);
+  async remove(key: string) {
+    assert(await this.store.object(this.kind, key), "Vault entry not found");
+    await this.store.remove(this.kind, key);
   }
-  request(req: string) {
+  async request(req: string) {
     const { privateKey, publicKey } = generateKeyPairSync("x25519");
     const rawPrivate = privateKey
         .export({ type: "pkcs8", format: "der" })
@@ -144,9 +135,9 @@ export class Vault {
       rawPublic = publicKey
         .export({ type: "spki", format: "der" })
         .subarray(-32);
-    this.store.save("vault-request", req, {
-      secret: encrypt(this.key, req, rawPrivate),
-    });
+    await this.store.save("vault-request", req, {
+            secret: encrypt(await this.key(), req, rawPrivate),
+          });
     return rawPublic.toString("base64");
   }
   shared(rawPrivate: Buffer, rawPublic: Buffer) {
@@ -172,8 +163,8 @@ export class Vault {
     );
     return createHash("sha256").update("nova-vault-v1").update(secret).digest();
   }
-  sealFor(key: string, req: string, their: string) {
-    const e = this.store.object<any>(this.kind, key);
+  async sealFor(key: string, req: string, their: string) {
+    const e = await this.store.object<any>(this.kind, key);
     assert(
       e?.share && !e.tempFor,
       "Credential is not shareable or is temporary",
@@ -183,7 +174,7 @@ export class Vault {
         privateKey.export({ format: "der", type: "pkcs8" }).subarray(-32),
         Buffer.from(their, "base64"),
       );
-    const content = this.get(key, "加密发给远程牛马").content;
+    const content = (await this.get(key, "加密发给远程牛马")).content;
     return {
       name: e.name,
       sealed: {
@@ -199,58 +190,58 @@ export class Vault {
       },
     };
   }
-  receive(req: string, task: string, sealed: Obj) {
-    const mine = this.store.object<any>("vault-request", req);
+  async receive(req: string, task: string, sealed: Obj) {
+    const mine = await this.store.object<any>("vault-request", req);
     assert(mine, "No outstanding credential request");
     const shared = this.shared(
-      decrypt(this.key, req, mine.secret),
+      decrypt(await this.key(), req, mine.secret),
       Buffer.from(sealed.epk, "base64"),
     );
     const data = JSON.parse(decrypt(shared, req, sealed.data).toString());
     assert(typeof data.password === "string" && data.password.length > 0 && data.password.length <= 16000, "Invalid shared credential");
     assert(data.condition === undefined || (typeof data.condition === "string" && data.condition.length <= 500), "Invalid shared credential condition");
-    const key = id("v");
-    this.store.transaction(() => {
-      this.store.remove("vault-request", req);
-      this.store.save(this.kind, key, {
-        id: key,
-        name: (data.name || "凭据") + "（对方传来）",
-        condition: `仅限任务「${task}」使用，任务结束即删除` + (data.condition ? `；原使用条件：${data.condition}` : ""),
-        secret: encrypt(
-          this.key,
-          "vault",
-          data.username
-            ? `账号：${data.username}\n密码：${data.password}`
-            : data.password,
-        ),
-        share: false,
-        tempFor: req,
-        createdAt: Date.now(),
-      });
-    });
+    const key = id("v"), vaultKey = await this.key();
+    await this.store.transaction(async () => {
+            await this.store.remove("vault-request", req);
+            await this.store.save(this.kind, key, {
+                      id: key,
+                      name: (data.name || "凭据") + "（对方传来）",
+                      condition: `仅限任务「${task}」使用，任务结束即删除` + (data.condition ? `；原使用条件：${data.condition}` : ""),
+                      secret: encrypt(
+                        vaultKey,
+                        "vault",
+                        data.username
+                          ? `账号：${data.username}\n密码：${data.password}`
+                          : data.password,
+                      ),
+                      share: false,
+                      tempFor: req,
+                      createdAt: Date.now(),
+                    });
+          });
     return { id: key, name: data.name };
   }
-  dropTemp(req: string) {
-    this.store.transaction(() => {
-      this.store.remove("vault-request", req);
-      for (const e of this.store.objects<any>(this.kind))
-        if (e.tempFor === req) this.store.remove(this.kind, e.id);
-    });
+  async dropTemp(req: string) {
+    await this.store.transaction(async () => {
+            await this.store.remove("vault-request", req);
+            for (const e of await this.store.objects<any>(this.kind))
+              if (e.tempFor === req) await this.store.remove(this.kind, e.id);
+          });
   }
 }
-/**
- * One-time move of the former global book: every employee used it, so each current employee gets a copy;
- * a temporary entry goes only to the employee owning its task. The global entries are then deleted.
- */
-export function migrateGlobalVault(store: Store, current: () => { employeeId: string; taskIds: string[] }[]) {
-  if (store.get("vault:migrated", false)) return;
-  const employees = current();
-  store.transaction(() => {
-    for (const entry of store.objects<any>("vault")) {
-      const owners = entry.tempFor ? employees.filter((employee) => employee.taskIds.includes(entry.tempFor)) : employees;
-      for (const owner of owners) store.save(vaultKind(owner.employeeId), entry.id, entry);
-      store.remove("vault", entry.id);
-    }
-    store.put("vault:migrated", true);
-  });
+/** One key load per store, shared by every Vault on it (the engine loads it at startup). */
+const keys = new WeakMap<Store, Promise<Buffer>>();
+async function loadKey(store: Store) {
+  const env = process.env.VEGA_VAULT_KEY;
+  const key = env
+    ? Buffer.from(env, /^[a-f0-9]{64}$/i.test(env) ? "hex" : "base64")
+    : await store.transaction(async () => {
+        const saved = Buffer.from(await store.get("vault:key", ""), "base64");
+        if (saved.length) return saved;
+        const fresh = randomBytes(32);
+        await store.put("vault:key", fresh.toString("base64"));
+        return fresh;
+      });
+  assert(key.length === 32, "VEGA_VAULT_KEY must encode exactly 32 bytes");
+  return key;
 }

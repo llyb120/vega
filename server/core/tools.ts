@@ -29,6 +29,7 @@ import type { Engine } from "./engine";
 import { CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, TEAM_MEMBER_RULES, TEAM_MANAGER_RULES } from "./prompt";
 import { prepareDutyInput } from "./duty-condition";
 import { Context } from "./context";
+import type { EmployeeState } from "./employee";
 import { MCP } from "./mcp";
 import {
   localShell,
@@ -64,40 +65,38 @@ const string = { type: "string" },
   integer = { type: "integer" },
   positive = { type: "integer", minimum: 1 };
 export class Tools {
-  context: Context;
+
   setupAccess?: "provider";
   actorId?: string;
   private credentials: CredentialBinding[] = [];
   private browserTab?: string;
   sceneStack: string[] = [];
-  mcp: MCP;
-  constructor(
+  static async create(engine: Engine, session: Session, config: Config, signal: AbortSignal, emit: (type: string, data: any) => void) {
+    const context = await Context.open(engine.store, session.id, config.contextMode === "acp" ? "acp" : "auto");
+    return new Tools(engine, session, config, signal, emit, context, await engine.mcpFor(session, config));
+  }
+  private constructor(
     public engine: Engine,
     public session: Session,
     public config: Config,
     public signal: AbortSignal,
     public emit: (type: string, data: any) => void,
-  ) {
-    this.context = new Context(
-      engine.store,
-      session.id,
-      config.contextMode === "acp" ? "acp" : "auto",
-    );
-    this.mcp = engine.mcpFor(session, config);
-  }
-  canManageEmployee() {
+    public context: Context,
+    public mcp: MCP,
+  ) {}
+  async canManageEmployee() {
     if (!this.actorId) return false;
-    const user = this.engine.store.sql("SELECT id,role,disabled FROM web_users WHERE id=?").get(this.actorId) as { id: string; role: string; disabled: number } | undefined;
-    return !!user && !user.disabled && this.engine.employeeFor(this.session).manageable(user);
+    const user = await this.engine.store.one("SELECT id,role,disabled FROM web_users WHERE id=?", this.actorId) as { id: string; role: string; disabled: number } | undefined;
+    return !!user && !user.disabled && await (await this.engine.employeeFor(this.session)).manageable(user);
   }
   /** Which employee/vault tools and branches this session may see; mirrors the runtime permission checks. */
-  toolContext(): ToolContext {
+  async toolContext(): Promise<ToolContext> {
     if (!this.session.employeeId && !this.session.taskId) return { kind: "normal" };
-    if (!this.session.taskId) return { kind: "chat", member: this.engine.employeeFor(this.session).state().scope === "team" && !this.canManageEmployee() };
-    let state: ReturnType<ReturnType<Engine["employeeFor"]>["state"]> | undefined, task: Obj | undefined;
+    if (!this.session.taskId) return { kind: "chat", member: (await (await this.engine.employeeFor(this.session)).state()).scope === "team" && !await this.canManageEmployee() };
+    let state: EmployeeState | undefined, task: Obj | undefined;
     try {
-      const employee = this.engine.employeeFor(this.session);
-      state = employee.state(); task = employee.findTask(this.session.taskId);
+      const employee = await this.engine.employeeFor(this.session);
+      state = await employee.state(); task = await employee.findTask(this.session.taskId);
     } catch { /* task record gone: only the always-visible task tools remain */ }
     const duty = task?.dutyId ? state?.duties.find((d) => d.id === task.dutyId) : undefined;
     const dynamic = !!duty && !duty.manual && !duty.everyMinutes && !duty.times?.length && !duty.events?.length;
@@ -111,9 +110,9 @@ export class Tools {
     };
   }
   /** Shared rules for the exposed tool families, injected once into the system prompt instead of every description. */
-  rules(model?: Model) {
-    const names = new Set(this.definitions(model).map((d) => d.name));
-    const ctx = this.toolContext(), parts: string[] = [];
+  async rules(model?: Model) {
+    const names = new Set((await this.definitions(model)).map((d) => d.name));
+    const ctx = await this.toolContext(), parts: string[] = [];
     if ([...names].some((n) => CHROME_TOOLS.has(n))) parts.push(CHROME_RULES);
     if (names.has("vault_get")) parts.push("[密码本] " + VAULT_USAGE);
     if (ctx.kind === "task") parts.push(EMPLOYEE_TASK_RULES);
@@ -121,7 +120,7 @@ export class Tools {
     if (ctx.kind === "chat") parts.push(ctx.member ? TEAM_MEMBER_RULES : TEAM_MANAGER_RULES);
     return parts.length ? "\n" + parts.join("\n") : "";
   }
-  definitions(model?: Model) {
+  async definitions(model?: Model) {
     const defs: Tool[] = [
       schema(
         "read",
@@ -240,7 +239,7 @@ export class Tools {
           ["block"],
         ),
       );
-      const ctx = this.toolContext();
+      const ctx = await this.toolContext();
       defs.push(...employeeTools(ctx), ...vaultTools(ctx));
       if (
         (!this.session.taskId || this.session.scene === "computer") &&
@@ -330,11 +329,11 @@ export class Tools {
   }
 
   private async credentialScope(a: Obj) {
-    const vault = this.engine.employeeFor(this.session).vault;
-    const entry = vault.list().find((item) => item.id === a.id && (!item.tempFor || item.tempFor === this.session.taskId));
+    const vault = (await this.engine.employeeFor(this.session)).vault;
+    const entry = (await vault.list()).find((item) => item.id === a.id && (!item.tempFor || item.tempFor === this.session.taskId));
     assert(entry, "Vault entry not found for this task");
-    const task = this.session.taskId ? this.engine.employeeFor(this.session).task(this.engine.employeeFor(this.session).state(), this.session.taskId).text
-      : this.engine.store.messages(this.session.id).findLast((message) => message.role === "user")?.text || "";
+    const task = this.session.taskId ? (await this.engine.employeeFor(this.session)).task(await (await this.engine.employeeFor(this.session)).state(), this.session.taskId).text
+      : (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "";
     const browser = this.session.localAgent ? this.engine.localBrowsers.peek(this.session.id) : this.session.employeeId ? this.engine.browsers.peek(this.session.employeeId) : this.engine.chrome;
     const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
     const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
@@ -344,7 +343,7 @@ export class Tools {
     }));
     const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (a.action === "vault_send" ? "为当前任务提供加密凭据支援" : ""), task: task.slice(0, 4000), ...(a.url ? { url: vaultSite(a.url) } : {}), pages }, this.signal);
     this.signal.throwIfAborted();
-    const latest = vault.list().find((item) => item.id === entry.id);
+    const latest = (await vault.list()).find((item) => item.id === entry.id);
     assert(latest?.name === entry.name && latest?.condition === entry.condition, "凭据使用条件已变化，请重新核对");
     return scope;
   }
@@ -359,7 +358,7 @@ export class Tools {
   }
   private async executeInner(call: Call, model: Model): Promise<Outcome> {
     this.signal.throwIfAborted();
-    const definition = this.definitions(model).find((t) => t.name === call.name);
+    const definition = (await this.definitions(model)).find((t) => t.name === call.name);
     assert(definition, "Tool unavailable in this scene");
     const split = CHROME_TOOLS.has(call.name) || EMPLOYEE_TOOLS.has(call.name) || VAULT_TOOLS.has(call.name);
     let internal: Internal | undefined, rest: Obj = {};
@@ -367,10 +366,10 @@ export class Tools {
       const { _after, ...publicArgs } = call.arguments || {};
       rest = publicArgs;
       // Validate against the visible (context-trimmed) schema before any side effect.
-      internal = toInternal(call.name, checkArgs(definition.parameters, rest), this.toolContext());
+      internal = toInternal(call.name, checkArgs(definition.parameters, rest), await this.toolContext());
     }
     const a = internal ? internal.args : omitPlaceholders({ ...call.arguments }, (definition as any).parameters);
-    const waiting = this.session.employeeId && this.session.taskId && this.engine.employeeFor(this.session).findTask(this.session.taskId)?.workspaceWait;
+    const waiting = this.session.employeeId && this.session.taskId && (await (await this.engine.employeeFor(this.session)).findTask(this.session.taskId))?.workspaceWait;
     if (waiting) return { value: { status: "queued", reason: "工作区写入占用，任务已暂停，本步未执行；资源释放后自动续做。" }, error: true, stop: true };
     if (internal) {
       const result = internal.tool === "chrome" ? await this.chrome(a) : await this.employee(internal, call.name, rest);
@@ -388,7 +387,7 @@ export class Tools {
         "Configuration writes require an explicit current /setup user command",
       );
       const next = JSON.parse(a.content),
-        previous = this.engine.config();
+        previous = await this.engine.config();
       mergeSecrets(next, previous);
       const allowed = ["provider", "model", "scenes"];
       for (const key of new Set([
@@ -403,8 +402,8 @@ export class Tools {
       return { value: await this.engine.saveConfig(next) };
     }
     if (["write", "edit", "bash"].includes(call.name) && this.session.employeeId && this.session.taskId) {
-      const employee = this.engine.employeeFor(this.session);
-      if (!await employee.claimWorkspace(this.session, this.session.scene === "coding" || call.name !== "bash")) return { value: { status: "queued", reason: employee.task(employee.state(), this.session.taskId).queueReason || "任务已暂停，本步未执行。", next: "System resumes the same task after the workspace is released; recheck current files before continuing, never replay completed operations." }, error: true, stop: true };
+      const employee = await this.engine.employeeFor(this.session);
+      if (!await employee.claimWorkspace(this.session, this.session.scene === "coding" || call.name !== "bash")) return { value: { status: "queued", reason: employee.task(await employee.state(), this.session.taskId).queueReason || "任务已暂停，本步未执行。", next: "System resumes the same task after the workspace is released; recheck current files before continuing, never replay completed operations." }, error: true, stop: true };
     }
     if (["write", "edit"].includes(call.name)) {
       const agent = this.agent();
@@ -427,9 +426,9 @@ export class Tools {
         ? await localCwdExists(this.engine.localAgents, agent, this.session.cwd, a.path, this.signal)
         : resolve(this.session.cwd, a.path);
       if (!agent) assert((await stat(path)).isDirectory(), "Existing cwd directory required");
-      if (this.session.employeeId && this.session.taskId && path !== this.session.cwd) this.engine.employeeFor(this.session).releaseWorkspace(this.session.taskId);
+      if (this.session.employeeId && this.session.taskId && path !== this.session.cwd) (await this.engine.employeeFor(this.session)).releaseWorkspace(this.session.taskId);
       this.session.cwd = path;
-      this.engine.store.saveSession(this.session);
+      await this.engine.store.saveSession(this.session);
       return { value: { cwd: path } };
     }
     if (call.name === "compress") {
@@ -454,10 +453,10 @@ export class Tools {
       ].includes(call.name)
     )
       return {
-        value: this.context.tool(call.name, a),
+        value: await this.context.tool(call.name, a),
       };
     if (call.name === "mcp") {
-      this.mcp = this.engine.mcpFor(this.session, this.config);
+      this.mcp = await this.engine.mcpFor(this.session, this.config);
       const result = await this.mcp.execute(
         a,
         !!this.session.readOnly,
@@ -466,11 +465,11 @@ export class Tools {
       const images: Outcome["images"] = [];
       for (const part of result.content || [])
         if (part.type === "image") {
-          const blobId = this.engine.store.blob(
-            part.mimeType,
-            Buffer.from(part.data, "base64"),
-          );
-          this.engine.store.grantBlob(blobId, this.session.id);
+          const blobId = await this.engine.store.blob(
+                      part.mimeType,
+                      Buffer.from(part.data, "base64"),
+                    );
+          await this.engine.store.grantBlob(blobId, this.session.id);
           images.push({ mime: part.mimeType, blobId });
           part.data = "[image attached]";
         }
@@ -493,37 +492,37 @@ export class Tools {
       walk(publicArgs, "");
       throw new Error(`${tool || "该工具"} 的 ${fields.length ? fields.join("、") : "文本字段"} 含有密码本凭据内容（如账号、密码或令牌），不能写入任务进度、提问、备注或恢复点。请删去该值后重试；需要指代时写“密码本中的某条目”。`);
     }
-    const employee = this.engine.employeeFor(this.session);
-    const source = this.session.employeeId && !this.session.taskId ? this.engine.store.messages(this.session.id).findLast((message) => message.role === "user") : undefined;
-    const taskLink = (id: string, replace = false) => {
-      if (source?.seq) employee.update((state) => {
-        const task = employee.task(state, id);
-        if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
-      });
-      const task = employee.task(employee.state(), id);
+    const employee = await this.engine.employeeFor(this.session);
+    const source = this.session.employeeId && !this.session.taskId ? (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user") : undefined;
+    const taskLink = async (id: string, replace = false) => {
+      if (source?.seq) await employee.update((state) => {
+              const task = employee.task(state, id);
+              if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
+            });
+      const task = employee.task(await employee.state(), id);
       return { id, title: task.text.slice(0, 80), status: task.status };
     };
-    if (internal.target === "task") assert(employee.findTask(a.id), "taskId 不是当前牛马的任务；职责请用 employee_duty_manage");
-    if (internal.target === "duty") assert(employee.state().duties.some((d) => d.id === a.id), "dutyId 不是当前牛马的职责；任务请用 employee_task_manage");
-    if (this.session.employeeId && !this.session.taskId && employee.state().scope === "team" && !this.canManageEmployee())
+    if (internal.target === "task") assert(await employee.findTask(a.id), "taskId 不是当前牛马的任务；职责请用 employee_duty_manage");
+    if (internal.target === "duty") assert((await employee.state()).duties.some((d) => d.id === a.id), "dutyId 不是当前牛马的职责；任务请用 employee_task_manage");
+    if (this.session.employeeId && !this.session.taskId && (await employee.state()).scope === "team" && !await this.canManageEmployee())
       assert(["list", "resume", "answer", "stop"].includes(a.action) || (a.action === "add" && a.kind === "todo"), "当前交代人无团队牛马管理权限；可以派单、查询、补充、续做和停止任务，职责、记忆和凭据请管理员管理");
     if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
-      const task = employee.task(employee.state(), a.id);
+      const task = employee.task(await employee.state(), a.id);
       assert(!task.owner.token, "Remote tasks require their assigning member");
       const value = await employee.control(a);
-      return { value, task: taskLink(a.id, a.action !== "stop" && !value.duplicate) };
+      return { value, task: await taskLink(a.id, a.action !== "stop" && !value.duplicate) };
     }
-    if (["vault_get", "vault_send"].includes(a.action)) employee.authorize(employee.state(), this.session.taskId || "", a);
+    if (["vault_get", "vault_send"].includes(a.action)) employee.authorize(await employee.state(), this.session.taskId || "", a);
     const scope = ["vault_get", "vault_send"].includes(a.action) ? await this.credentialScope(a) : "";
     const result = await employee.execute(
       this.session.taskId || "",
       await prepareDutyInput(this.engine, employee, { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) }, this.session.taskId || "", this.signal),
     );
     if (a.action === "vault_get" && result.secret) result.secret = JSON.stringify({ ...JSON.parse(result.secret), scopeSite: scope });
-    return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? taskLink(result.value.id) : undefined };
+    return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? await taskLink(result.value.id) : undefined };
   }
   private async chrome(a: Obj): Promise<Outcome> {
-    const employeeId = !this.session.localAgent && (this.session.employeeId || this.session.taskId) ? this.engine.employeeFor(this.session).employeeId : "";
+    const employeeId = !this.session.localAgent && (this.session.employeeId || this.session.taskId) ? (await this.engine.employeeFor(this.session)).employeeId : "";
     let browser: Awaited<ReturnType<Engine["chromeFor"]>>;
     try { browser = await this.engine.chromeFor(this.session, this.signal); }
     catch (error) {
@@ -572,7 +571,7 @@ export class Tools {
       return {
         value: {
           path: a.path,
-          text: JSON.stringify(maskedConfig(this.engine.config()), null, 2),
+          text: JSON.stringify(maskedConfig(await this.engine.config()), null, 2),
           next: "__stored_secret__ preserves existing secrets; only explicit setup commands permit writes.",
         },
       };
@@ -580,8 +579,8 @@ export class Tools {
     if (a.path.startsWith("sqlite:message/")) {
       const seq = Number(a.path.slice("sqlite:message/".length));
       assert(Number.isInteger(seq) && seq >= 1, "Invalid message position");
-      const row = this.engine.store
-        .messages(this.session.id)
+      const row = (await this.engine.store
+              .messages(this.session.id))
         .find((m) => m.seq === seq);
       assert(row, "Message not found in this session");
       const text = JSON.stringify(row, null, 2).split("\n"),
@@ -613,7 +612,7 @@ export class Tools {
       const [skillID, ...rest] = a.path
         .slice("sqlite:skill/".length)
         .split("/");
-      const skill = this.engine.store.object<any>(skillKind(this.session.employeeId), skillID);
+      const skill = await this.engine.store.object<any>(skillKind(this.session.employeeId), skillID);
       assert(skill, "Skill not found");
       const path = rest.length ? skillEntry(rest.join("/")) : "SKILL.md";
       let result: Outcome;
@@ -636,9 +635,9 @@ export class Tools {
     if (a.path.startsWith("sqlite:")) {
       const match = /^sqlite:blob\/(.+)$/.exec(a.path);
       assert(match, "Invalid SQLite archive path");
-      const blob = this.engine.store.blobData(match[1]);
+      const blob = await this.engine.store.blobData(match[1]);
       assert(blob, "Archived blob missing");
-      this.engine.store.grantBlob(match[1], this.session.id);
+      await this.engine.store.grantBlob(match[1], this.session.id);
       return {
         value: { path: a.path, url: `/api/blobs/${match[1]}` },
         images: [{ mime: blob.mime, blobId: match[1] }],
@@ -649,7 +648,7 @@ export class Tools {
       // Archived screenshots, DOM records and tool results: only this employee's (or user's) own, on the server.
       const path = files.readable(this.session, a.path), mime = files.mime(path);
       let data: Buffer;
-      try { data = files.read(path); } catch { throw Error("存档文件不存在（可能已随重置或清空聊天删除）：" + a.path); }
+      try { data = await files.read(path); } catch { throw Error("存档文件不存在（可能已随重置或清空聊天删除）：" + a.path); }
       if (mime) return { value: { path, url: files.url(path) }, images: [{ mime, path, url: files.url(path) }] };
       // Paged like a text file so records larger than one tool result stay fully readable.
       return { value: { path, ...archiveSlice(JSON.parse(data.toString("utf8")), a.offset, a.limit) } };
@@ -666,11 +665,11 @@ export class Tools {
       assert(st.size <= 25 << 20, "Image exceeds25MiB");
       const data = local?.data || await readFile(path),
         metadata = await sharp(data, { limitInputPixels: 64000000 }).metadata();
-      const blobId = this.engine.store.blob(
-        "image/" + (metadata.format === "jpeg" ? "jpeg" : metadata.format),
-        data,
-      );
-      this.engine.store.grantBlob(blobId, this.session.id);
+      const blobId = await this.engine.store.blob(
+              "image/" + (metadata.format === "jpeg" ? "jpeg" : metadata.format),
+              data,
+            );
+      await this.engine.store.grantBlob(blobId, this.session.id);
       return {
         value: { path, url: `/api/blobs/${blobId}` },
         images: [

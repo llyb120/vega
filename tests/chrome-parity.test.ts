@@ -7,10 +7,10 @@ import { Store } from "../server/core/store";
 import { bindStep, chains, literalMet, runCandidates, runState, validatePlan } from "../server/core/browser-run";
 import type { Obj } from "../server/core/util";
 
-function fixture(t: TestContext) {
-  const store = new Store(":memory:"), chrome = new Chrome(store, new ChromeBridge(), "");
-  t.after(() => store.close());
-  store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
+async function fixture(t: TestContext) {
+  const store = await Store.open(":memory:"), chrome = new Chrome(store, new ChromeBridge(), "");
+  t.after(async () => await store.close());
+  await store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
   const sent: Obj[] = [], calls: Obj[] = [];
   const page: Obj = { url: "https://example.test/", title: "Fixture", document: "doc", stamp: "stamp", text: "ready", visibleText: "ready", frame: 0,
     viewport: { width: 800, height: 600, scrollX: 0, scrollY: 0, devicePixelRatio: 1 }, documentSize: { width: 800, height: 600 },
@@ -44,7 +44,7 @@ function fixture(t: TestContext) {
 test("navigation invalidates all owners of its tab even without feedback", async (t) => {
   for (const operation of ["goto", "back", "forward", "reload", "close_tab"]) {
     for (const observe of ["none", "inspect"]) {
-      const f = fixture(t), old = await f.observe();
+      const f = await fixture(t), old = await f.observe();
       f.chrome.observations.set("other:tab", old);
       f.chrome.observations.set("owner:unrelated", { ...old, tabTag: "unrelated" });
       const result = await f.chrome.execute("owner", ".", { operation, tabTag: "tab", url: "https://example.test/next", observe, visual: "none" });
@@ -64,7 +64,7 @@ test("navigation invalidates all owners of its tab even without feedback", async
 });
 
 test("selecting a tab preserves other owners, and failed navigation does not discard observations", async (t) => {
-  const f = fixture(t), old = await f.observe();
+  const f = await fixture(t), old = await f.observe();
   f.chrome.observations.set("other:tab", old);
   await f.chrome.execute("owner", ".", { operation: "select_tab", tabTag: "tab", observe: "none" });
   assert.equal(f.chrome.observations.get("other:tab"), old);
@@ -75,7 +75,7 @@ test("selecting a tab preserves other owners, and failed navigation does not dis
 });
 
 test("whole-batch preflight rejects unknown refs, uploads and screenshot bounds before any input", async (t) => {
-  const f = fixture(t); const o = await f.observe();
+  const f = await fixture(t); const o = await f.observe();
   f.chrome.workspaceFile = async () => { throw Error("Only regular workspace files"); };
   for (const action of [{ action: "click", ref: "invented" }, { action: "upload", selector: "input[type=file]", files: ["outside"] },
     ...[800, -1, NaN, Infinity].map(x => ({ action: "click_at", x, y: 1 })),
@@ -96,7 +96,7 @@ test("coordinate actions accept DOM-only observations with missing or stale imag
       { action: "scroll_at", x: 20, y: 30, delta: 120 },
       { action: "drag", x: 20, y: 30, to_x: 40, to_y: 50, duration_ms: 80 },
     ]) {
-      const f = fixture(t); await f.observe();
+      const f = await fixture(t); await f.observe();
       const r = await f.act({ imageId, action });
       assert.equal(r.status, "executed", r.reason); assert.equal(r.completedActions, 1); assert.equal(r.inputAttempted, true);
       assert.deepEqual(f.sent[0], { method: "Input.dispatchMouseEvent", type: "mouseMoved", x: 20, y: 30 });
@@ -111,7 +111,7 @@ test("coordinate actions accept DOM-only observations with missing or stale imag
 
 test("coordinate image IDs are optional hints while image scale and tile offsets are preserved", async (t) => {
   for (const imageId of [undefined, "old-image", "current", "second"]) {
-    const f = fixture(t), o = await f.observe();
+    const f = await fixture(t), o = await f.observe();
     o.screenshot = true; o.fullPage = true;
     o.images = [
       { imageId: "current", x: 100, y: 200, width: 400, height: 300, pixelWidth: 200, pixelHeight: 150 },
@@ -127,7 +127,7 @@ test("coordinate image IDs are optional hints while image scale and tile offsets
 
 test("read-only expanded screenshots still stop a whole coordinate batch before input", async (t) => {
   for (const imageId of [undefined, "old-image", "expanded"]) {
-    const f = fixture(t), o = await f.observe();
+    const f = await fixture(t), o = await f.observe();
     o.screenshot = true;
     o.images = [{ imageId: "expanded", readOnlyImage: true, pixelWidth: 800, pixelHeight: 3000 }];
     const r = await f.act({ imageId, actions: [{ action: "press", key: "Enter" }, { action: "click_at", x: 20, y: 30 }] });
@@ -137,7 +137,7 @@ test("read-only expanded screenshots still stop a whole coordinate batch before 
 });
 
 test("a new child tab ends a batch; only a unique active child receives feedback", async (t) => {
-  const f = fixture(t); await f.observe();
+  const f = await fixture(t); await f.observe();
   f.chrome.key = async (_tag, key) => { f.sent.push({ key }); f.tabs.push({ tag: "child", openerTag: "tab", active: true, controllable: true }); };
   const r = await f.act({ actions: [{ action: "press", key: "Enter" }, { action: "press", key: "Tab" }] });
   assert.equal(r.completedActions, 1); assert.equal(r.status, "needs_review"); assert.equal(r.tabTag, "child"); assert.equal(r.sourceTabTag, "tab");
@@ -146,7 +146,7 @@ test("a new child tab ends a batch; only a unique active child receives feedback
 
 test("ambiguous or background children return inventory without recapturing the source", async (t) => {
   for (const multiple of [false, true]) {
-    const f = fixture(t); await f.observe(); let observed = 0;
+    const f = await fixture(t); await f.observe(); let observed = 0;
     f.chrome.observe = async () => { observed++; throw Error("must not observe"); };
     f.chrome.key = async () => {
       f.tabs.push({ tag: "child", openerTag: "tab", active: multiple, controllable: true });
@@ -158,7 +158,7 @@ test("ambiguous or background children return inventory without recapturing the 
 });
 
 test("evaluate discovers only children of its source and honors feedback=none", async (t) => {
-  const f = fixture(t); await f.observe();
+  const f = await fixture(t); await f.observe();
   const original = f.chrome.evaluate;
   f.chrome.evaluate = async (tag, frame, expression, signal, timeout) => {
     if (expression.startsWith("__novaWebview.evaluate(")) {
@@ -176,7 +176,7 @@ test("evaluate discovers only children of its source and honors feedback=none", 
 });
 
 test("script exceptions and observation failures retain execution uncertainty without resending", async (t) => {
-  const f = fixture(t); await f.observe(); let scripts = 0;
+  const f = await fixture(t); await f.observe(); let scripts = 0;
   f.chrome.evaluate = async () => { scripts++; throw Error("script failed after input"); };
   const r = await f.act({ operation: "evaluate", expression: "throw Error('fail')" });
   assert.equal(r.status, "needs_review"); assert.equal(r.inputAttempted, true); assert.equal(scripts, 1);
@@ -186,14 +186,14 @@ test("script exceptions and observation failures retain execution uncertainty wi
 });
 
 test("evaluate applies a CDP deadline and an independent bounded wait", async (t) => {
-  const f = fixture(t); let params: Obj = {}, calls = 0;
+  const f = await fixture(t); let params: Obj = {}, calls = 0;
   f.chrome.cdp = async (_tag, _method, args) => { calls++; params = args!; return new Promise(() => {}); };
   await assert.rejects(Chrome.prototype.evaluate.call(f.chrome, "tab", { id: "main", context: 1 }, "new Promise(()=>{})", undefined, 20), /超时.*不要重放/);
   assert.equal(params.timeout, 20); assert.equal(params.awaitPromise, true); assert.equal(calls, 1);
 });
 
 test("guided runs wait for when/expect evidence without repeating input and match URL/title", async (t) => {
-  const f = fixture(t); f.page.text = f.page.visibleText = "loading"; await f.observe();
+  const f = await fixture(t); f.page.text = f.page.visibleText = "loading"; await f.observe();
   const read = f.chrome.observe; let observations = 0;
   f.chrome.observe = async (tag, scope, signal) => {
     observations++;
@@ -209,7 +209,7 @@ test("guided runs wait for when/expect evidence without repeating input and matc
 
 test("run stops after crossing origins or opening a child and never executes remaining steps", async (t) => {
   for (const popup of [false, true]) {
-    const f = fixture(t); await f.observe();
+    const f = await fixture(t); await f.observe();
     f.chrome.mouse = async () => {
       f.sent.push({ action: "click" });
       if (popup) f.tabs.push({ tag: "child", openerTag: "tab", active: true, controllable: true });
@@ -223,7 +223,7 @@ test("run stops after crossing origins or opening a child and never executes rem
 });
 
 test("run batches independent form fills but ends a batch at submit or a when boundary", async (t) => {
-  const f = fixture(t); f.page.items.push({ ref: "city", nodeId: "city", name: "City", role: "textbox", editable: true, inView: true }); await f.observe();
+  const f = await fixture(t); f.page.items.push({ ref: "city", nodeId: "city", name: "City", role: "textbox", editable: true, inView: true }); await f.observe();
   const batches: Obj[][] = [];
   f.chrome.inner = async (_owner, _cwd, args) => {
     batches.push(args.actions);
@@ -236,7 +236,7 @@ test("run batches independent form fills but ends a batch at submit or a when bo
 });
 
 test("run validates every step before input and uncertain input never retries", async (t) => {
-  const f = fixture(t); await f.observe();
+  const f = await fixture(t); await f.observe();
   await assert.rejects(f.run([{ action: "click", name: "Save" }, { action: "fill", name: "Email" }]), /fill requires text/);
   assert.equal(f.sent.length, 0);
   f.chrome.inner = async () => { f.sent.push({ uncertain: true }); return { status: "needs_review", inputAttempted: true, completedActions: 0, reason: "unknown" }; };
@@ -245,7 +245,7 @@ test("run validates every step before input and uncertain input never retries", 
 });
 
 test("run resumes after a partial DOM preflight failure without replaying the completed fill", async (t) => {
-  const f = fixture(t); f.page.items.push({ ref: "city", nodeId: "city", name: "City", role: "textbox", editable: true, inView: true }); await f.observe();
+  const f = await fixture(t); f.page.items.push({ ref: "city", nodeId: "city", name: "City", role: "textbox", editable: true, inView: true }); await f.observe();
   const batches: Obj[][] = [];
   f.chrome.inner = async (_owner, _cwd, args) => {
     batches.push(args.actions);
@@ -278,7 +278,7 @@ test("local binding ranks column/group icons, refuses ambiguous targets and cons
 });
 
 async function screenshotFixture(t: TestContext, width = 800, height = 3000) {
-  const f = fixture(t), captures: Obj[] = [], layouts: string[] = [];
+  const f = await fixture(t), captures: Obj[] = [], layouts: string[] = [];
   f.page.documentSize = { width, height };
   f.chrome.evaluate = async (_tag, _frame, expression) => { layouts.push(expression); return expression.includes("innerScrollOverflow") ? 0 : true; };
   f.chrome.cdp = async (_tag, method, params = {}) => {
@@ -303,9 +303,9 @@ test("unchanged screenshots detect small pixel changes and keep frame streams se
   f.chrome.cdp = async (...args) => args[1] === "Page.captureScreenshot" ? { data: pixels.toString("base64") } : raw(...args);
   const first = await f.observe(); await f.chrome.capture("owner", first, {});
   // Screenshots are files in the owner session's directory, served under /api/files.
-  assert.equal(first.images[0].path, f.store.files.dir(f.store.session("owner")) + "/" + first.images[0].imageId + ".webp");
+  assert.equal(first.images[0].path, f.store.files.dir(await f.store.session("owner")) + "/" + first.images[0].imageId + ".webp");
   assert.equal(first.images[0].url, f.store.files.url(first.images[0].path));
-  assert.equal((await sharp(f.store.files.read(first.images[0].path)).metadata()).format, "webp");
+  assert.equal((await sharp(await f.store.files.read(first.images[0].path)).metadata()).format, "webp");
   const same = await f.observe(); await f.chrome.capture("owner", same, {}, first);
   assert.equal(same.images[0].unchanged, true);
   assert.equal(same.images[0].path, first.images[0].path);
@@ -338,7 +338,7 @@ test("unchanged screenshots detect small pixel changes and keep frame streams se
   assert.equal(live2.images[0].path, f.store.files.dir("browser-view:u") + "/live-tab-0.webp");
   assert.notEqual(live2.images[0].url, live1.images[0].url);
   assert.equal(live2.images[0].url, f.store.files.url(live2.images[0].path) + "?v=" + live2.id);
-  const raw2 = await sharp(f.store.files.read(live2.images[0].path)).raw().toBuffer();
+  const raw2 = await sharp(await f.store.files.read(live2.images[0].path)).raw().toBuffer();
   assert.equal(raw2[0], 0, "the file holds the latest frame");
 });
 
@@ -378,7 +378,7 @@ test("viewport crops keep viewport coordinates after scrolling; restoration runs
 });
 
 test("run does not treat tooltip/ref changes as progress and never blindly repeats a step", async (t) => {
-  const f = fixture(t); await f.observe();
+  const f = await fixture(t); await f.observe();
   const before = runState([f.page]); f.page.visibleText += " tooltip"; f.page.items[0].ref = "fresh-save";
   assert.equal(runState([f.page]), before);
   await f.observe();
@@ -389,7 +389,7 @@ test("run does not treat tooltip/ref changes as progress and never blindly repea
 });
 
 test("run when failure waits without input; expectation failure keeps completed actions out of remaining steps", async (t) => {
-  const f = fixture(t); await f.observe();
+  const f = await fixture(t); await f.observe();
   const blocked = await f.run([{ action: "click", name: "Save", when: "absent" }]);
   assert.equal(blocked.altairRun.guided.completedSteps, 0); assert.equal(f.sent.length, 0);
   assert(blocked.altairRun.checks[0].ms >= 3000);
@@ -400,7 +400,7 @@ test("run when failure waits without input; expectation failure keeps completed 
 });
 
 test("run explicit repeat rebinds only after a changed state and observes its budget", async (t) => {
-  const f = fixture(t); f.page.items[0].sort = "none"; await f.observe();
+  const f = await fixture(t); f.page.items[0].sort = "none"; await f.observe();
   f.chrome.mouse = async () => {
     f.sent.push({ action: "click" });
     f.page.items[0].sort = f.sent.filter((v) => v.action === "click").length === 1 ? "ascending" : "descending";
@@ -428,7 +428,7 @@ test("expanded layout restores the viewport and reports incomplete scroll expans
 });
 
 test("failed optional screenshots preserve DOM while explicit screenshots report failure", async (t) => {
-  const f = fixture(t); f.chrome.capture = async () => { throw Error("capture failed"); };
+  const f = await fixture(t); f.chrome.capture = async () => { throw Error("capture failed"); };
   const r: Obj = await f.chrome.feedback("owner", "tab", {});
   assert(r.pages[0].items.length); assert.equal(r.screenshotError, "capture failed"); assert.equal(f.chrome.observations.get("owner:tab")!.screenshot, false);
   await assert.rejects(f.chrome.feedback("owner", "tab", {}, "screenshot"), /capture failed/);
@@ -436,7 +436,7 @@ test("failed optional screenshots preserve DOM while explicit screenshots report
 
 
 test("inspect still rejects region/ref; screenshot validates region strictly", async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.tabs.splice(0, f.tabs.length, { tag: "only", active: true, controllable: true, loading: false });
   await assert.rejects(
     f.chrome.feedback("owner", "only", { region: { x: 0, y: 0, width: 40, height: 40 } }, "inspect"),
@@ -449,7 +449,7 @@ test("inspect still rejects region/ref; screenshot validates region strictly", a
 });
 
 test("navigation waits while the document is still loading, bounded, and reports tabs after settling", async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   let probes = 0;
   f.chrome.cdp = async (_tag, method, params: Obj = {}) => {
     if (method === "Runtime.evaluate" && params.expression === "document.readyState") return { result: { value: ++probes < 3 ? "interactive" : "complete" } };

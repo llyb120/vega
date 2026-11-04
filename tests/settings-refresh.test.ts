@@ -49,7 +49,7 @@ test("employee times are Beijing regardless of server timezone, including midnig
 });
 
 test("remote Devin PKCE returns to the website, is state/owner-bound and never binds a server loopback listener", async () => {
-  const store = new Store(":memory:"),
+  const store = await Store.open(":memory:"),
     auth = new Subscriptions(store, "");
   let exchanges = 0;
   auth.loginRequest = async (url, init) => {
@@ -92,7 +92,7 @@ test("remote Devin PKCE returns to the website, is state/owner-bound and never b
       auth.loginPoll("devin", start.state, undefined, "admin-two"),
     );
     assert(
-      !JSON.stringify(store.get("subscription:devin", {})).includes(
+      !JSON.stringify(await store.get("subscription:devin", {})).includes(
         "session-secret-fixture",
       ),
     );
@@ -103,12 +103,12 @@ test("remote Devin PKCE returns to the website, is state/owner-bound and never b
     );
   } finally {
     auth.close();
-    store.close();
+    await store.close();
   }
 });
 
 test("remote CodeBuddy polling preserves its site/source and accepts only official login domains", async () => {
-  const store = new Store(":memory:"),
+  const store = await Store.open(":memory:"),
     auth = new Subscriptions(store, "");
   const urls: string[] = [];
   auth.loginRequest = async (url) => {
@@ -158,12 +158,12 @@ test("remote CodeBuddy polling preserves its site/source and accepts only offici
     await assert.rejects(() => auth.loginStart("codebuddy", "cn"));
   } finally {
     auth.close();
-    store.close();
+    await store.close();
   }
 });
 
 test("removed Orbit is not exposed to the website or scheduler; prior data is retained without firing old subscriptions", async () => {
-  const store = new Store(":memory:"),
+  const store = await Store.open(":memory:"),
     employee = new Employee(store, new Vault(store), {
       run: async () => {
         throw Error("must not run");
@@ -176,7 +176,7 @@ test("removed Orbit is not exposed to the website or scheduler; prior data is re
     });
   employee.closed = true;
   try {
-    const state = employee.state();
+    const state = await employee.state();
     state.duties.push({
       id: "legacy",
       text: "old star workflow",
@@ -186,16 +186,16 @@ test("removed Orbit is not exposed to the website or scheduler; prior data is re
       pending: ["old event"],
     });
     state.orbit.push({ id: "retained", text: "legacy data" });
-    store.put("employee", state);
-    assert.equal(employee.state().duties[0].enabled, false);
-    assert.equal(employee.state().duties[0].eventAt, 0);
+    await store.put("employee", state);
+    assert.equal((await employee.state()).duties[0].enabled, false);
+    assert.equal((await employee.state()).duties[0].eventAt, 0);
     await assert.rejects(() =>
       employee.execute("", { action: "orbit_add", text: "x" }),
     );
-    assert.equal(store.get<any>("employee", {}).orbit[0].id, "retained");
+    assert.equal((await store.get<any>("employee", {})).orbit[0].id, "retained");
   } finally {
     employee.close();
-    store.close();
+    await store.close();
   }
 });
 

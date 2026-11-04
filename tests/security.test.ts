@@ -43,13 +43,9 @@ test("credential redaction preserves wire roles/tool names/opaque signatures/ima
   assert.equal(message.opaque![0].encrypted_content, "aaa");
 });
 test("a secret equal to event type cannot hide SSE completion or corrupt tool IDs", async () => {
-  const store = new Store(":memory:"),
+  const store = await Store.open(":memory:"),
     auth = new Subscriptions(store, ""),
-    engine = new Engine(
-      store,
-      new Catalog(store, auth),
-      new Chrome(store, new ChromeBridge(), ""),
-    );
+    engine = await Engine.create(store, new Catalog(store, auth), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
   const r = new Redactor();
   r.add("done");
@@ -61,7 +57,7 @@ test("a secret equal to event type cannot hide SSE completion or corrupt tool ID
   assert.equal(seen.session, "session");
   assert.notEqual(seen.data.text, "done");
   await engine.close();
-  store.close();
+  await store.close();
 });
 test("usage is normalized for cache reads/writes across all three protocols", () => {
   assert.deepEqual(

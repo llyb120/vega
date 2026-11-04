@@ -15,21 +15,21 @@ const idle = () => new AbortController().signal;
 /** Jobs reach a client only through its own socket transport; captured as { data: { instance, ...job } }. */
 const wire = (jobs: any[], instance = details.instance, reply?: (job: any) => void) => ({ send: (job: any) => { jobs.push({ data: { instance, ...job } }); reply?.(job); }, close() {} });
 
-test("local login tickets are one-use, bounded, expire and follow website revocation without API keys", () => {
+test("local login tickets are one-use, bounded, expire and follow website revocation without API keys", async () => {
   const hub = new LocalAgents();
   const principal = { hash: "login", user: { id: "alice" }, expiresAt: Date.now() + 10000 } as Principal;
   let current: Principal | undefined = principal;
   const auth = { resolveHash: () => current } as unknown as Auth;
   const first = hub.ticket(principal, details.instance);
-  assert.equal(hub.verify(first.ticket, auth).userId, "alice");
-  assert.throws(() => hub.verify(first.ticket, auth));
+  assert.equal((await hub.verify(first.ticket, auth)).userId, "alice");
+  await assert.rejects(async () => await hub.verify(first.ticket, auth));
   const revoked = hub.ticket(principal, details.instance);
   current = undefined;
-  assert.throws(() => hub.verify(revoked.ticket, auth));
+  await assert.rejects(async () => await hub.verify(revoked.ticket, auth));
   const expired = hub.ticket(principal, details.instance);
   (hub as any).tickets.get(expired.ticket).until = Date.now() - 1;
   current = principal;
-  assert.throws(() => hub.verify(expired.ticket, auth));
+  await assert.rejects(async () => await hub.verify(expired.ticket, auth));
   hub.close();
 });
 
@@ -91,16 +91,16 @@ test("multiple owned clients route by device and expire independently without fa
 });
 
 test("unbound historical local sessions pause instead of guessing which computer to use", async () => {
-  const store = new Store(":memory:"), hub = new LocalAgents();
+  const store = await Store.open(":memory:"), hub = new LocalAgents();
   try {
     hub.connect("alice", details);
-    const session = store.newSession({ ownerId: "alice", cwd: details.cwd, localAgent: true });
-    const tools = new Tools({ store, localAgents: hub, vault: new Vault(store), mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, idle(), () => {});
+    const session = await store.newSession({ ownerId: "alice", cwd: details.cwd, localAgent: true });
+    const tools = await Tools.create({ store, localAgents: hub, vault: new Vault(store), mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, idle(), () => {});
     const result = await tools.execute({ id: "unbound", name: "bash", arguments: { command: "must not run" } }, {} as any);
     assert.equal(result.stop, true);
     assert.match(result.pause!, /尚未绑定客户端/);
     assert.equal(hub.active("alice", details.clientId)!.pending.size, 0);
-  } finally { hub.close(); store.close(); }
+  } finally { hub.close(); await store.close(); }
 });
 
 test("session cancellation sends a WebSocket cancel job and rejects the original pending request", async () => {
@@ -118,36 +118,36 @@ test("session cancellation sends a WebSocket cancel job and rejects the original
 
 test("lost local response pauses for user confirmation, without replay or server filesystem fallback", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-local-loss-"));
-  const store = new Store(":memory:");
+  const store = await Store.open(":memory:");
   const hub = new LocalAgents();
   hub.connect("alice", { ...details, cwd: dir });
-  const session = store.newSession({ ownerId: "alice", cwd: dir, localAgent: true, clientId: details.clientId });
+  const session = await store.newSession({ ownerId: "alice", cwd: dir, localAgent: true, clientId: details.clientId });
   const engine = { store, localAgents: hub, vault: new Vault(store), mcpFor: () => ({}) } as any;
-  const tools = new Tools(engine, session, { model: "", provider: {} }, idle(), () => {});
+  const tools = await Tools.create(engine, session, { model: "", provider: {} }, idle(), () => {});
   const operation = tools.execute({ id: "once", name: "bash", arguments: { command: "this command must not run on the server", timeout: 10 } }, {} as any);
   hub.disconnect("alice");
   const result = await operation;
   assert.equal(result.stop, true);
   assert.match(result.pause!, /修复连接.*继续/);
   assert.equal(result.error, true);
-  assert.deepEqual(store.messages(session.id), []);
+  assert.deepEqual(await store.messages(session.id), []);
   const offline = await tools.execute({ id: "offline-write", name: "write", arguments: { path: "must-not-exist", content: "unsafe fallback" } }, {} as any);
   assert.equal(offline.stop, true);
   await assert.rejects(access(join(dir, "must-not-exist")));
-  store.close();
+  await store.close();
   await rm(dir, { recursive: true, force: true });
 });
 
 test("local file reads resolve on the client rather than statting server paths", async () => {
-  const store = new Store(":memory:");
+  const store = await Store.open(":memory:");
   let hub: LocalAgents;
   hub = new LocalAgents();
   hub.connect("alice", details, wire([], details.instance, (job) => queueMicrotask(() => hub.result("alice", { id: job.id, instance: details.instance, result: { path: "C:\\only-on-client\\note.txt", content: Buffer.from("hello\nworld").toString("base64") } }))));
-  const session = store.newSession({ ownerId: "alice", cwd: details.cwd, localAgent: true, clientId: details.clientId });
-  const tools = new Tools({ store, localAgents: hub, vault: new Vault(store), mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, idle(), () => {});
+  const session = await store.newSession({ ownerId: "alice", cwd: details.cwd, localAgent: true, clientId: details.clientId });
+  const tools = await Tools.create({ store, localAgents: hub, vault: new Vault(store), mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, idle(), () => {});
   const result = await tools.execute({ id: "read", name: "read", arguments: { path: "note.txt" } }, {} as any);
   assert.match(result.value.text, /1\|hello\n2\|world/);
-  assert.equal(store.stage(session.id).localAgent, true);
-  assert.equal(store.fork(session.id).localAgent, true);
-  hub.close(); store.close();
+  assert.equal((await store.stage(session.id)).localAgent, true);
+  assert.equal((await store.fork(session.id)).localAgent, true);
+  hub.close(); await store.close();
 });

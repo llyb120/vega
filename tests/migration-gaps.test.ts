@@ -16,14 +16,10 @@ import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { maskedConfig, resolveModel } from "../server/core/config";
 import { employeeCall } from "./public-call";
-function engine() {
-  const store = new Store(":memory:"),
+async function engine() {
+  const store = await Store.open(":memory:"),
     auth = new Subscriptions(store, ""),
-    e = new Engine(
-      store,
-      new Catalog(store, auth),
-      new Chrome(store, new ChromeBridge(), ""),
-    );
+    e = await Engine.create(store, new Catalog(store, auth), new Chrome(store, new ChromeBridge(), ""));
   e.employee.closed = true;
   const config: any = {
     scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
@@ -43,13 +39,13 @@ function engine() {
       },
     },
   };
-  store.put("config", config);
+  await store.put("config", config);
   return { e, store, config };
 }
 test("output-length recovery lowers effort only once and never replays already completed mutations", async () => {
-  const { e, store, config } = engine(),
+  const { e, store, config } = await engine(),
     dir = await mkdtemp(join(tmpdir(), "vega-recovery-")),
-    session = store.newSession({ cwd: dir });
+    session = await store.newSession({ cwd: dir });
   let n = 0,
     writes = 0;
   const efforts: string[] = [];
@@ -91,14 +87,14 @@ test("output-length recovery lowers effort only once and never replays already c
     assert.equal(recoveryModel(model), undefined);
   } finally {
     await e.close();
-    store.close();
+    await store.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
 test("empty employee chat generations recover with the same request and never replay a delegated task", async () => {
-  const { e, store, config } = engine();
-  const employee = e.employee.for(e.employee.create({ name: "Assistant" }, "owner").id);
-  const session = employee.chat("owner");
+  const { e, store, config } = await engine();
+  const employee = await e.employee.for((await e.employee.create({ name: "Assistant" }, "owner")).id);
+  const session = await employee.chat("owner");
   let requests = 0, dispatches = 0;
   const retries: any[] = [];
   e.events.on("event", (event) => {
@@ -120,16 +116,16 @@ test("empty employee chat generations recover with the same request and never re
     assert.equal(requests, 4);
     assert.equal(retries.length, 2, "one recovery for each distinct empty generation, not a repeated tool batch");
     assert.equal(dispatches, 1);
-    assert.equal(employee.state().tasks.length, 1);
-    assert.equal(store.messages(session.id).at(-1)?.text, "已创建任务，后续在任务页跟进。");
+    assert.equal((await employee.state()).tasks.length, 1);
+    assert.equal((await store.messages(session.id)).at(-1)?.text, "已创建任务，后续在任务页跟进。");
     assert.equal(config.provider.p.models.m.options.reasoningEffort, "high");
-  } finally { await e.close(); store.close(); }
+  } finally { await e.close(); await store.close(); }
 });
 
 test("repeated thinking-only failures stop after one recovery and remain visible in employee chat history", async () => {
-  const { e, store } = engine();
-  const employee = e.employee.for(e.employee.create({ name: "Assistant" }, "owner").id);
-  const session = employee.chat("owner");
+  const { e, store } = await engine();
+  const employee = await e.employee.for((await e.employee.create({ name: "Assistant" }, "owner")).id);
+  const session = await employee.chat("owner");
   let requests = 0;
   const events: any[] = [];
   e.events.on("event", (event) => events.push(event));
@@ -137,8 +133,8 @@ test("repeated thinking-only failures stop after one recovery and remain visible
   try {
     await assert.rejects(e.run(session.id, { role: "user", text: "please handle this" }), /thinking only/);
     assert.equal(requests, 2);
-    assert.equal(employee.state().tasks.length, 0, "thinking is never evidence that a task was created");
-    const failure = store.messages(session.id).at(-1)!;
+    assert.equal((await employee.state()).tasks.length, 0, "thinking is never evidence that a task was created");
+    const failure = (await store.messages(session.id)).at(-1)!;
     assert.equal(failure.role, "assistant");
     assert.equal(failure.error, true);
     assert.match(failure.text!, /本轮未完成/);
@@ -146,34 +142,28 @@ test("repeated thinking-only failures stop after one recovery and remain visible
     assert.equal(events.at(-1).type, "done");
     assert.equal(events.at(-1).data.error, true);
     assert.equal(e.active.size, 0);
-  } finally { await e.close(); store.close(); }
+  } finally { await e.close(); await store.close(); }
 });
 
 test("cancelling a thinking-only generation never triggers recovery or creates a failure reply", async () => {
-  const { e, store } = engine();
-  const employee = e.employee.for(e.employee.create({ name: "Assistant" }, "owner").id);
-  const session = employee.chat("owner"), controller = new AbortController();
+  const { e, store } = await engine();
+  const employee = await e.employee.for((await e.employee.create({ name: "Assistant" }, "owner")).id);
+  const session = await employee.chat("owner"), controller = new AbortController();
   let requests = 0;
   e.providers.chat = async () => { requests++; controller.abort(); throw new ProviderError("thinking only", 0, "empty"); };
   try {
     await assert.rejects(e.run(session.id, { role: "user", text: "please handle this" }, undefined, controller.signal));
     assert.equal(requests, 1);
-    assert(!store.messages(session.id).some((message) => message.error));
-    assert.equal(employee.state().tasks.length, 0);
-  } finally { await e.close(); store.close(); }
+    assert(!(await store.messages(session.id)).some((message) => message.error));
+    assert.equal((await employee.state()).tasks.length, 0);
+  } finally { await e.close(); await store.close(); }
 });
 
 test("setup virtual config is explicit-authorized, section-scoped and secret-preserving", async () => {
-  const { e, store, config } = engine(),
-    session = store.newSession(),
+  const { e, store, config } = await engine(),
+    session = await store.newSession(),
     model = resolveModel(config, config.scenes.lightweight[0]),
-    tools = new Tools(
-      e,
-      session,
-      config,
-      new AbortController().signal,
-      () => {},
-    );
+    tools = await Tools.create(e, session, config, new AbortController().signal, () => {});
   try {
     const value = {
       ...config,
@@ -202,7 +192,7 @@ test("setup virtual config is explicit-authorized, section-scoped and secret-pre
       model,
     );
     assert.equal(result.value.provider.p.apiKey, "__stored_secret__");
-    assert.equal(e.config().provider.p.apiKey, "test-key");
+    assert.equal((await e.config()).provider.p.apiKey, "test-key");
     const bad = { ...value, systemPrompt: "injected" };
     await assert.rejects(() =>
       tools.execute(
@@ -237,11 +227,11 @@ test("setup virtual config is explicit-authorized, section-scoped and secret-pre
   } finally {
     await tools.close();
     await e.close();
-    store.close();
+    await store.close();
   }
 });
 test("removed image service is hidden and unavailable while reading image pixels remains supported", async () => {
-  const { e, store, config } = engine(),
+  const { e, store, config } = await engine(),
     dir = await mkdtemp(join(tmpdir(), "vega-vision-"));
   const legacy = {
     ...config,
@@ -251,21 +241,15 @@ test("removed image service is hidden and unavailable while reading image pixels
       models: ["image-model"],
     },
   };
-  store.put("config", legacy);
+  await store.put("config", legacy);
   const model = resolveModel(config, config.scenes.lightweight[0]),
-    session = store.newSession({ cwd: dir }),
-    tools = new Tools(
-      e,
-      session,
-      e.config(),
-      new AbortController().signal,
-      () => {},
-    );
+    session = await store.newSession({ cwd: dir }),
+    tools = await Tools.create(e, session, await e.config(), new AbortController().signal, () => {});
   try {
-    assert(!("image" in e.config()));
+    assert(!("image" in await e.config()));
     assert(!("image" in maskedConfig(legacy)));
     for (const name of ["generate_image", "edit_image"]) {
-      assert(!tools.definitions(model).some((tool) => tool.name === name));
+      assert(!(await tools.definitions(model)).some((tool) => tool.name === name));
       await assert.rejects(
         () =>
           tools.execute(
@@ -292,18 +276,18 @@ test("removed image service is hidden and unavailable while reading image pixels
     assert.equal(read.images?.[0].mime, "image/png");
     assert.equal(read.value.url, "/api/blobs/" + read.images![0].blobId);
     assert.equal(
-      Buffer.from(store.blobData(read.images![0].blobId!)!.data).toString(
+      Buffer.from((await store.blobData(read.images![0].blobId!))!.data).toString(
         "base64",
       ),
       image.toString("base64"),
     );
-    const id = store.blob("image/png", image);
+    const id = await store.blob("image/png", image);
     const archived = await tools.read({ path: "sqlite:blob/" + id });
     assert.equal(archived.images?.[0].blobId, id);
     assert.equal(archived.value.url, "/api/blobs/" + id);
     // A large observation archive reads in pages that each fit one tool result, and reassemble losslessly.
     const record = { id: "obs", text: "页".repeat(9000) + "x".repeat(5000), pages: Array.from({ length: 400 }, (_, i) => ({ ref: "r." + i, name: "item " + i })), images: [{ imageId: "obs-0", path: "x.webp" }] };
-    const documentPath = store.files.write(session, "obs.json", JSON.stringify(record));
+    const documentPath = await store.files.write(session, "obs.json", JSON.stringify(record));
     const lines: string[] = [];
     for (let offset: number | undefined = 1, pages = 0; offset; pages++) {
       assert(pages < 200);
@@ -320,13 +304,13 @@ test("removed image service is hidden and unavailable while reading image pixels
     const limited = await tools.read({ path: documentPath, offset: 3, limit: 2 });
     assert.match(limited.value.text, /^3\|/);
     assert.equal(limited.value.nextOffset, 5);
-    assert(tools.definitions(model).some((tool) => tool.name === "chrome_screenshot"));
+    assert((await tools.definitions(model)).some((tool) => tool.name === "chrome_screenshot"));
     assert(!("image" in (await e.saveConfig(legacy))));
-    assert(!("image" in store.get<any>("config", {})));
+    assert(!("image" in await store.get<any>("config", {})));
   } finally {
     await tools.close();
     await e.close();
-    store.close();
+    await store.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -361,75 +345,57 @@ test("file read uses actual returned line boundary at50KiB, reports oversized li
     await rm(dir, { recursive: true, force: true });
   }
 });
-test("fork copies the reversible block ledger without sharing mutable context state or Fire identity", () => {
-  const store = new Store(":memory:");
+test("fork copies the reversible block ledger without sharing mutable context state or Fire identity", async () => {
+  const store = await Store.open(":memory:");
   try {
-    const session = store.newSession({ fireRoot: "not-inherited" }),
-      ctx = new Context(store, session.id);
+    const session = await store.newSession({ fireRoot: "not-inherited" }),
+      ctx = await Context.open(store, session.id);
     for (let i = 0; i < 16; i++) {
-      store.append(session.id, { role: "user", text: "requirement " + i });
-      store.append(session.id, {
-        role: "assistant",
-        text: "evidence ".repeat(600),
-      });
+      await store.append(session.id, { role: "user", text: "requirement " + i });
+      await store.append(session.id, {
+                role: "assistant",
+                text: "evidence ".repeat(600),
+              });
     }
-    const fold = ctx.compress([
-      {
-        startRef: "m00001",
-        endRef: "m00007",
-        summary:
-          "Finished checkpoint preserves original requirements, relevant evidence, decisions and all remaining follow-up work.",
-      },
-    ])[0];
-    const copy = store.fork(session.id),
-      forked = new Context(store, copy.id);
-    assert.equal(forked.live()[0].id, fold.id);
-    forked.decompress(fold.id);
-    assert.equal(forked.live().length, 0);
-    assert.equal(ctx.live().length, 1);
+    const fold = (await ctx.compress([
+          {
+            startRef: "m00001",
+            endRef: "m00007",
+            summary:
+              "Finished checkpoint preserves original requirements, relevant evidence, decisions and all remaining follow-up work.",
+          },
+        ]))[0];
+    const copy = await store.fork(session.id),
+      forked = await Context.open(store, copy.id);
+    assert.equal((await forked.live())[0].id, fold.id);
+    await forked.decompress(fold.id);
+    assert.equal((await forked.live()).length, 0);
+    assert.equal((await ctx.live()).length, 1);
     assert.equal(copy.fireRoot, undefined);
     assert.equal(
-      store.messages(copy.id).length,
-      store.messages(session.id).length,
+      (await store.messages(copy.id)).length,
+      (await store.messages(session.id)).length,
     );
   } finally {
-    store.close();
+    await store.close();
   }
 });
 test("session MCP connection/discovery survives normal turns, refreshes onconfig/cwd and closes at shutdown", async () => {
-  const { e, store, config } = engine(),
-    session = store.newSession(),
-    first = new Tools(
-      e,
-      session,
-      config,
-      new AbortController().signal,
-      () => {},
-    );
+  const { e, store, config } = await engine(),
+    session = await store.newSession(),
+    first = await Tools.create(e, session, config, new AbortController().signal, () => {});
   first.mcp.described.set("service/tool", "definition");
   await first.close();
-  const next = new Tools(
-    e,
-    session,
-    config,
-    new AbortController().signal,
-    () => {},
-  );
+  const next = await Tools.create(e, session, config, new AbortController().signal, () => {});
   try {
     assert.equal(next.mcp, first.mcp);
     assert.equal(next.mcp.described.get("service/tool"), "definition");
-    const changed = new Tools(
-      e,
-      session,
-      { ...config, mcp: { different: { command: "not-started" } } },
-      new AbortController().signal,
-      () => {},
-    );
+    const changed = await Tools.create(e, session, { ...config, mcp: { different: { command: "not-started" } } }, new AbortController().signal, () => {});
     assert.notEqual(changed.mcp, next.mcp);
     await changed.close();
   } finally {
     await e.close();
     assert.equal(e.mcpSessions.size, 0);
-    store.close();
+    await store.close();
   }
 });

@@ -22,10 +22,10 @@ test(
       token = randomBytes(32).toString("base64url"),
       dir = await mkdtemp(join(tmpdir(), "vega-events-http-")),
       db = join(dir, "events.db"),
-      store = new Store(db),
-      seeded = store.newSession({ title: "large history", cwd: dir });
-    store.append(seeded.id, { role: "assistant", text: "x".repeat(300000) });
-    store.close();
+      store = await Store.open(db),
+      seeded = await store.newSession({ title: "large history", cwd: dir });
+    await store.append(seeded.id, { role: "assistant", text: "x".repeat(300000) });
+    await store.close();
     const child = spawn(process.execPath, [resolve(".output/server/index.mjs")], {
       env: {
         ...process.env,

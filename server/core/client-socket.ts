@@ -9,63 +9,69 @@ import { assert, type Obj } from "./util";
 export const CLIENT_BODY_LIMIT = 48 << 20, CLIENT_SOCKET_LIMIT = 1 << 20;
 type Socket = Pick<Peer, "id" | "request" | "send" | "close">;
 type Grant = { hash: string; userId: string; clientId: string; createdAt: number };
-type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj; transport?: Agent["transport"]; updating?: boolean };
+type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj; transport?: Agent["transport"]; updating?: boolean; tail?: Promise<void> };
 
 export class ClientSockets {
   private connections = new Map<string, Connection>();
   private timer: ReturnType<typeof setInterval>;
-  private onRevoke = (userId: string) => this.revoke(userId);
-  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean) {
+  private onRevoke = async (userId: string) => await this.revoke(userId);
+  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>) {
     auth.events.on("revoke", this.onRevoke);
-    this.timer = setInterval(() => {
+    this.timer = setInterval(async () => {
       for (const [id, connection] of this.connections) {
-        if (!this.valid(connection.grant)) this.close(id, true);
+        if (!await this.valid(connection.grant)) this.close(id, true);
         else if (Date.now() - connection.lastAt > CLIENT_HEARTBEAT_TIMEOUT) this.close(id);
       }
     }, 5000);
     this.timer.unref();
   }
-  pair(a: Obj) {
+  async pair(a: Obj) {
     assert(typeof a.clientId === "string" && /^[a-f0-9]{32}$/.test(a.clientId), "Invalid client ID");
-    const proof = this.hub.verify(a.ticket, this.auth), user = this.auth.user(proof.userId);
+    const proof = await this.hub.verify(a.ticket, this.auth), user = await this.auth.user(proof.userId);
     assert(user && !user.disabled && user.role !== "viewer", "Client pairing requires execution permission");
-    const existing = typeof a.deviceToken === "string" ? this.record(a.deviceToken) : undefined;
+    const existing = typeof a.deviceToken === "string" ? await this.record(a.deviceToken) : undefined;
     if (existing && existing.userId === user.id && existing.clientId === a.clientId)
       return { ...proof, clientId: a.clientId, deviceToken: a.deviceToken };
-    const grants = this.store.objects<Grant>("client-token").filter((item) => item.userId === user.id);
+    const grants = (await this.store.objects<Grant>("client-token")).filter((item) => item.userId === user.id);
     assert(grants.filter((item) => item.clientId !== a.clientId).length < 8, "Too many authorized clients");
-    this.revoke(user.id, a.clientId);
+    await this.revoke(user.id, a.clientId);
     const deviceToken = randomBytes(32).toString("base64url"), hash = digest(deviceToken);
-    this.store.save("client-token", hash, { hash, userId: user.id, clientId: a.clientId, createdAt: Date.now() } satisfies Grant);
+    await this.store.save("client-token", hash, { hash, userId: user.id, clientId: a.clientId, createdAt: Date.now() } satisfies Grant);
     return { ...proof, clientId: a.clientId, deviceToken };
   }
-  private record(token: string) {
+  private async record(token: string) {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return;
-    const grant = this.store.object<Grant>("client-token", digest(token));
-    return grant && this.valid(grant) ? grant : undefined;
+    const grant = await this.store.object<Grant>("client-token", digest(token));
+    return grant && await this.valid(grant) ? grant : undefined;
   }
-  private valid(grant: Grant) {
-    const stored = this.store.object<Grant>("client-token", grant.hash), user = this.auth.user(grant.userId);
+  private async valid(grant: Grant) {
+    const stored = await this.store.object<Grant>("client-token", grant.hash), user = await this.auth.user(grant.userId);
     return !!stored && stored.clientId === grant.clientId && stored.userId === grant.userId && !!user && !user.disabled && user.role !== "viewer";
   }
-  authorize(request: Socket["request"]) {
+  async authorize(request: Socket["request"]) {
     assert(!request.headers.get("origin") && !new URL(request.url).search, "Native client connection required");
     const token = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") || "")?.[1];
-    const grant = token && this.record(token);
+    const grant = token && await this.record(token);
     assert(grant, "Client credential invalid or revoked");
     return grant;
   }
-  open(socket: Socket) {
-    const grant = this.authorize(socket.request);
+  async open(socket: Socket) {
+    const grant = await this.authorize(socket.request);
     assert(this.connections.size < 128, "Too many native client connections");
     this.connections.set(socket.id, { socket, grant, lastAt: Date.now() });
   }
+  /** Messages of one connection are handled one after another, in arrival order. */
   message(socket: Socket, raw: string) {
+    const connection = this.connections.get(socket.id);
+    if (!connection) return;
+    return (connection.tail = (connection.tail || Promise.resolve()).then(() => this.handle(socket, raw)));
+  }
+  private async handle(socket: Socket, raw: string) {
     const connection = this.connections.get(socket.id);
     if (!connection) return;
     let accepted = false;
     try {
-      assert(this.valid(connection.grant), "Client authorization revoked");
+      assert(await this.valid(connection.grant), "Client authorization revoked");
       assert(Buffer.byteLength(raw) <= CLIENT_SOCKET_LIMIT, "Client message too large");
       const value = JSON.parse(raw);
       assert(value && typeof value === "object" && !Array.isArray(value), "Invalid client message");
@@ -75,6 +81,8 @@ export class ClientSockets {
         assert(value.type === "hello" && value.clientId === grant.clientId, "Client identity mismatch");
         validateClient(value);
         assert(value.version === undefined || (typeof value.version === "string" && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(value.version)), "Invalid client version");
+        // Read before connecting, so nothing awaits between connect and "ready" (queued jobs follow "ready").
+        const busy = value.autoUpdate === true && value.resume === true && !!value.version ? await this.clientInUse(grant.clientId) : false;
         const previous = this.hub.active(grant.userId, grant.clientId);
         if (previous && previous.instance !== value.instance) this.hub.disconnect(grant.userId, previous.instance);
         connection.transport = {
@@ -85,13 +93,13 @@ export class ClientSockets {
         connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, supplement: value.supplement, resume: value.resume === true, autoUpdate: value.autoUpdate === true && value.resume === true && !!value.version };
         const agent = this.hub.active(grant.userId, grant.clientId)!;
         accepted = true;
-        socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy: this.clientInUse(grant.clientId) } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) }));
+        socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) }));
         return;
       }
       if (value.type === "update_prepare") {
         assert(connection.details.autoUpdate && !connection.updating, "Client update not negotiated");
-        const agent = this.hub.active(grant.userId, grant.clientId);
-        const idle = agent && agent.transport === connection.transport && !agent.reconnecting && !agent.pending.size && !agent.browserLeases.size && !this.clientInUse(grant.clientId);
+        const inUse = await this.clientInUse(grant.clientId), agent = this.hub.active(grant.userId, grant.clientId);
+        const idle = agent && agent.transport === connection.transport && !agent.reconnecting && !agent.pending.size && !agent.browserLeases.size && !inUse;
         if (idle) {
           connection.updating = true;
           // Reserve the same instance; new operations wait instead of racing the restart.
@@ -106,7 +114,7 @@ export class ClientSockets {
         }
         if (!connection.updating) this.hub.connect(grant.userId, connection.details);
         accepted = true;
-        socket.send(JSON.stringify({ type: "pong", ...(connection.details.autoUpdate ? { busy: this.clientInUse(grant.clientId) } : {}) }));
+        socket.send(JSON.stringify({ type: "pong", ...(connection.details.autoUpdate ? { busy: await this.clientInUse(grant.clientId) } : {}) }));
       } else {
         assert(value.type === "result", "Client may only send heartbeats and job results");
         this.hub.result(grant.userId, { id: value.id, result: value.result, instance: connection.details.instance });
@@ -116,16 +124,16 @@ export class ClientSockets {
     } catch { this.close(socket.id, !accepted); }
   }
   /** A result posted over HTTP; the response is its acknowledgement. */
-  upload(request: Socket["request"], value: Obj) {
-    const grant = this.authorize(request), instance = request.headers.get("x-vega-instance");
-    assert(this.valid(grant), "Client authorization revoked");
+  async upload(request: Socket["request"], value: Obj) {
+    const grant = await this.authorize(request), instance = request.headers.get("x-vega-instance");
+    assert(await this.valid(grant), "Client authorization revoked");
     assert(value && typeof value === "object" && value.type === "result", "Invalid client result");
     assert(this.hub.active(grant.userId, grant.clientId)?.instance === instance, "Agent disconnected");
     return this.hub.result(grant.userId, { id: value.id, result: value.result, instance });
   }
-  revoke(userId: string, clientId?: string) {
-    for (const grant of this.store.objects<Grant>("client-token")) {
-      if (grant.userId === userId && (!clientId || grant.clientId === clientId)) this.store.remove("client-token", grant.hash);
+  async revoke(userId: string, clientId?: string) {
+    for (const grant of await this.store.objects<Grant>("client-token")) {
+      if (grant.userId === userId && (!clientId || grant.clientId === clientId)) await this.store.remove("client-token", grant.hash);
     }
     for (const [id, connection] of this.connections) {
       if (connection.grant.userId === userId && (!clientId || connection.grant.clientId === clientId)) this.close(id, true);

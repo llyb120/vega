@@ -51,7 +51,7 @@ async function regular(path: string, max: number) {
 }
 export async function loadSkills(config: Config, store: Store, cwd: string) {
   const skills: Obj[] = [];
-  for (const skill of store.objects<any>(skillKind(config.employeeId))) {
+  for (const skill of await store.objects<any>(skillKind(config.employeeId))) {
     const entry = await materializeSkill(store, skill);
     skills.push({
       id: skill.id,

@@ -53,11 +53,11 @@ export class LocalAgents {
     this.tickets.set(ticket, { hash: principal.hash, instance, until: Date.now() + 15000 });
     return { ticket };
   }
-  verify(ticket: unknown, auth: Auth) {
+  async verify(ticket: unknown, auth: Auth) {
     assert(typeof ticket === "string", "Invalid agent ticket");
     const entry = this.tickets.get(ticket);
     this.tickets.delete(ticket);
-    const principal = entry && entry.until >= Date.now() && auth.resolveHash(entry.hash);
+    const principal = entry && entry.until >= Date.now() && await auth.resolveHash(entry.hash);
     assert(principal, "Local agent ticket expired or login revoked");
     return { userId: principal.user.id, instance: entry!.instance, expiresAt: principal.expiresAt };
   }

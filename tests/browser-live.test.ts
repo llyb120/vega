@@ -16,7 +16,7 @@ test("live control idle and uncertain delivery release the shared gate without r
   const f = await fixture(),
     s = await f.open();
   await s.wait("frame");
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", (m) => m.mode === "control");
   f.hub.sessions.get(s.socket.id)!.lastInput = Date.now() - 30001;
   await s.wait(
@@ -25,7 +25,7 @@ test("live control idle and uncertain delivery release the shared gate without r
   );
   await f.chrome.tabGate("C1").run(async () => {});
   assert.equal(f.hub.controllers.size, 0);
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   for (let i = 0; i < 100 && !f.hub.sessions.get(s.socket.id)!.locked; i++)
     await sleep(5);
   const original = f.chrome.cdp.bind(f.chrome);
@@ -43,13 +43,13 @@ test("live control idle and uncertain delivery release the shared gate without r
     frameId: s.frame().frameId,
     action: { action: "type", text: "only once" },
   };
-  s.message(input);
+  await s.message(input);
   const result = await s.wait("input_result");
   assert.equal(result.status, "needs_review");
   assert.match(result.reason, /wire lost/);
   await f.chrome.tabGate("C1").run(async () => {});
   assert.equal(f.hub.controllers.size, 0);
-  s.message(input);
+  await s.message(input);
   assert.equal(attempts, 1);
   assert(s.closed.length);
 });
@@ -61,7 +61,7 @@ for (const [stage, reason] of [
 ]) test(`Enter navigation recovers ${stage} reads on the same live connection without replay`, async () => {
   const f = await fixture(), s = await f.open();
   await s.wait("frame");
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
   const session = f.hub.sessions.get(s.socket.id)!;
   const evaluate = f.chrome.evaluate.bind(f.chrome), observe = f.chrome.observe.bind(f.chrome), cdp = f.chrome.cdp.bind(f.chrome);
@@ -100,7 +100,7 @@ for (const [stage, reason] of [
     }
     return cdp(...args);
   };
-  s.message({ type: "input", seq: 1, frameId: s.frame().frameId, action: { action: "press", key: "Enter" } });
+  await s.message({ type: "input", seq: 1, frameId: s.frame().frameId, action: { action: "press", key: "Enter" } });
   assert.equal((await s.wait("input_result", m => m.seq === 1)).status, "executed");
   const frame = await s.wait("frame", m => m.url === f.state.url);
   await s.wait("frame", m => m.frameId > frame.frameId);
@@ -144,7 +144,7 @@ test("control of another tab runs while an agent task owns a different tab", asy
   const session = f.hub.sessions.get(b.socket.id)!;
   session.tabTag = "C2";
   f.state.url = "https://other.test/";
-  b.message({ type: "mode", mode: "control" });
+  await b.message({ type: "mode", mode: "control" });
   await b.wait("mode", (m) => m.mode === "control");
   assert(f.hub.controllers.get("C2") === session);
   let released = false;
@@ -152,7 +152,7 @@ test("control of another tab runs while an agent task owns a different tab", asy
     await sleep(60);
     released = true;
   });
-  b.message({
+  await b.message({
     type: "input",
     seq: 1,
     frameId: b.frame().frameId,
@@ -270,17 +270,17 @@ async function fixture() {
         const message = JSON.parse(String(raw));
         messages.push(message);
         if (autoAck && message.type === "frame")
-          queueMicrotask(() =>
-            hub.message(
-              socket,
-              JSON.stringify({ type: "frame_ack", frameId: message.frameId }),
-            ),
+          queueMicrotask(async () =>
+            await hub.message(
+                            socket,
+                            JSON.stringify({ type: "frame_ack", frameId: message.frameId }),
+                          ),
           );
       },
       close: (code?: number, reason?: string) => closed.push({ code, reason }),
     };
-    hub.open(socket);
-    const message = (value: Obj) => hub.message(socket, JSON.stringify(value));
+    await hub.open(socket);
+    const message = async (value: Obj) => await hub.message(socket, JSON.stringify(value));
     const wait = async (
       type: string,
       predicate: (m: Obj) => boolean = () => true,
@@ -342,21 +342,21 @@ test("live browser tickets require same-origin admin cookie, expire and are cons
     { origin: "http://localhost" },
     { origin: "http://localhost", cookie: "vega_session=other" },
   ])
-    assert.throws(() =>
-      f.hub.authorize({
-        ...request,
-        headers: new Headers(headers as Record<string, string>),
-      }),
+    await assert.rejects(async () =>
+      await f.hub.authorize({
+                ...request,
+                headers: new Headers(headers as Record<string, string>),
+              }),
     );
-  assert.equal(f.hub.authorize(request, true).principal.hash, f.principal.hash);
-  assert.throws(() => f.hub.authorize(request, true));
+  assert.equal((await f.hub.authorize(request, true)).principal.hash, f.principal.hash);
+  await assert.rejects(async () => await f.hub.authorize(request, true));
   const stale = await f.hub.ticket(f.principal, "C1");
   f.hub.tickets.get(stale.ticket)!.until = 0;
-  assert.throws(() =>
-    f.hub.authorize({
-      ...request,
-      url: "http://localhost/api/chrome/live?ticket=" + stale.ticket,
-    }),
+  await assert.rejects(async () =>
+    await f.hub.authorize({
+            ...request,
+            url: "http://localhost/api/chrome/live?ticket=" + stale.ticket,
+          }),
   );
   f.principal.user.role = "viewer";
   await assert.rejects(() => f.hub.ticket(f.principal, "C1"));
@@ -375,9 +375,9 @@ test("live frames use acknowledgement backpressure without SQLite snapshots; con
     "no unacknowledged frame queue",
   );
   assert.equal(f.chrome.observations.size, 0);
-  s.message({ type: "frame_ack", frameId: first.frameId });
+  await s.message({ type: "frame_ack", frameId: first.frameId });
   await s.wait("frame", (m) => m.frameId > first.frameId);
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", (m) => m.mode === "control");
   let agentRan = false;
   const agent = f.chrome.tabGate("C1").run(async () => {
@@ -385,7 +385,7 @@ test("live frames use acknowledgement backpressure without SQLite snapshots; con
   });
   await sleep(30);
   assert.equal(agentRan, false);
-  s.message({ type: "mode", mode: "view" });
+  await s.message({ type: "mode", mode: "view" });
   await agent;
   assert.equal(agentRan, true);
 });
@@ -393,11 +393,11 @@ test("live input maps displayed pixels, streams drag phases, types once and rele
   const f = await fixture(),
     s = await f.open();
   await s.wait("frame");
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", (m) => m.mode === "control");
   let seq = 0;
   const input = async (action: Obj) => {
-    s.message({
+    await s.message({
       type: "input",
       seq: ++seq,
       frameId: s.frame().frameId,
@@ -447,18 +447,18 @@ test("live input maps displayed pixels, streams drag phases, types once and rele
 test("weak-network pointer samples coalesce server-side and release applies the final position before the next frame", async () => {
   const f = await fixture(), s = await f.open();
   const frame = await s.wait("frame");
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
   const session = f.hub.sessions.get(s.socket.id)!;
-  s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
+  await s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
   assert.equal((await s.wait("input_result", m => m.seq === 1)).status, "executed");
   let unblock!: () => void;
   const blocked = session.io.run(() => new Promise<void>(yes => { unblock = yes; }));
   while (!unblock) await sleep(1);
   for (let seq = 2; seq <= 101; seq++)
-    s.message({ type: "pointer", seq, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "move", x: 100 + seq, y: 100 } });
+    await s.message({ type: "pointer", seq, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "move", x: 100 + seq, y: 100 } });
   assert.equal(session.pointerPending?.seq, 101, "keep one latest sample, not an unbounded movement queue");
-  s.message({ type: "pointer", seq: 102, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "up", x: 250, y: 150 } });
+  await s.message({ type: "pointer", seq: 102, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "up", x: 250, y: 150 } });
   unblock(); await blocked;
   assert.equal((await s.wait("pointer_result", m => m.seq === 102)).status, "executed");
   assert.deepEqual(f.calls.filter(c => c.method === "Input.dispatchMouseEvent").map(c => [c.params.type, c.params.x, c.params.y]), [
@@ -472,24 +472,24 @@ test("weak-network pointer samples coalesce server-side and release applies the 
   f.state.stamp = "result of first drag";
   // A second gesture uses the new picture, never a frame re-labeled from the first gesture.
   const nextFrame = await s.wait("frame", m => m.inputSeq === 102 && m.frameId > after.frameId);
-  s.message({ type: "input", seq: 103, frameId: nextFrame.frameId, action: { action: "pointer", phase: "down", x: 200, y: 100 } });
+  await s.message({ type: "input", seq: 103, frameId: nextFrame.frameId, action: { action: "pointer", phase: "down", x: 200, y: 100 } });
   assert.equal((await s.wait("input_result", m => m.seq === 103)).status, "executed");
-  s.message({ type: "pointer", seq: 104, dragSeq: 103, frameId: nextFrame.frameId, action: { action: "pointer", phase: "up", x: 210, y: 100 } });
+  await s.message({ type: "pointer", seq: 104, dragSeq: 103, frameId: nextFrame.frameId, action: { action: "pointer", phase: "up", x: 210, y: 100 } });
   assert.equal((await s.wait("pointer_result", m => m.seq === 104)).status, "executed");
 });
 
 test("a queued weak-network release fails closed on navigation and does not replay discarded moves", async () => {
   const f = await fixture(), s = await f.open(), frame = await s.wait("frame");
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
-  s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
+  await s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
   await s.wait("input_result", m => m.seq === 1);
   const session = f.hub.sessions.get(s.socket.id)!;
   let unblock!: () => void;
   const blocked = session.io.run(() => new Promise<void>(yes => { unblock = yes; }));
   while (!unblock) await sleep(1);
   for (let seq = 2; seq <= 4; seq++)
-    s.message({ type: "pointer", seq, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: seq === 4 ? "up" : "move", x: 150 + seq, y: 100 } });
+    await s.message({ type: "pointer", seq, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: seq === 4 ? "up" : "move", x: 150 + seq, y: 100 } });
   f.state.url = "https://other.test/";
   unblock(); await blocked;
   assert.equal((await s.wait("pointer_result", m => m.seq === 4)).status, "not_executed");
@@ -501,9 +501,9 @@ test("a queued weak-network release fails closed on navigation and does not repl
 for (const mutation of ["wrong drag", "wrong frame", "invalid phase", "invalid coordinates", "duplicate"]) test(`pointer stream rejects ${mutation} and releases any held mouse without replay`, async () => {
   const f = await fixture(), s = await f.open();
   const frame = await s.wait("frame");
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
-  s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
+  await s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
   await s.wait("input_result", m => m.seq === 1);
   const message = { type: "pointer", seq: 2, dragSeq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "move", x: 150, y: 100 } };
   if (mutation === "wrong drag") message.dragSeq = 999;
@@ -511,7 +511,7 @@ for (const mutation of ["wrong drag", "wrong frame", "invalid phase", "invalid c
   if (mutation === "invalid phase") message.action.phase = "down";
   if (mutation === "invalid coordinates") message.action.x = -1;
   if (mutation === "duplicate") message.seq = 1;
-  s.message(message);
+  await s.message(message);
   await f.chrome.tabGate("C1").run(async () => {});
   assert.equal(s.closed.at(-1)?.code, 4400);
   assert.deepEqual(f.calls.filter(c => c.method === "Input.dispatchMouseEvent").map(c => c.params.type), ["mousePressed", "mouseReleased"]);
@@ -520,7 +520,7 @@ for (const mutation of ["wrong drag", "wrong frame", "invalid phase", "invalid c
 test("a held touch can start from its displayed frame after stream repaints without relaxing freshness or page checks", async () => {
   const f = await fixture(), s = await f.open();
   const frame = await s.wait("frame");
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
   await sleep(650);
   await s.wait("frame", m => m.frameId >= frame.frameId + 4);
@@ -529,7 +529,7 @@ test("a held touch can start from its displayed frame after stream repaints with
   assert(starting, "a long press must not lose its starting frame after only three repaints");
   let seq = 0;
   const input = async (phase: string) => {
-    s.message({ type: "input", seq: ++seq, frameId: frame.frameId, action: { action: "pointer", phase, x: 200, y: 100 } });
+    await s.message({ type: "input", seq: ++seq, frameId: frame.frameId, action: { action: "pointer", phase, x: 200, y: 100 } });
     return s.wait("input_result", m => m.seq === seq);
   };
   for (const phase of ["down", "move", "up"]) assert.equal((await input(phase)).status, "executed");
@@ -542,7 +542,7 @@ test("a held touch can start from its displayed frame after stream repaints with
   assert.equal(f.calls.filter(c => c.params?.type === "mousePressed").length, presses);
   for (let i = 0; i < 40; i++) {
     session.pendingFrame = { ...starting, id: 1000 + i, at: Date.now() };
-    s.message({ type: "frame_ack", frameId: 1000 + i });
+    await s.message({ type: "frame_ack", frameId: 1000 + i });
   }
   assert.equal(session.acknowledged.size, 32, "frame metadata retention stays bounded");
   assert(!session.acknowledged.has(frame.frameId));
@@ -550,12 +550,12 @@ test("a held touch can start from its displayed frame after stream repaints with
 test("live drag retains its accepted frame across scroll, expiry and acknowledgement eviction", async () => {
   const f = await fixture(), s = await f.open();
   const frame = await s.wait("frame");
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
   const session = f.hub.sessions.get(s.socket.id)!;
   let seq = 0;
   const input = async (phase: string) => {
-    s.message({ type: "input", seq: ++seq, frameId: frame.frameId, action: { action: "pointer", phase, x: 200, y: 100 } });
+    await s.message({ type: "input", seq: ++seq, frameId: frame.frameId, action: { action: "pointer", phase, x: 200, y: 100 } });
     return s.wait("input_result", m => m.seq === seq);
   };
   assert.equal((await input("down")).status, "executed");
@@ -575,17 +575,17 @@ test("live drag retains its accepted frame across scroll, expiry and acknowledge
 for (const change of ["document", "url", "width", "height", "viewport", "frameId"]) test(`live drag stops and releases the mouse when ${change} changes`, async () => {
   const f = await fixture(), s = await f.open();
   const frame = await s.wait("frame");
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
   const session = f.hub.sessions.get(s.socket.id)!;
-  s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
+  await s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
   assert.equal((await s.wait("input_result", m => m.seq === 1)).status, "executed");
   if (change === "document") session.observation!.pages[0].document = "new document";
   else if (change === "url") f.state.url = "https://other.test/";
   else if (change === "width" || change === "height") f.state[change] += 100;
   else if (change === "viewport") f.state.viewport = "[2,0,0]";
   if (change !== "frameId") f.state.stamp = "changed " + change;
-  s.message({ type: "input", seq: 2, frameId: change === "frameId" ? -1 : frame.frameId, action: { action: "pointer", phase: "move", x: 150, y: 100 } });
+  await s.message({ type: "input", seq: 2, frameId: change === "frameId" ? -1 : frame.frameId, action: { action: "pointer", phase: "move", x: 150, y: 100 } });
   assert.equal((await s.wait("input_result", m => m.seq === 2)).status, "not_executed");
   assert.equal(session.mouse, undefined);
   assert.deepEqual(f.calls.filter(c => c.method === "Input.dispatchMouseEvent").map(c => c.params.type), ["mousePressed", "mouseReleased"]);
@@ -595,7 +595,7 @@ test("live controls reject stale frames, changed focus, arbitrary scripts and du
   const f = await fixture(),
     s = await f.open();
   await s.wait("frame");
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", (m) => m.mode === "control");
   const session = f.hub.sessions.get(s.socket.id)!;
   let seq = 0;
@@ -605,7 +605,7 @@ test("live controls reject stale frames, changed focus, arbitrary scripts and du
     { action: "press", key: "Ctrl+L" },
     { action: "goto", url: "javascript:alert(1)" },
   ]) {
-    s.message({
+    await s.message({
       type: "input",
       seq: ++seq,
       frameId: s.frame().frameId,
@@ -617,7 +617,7 @@ test("live controls reject stale frames, changed focus, arbitrary scripts and du
     );
   }
   f.state.focus.identity = 2;
-  s.message({
+  await s.message({
     type: "input",
     seq: ++seq,
     frameId: s.frame().frameId,
@@ -636,16 +636,16 @@ test("live controls reject stale frames, changed focus, arbitrary scripts and du
   const next = await fixture(),
     other = await next.open();
   await other.wait("frame");
-  other.message({ type: "mode", mode: "control" });
+  await other.message({ type: "mode", mode: "control" });
   await other.wait("mode", (m) => m.mode === "control");
-  other.message({
+  await other.message({
     type: "input",
     seq: 1,
     frameId: other.frame().frameId,
     action: { action: "press", key: "Enter" },
   });
   await other.wait("input_result");
-  other.message({
+  await other.message({
     type: "input",
     seq: 1,
     frameId: other.frame().frameId,
@@ -679,7 +679,7 @@ test("a still page sends its picture once, then tiny same-picture frames at 2 fp
   assert(full.data && !full.same, "a changed screen sends the new picture");
   const latest = () => s.messages.filter((m) => m.type === "frame").at(-1)!;
   for (let i = 0; i < 100 && !latest().same; i++) await sleep(10);
-  s.message({ type: "frame_ack", frameId: latest().frameId, resend: true });
+  await s.message({ type: "frame_ack", frameId: latest().frameId, resend: true });
   const mark2 = s.messages.length;
   const resent = await s.wait("frame", (m) => s.messages.indexOf(m) >= mark2 && !!m.data);
   assert(resent.data, "a viewer that lost its picture gets it again");
@@ -690,9 +690,9 @@ test("input brings the stream back to 10 fps immediately", async () => {
   const session = f.hub.sessions.get(s.socket.id)!;
   session.lastChange = session.lastInput = Date.now() - 5000;
   assert.equal(session.interval(), 500);
-  s.message({ type: "mode", mode: "control" });
+  await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", (m) => m.mode === "control");
-  s.message({ type: "input", seq: 1, frameId: s.frame().frameId, action: { action: "type", text: "x" } });
+  await s.message({ type: "input", seq: 1, frameId: s.frame().frameId, action: { action: "type", text: "x" } });
   await s.wait("input_result");
   assert.equal(session.interval(), 100);
 });

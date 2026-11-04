@@ -21,12 +21,12 @@ import {
 } from "../server/core/employee";
 import { employeeCall } from "./public-call";
 
-function fixture() {
-  const store = new Store(":memory:");
-  const engine = new Engine(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+async function fixture() {
+  const store = await Store.open(":memory:");
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test", models: { model: { modalities: { input: ["text", "image"] }, limit: { context: 128000, output: 8192 } } } } } });
-  const employee = engine.employee.for(engine.employee.create({ name: "Memory employee" }, "owner").id), chat = employee.chat("owner");
+  await store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test", models: { model: { modalities: { input: ["text", "image"] }, limit: { context: 128000, output: 8192 } } } } } });
+  const employee = await engine.employee.for((await engine.employee.create({ name: "Memory employee" }, "owner")).id), chat = await employee.chat("owner");
   return { store, engine, employee, chat };
 }
 const action = (id: string, arguments_: any) => ({ role: "assistant", calls: [{ id, ...employeeCall(arguments_) }] });
@@ -181,10 +181,10 @@ test("standing memories (pinned, preference, correction) are injected even for a
 });
 
 test("chat recall uses the last three user turns, so '好的，继续' keeps the topic and standing memories", async () => {
-  const { store, engine, employee, chat } = fixture();
-  const state = employee.state();
+  const { store, engine, employee, chat } = await fixture();
+  const state = await employee.state();
   state.memories = [mem("pin", "convention", "回复一律用中文，结论先行", { pinned: true }), mem("oa", "environment", "OA 系统地址是 https://oa.example.test"), mem("ci", "procedure", "构建产物上传到制品库")];
-  employee.save(state);
+  await employee.save(state);
   const systems: string[] = [];
   engine.providers.chat = async (_model, system) => { systems.push(system); return { role: "assistant", text: "好的。" }; };
   try {
@@ -195,7 +195,7 @@ test("chat recall uses the last three user turns, so '好的，继续' keeps the
       assert(system.includes("https://oa.example.test"));
       assert(!system.includes("构建产物上传到制品库"));
     }
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("an OA task recalls the OA address memory", () => {
@@ -234,7 +234,7 @@ test("model writes: environment is active at once, person_org waits for confirma
 });
 
 test("employee memory tools propose/search/resolve and refresh prompt in the same turn", async () => {
-  const { store, engine, employee, chat } = fixture();
+  const { store, engine, employee, chat } = await fixture();
   let phase = "propose", requests = 0, memory = "";
   engine.providers.chat = async (_model, system, _messages, definitions) => {
     assert(system.includes("主动积累") && system.includes("memory_propose"));
@@ -255,41 +255,41 @@ test("employee memory tools propose/search/resolve and refresh prompt in the sam
   };
   try {
     await engine.run(chat.id, { role: "user", text: "Project Aurora 的长期环境是 east region" });
-    memory = employee.state().memories[0].id;
+    memory = (await employee.state()).memories[0].id;
     phase = "update";
     await engine.run(chat.id, { role: "user", text: "更新长期约定：现在固定改用 west region" });
-    assert.equal(employee.state().memories.filter((m: any) => m.status !== "archived").length, 1);
-    assert.equal(employee.state().memories[0].id, memory);
+    assert.equal((await employee.state()).memories.filter((m: any) => m.status !== "archived").length, 1);
+    assert.equal((await employee.state()).memories[0].id, memory);
     phase = "forget";
     await engine.run(chat.id, { role: "user", text: "忘记这条环境约定" });
-    assert.equal(employee.state().memories.length, 0);
-  } finally { await engine.close(); store.close(); }
+    assert.equal((await employee.state()).memories.length, 0);
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("memory_propose rejects bad lengths without mutating store", async () => {
-  const { store, engine, employee } = fixture();
+  const { store, engine, employee } = await fixture();
   const boundary = "字".repeat(100) + "项".repeat(100);
   try {
     await employee.execute("", { action: "memory_propose", claim: "字", source: "ui" });
     const saved = await employee.execute("", { action: "memory_propose", claim: ` \n${boundary}\t`, source: "ui", memoryKind: "preference" });
-    assert.equal(employee.state().memories[1].claim, boundary);
-    const before = structuredClone(employee.state().memories);
+    assert.equal((await employee.state()).memories[1].claim, boundary);
+    const before = structuredClone((await employee.state()).memories);
     for (const claim of [undefined, " \t\n", boundary + "额外"]) {
       await assert.rejects(employee.execute("", { action: "memory_propose", id: saved.value.id, claim, source: "ui" }));
-      assert.deepEqual(employee.state().memories, before);
+      assert.deepEqual((await employee.state()).memories, before);
     }
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("chat recalls older relevant memories outside recent noise", async () => {
-  const { store, engine, employee, chat } = fixture();
+  const { store, engine, employee, chat } = await fixture();
   const now = Date.now(), previousUse = now - 3 * 86400000;
-  employee.update((state) => {
-    state.memories = [
-      migrateMemories([{ id: "older", text: "项目银河统一使用TypeScript并在原目录开发", importance: 2, strength: 1, at: previousUse, usedAt: previousUse }], now).memories[0],
-      ...Array.from({ length: 35 }, (_, index) => migrateMemories([{ id: "recent-" + index, text: "unrelated preference " + index, importance: 1, strength: 1, at: now, usedAt: now }], now).memories[0]),
-    ];
-  });
+  await employee.update((state) => {
+        state.memories = [
+          migrateMemories([{ id: "older", text: "项目银河统一使用TypeScript并在原目录开发", importance: 2, strength: 1, at: previousUse, usedAt: previousUse }], now).memories[0],
+          ...Array.from({ length: 35 }, (_, index) => migrateMemories([{ id: "recent-" + index, text: "unrelated preference " + index, importance: 1, strength: 1, at: now, usedAt: now }], now).memories[0]),
+        ];
+      });
   let requests = 0;
   engine.providers.chat = async (_model, system) => {
     assert(system.includes("项目银河统一使用TypeScript并在原目录开发"));
@@ -297,14 +297,14 @@ test("chat recalls older relevant memories outside recent noise", async () => {
   };
   try {
     await engine.run(chat.id, { role: "user", text: "项目银河统一使用TypeScript并在原目录开发，继续按这个约定" });
-    const memory = employee.state().memories.find((item: any) => item.id === "older")!;
+    const memory = (await employee.state()).memories.find((item: any) => item.id === "older")!;
     assert(memory.usefulness > 0.3);
     assert((memory.lastUsedAt || 0) >= previousUse);
-  } finally { await engine.close(); store.close(); }
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("task complete auto-extracts durable memories and later chat can recall them", async () => {
-  const { store, engine, employee, chat } = fixture();
+  const { store, engine, employee, chat } = await fixture();
   const created = await employee.execute("", { action: "add", kind: "todo", text: "核验项目银河的网关约定" });
   let requests = 0;
   engine.providers.chat = async (_model, system) => {
@@ -314,19 +314,19 @@ test("task complete auto-extracts durable memories and later chat can recall the
     return { role: "assistant", text: "按已保存约定处理。" };
   };
   try {
-    employee.update((state) => { state.tasks[0].status = "running"; });
+    await employee.update((state) => { state.tasks[0].status = "running"; });
     employee.busy.set(created.value.id, { computer: false, session: "" });
-    await employee.run(employee.state().tasks[0]);
-    assert.equal(employee.state().tasks[0].status, "done");
-    assert((employee.state().tasks[0].memorySuggestions || []).length >= 1);
-    assert(employee.state().memories.some((m: any) => /HTTP\/1\.1|表格/.test(m.claim)));
+    await employee.run((await employee.state()).tasks[0]);
+    assert.equal((await employee.state()).tasks[0].status, "done");
+    assert(((await employee.state()).tasks[0].memorySuggestions || []).length >= 1);
+    assert((await employee.state()).memories.some((m: any) => /HTTP\/1\.1|表格/.test(m.claim)));
     await engine.run(chat.id, { role: "user", text: "项目银河网关后续怎么处理？" });
-    assert.match(store.messages(chat.id).at(-1)!.text!, /约定|HTTP|表格|处理/);
-  } finally { await engine.close(); store.close(); }
+    assert.match((await store.messages(chat.id)).at(-1)!.text!, /约定|HTTP|表格|处理/);
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("continuing task prompt includes recalled memory block", async () => {
-  const { store, engine, employee } = fixture();
+  const { store, engine, employee } = await fixture();
   const created = await employee.execute("", { action: "add", kind: "todo", text: "继续核验项目银河 TypeScript 约定" });
   await employee.execute("", { action: "memory_propose", claim: "项目银河统一使用TypeScript并在原目录开发", memoryKind: "convention", source: "ui" });
   let saw = false;
@@ -337,19 +337,19 @@ test("continuing task prompt includes recalled memory block", async () => {
     return action("complete", { action: "complete", deliverableRef: [], text: "verified typescript convention", summary: "项目银河统一使用TypeScript并在原目录开发。" });
   };
   try {
-    employee.update((state) => {
-      const task = state.tasks[0];
-      task.status = "running";
-      task.plan = [{ content: "verify", status: "completed" }];
-      task.planRevision = task.revision || 0;
-      task.workSession = store.newSession({ title: "t", cwd: state.cwd, taskId: task.id, employeeId: employee.employeeId, ownerId: "owner" }).id;
-    });
-    store.append(employee.state().tasks[0].workSession, { role: "user", text: "先前一轮" });
-    employee.busy.set(created.value.id, { computer: false, session: employee.state().tasks[0].workSession });
-    await employee.run(employee.state().tasks[0]);
+    await employee.update(async (state) => {
+            const task = state.tasks[0];
+            task.status = "running";
+            task.plan = [{ content: "verify", status: "completed" }];
+            task.planRevision = task.revision || 0;
+            task.workSession = (await store.newSession({ title: "t", cwd: state.cwd, taskId: task.id, employeeId: employee.employeeId, ownerId: "owner" })).id;
+          });
+    await store.append((await employee.state()).tasks[0].workSession, { role: "user", text: "先前一轮" });
+    employee.busy.set(created.value.id, { computer: false, session: (await employee.state()).tasks[0].workSession });
+    await employee.run((await employee.state()).tasks[0]);
     assert.equal(saw, true);
-    assert.equal(employee.state().tasks[0].status, "done");
-  } finally { await engine.close(); store.close(); }
+    assert.equal((await employee.state()).tasks[0].status, "done");
+  } finally { await engine.close(); await store.close(); }
 });
 
 test("legacy recallMemory wrapper migrates and respects read-only mode", () => {

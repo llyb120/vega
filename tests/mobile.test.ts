@@ -118,106 +118,106 @@ test(
         ["long-service-".repeat(12)]: { url: "https://example.test/mcp" },
       },
     };
-    const store = new Store(db),
-      session = store.newSession({
-        title: "非常长的会话标题" + "long-title-".repeat(40),
-        cwd: dir,
-        model: config.model,
-      });
-    store.put("config", config);
-    const inlineBlob = store.blob("image/png", png);
-    store.grantBlob(inlineBlob, session.id);
-    store.append(session.id, {
-      role: "user",
-      at: 1000,
-      text: "https://example.test/" + "a".repeat(2000),
-    });
-    store.append(session.id, {
-      role: "assistant",
-      at: 2000,
-      text: "过程说明",
-      thinking: "分析上下文",
-      usage: { input: 100, output: 20, totalTokens: 120 },
-    });
-    store.append(session.id, {
-      role: "tool",
-      at: 3000,
-      name: "read",
-      callId: "fixture-read",
-      text: "工具结果",
-    });
-    store.append(session.id, {
-      role: "assistant",
-      at: 4000,
-      text: "已有历史正文\n".repeat(300) + "\n| **项目** | 数量 | 状态 | 说明 | 路径 | 备注 |\n| :--- | :---: | ---: | --- | --- | --- |\n| `read` | 12 | 完成 | 表格内容 | example.txt | 可横向滚动 |\n\n![Markdown 图片](</api/blobs/" + inlineBlob + ">)\n",
-      usage: { input: 50, output: 10, totalTokens: 60 },
-    });
-    new Experiences(store).execute(
-      "fixture",
-      {
-        operation: "experience_save",
-        snapshotId: "fixture",
-        experience: {
-          scope: "https://example.test",
-          task: "经验任务" + "word-".repeat(50),
-          conditions: ["已登录"],
-          steps: ["打开列表", "选择记录" + "long-".repeat(80)],
-          checks: ["完成"],
-          outcome: "success",
-          evidence: "fixture passed",
-          redacted: true,
-        },
-      },
-      { id: "fixture", origin: "https://example.test" },
-    );
-    const worker = store.newSession({
-        title: "牛马专属主会话",
-        cwd: dir,
-        taskId: "seeded-worker",
-      }),
-      computer = store.newSession({
-        title: "牛马专属电脑会话",
-        cwd: dir,
-        taskId: "seeded-worker",
-        scene: "computer",
-      });
-    store.append(worker.id, {
-      role: "assistant",
-      text: "employee-only work record",
-    });
-    store.append(computer.id, {
-      role: "assistant",
-      text: "employee-only browser record",
-    });
-    store.put("employee", {
-      enabled: false,
-      public: false,
-      workStart: "09:00",
-      workEnd: "18:00",
-      idleMinutes: 10,
-      takeoverSeconds: 15,
-      desktopAskAfter: 0,
-      cwd: dir,
-      duties: [],
-      tasks: [
-        {
-          id: "seeded-worker",
-          text: "seeded employee task",
-          status: "done",
-          createdAt: Date.now(),
-          profile: "lightweight",
-          cwd: dir,
-          owner: { token: "", name: "" },
-          workSession: worker.id,
-          computerSession: computer.id,
-        },
-      ],
-      memories: [],
-      runs: [],
-      orbit: [],
-      links: [],
-    });
-    store.close();
+    const store = await Store.open(db),
+      session = await store.newSession({
+              title: "非常长的会话标题" + "long-title-".repeat(40),
+              cwd: dir,
+              model: config.model,
+            });
+    await store.put("config", config);
+    const inlineBlob = await store.blob("image/png", png);
+    await store.grantBlob(inlineBlob, session.id);
+    await store.append(session.id, {
+            role: "user",
+            at: 1000,
+            text: "https://example.test/" + "a".repeat(2000),
+          });
+    await store.append(session.id, {
+            role: "assistant",
+            at: 2000,
+            text: "过程说明",
+            thinking: "分析上下文",
+            usage: { input: 100, output: 20, totalTokens: 120 },
+          });
+    await store.append(session.id, {
+            role: "tool",
+            at: 3000,
+            name: "read",
+            callId: "fixture-read",
+            text: "工具结果",
+          });
+    await store.append(session.id, {
+            role: "assistant",
+            at: 4000,
+            text: "已有历史正文\n".repeat(300) + "\n| **项目** | 数量 | 状态 | 说明 | 路径 | 备注 |\n| :--- | :---: | ---: | --- | --- | --- |\n| `read` | 12 | 完成 | 表格内容 | example.txt | 可横向滚动 |\n\n![Markdown 图片](</api/blobs/" + inlineBlob + ">)\n",
+            usage: { input: 50, output: 10, totalTokens: 60 },
+          });
+    await new Experiences(store).execute(
+            "fixture",
+            {
+              operation: "experience_save",
+              snapshotId: "fixture",
+              experience: {
+                scope: "https://example.test",
+                task: "经验任务" + "word-".repeat(50),
+                conditions: ["已登录"],
+                steps: ["打开列表", "选择记录" + "long-".repeat(80)],
+                checks: ["完成"],
+                outcome: "success",
+                evidence: "fixture passed",
+                redacted: true,
+              },
+            },
+            { id: "fixture", origin: "https://example.test" },
+          );
+    const worker = await store.newSession({
+            title: "牛马专属主会话",
+            cwd: dir,
+            taskId: "seeded-worker",
+          }),
+      computer = await store.newSession({
+              title: "牛马专属电脑会话",
+              cwd: dir,
+              taskId: "seeded-worker",
+              scene: "computer",
+            });
+    await store.append(worker.id, {
+            role: "assistant",
+            text: "employee-only work record",
+          });
+    await store.append(computer.id, {
+            role: "assistant",
+            text: "employee-only browser record",
+          });
+    await store.put("employee", {
+            enabled: false,
+            public: false,
+            workStart: "09:00",
+            workEnd: "18:00",
+            idleMinutes: 10,
+            takeoverSeconds: 15,
+            desktopAskAfter: 0,
+            cwd: dir,
+            duties: [],
+            tasks: [
+              {
+                id: "seeded-worker",
+                text: "seeded employee task",
+                status: "done",
+                createdAt: Date.now(),
+                profile: "lightweight",
+                cwd: dir,
+                owner: { token: "", name: "" },
+                workSession: worker.id,
+                computerSession: computer.id,
+              },
+            ],
+            memories: [],
+            runs: [],
+            orbit: [],
+            links: [],
+          });
+    await store.close();
     const reserve = createServer();
     await new Promise<void>((yes) => reserve.listen(0, "127.0.0.1", yes));
     const port = (reserve.address() as any).port;

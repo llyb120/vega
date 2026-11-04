@@ -125,25 +125,25 @@ test("vault keeps the existing name/condition/content form without requiring web
   assert(!employeeVault.includes('v-model="form.site"'));
 });
 
-test("vault adds multiple entries and edits only the chosen one without exposing secrets", () => {
-  const store = new Store(":memory:"), vault = new Vault(store);
+test("vault adds multiple entries and edits only the chosen one without exposing secrets", async () => {
+  const store = await Store.open(":memory:"), vault = new Vault(store);
   try {
-    const first = vault.save({ name: "account", condition: "first task", content: "secret-one" });
-    const second = vault.save({ name: "account", condition: "second task", content: "secret-two" });
+    const first = await vault.save({ name: "account", condition: "first task", content: "secret-one" });
+    const second = await vault.save({ name: "account", condition: "second task", content: "secret-two" });
     assert.notEqual(first.id, second.id);
-    assert.equal(vault.list().length, 2);
-    assert(!JSON.stringify(vault.list()).includes("secret-"));
+    assert.equal((await vault.list()).length, 2);
+    assert(!JSON.stringify(await vault.list()).includes("secret-"));
     const form = { value: {} };
-    vaultFunction("edit", { form })(vault.list()[0]);
+    vaultFunction("edit", { form })((await vault.list())[0]);
     assert.equal((form.value as any).content, "");
-    vault.save({ id: first.id, name: "renamed", condition: "updated condition", content: "" });
-    assert.equal(vault.get(first.id, "test").content, "secret-one");
-    assert.equal(vault.get(second.id, "test").content, "secret-two");
-    vault.save({ id: second.id, name: "replacement", condition: "second task", content: "new-secret" });
-    vault.remove(first.id);
-    assert.equal(vault.list().length, 1);
-    assert.equal(vault.get(second.id, "test").content, "new-secret");
+    await vault.save({ id: first.id, name: "renamed", condition: "updated condition", content: "" });
+    assert.equal((await vault.get(first.id, "test")).content, "secret-one");
+    assert.equal((await vault.get(second.id, "test")).content, "secret-two");
+    await vault.save({ id: second.id, name: "replacement", condition: "second task", content: "new-secret" });
+    await vault.remove(first.id);
+    assert.equal((await vault.list()).length, 1);
+    assert.equal((await vault.get(second.id, "test")).content, "new-secret");
     vaultFunction("reset", { form })();
     assert.equal((form.value as any).id, undefined);
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });

@@ -79,28 +79,28 @@ export function outputBudget(
   assert(available >= 32, "Context window input leaves no output budget");
   return Math.min(model.maxOutputTokens, available);
 }
-export function bodyFor(
+export async function bodyFor(
   model: Model,
   system: string,
   input: Message[],
   tools: Tool[],
-  resolveImage?: (image: { mime: string; data?: string; blobId?: string; path?: string }) => {
+  resolveImage?: (image: { mime: string; data?: string; blobId?: string; path?: string }) => Promise<{
     mime: string;
     data: string;
-  },
+  }>,
 ) {
   const trimmed = historyImages(input),
     rows = resolveImage
-      ? trimmed.map((m) =>
+      ? await Promise.all(trimmed.map(async (m) =>
           m.images?.length
             ? {
                 ...m,
-                images: m.images.map((im) =>
+                images: await Promise.all(m.images.map((im) =>
                   im.data ? { mime: im.mime, data: im.data } : resolveImage(im),
-                ),
+                )),
               }
             : m,
-        )
+        ))
       : trimmed,
     options = wireOptions(model),
     body: Obj = { ...options, model: model.id, stream: true };
@@ -451,7 +451,7 @@ export class Providers {
     data?: string;
     blobId?: string;
     path?: string;
-  }) => { mime: string; data: string } = (im) => ({
+  }) => Promise<{ mime: string; data: string }> = async (im) => ({
     mime: im.mime,
     data: im.data || "",
   });
@@ -468,13 +468,13 @@ export class Providers {
     emit: Emit = () => {},
     session = "",
   ): Promise<Message> {
-    const { path, body } = bodyFor(
-      model,
-      system,
-      messages,
-      tools,
-      this.resolveImage,
-    );
+    const { path, body } = await bodyFor(
+          model,
+          system,
+          messages,
+          tools,
+          this.resolveImage,
+        );
     if (model.api === "devin")
       return usableReply(await devinStream(
         model,
@@ -531,13 +531,13 @@ export class Providers {
         historyHash(messages.slice(0, previous.count)) === previous.prefix
       ) {
         body.previous_response_id = previous.response;
-        body.input = bodyFor(
-          model,
-          system,
-          messages.slice(previous.count),
-          tools,
-          this.resolveImage,
-        ).body.input;
+        body.input = (await bodyFor(
+                  model,
+                  system,
+                  messages.slice(previous.count),
+                  tools,
+                  this.resolveImage,
+                )).body.input;
         continuation = true;
       }
       this.checkpoints.set(cacheKey, {
@@ -574,13 +574,13 @@ export class Providers {
     ) {
       await bounded(response, 4096);
       delete body.previous_response_id;
-      body.input = bodyFor(
-        model,
-        system,
-        messages,
-        tools,
-        this.resolveImage,
-      ).body.input;
+      body.input = (await bodyFor(
+              model,
+              system,
+              messages,
+              tools,
+              this.resolveImage,
+            )).body.input;
       response = await request(
         model.baseURL + path,
         {
@@ -619,13 +619,13 @@ export class Providers {
             (p) => !["thinking", "redacted_thinking"].includes(p.type),
           ),
         }));
-        const retry = bodyFor(
-        model,
-        system,
-        unsigned,
-        tools,
-        this.resolveImage,
-      );
+        const retry = await bodyFor(
+                model,
+                system,
+                unsigned,
+                tools,
+                this.resolveImage,
+              );
         response = await request(
           model.baseURL + retry.path,
           { method: "POST", headers, body: JSON.stringify(retry.body), signal },

@@ -10,12 +10,8 @@ import { Tools } from "../server/core/tools";
 import { resolveModel } from "../server/core/config";
 
 test("ordinary conversations do not depend on employee state, schedule or task runtime; explicit delegation stays independent", async () => {
-  const store = new Store(":memory:"),
-    engine = new Engine(
-      store,
-      new Catalog(store, new Subscriptions(store, "")),
-      new Chrome(store, new ChromeBridge(), ""),
-    );
+  const store = await Store.open(":memory:"),
+    engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
   const config = {
     scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
@@ -28,19 +24,13 @@ test("ordinary conversations do not depend on employee state, schedule or task r
       },
     },
   };
-  store.put("config", config);
-  const session = store.newSession({ title: "ordinary" }),
-    taskSession = store.newSession({
-      title: "employee",
-      taskId: "existing-task",
-    });
-  const tools = new Tools(
-      engine,
-      session,
-      config,
-      new AbortController().signal,
-      () => {},
-    ),
+  await store.put("config", config);
+  const session = await store.newSession({ title: "ordinary" }),
+    taskSession = await store.newSession({
+          title: "employee",
+          taskId: "existing-task",
+        });
+  const tools = await Tools.create(engine, session, config, new AbortController().signal, () => {}),
     model = resolveModel(config),
     originalState = engine.employee.state.bind(engine.employee),
     events: any[] = [];
@@ -57,28 +47,22 @@ test("ordinary conversations do not depend on employee state, schedule or task r
       role: "user",
       text: "just a normal conversation",
     });
-    assert.equal(store.messages(session.id).at(-1)?.text, "ordinary reply");
-    assert(!store.session(session.id).taskId);
+    assert.equal((await store.messages(session.id)).at(-1)?.text, "ordinary reply");
+    assert(!(await store.session(session.id)).taskId);
     assert(
       events
         .filter((event) => event.session === session.id)
         .every((event) => !event.taskId),
     );
-    const rules = tools.rules(model);
+    const rules = await tools.rules(model);
     assert(rules.includes("普通会话"));
     assert(rules.includes("不需要牛马启用"));
-    assert(tools.definitions(model).some((tool) => tool.name === "chrome_act"));
-    assert(!tools.definitions(model).some((tool) => tool.name.startsWith("vault_")), "a plain session belongs to no employee and has no vault");
+    assert((await tools.definitions(model)).some((tool) => tool.name === "chrome_act"));
+    assert(!(await tools.definitions(model)).some((tool) => tool.name.startsWith("vault_")), "a plain session belongs to no employee and has no vault");
     assert(!rules.includes("[密码本]"));
-    const readOnlyTools = new Tools(
-      engine,
-      store.newSession({ title: "readonly", readOnly: true }),
-      config,
-      new AbortController().signal,
-      () => {},
-    );
+    const readOnlyTools = await Tools.create(engine, await store.newSession({ title: "readonly", readOnly: true }), config, new AbortController().signal, () => {});
     assert(
-      !readOnlyTools.definitions(model).some((tool) => tool.name.startsWith("vault_")),
+      !(await readOnlyTools.definitions(model)).some((tool) => tool.name.startsWith("vault_")),
     );
     engine.employee.state = originalState;
     const delegated = await tools.execute(
@@ -92,31 +76,25 @@ test("ordinary conversations do not depend on employee state, schedule or task r
       model,
     );
     assert(
-      engine.employee
-        .state()
+      (await engine.employee
+                .state())
         .tasks.some((task) => task.id === delegated.value.id),
     );
-    assert(!store.session(session.id).taskId);
-    assert.equal(store.messages(session.id).length, 2);
-    assert.equal(store.messages(taskSession.id).length, 0);
-    assert.throws(() => store.stage(taskSession.id));
-    assert.throws(() => store.fork(taskSession.id));
-    const stage = store.stage(session.id);
+    assert(!(await store.session(session.id)).taskId);
+    assert.equal((await store.messages(session.id)).length, 2);
+    assert.equal((await store.messages(taskSession.id)).length, 0);
+    await assert.rejects(async () => await store.stage(taskSession.id));
+    await assert.rejects(async () => await store.fork(taskSession.id));
+    const stage = await store.stage(session.id);
     assert(!stage.taskId);
     assert.equal(stage.stageSource, session.id);
-    assert(!store.fork(session.id).taskId);
-    const taskTools = new Tools(
-      engine,
-      taskSession,
-      config,
-      new AbortController().signal,
-      () => {},
+    assert(!(await store.fork(session.id)).taskId);
+    const taskTools = await Tools.create(engine, taskSession, config, new AbortController().signal, () => {});
+    assert(
+      (await taskTools.rules(model)).includes("当前会话属于牛马任务"),
     );
     assert(
-      taskTools.rules(model).includes("当前会话属于牛马任务"),
-    );
-    assert(
-      !taskTools.definitions(model).some((tool) => ["vault_request", "vault_send"].includes(tool.name)),
+      !(await taskTools.definitions(model)).some((tool) => ["vault_request", "vault_send"].includes(tool.name)),
     );
     await engine.run(taskSession.id, {
       role: "user",
@@ -130,6 +108,6 @@ test("ordinary conversations do not depend on employee state, schedule or task r
   } finally {
     engine.employee.state = originalState;
     await engine.close();
-    store.close();
+    await store.close();
   }
 });

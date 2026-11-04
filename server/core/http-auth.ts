@@ -67,7 +67,7 @@ export function setLogin(event: H3Event, token: string, expiresAt: number) {
 export function clearLogin(event: H3Event) {
   deleteCookie(event, COOKIE, cookieOptions(event));
 }
-export function gate(event: H3Event, path: string) {
+export async function gate(event: H3Event, path: string) {
   const { auth, token } = app();
   // OAuth returns cross-site without a website cookie; callback validates its one-time state.
   if (path === "/api/providers/callback/devin" && event.method === "GET")
@@ -93,7 +93,7 @@ export function gate(event: H3Event, path: string) {
     event.method === "POST"
   )
     return;
-  const session = auth.authenticate(getCookie(event, COOKIE));
+  const session = await auth.authenticate(getCookie(event, COOKIE));
   check(session, 401, "Please sign in");
   event.context.principal = session;
   if (!["GET", "HEAD", "OPTIONS"].includes(event.method))
@@ -129,31 +129,31 @@ export function gate(event: H3Event, path: string) {
     return;
   throw new AuthError(403, "Administrator permission required");
 }
-export function eventAllowed(user: User, value: any) {
+export async function eventAllowed(user: User, value: any) {
   if (value.targetUser) return value.targetUser === user.id;
   const { auth } = app();
   if (value.session) {
     try {
-      return auth.canRead(user, app().store.session(value.session));
+      return await auth.canRead(user, await app().store.session(value.session));
     } catch {
       return false;
     }
   }
   if (value.data?.employeeId) {
     if (value.data.deleted) return user.role === "admin" || value.data.scope === "team" || value.data.ownerId === user.id;
-    try { return app().engine.employee.for(value.data.employeeId).accessible(user); }
+    try { return await (await app().engine.employee.for(value.data.employeeId)).accessible(user); }
     catch { return false; }
   }
   if (value.type === "fire") {
     try {
-      return auth.canRead(user, app().store.session(value.data.root));
+      return await auth.canRead(user, await app().store.session(value.data.root));
     } catch {
       return false;
     }
   }
   if (value.data?.fireRoot) {
     try {
-      return auth.canRead(user, app().store.session(value.data.fireRoot));
+      return await auth.canRead(user, await app().store.session(value.data.fireRoot));
     } catch {
       return false;
     }

@@ -8,11 +8,11 @@ import { Employee, type EmployeeRuntime } from "../server/core/employee";
 import { Store } from "../server/core/store";
 import { Vault } from "../server/core/vault";
 
-function fixture() {
-  const store = new Store(":memory:");
+async function fixture() {
+  const store = await Store.open(":memory:");
   const runtime: EmployeeRuntime = { run: async () => {}, cancel() {}, isRunning: () => false, emit() {}, send: async () => ({}), config: () => ({ scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] }, model: "fixture/model" }) };
   const root = new Employee(store, new Vault(store), runtime); root.closed = true;
-  const employee = root.for(root.create({ name: "Avatar employee", avatar: "zodiac:aries" }, "owner").id);
+  const employee = await root.for((await root.create({ name: "Avatar employee", avatar: "zodiac:aries" }, "owner")).id);
   return { store, root, employee };
 }
 
@@ -71,73 +71,73 @@ test("bot avatars encode shape and color in the preset string and every shape ha
 });
 
 test("preset selection, clearing and reopening preserve the employee's own avatar without accepting an arbitrary blob reference", async () => {
-  const { store, root, employee } = fixture();
+  const { store, root, employee } = await fixture();
   try {
-    assert.equal(employee.state().avatar, "zodiac:aries");
+    assert.equal((await employee.state()).avatar, "zodiac:aries");
     await updateEmployeeAvatar(employee, { preset: "zodiac:pisces" });
     const reopened = new Employee(store, root.vault, root.runtime);
-    assert.equal(reopened.for(employee.employeeId).state().avatar, "zodiac:pisces");
+    assert.equal((await (await reopened.for(employee.employeeId)).state()).avatar, "zodiac:pisces");
     await assert.rejects(employee.control({ action: "settings", avatar: "blob-" + "1".repeat(32) }), /avatar/);
-    assert.equal(employee.state().avatar, "zodiac:pisces");
+    assert.equal((await employee.state()).avatar, "zodiac:pisces");
     await updateEmployeeAvatar(employee, { preset: "bot:cloud:teal" });
-    assert.equal(employee.state().avatar, "bot:cloud:teal");
+    assert.equal((await employee.state()).avatar, "bot:cloud:teal");
     await assert.rejects(updateEmployeeAvatar(employee, { preset: "bot:cloud:#00ffaa" }));
-    assert.equal(employee.state().avatar, "bot:cloud:teal");
+    assert.equal((await employee.state()).avatar, "bot:cloud:teal");
     await updateEmployeeAvatar(employee, { preset: "" });
-    assert.equal(employee.state().avatar, "");
-    assert.throws(() => root.create({ name: "Bad", avatar: "https://tracker.example/pixel" }, "owner"), /avatar/);
-  } finally { root.close(); store.close(); }
+    assert.equal((await employee.state()).avatar, "");
+    await assert.rejects(async () => await root.create({ name: "Bad", avatar: "https://tracker.example/pixel" }, "owner"), /avatar/);
+  } finally { root.close(); await store.close(); }
 });
 
-test("new employees automatically get an unused shape/color pair without changing existing avatars", () => {
-  const { store, root } = fixture();
+test("new employees automatically get an unused shape/color pair without changing existing avatars", async () => {
+  const { store, root } = await fixture();
   try {
-    const selected = root.create({ name: "Selected", avatar: "bot:cloud:teal" }, "owner");
-    const legacy = root.create({ name: "Legacy" }, "owner");
-    root.for(legacy.id).update((state) => { state.avatar = ""; });
-    const before = root.all().map((employee) => employee.state());
+    const selected = await root.create({ name: "Selected", avatar: "bot:cloud:teal" }, "owner");
+    const legacy = await root.create({ name: "Legacy" }, "owner");
+    await (await root.for(legacy.id)).update((state) => { state.avatar = ""; });
+    const before = await Promise.all((await root.all()).map(async (employee) => await employee.state()));
     const used = new Set(before.map((state) => {
       const bot = parseBotAvatar(state.avatar) || defaultBotAvatar(state.id);
       return botAvatarPreset(bot.shape, bot.color);
     }));
     const created = [];
-    while (root.all().length < 50) {
-      const state = root.create({ name: "Automatic", ...(created.length % 2 ? { avatar: "" } : {}) }, "owner");
+    while ((await root.all()).length < 50) {
+      const state = await root.create({ name: "Automatic", ...(created.length % 2 ? { avatar: "" } : {}) }, "owner");
       assert(parseBotAvatar(state.avatar), "persist an explicit preset, not a hash-only default");
       assert(!used.has(state.avatar!), state.avatar);
       used.add(state.avatar!);
       created.push(state);
     }
-    for (const state of before) assert.equal(root.for(state.id).state().avatar, state.avatar);
+    for (const state of before) assert.equal((await (await root.for(state.id)).state()).avatar, state.avatar);
     const reopened = new Employee(store, root.vault, root.runtime);
-    for (const state of created) assert.equal(reopened.for(state.id).state().avatar, state.avatar);
-    assert.equal(reopened.for(selected.id).state().avatar, "bot:cloud:teal");
-    assert.throws(() => root.create({ name: "Full" }, "owner"), /capacity/);
-  } finally { root.close(); store.close(); }
+    for (const state of created) assert.equal((await (await reopened.for(state.id)).state()).avatar, state.avatar);
+    assert.equal((await (await reopened.for(selected.id)).state()).avatar, "bot:cloud:teal");
+    await assert.rejects(async () => await root.create({ name: "Full" }, "owner"), /capacity/);
+  } finally { root.close(); await store.close(); }
 });
 
 test("custom avatar uploads are normalized, metadata-free and stored separately from employee state", async () => {
-  const { store, root, employee } = fixture();
+  const { store, root, employee } = await fixture();
   try {
     const input = await sharp({ create: { width: 300, height: 180, channels: 4, background: "#6699dd" } }).withMetadata({ orientation: 6 }).png().toBuffer();
     const result = await updateEmployeeAvatar(employee, { mime: "image/png", data: input.toString("base64") });
     assert.equal(result.employeeId, employee.employeeId);
     assert.match(result.avatar, /^blob-[a-f\d]{32}$/);
-    assert.equal(employee.state().avatar, result.avatar);
-    const image = store.blobData(result.avatar)!;
+    assert.equal((await employee.state()).avatar, result.avatar);
+    const image = (await store.blobData(result.avatar))!;
     assert.equal(image.mime, "image/webp");
     const metadata = await sharp(image.data).metadata();
     assert.equal(metadata.width, 512); assert.equal(metadata.height, 512);
     assert.equal(metadata.exif, undefined); assert.equal(metadata.orientation, undefined);
-    assert(!JSON.stringify(employee.state()).includes(input.toString("base64")));
-    assert.equal(root.state().avatar, undefined, "another employee's avatar is unchanged");
-  } finally { root.close(); store.close(); }
+    assert(!JSON.stringify(await employee.state()).includes(input.toString("base64")));
+    assert.equal((await root.state()).avatar, undefined, "another employee's avatar is unchanged");
+  } finally { root.close(); await store.close(); }
 });
 
 test("invalid, oversized and disguised image uploads leave the current avatar and blob store unchanged", async () => {
-  const { store, root, employee } = fixture();
+  const { store, root, employee } = await fixture();
   try {
-    const before = (store.db.prepare("SELECT COUNT(*) count FROM blobs").get() as any).count;
+    const before = (await store.one("SELECT COUNT(*) count FROM blobs") as any).count;
     const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>').toString("base64");
     const jpeg = await sharp({ create: { width: 10, height: 10, channels: 3, background: "white" } }).jpeg().toBuffer();
     for (const input of [
@@ -146,9 +146,9 @@ test("invalid, oversized and disguised image uploads leave the current avatar an
       { mime: "image/png", data: jpeg.toString("base64") }, { mime: "image/png", data: "not base64!" },
       { mime: "__proto__", data: "YQ==" }, { mime: "image/png", data: "A".repeat(7 * 1024 * 1024 + 1) },
     ]) await assert.rejects(updateEmployeeAvatar(employee, input));
-    assert.equal(employee.state().avatar, "zodiac:aries");
-    assert.equal((store.db.prepare("SELECT COUNT(*) count FROM blobs").get() as any).count, before);
-  } finally { root.close(); store.close(); }
+    assert.equal((await employee.state()).avatar, "zodiac:aries");
+    assert.equal((await store.one("SELECT COUNT(*) count FROM blobs") as any).count, before);
+  } finally { root.close(); await store.close(); }
 });
 
 test("bot faces are projected onto a turning 3D head", () => {

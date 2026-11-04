@@ -172,16 +172,16 @@ test("narrow fallback: only null or an empty value its own bound rejects counts 
 });
 
 test("a whole-schema default fill is rejected before any browser or employee side effect", async (t) => {
-  const store = new Store(":memory:");
-  t.after(() => store.close());
+  const store = await Store.open(":memory:");
+  t.after(async () => await store.close());
   let browser = 0, employee = 0;
-  const session = store.newSession({ scene: "computer" });
+  const session = await store.newSession({ scene: "computer" });
   const engine = {
     store, vault: new Vault(store), mcpFor: () => ({}),
     chromeFor: async () => { browser++; throw Error("must not reach Chrome"); },
     employeeFor: () => { employee++; throw Error("must not reach the employee"); },
   } as any;
-  const tools = new Tools(engine, session, { model: "", provider: {} } as any, new AbortController().signal, () => {});
+  const tools = await Tools.create(engine, session, { model: "", provider: {} } as any, new AbortController().signal, () => {});
   const filled = { tabTag: "C1", actions: [{ action: "click", ref: "e1", frame: 0, button: "", clickCount: 0, value: "", text: "", key: "", x: 0, y: 0 }], imageId: "", visual: "", settleMs: 0 };
   await assert.rejects(tools.execute({ id: "a", name: "chrome_act", arguments: filled }, {} as any), ArgumentError);
   await assert.rejects(tools.execute({ id: "b", name: "chrome_navigate", arguments: { url: "https://a.test", target: { kind: "new_tab", tabTag: "", incognito: false } } }, {} as any), /不接受字段 tabTag/);
@@ -210,16 +210,16 @@ test("visible tools and branches follow session, scene and permission like the o
   for (const name of ["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete", "vault_request", "vault_send"]) assert(STANDALONE_TOOLS.has(name));
 });
 
-test("chrome tools appear only where the old chrome tool did", (t) => {
-  const store = new Store(":memory:");
-  t.after(() => store.close());
+test("chrome tools appear only where the old chrome tool did", async (t) => {
+  const store = await Store.open(":memory:");
+  t.after(async () => await store.close());
   const engine = { store, vault: new Vault(store), mcpFor: () => ({}) } as any;
   const config = { model: "", provider: {}, scenes: { lightweight: ["p/l"], coding: ["p/c"], computer: ["p/x"] } } as any;
-  const visible = (session: any, model?: any) => new Tools(engine, session, config, new AbortController().signal, () => {}).definitions(model).filter((d) => d.name.startsWith("chrome_")).length;
-  assert.equal(visible(store.newSession({ scene: "computer" })), 14);
-  assert.equal(visible(store.newSession({ scene: "coding" })), 0);
-  assert.equal(visible(store.newSession({ scene: "coding" }), { selection: "p/x" }), 14);
-  assert.equal(visible(store.newSession({ scene: "computer", readOnly: true })), 0);
+  const visible = async (session: any, model?: any) => (await (await Tools.create(engine, session, config, new AbortController().signal, () => {})).definitions(model)).filter((d) => d.name.startsWith("chrome_")).length;
+  assert.equal(await visible(await store.newSession({ scene: "computer" })), 14);
+  assert.equal(await visible(await store.newSession({ scene: "coding" })), 0);
+  assert.equal(await visible(await store.newSession({ scene: "coding" }), { selection: "p/x" }), 14);
+  assert.equal(await visible(await store.newSession({ scene: "computer", readOnly: true })), 0);
 });
 
 test("dispatch and status descriptions steer away from copied tool names and redundant dedupe checks", () => {

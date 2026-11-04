@@ -40,7 +40,7 @@ export class Catalog {
             ? p.preset
             : undefined;
     if (source) {
-      const local = await this.auth.load(source, this.store.get("paths", {}));
+      const local = await this.auth.load(source, await this.store.get("paths", {}));
       const subscription = !!local.localAuth;
       const options = { ...local.options, ...p.options };
       options.apiKey = local.options.apiKey;
@@ -98,7 +98,7 @@ export class Catalog {
   ): Promise<{ models: Obj; version?: string; raw?: Obj[] }> {
     const identity = this.identity(p),
       cached = this.cache.get(identity),
-      saved = this.store.object<any>("model-cache", identity);
+      saved = await this.store.object<any>("model-cache", identity);
     if (!force && cached && Date.now() - cached.at < 60000) return cached;
     if (
       !force &&
@@ -246,7 +246,7 @@ export class Catalog {
       if (p.localAuth === "codex") url += "?client_version=0.134.0";
       const budget = { bytes: 16 << 20 };
       const preset = presets.find((v) => v.id === p.preset);
-      let metadata = this.store.get<any>("models.dev", null);
+      let metadata = await this.store.get<any>("models.dev", null);
       const needsMetadata =
         !!preset?.modelsDev ||
         [
@@ -262,7 +262,7 @@ export class Catalog {
             at: Date.now(),
             data: await jsonRequest("https://models.dev/api.json", {}, 20000),
           };
-          this.store.put("models.dev", metadata);
+          await this.store.put("models.dev", metadata);
         } catch {}
       }
       const entriesAll: Obj[] = [];
@@ -370,7 +370,7 @@ export class Catalog {
     }
     const result = { at: Date.now(), models, version, raw };
     this.cache.set(identity, result);
-    this.store.save("model-cache", identity, result);
+    await this.store.save("model-cache", identity, result);
     return result;
   }
   devinModel(families: Obj[], requested: string, effort?: string) {

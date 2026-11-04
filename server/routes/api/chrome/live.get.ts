@@ -3,20 +3,20 @@ import { employeeLive } from "../../../core/application";
 import type { Peer } from "crossws";
 import type { BrowserLive } from "../../../core/browser-live";
 const sessions = new Map<string, BrowserLive>();
-const live = (request: { url: string }) => employeeLive(new URL(request.url).searchParams.get("employeeId") || undefined);
+const live = async (request: { url: string }) => await employeeLive(new URL(request.url).searchParams.get("employeeId") || undefined);
 export default defineWebSocketHandler({
-  upgrade(request) {
-    try { live(request).authorize(request); }
+  async upgrade(request) {
+    try { await (await live(request)).authorize(request); }
     catch { return new Response("Browser connection denied", { status: 403 }); }
   },
-  open(peer: Peer) {
+  async open(peer: Peer) {
     try {
-      const hub = live(peer.request);
-      hub.open(peer);
+      const hub = await live(peer.request);
+      await hub.open(peer);
       sessions.set(peer.id, hub);
     } catch { peer.close(4403, "浏览器连接已失效"); }
   },
-  message(peer, message) { sessions.get(peer.id)?.message(peer, message.text()); },
+  async message(peer, message) { await sessions.get(peer.id)?.message(peer, message.text()); },
   close(peer) {
     void sessions.get(peer.id)?.sessions.get(peer.id)?.close();
     sessions.delete(peer.id);

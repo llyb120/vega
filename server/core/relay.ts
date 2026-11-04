@@ -52,20 +52,26 @@ export class Relay {
     }
   >();
   tail = Promise.resolve();
-  device: string;
+  private device?: Promise<string>;
   onStatus: (data: any) => void = () => {};
   constructor(
     public store: Store,
     public employee: Employee,
   ) {
-    this.device = store.get("relay:device", "") || id();
-    store.put("relay:device", this.device);
   }
-  cfg() {
-    return this.store.get<Obj>("config", {}).relay || {};
+  /** This server's relay identity, created once. */
+  deviceId() {
+    return (this.device ??= this.store.transaction(async () => {
+      const device = (await this.store.get("relay:device", "")) || id();
+      await this.store.put("relay:device", device);
+      return device;
+    }));
   }
-  headers() {
-    const cfg = this.cfg(),
+  async cfg() {
+    return (await this.store.get<Obj>("config", {})).relay || {};
+  }
+  async headers() {
+    const cfg = await this.cfg(),
       token = expand(cfg.token || "");
     assert(cfg.server && token, "Configure relay server and token");
     return {
@@ -83,14 +89,14 @@ export class Relay {
           ),
         ].join(","),
       ),
-      "X-Relay-Device": this.device,
+      "X-Relay-Device": await this.deviceId(),
       "X-Relay-Version": "0.2.0",
     };
   }
-  restart() {
+  async restart() {
     this.abort?.abort();
     this.abort = new AbortController();
-    const cfg = this.cfg();
+    const cfg = await this.cfg();
     if (!cfg.server || !cfg.token) return;
     void this.loop(this.abort.signal);
   }
@@ -106,8 +112,8 @@ export class Relay {
     let backoff = 1000;
     while (!signal.aborted) {
       try {
-        const cfg = this.cfg(),
-          state = this.store.get("relay:cursor", { seq: 0, serverEpoch: "" }),
+        const cfg = await this.cfg(),
+          state = await this.store.get("relay:cursor", { seq: 0, serverEpoch: "" }),
           url = new URL(cfg.server.replace(/\/$/, "") + "/v2/events");
         url.searchParams.set("since", String(state.seq));
         url.searchParams.set("serverEpoch", state.serverEpoch);
@@ -115,7 +121,7 @@ export class Relay {
           url.href,
           {
             headers: {
-              ...this.headers(),
+              ...await this.headers(),
               Accept: "text/event-stream",
               "Accept-Encoding": "identity",
               "X-Nova-SSE-Topics": "relay,remote",
@@ -131,7 +137,7 @@ export class Relay {
         this.connected = true;
         this.onStatus({ connected: true });
         backoff = 1000;
-        for (const employee of this.employee.all()) for (const task of employee.state().tasks)
+        for (const employee of await this.employee.all()) for (const task of (await employee.state()).tasks)
           if (task.status === "waiting" && task.owner.token)
             void this.send(task.owner.token, "starlink.help", {
               id: task.id,
@@ -145,7 +151,7 @@ export class Relay {
           if (frame.op === "ready") {
             if (Number.isSafeInteger(frame.lastSeq)) state.seq = frame.lastSeq;
             if (frame.serverEpoch) state.serverEpoch = frame.serverEpoch;
-            this.store.put("relay:cursor", state);
+            await this.store.put("relay:cursor", state);
           }
           if (frame.op === "event") {
             const event = frame.event;
@@ -154,7 +160,7 @@ export class Relay {
             await this.dispatch(event);
             if (event.seq) {
               state.seq = event.seq;
-              this.store.put("relay:cursor", state);
+              await this.store.put("relay:cursor", state);
             }
           }
         }
@@ -173,7 +179,7 @@ export class Relay {
       let last: any;
       for (let attempt = 0; attempt < 5; attempt++) {
         try {
-          const cfg = this.cfg(),
+          const cfg = await this.cfg(),
             frame = {
               version: 2,
               op: "send",
@@ -191,7 +197,7 @@ export class Relay {
             {
               method: "POST",
               headers: {
-                ...this.headers(),
+                ...await this.headers(),
                 "Content-Type": "application/json",
                 ...(compressed ? { "Content-Encoding": "gzip" } : {}),
               },
@@ -223,9 +229,9 @@ export class Relay {
   async call(peer: string, command: string, args: Obj) {
     const reqId = id();
     if (["employee_do", "employee_say"].includes(command))
-      this.employee.update((s) => {
-        if (!s.links.includes(peer)) s.links.push(peer);
-      });
+      await this.employee.update((s) => {
+                if (!s.links.includes(peer)) s.links.push(peer);
+              });
     return await new Promise<any>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(reqId);
@@ -279,22 +285,22 @@ export class Relay {
     }
     if (event.type?.startsWith("starlink.")) {
       const employee = event.type === "starlink.reply"
-        ? this.employee.all().find((employee) => employee.findTask(data.id)) || this.employee
+        ? (await this.employee.forTask(data.id)) || this.employee
         : this.employee;
       await employee.remote(from, event.type, data);
     }
   }
   async serve(owner: Owner, command: string, args: Obj) {
-    const employee = this.employee.for(args.employeeId || "default");
-    assert(employee.state().public, "Employee is not public");
+    const employee = await this.employee.for(args.employeeId || "default");
+    assert((await employee.state()).public, "Employee is not public");
     if (command === "info") {
       return {
         status: "ready",
-        tasks: employee.store.activeTaskCount(employee.employeeId),
+        tasks: await employee.store.activeTaskCount(employee.employeeId),
       };
     }
     if (command === "employee_get") {
-      const s = employee.state();
+      const s = await employee.state();
       return {
         id: s.id, name: s.name, public: s.public,
         duties: [], memories: [], runs: [], orbit: [], links: [],
@@ -324,11 +330,11 @@ export class Relay {
     }
     if (command === "transcript") {
       let taskId = "";
-      try { taskId = employee.store.session(args.threadId).taskId || ""; } catch {}
-      const task = employee.findTask(taskId);
+      try { taskId = (await employee.store.session(args.threadId)).taskId || ""; } catch {}
+      const task = await employee.findTask(taskId);
       assert(task && (task.workSession === args.threadId || task.computerSession === args.threadId), "Only the assigning member may view this task");
       assert(task?.owner.token === owner.token, "Only the assigning member may view this task");
-      return employee.transcript(args.threadId);
+      return await employee.transcript(args.threadId);
     }
     throw Error("Unsupported employee team command");
   }

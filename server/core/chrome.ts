@@ -202,7 +202,7 @@ export class Chrome {
     };
   }
   /** Screenshot files go to the owner's directory: the session (task) or the user's browser view. */
-  private fileOwner(owner: string) { return owner.startsWith("browser-view:") ? owner : this.store.session(owner); }
+  private async fileOwner(owner: string) { return owner.startsWith("browser-view:") ? owner : await this.store.session(owner); }
   /**
    * File name of an image or DOM record. The browser view only ever needs the current frame, so it overwrites one
    * file per tab (and tile); sessions keep every capture by id for read-back.
@@ -352,7 +352,7 @@ export class Chrome {
           typeof page.stamp === "string" && prior.pages[0].stamp === page.stamp
         ) {
           let old: Buffer | undefined;
-          try { old = this.store.files.read(previous.path); } catch {}
+          try { old = await this.store.files.read(previous.path); } catch {}
           if (old) {
             const [a, b] = await Promise.all([
               sharp(old).removeAlpha().raw().toBuffer(),
@@ -369,7 +369,7 @@ export class Chrome {
           }
         }
         const fresh = !path;
-        path ||= this.store.files.write(this.fileOwner(owner), this.fileName(owner, tag, imageID, `-${o.images.length}.webp`), data);
+        path ||= await this.store.files.write(await this.fileOwner(owner), this.fileName(owner, tag, imageID, `-${o.images.length}.webp`), data);
         o.images.push({
           imageId: imageID,
           snapshotId: o.id,
@@ -484,7 +484,7 @@ export class Chrome {
         shot = { screenshotError: error.message };
       }
     }
-    o.documentPath = this.store.files.write(this.fileOwner(owner), this.fileName(owner, tag, o.id, ".json"), JSON.stringify({ ...o, frames: undefined }));
+    o.documentPath = await this.store.files.write(await this.fileOwner(owner), this.fileName(owner, tag, o.id, ".json"), JSON.stringify({ ...o, frames: undefined }));
     this.observations.set(key, o);
     const origin = new URL(o.pages[0].url).origin;
     // Identifiers and images first: an oversized result is clipped from the end, never these.
@@ -496,7 +496,7 @@ export class Chrome {
       ...shot,
       documentPath: o.documentPath,
       coverageGaps: o.coverageGaps,
-      experienceHint: this.experiences.hint(owner, origin),
+      experienceHint: await this.experiences.hint(owner, origin),
       pages: this.summarize(o, a),
     };
   }
@@ -1185,11 +1185,11 @@ export class Chrome {
     if (op.startsWith("experience_")) {
       const o = latest(),
         origin = o ? new URL(o.pages[0].url).origin : undefined;
-      return this.experiences.execute(
-        owner,
-        a,
-        o && origin ? { id: o.id, origin } : undefined,
-      );
+      return await this.experiences.execute(
+              owner,
+              a,
+              o && origin ? { id: o.id, origin } : undefined,
+            );
     }
     if (op === "run")
       return this.run(owner, cwd, { ...a, tabTag: tag }, signal, credentials);

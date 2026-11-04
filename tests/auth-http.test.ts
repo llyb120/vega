@@ -18,18 +18,18 @@ test(
     const dir = await mkdtemp(join(tmpdir(), "vega-web-auth-")),
       db = join(dir, "auth.db"),
       token = randomBytes(32).toString("base64url");
-    const seeded = new Store(db),
-      legacy = seeded.newSession({ title: "legacy admin-only", cwd: dir }),
-      employeeSession = seeded.newSession({
-        title: "employee-owned history",
-        cwd: dir,
-        taskId: "employee-test-task",
-      }),
-      secretBlob = seeded.blob(
-        "image/png",
-        Buffer.from("secret-image-fixture"),
-      );
-    seeded.close();
+    const seeded = await Store.open(db),
+      legacy = await seeded.newSession({ title: "legacy admin-only", cwd: dir }),
+      employeeSession = await seeded.newSession({
+              title: "employee-owned history",
+              cwd: dir,
+              taskId: "employee-test-task",
+            }),
+      secretBlob = await seeded.blob(
+              "image/png",
+              Buffer.from("secret-image-fixture"),
+            );
+    await seeded.close();
     let thinkingRequests = 0, triggerRequests = 0;
     const mock = createServer(async (req, res) => {
       if (req.method === "GET" && req.url === "/models") {
@@ -847,10 +847,10 @@ test(
       let continued: any,
         privateMessages: any[] = [];
       for (let n = 0; n < 150; n++) {
-        const inspectPrivate = new Store(db);
-        continued = inspectPrivate.session(s2.id);
-        privateMessages = inspectPrivate.messages(s2.id);
-        inspectPrivate.close();
+        const inspectPrivate = await Store.open(db);
+        continued = await inspectPrivate.session(s2.id);
+        privateMessages = await inspectPrivate.messages(s2.id);
+        await inspectPrivate.close();
         if (
           !continued.running &&
           privateMessages.some(

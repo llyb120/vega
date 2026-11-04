@@ -16,7 +16,7 @@ import { shell } from "../server/core/tools";
 test("directory skill import retains scripts/references in SQLite and works after original deletion", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-bundle-")),
     root = join(dir, "example"),
-    store = new Store(":memory:"),
+    store = await Store.open(":memory:"),
     old = process.env.VEGA_SKILL_CACHE;
   process.env.VEGA_SKILL_CACHE = join(dir, "cache");
   try {
@@ -70,18 +70,18 @@ test("directory skill import retains scripts/references in SQLite and works afte
       ),
     );
     await writeFile(script, "tampered");
-    await materializeSkill(store, store.object("skill", "bundled")!);
+    await materializeSkill(store, (await store.object("skill", "bundled"))!);
     assert.match(await readFile(script, "utf8"), /bundle script works/);
   } finally {
     if (old === undefined) delete process.env.VEGA_SKILL_CACHE;
     else process.env.VEGA_SKILL_CACHE = old;
-    store.close();
+    await store.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
 test("ZIP import snapshots packaged resources without traversal or unsafe archive paths", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-zip-")),
-    store = new Store(":memory:");
+    store = await Store.open(":memory:");
   try {
     const data = zipSync({
       "wrapper/pack/SKILL.md": strToU8(
@@ -93,7 +93,7 @@ test("ZIP import snapshots packaged resources without traversal or unsafe archiv
     await writeFile(path, data);
     const imported = await importSkill(store, path);
     assert(imported.files.includes("references/data.txt"));
-    assert(store.object<any>("skill", "zipped")?.assets.length === 2);
+    assert((await store.object<any>("skill", "zipped"))?.assets.length === 2);
     for (const entry of [
       "../outside",
       "/absolute",
@@ -116,7 +116,7 @@ test("ZIP import snapshots packaged resources without traversal or unsafe archiv
       ),
     );
   } finally {
-    store.close();
+    await store.close();
     await rm(dir, { recursive: true, force: true });
   }
 });

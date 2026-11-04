@@ -34,12 +34,13 @@ async function temp() {
   cleanup.push(() => rm(dir, { recursive: true, force: true }));
   return dir;
 }
-function store() {
-  const s = new Store(":memory:");
-  cleanup.push(() => s.close());
+async function store() {
+  const s = await Store.open(":memory:");
+  cleanup.push(async () => await s.close());
   return s;
 }
-function employee(s = store()) {
+async function employee(given?: Store) {
+  const s = given || await store();
   const vault = new Vault(s);
   let instance: Employee;
   const runtime: EmployeeRuntime = {
@@ -55,8 +56,8 @@ function employee(s = store()) {
   cleanup.push(() => instance.close());
   return instance;
 }
-function engine() {
-  const s = store(),
+async function engine() {
+  const s = await store(),
     auth = new Subscriptions(s, ""),
     catalog = new Catalog(s, auth),
     bridge = new ChromeBridge(),
@@ -68,7 +69,7 @@ function engine() {
         "utf8",
       ),
     );
-  const e = new Engine(s, catalog, chrome);
+  const e = await Engine.create(s, catalog, chrome);
   e.employee.closed = true;
   cleanup.push(() => e.close());
   return e;
@@ -117,23 +118,23 @@ const cfg = (url: string) => ({
 test("SQLite reopen, independent Stage history, current source timeline", async () => {
   const dir = await temp(),
     path = join(dir, "db");
-  let s = new Store(path);
-  const first = s.newSession({ cwd: dir, model: "p/m" });
-  s.append(first.id, { role: "user", text: "one" });
-  s.append(first.id, { role: "assistant", text: "done" });
-  const stage = s.stage(first.id);
+  let s = await Store.open(path);
+  const first = await s.newSession({ cwd: dir, model: "p/m" });
+  await s.append(first.id, { role: "user", text: "one" });
+  await s.append(first.id, { role: "assistant", text: "done" });
+  const stage = await s.stage(first.id);
   assert.equal(stage.model, undefined);
   assert.equal(stage.cwd, first.cwd);
-  s.close();
-  s = new Store(path);
-  cleanup.push(() => s.close());
-  assert.equal(s.messages(stage.id).length, 0);
-  s.append(first.id, { role: "user", text: "latest requirement" });
-  assert.match(new Context(s, first.id).stage(), /latest requirement/);
-  assert.deepEqual(s.sessionFamily(first.id).map((v) => v.id).sort(), [first.id, stage.id].sort());
-  s.deleteSession(first.id);
-  assert.throws(() => s.session(stage.id), /Session not found/);
-  assert.equal(s.messages(stage.id).length, 0);
+  await s.close();
+  s = await Store.open(path);
+  cleanup.push(async () => await s.close());
+  assert.equal((await s.messages(stage.id)).length, 0);
+  await s.append(first.id, { role: "user", text: "latest requirement" });
+  assert.match(await (await Context.open(s, first.id)).stage(), /latest requirement/);
+  assert.deepEqual((await s.sessionFamily(first.id)).map((v) => v.id).sort(), [first.id, stage.id].sort());
+  await s.deleteSession(first.id);
+  await assert.rejects(async () => await s.session(stage.id), /Session not found/);
+  assert.equal((await s.messages(stage.id)).length, 0);
 });
 test("exact edits reject ambiguous/overlap without modifying file", async () => {
   const dir = await temp(),
@@ -168,55 +169,55 @@ test("exact edits reject ambiguous/overlap without modifying file", async () => 
   assert.equal(await readFile(path, "utf8"), "A beta G");
 });
 test("nested context blocks are reversible and preserve original users", async () => {
-  const s = store(),
-    session = s.newSession(),
-    ctx = new Context(s, session.id);
+  const s = await store(),
+    session = await s.newSession(),
+    ctx = await Context.open(s, session.id);
   for (let i = 0; i < 24; i++)
-    s.append(session.id, {
-      role: i % 2 ? "assistant" : "user",
-      text:
-        i % 2
-          ? "original " + i + " " + "finished evidence ".repeat(200)
-          : "original " + i,
-    });
-  const one = ctx.compress([
-    {
-      startRef: "m00001",
-      endRef: "m00007",
-      summary:
-        "First work finished; original requirements, evidence and decisions remain recoverable.",
-    },
-  ])[0];
-  const two = ctx.compress([
-    {
-      startRef: one.id,
-      endRef: "m00011",
-      summary:
-        "Combined finished work; preserve all remaining decisions and original requirements.",
-    },
-  ])[0];
-  ctx.decompress(two.id);
-  assert(ctx.folds().find((f) => f.id === one.id)?.active);
-  ctx.decompress(one.id);
-  assert.equal(ctx.view().length, 24);
-  assert.throws(() =>
-    ctx.compress([{ startRef: "m00020", endRef: "m00024", summary: "bad" }]),
+    await s.append(session.id, {
+            role: i % 2 ? "assistant" : "user",
+            text:
+              i % 2
+                ? "original " + i + " " + "finished evidence ".repeat(200)
+                : "original " + i,
+          });
+  const one = (await ctx.compress([
+      {
+        startRef: "m00001",
+        endRef: "m00007",
+        summary:
+          "First work finished; original requirements, evidence and decisions remain recoverable.",
+      },
+    ]))[0];
+  const two = (await ctx.compress([
+      {
+        startRef: one.id,
+        endRef: "m00011",
+        summary:
+          "Combined finished work; preserve all remaining decisions and original requirements.",
+      },
+    ]))[0];
+  await ctx.decompress(two.id);
+  assert((await ctx.folds()).find((f) => f.id === one.id)?.active);
+  await ctx.decompress(one.id);
+  assert.equal((await ctx.view()).length, 24);
+  await assert.rejects(async () =>
+    await ctx.compress([{ startRef: "m00020", endRef: "m00024", summary: "bad" }]),
   );
-  assert.equal(s.messages(session.id).length, 24);
+  assert.equal((await s.messages(session.id)).length, 24);
 });
-test("context protects tool pairs and current turn", () => {
-  const s = store(),
-    session = s.newSession(),
-    ctx = new Context(s, session.id);
-  s.append(session.id, {
-    role: "assistant",
-    calls: [{ id: "c", name: "read", arguments: {} }],
-  });
-  s.append(session.id, { role: "tool", callId: "c", text: "done" });
+test("context protects tool pairs and current turn", async () => {
+  const s = await store(),
+    session = await s.newSession(),
+    ctx = await Context.open(s, session.id);
+  await s.append(session.id, {
+        role: "assistant",
+        calls: [{ id: "c", name: "read", arguments: {} }],
+      });
+  await s.append(session.id, { role: "tool", callId: "c", text: "done" });
   for (let i = 0; i < 10; i++)
-    s.append(session.id, { role: "user", text: "next" });
-  assert.throws(() =>
-    ctx.compress([{ startRef: "m00001", endRef: "m00001", summary: "split" }]),
+    await s.append(session.id, { role: "user", text: "next" });
+  await assert.rejects(async () =>
+    await ctx.compress([{ startRef: "m00001", endRef: "m00001", summary: "split" }]),
   );
   assert.deepEqual(parseStage("one /stage2 two"), {
     current: "one",
@@ -228,26 +229,26 @@ test("context protects tool pairs and current turn", () => {
   assert.equal(parseStage("path/stage.txt"), null);
 });
 test("employee task permissions, key dedup, approval reuses original sessions", async () => {
-  const e = employee();
+  const e = await employee();
   const d = await e.execute("", {
     action: "add",
     kind: "duty",
     text: "workflow",
     manual: true,
   });
-  e.update((s) =>
-    s.tasks.push({
-      id: "task",
-      text: "work",
-      status: "running",
-      createdAt: Date.now(),
-      profile: "lightweight",
-      cwd: process.cwd(),
-      owner: { token: "", name: "" },
-      dutyId: d.value.id,
-      workSession: "original",
-    }),
-  );
+  await e.update((s) =>
+        s.tasks.push({
+          id: "task",
+          text: "work",
+          status: "running",
+          createdAt: Date.now(),
+          profile: "lightweight",
+          cwd: process.cwd(),
+          owner: { token: "", name: "" },
+          dutyId: d.value.id,
+          workSession: "original",
+        }),
+      );
   e.busy.set("task", { computer: false, session: "original" });
   await assert.rejects(() =>
     e.execute("task", { action: "update", id: d.value.id, text: "hijacked" }),
@@ -262,7 +263,7 @@ test("employee task permissions, key dedup, approval reuses original sessions", 
   assert(pause.stop);
   e.busy.clear();
   await e.control({ action: "approve", id: "task", approved: true });
-  const task = e.state().tasks.find((t) => t.id === "task")!;
+  const task = (await e.state()).tasks.find((t) => t.id === "task")!;
   assert.equal(task.status, "queued");
   assert.equal(task.workSession, "original");
   const a = await e.execute("", {
@@ -281,7 +282,7 @@ test("employee task permissions, key dedup, approval reuses original sessions", 
   assert(b.value.exists);
 });
 test("duty validation, manual scheduling and removed Orbit do not trigger work", async () => {
-  const e = employee(),
+  const e = await employee(),
     now = Date.now();
   for (const a of [
     { times: ["25:00"] },
@@ -308,13 +309,13 @@ test("duty validation, manual scheduling and removed Orbit do not trigger work",
     text: "manual workflow",
     manual: true,
   });
-  e.update((s) => {
-    s.enabled = true;
-    s.workStart = s.workEnd = "00:00";
-  });
+  await e.update((s) => {
+        s.enabled = true;
+        s.workStart = s.workEnd = "00:00";
+      });
   e.closed = false;
   await e.tick();
-  assert.equal(e.state().tasks.length, 0);
+  assert.equal((await e.state()).tasks.length, 0);
   e.close();
   const manual = {
     id: "manual",
@@ -350,30 +351,30 @@ test("memory relevance floor, migration and feedback-driven usefulness", () => {
   assert(state.memories.find((m: any) => m.id === "code").usefulness > 0.3);
   assert.equal(retention(state.memories.find((m: any) => m.id === "perm"), now), 1);
 });
-test("vault AES-GCM/X25519 matches original wire format and task-limited temporary entries", () => {
-  const s1 = store(),
-    s2 = store(),
+test("vault AES-GCM/X25519 matches original wire format and task-limited temporary entries", async () => {
+  const s1 = await store(),
+    s2 = await store(),
     a = new Vault(s1),
     b = new Vault(s2);
-  const entry = a.save({
-    name: "service",
-    condition: "authorized use",
-    content: "super-secret",
-    share: true,
-  }).id;
-  const pk = b.request("req"),
-    sealed = a.sealFor(entry, "req", pk),
-    received = b.receive("req", "test task", sealed.sealed);
-  assert.throws(() => b.get(received.id, "purpose", "another-task"));
-  assert.equal(b.get(received.id, "purpose", "req").content, "super-secret");
-  assert(!JSON.stringify(a.list()).includes("super-secret"));
-  b.dropTemp("req");
-  assert.equal(b.list().length, 0);
-  assert.throws(() => b.receive("req", "task", sealed.sealed));
-  assert(!JSON.stringify(s1.objects("vault")).includes("super-secret"));
+  const entry = (await a.save({
+      name: "service",
+      condition: "authorized use",
+      content: "super-secret",
+      share: true,
+    })).id;
+  const pk = await b.request("req"),
+    sealed = await a.sealFor(entry, "req", pk),
+    received = await b.receive("req", "test task", sealed.sealed);
+  await assert.rejects(async () => await b.get(received.id, "purpose", "another-task"));
+  assert.equal((await b.get(received.id, "purpose", "req")).content, "super-secret");
+  assert(!JSON.stringify(await a.list()).includes("super-secret"));
+  await b.dropTemp("req");
+  assert.equal((await b.list()).length, 0);
+  await assert.rejects(async () => await b.receive("req", "task", sealed.sealed));
+  assert(!JSON.stringify(await s1.objects("vault")).includes("super-secret"));
 });
-test("experience routes dedup wording, share only identical prefixes and fail closed on scope", () => {
-  const e = new Experiences(store()),
+test("experience routes dedup wording, share only identical prefixes and fail closed on scope", async () => {
+  const e = new Experiences(await store()),
     a = {
       operation: "experience_save",
       snapshotId: "s",
@@ -389,20 +390,20 @@ test("experience routes dedup wording, share only identical prefixes and fail cl
         redacted: true,
       },
     };
-  const first: any = e.execute("one", a, { id: "s", origin: "https://a.test" });
+  const first: any = await e.execute("one", a, { id: "s", origin: "https://a.test" });
   a.experience.steps = ["打开报表。", "点击 导出"];
-  const again: any = e.execute("two", a, { id: "s", origin: "https://a.test" });
+  const again: any = await e.execute("two", a, { id: "s", origin: "https://a.test" });
   assert.equal(first.experience.id, again.experience.id);
   assert.equal(again.experience.confidence, "reused");
-  assert.throws(() =>
-    e.execute("one", a, { id: "s", origin: "https://b.test" }),
+  await assert.rejects(async () =>
+    await e.execute("one", a, { id: "s", origin: "https://b.test" }),
   );
-  assert(e.hint("one", "https://a.test"));
-  assert.equal(e.hint("one", "https://a.test"), undefined);
-  const result = e.execute("one", {
-    operation: "experience_search",
-    experience: { scope: "https://a.test", task: "*" },
-  });
+  assert(await e.hint("one", "https://a.test"));
+  assert.equal(await e.hint("one", "https://a.test"), undefined);
+  const result = await e.execute("one", {
+      operation: "experience_search",
+      experience: { scope: "https://a.test", task: "*" },
+    });
   assert.equal(result.totalRoutes, 1);
   assert.equal(result.graph.roots.length, 1);
 });
@@ -425,10 +426,10 @@ test("agent retries provider only, shares scene history, leaves one side effect"
       } else completion(res, { content: "finished" });
     });
   });
-  const e = engine(),
+  const e = await engine(),
     dir = await temp();
-  e.store.put("config", cfg(url));
-  const session = e.store.newSession({ cwd: dir });
+  await e.store.put("config", cfg(url));
+  const session = await e.store.newSession({ cwd: dir });
   let starts = 0;
   e.events.on("event", (event) => {
     if (event.type === "tool_start") starts++;

@@ -3,37 +3,23 @@ import type { Obj } from "./util";
 
 /**
  * An employee's tasks and runs live in their own tables (employee_tasks, employee_runs), not in the employee record.
- * attachRows gives a loaded employee record `tasks` and `runs` properties that read their rows only when first used;
- * saveRows writes back only rows that changed, were added or were removed since they were read. A record whose tasks
- * and runs were never touched writes neither, and a write never drops a task added meanwhile by someone else.
+ * loadRows reads them into a loaded record and remembers what was read; saveRows writes back only rows that changed,
+ * were added or were removed since then. A record loaded without rows writes neither, and a write never drops a task
+ * added meanwhile by someone else.
  */
 const ROWS = Symbol("employee rows");
-type Lazy<T> = { value?: T[]; seen?: Map<string | number, string> };
-type Rows = { tasks: Lazy<Obj>; runs: Lazy<Obj>; runIds: WeakMap<Obj, number> };
+type Rows = { tasks: Map<string, string>; runs: Map<number, string>; runIds: WeakMap<Obj, number> };
 
-export function attachRows(store: Store, employee: string, state: Obj) {
-  const rows: Rows = { tasks: {}, runs: {}, runIds: new WeakMap() };
-  const load = (name: "tasks" | "runs") => {
-    const lazy = rows[name];
-    if (lazy.seen) return;
-    lazy.seen = new Map();
-    const list = name === "tasks" ? store.employeeTasks(employee) : store.employeeRuns(employee);
-    const value = list.map((row) => {
-      lazy.seen!.set(row.id, row.data);
-      const item = JSON.parse(row.data);
-      if (name === "runs") rows.runIds.set(item, row.id as number);
-      return item;
-    });
-    lazy.value ??= value;
-  };
-  for (const name of ["tasks", "runs"] as const)
-    Object.defineProperty(state, name, {
-      enumerable: true,
-      configurable: true,
-      get: () => { load(name); return rows[name].value; },
-      // Replacing the list still needs the original rows, to know which ones to delete.
-      set: (value: Obj[]) => { load(name); rows[name].value = value; },
-    });
+export async function loadRows(store: Store, employee: string, state: Obj) {
+  const rows: Rows = { tasks: new Map(), runs: new Map(), runIds: new WeakMap() };
+  const [tasks, runs] = await Promise.all([store.employeeTasks(employee), store.employeeRuns(employee)]);
+  state.tasks = tasks.map((row) => { rows.tasks.set(row.id, row.data); return JSON.parse(row.data); });
+  state.runs = runs.map((row) => {
+    const run = JSON.parse(row.data);
+    rows.runs.set(row.id, row.data);
+    rows.runIds.set(run, row.id);
+    return run;
+  });
   Object.defineProperty(state, ROWS, { value: rows });
   return state;
 }
@@ -43,30 +29,25 @@ export function baseRecord(state: Obj) {
   return Object.fromEntries(Object.keys(state).filter((key) => key !== "tasks" && key !== "runs").map((key) => [key, state[key]]));
 }
 
-export function saveRows(store: Store, employee: string, state: Obj, active: (task: Obj) => boolean) {
+export async function saveRows(store: Store, employee: string, state: Obj, active: (task: Obj) => boolean) {
   const rows: Rows | undefined = (state as any)[ROWS];
   if (!rows) return;
-  const { tasks, runs } = rows;
-  if (tasks.seen && tasks.value) {
-    const kept = new Set<string>();
-    for (const task of tasks.value) {
-      const data = JSON.stringify(task);
-      kept.add(task.id);
-      if (tasks.seen.get(task.id) !== data) store.putEmployeeTask(employee, task.id, active(task), task.createdAt || Date.now(), data);
-      tasks.seen.set(task.id, data);
-    }
-    for (const id of [...tasks.seen.keys()]) if (!kept.has(id as string)) { store.deleteEmployeeTask(id as string); tasks.seen.delete(id); }
+  const kept = new Set<string>();
+  for (const task of state.tasks as Obj[]) {
+    const data = JSON.stringify(task);
+    kept.add(task.id);
+    if (rows.tasks.get(task.id) !== data) await store.putEmployeeTask(employee, task.id, active(task), task.createdAt || Date.now(), data);
+    rows.tasks.set(task.id, data);
   }
-  if (runs.seen && runs.value) {
-    const kept = new Set<number>();
-    for (const run of runs.value) {
-      const data = JSON.stringify(run);
-      let id = rows.runIds.get(run);
-      if (id === undefined) { id = store.insertEmployeeRun(employee, String(run.taskId || ""), data); rows.runIds.set(run, id); }
-      else if (runs.seen.get(id) !== data) store.updateEmployeeRun(id, data);
-      runs.seen.set(id, data);
-      kept.add(id);
-    }
-    for (const id of [...runs.seen.keys()]) if (!kept.has(id as number)) { store.deleteEmployeeRun(id as number); runs.seen.delete(id); }
+  for (const id of [...rows.tasks.keys()]) if (!kept.has(id)) { await store.deleteEmployeeTask(id); rows.tasks.delete(id); }
+  const keptRuns = new Set<number>();
+  for (const run of state.runs as Obj[]) {
+    const data = JSON.stringify(run);
+    let id = rows.runIds.get(run);
+    if (id === undefined) { id = await store.insertEmployeeRun(employee, String(run.taskId || ""), data); rows.runIds.set(run, id); }
+    else if (rows.runs.get(id) !== data) await store.updateEmployeeRun(id, data);
+    rows.runs.set(id, data);
+    keptRuns.add(id);
   }
+  for (const id of [...rows.runs.keys()]) if (!keptRuns.has(id)) { await store.deleteEmployeeRun(id); rows.runs.delete(id); }
 }

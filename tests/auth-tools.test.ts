@@ -10,14 +10,10 @@ import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { resolveModel } from "../server/core/config";
 test("website login and role revocation never filter internal tools or interrupt authorized runtime work", async () => {
-  const store = new Store(":memory:"),
+  const store = await Store.open(":memory:"),
     auth = new Auth(store, "website-only-permissions-fixture-token"),
     subscriptions = new Subscriptions(store, ""),
-    engine = new Engine(
-      store,
-      new Catalog(store, subscriptions),
-      new Chrome(store, new ChromeBridge(), ""),
-    );
+    engine = await Engine.create(store, new Catalog(store, subscriptions), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
   const cfg: any = {
     scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] },
@@ -31,7 +27,7 @@ test("website login and role revocation never filter internal tools or interrupt
       },
     },
   };
-  store.put("config", cfg);
+  await store.put("config", cfg);
   let release!: () => void, started!: () => void;
   const begun = new Promise<void>((yes) => (started = yes)),
     wait = new Promise<void>((yes) => (release = yes));
@@ -53,36 +49,24 @@ test("website login and role revocation never filter internal tools or interrupt
         username: "runner",
         password: "valid-web-operator-fixture-password",
       });
-    const session = store.newSession({ ownerId: user.id }),
-      system = store.newSession(),
+    const session = await store.newSession({ ownerId: user.id }),
+      system = await store.newSession(),
       model = resolveModel(cfg);
-    tools = new Tools(
-      engine,
-      session,
-      cfg,
-      new AbortController().signal,
-      () => {},
-    );
-    reference = new Tools(
-      engine,
-      system,
-      cfg,
-      new AbortController().signal,
-      () => {},
-    );
-    const definitions = () =>
-      tools!
-        .definitions(model)
+    tools = await Tools.create(engine, session, cfg, new AbortController().signal, () => {});
+    reference = await Tools.create(engine, system, cfg, new AbortController().signal, () => {});
+    const definitions = async () =>
+      (await tools!
+                .definitions(model))
         .map((t) => t.name)
         .sort();
     assert.deepEqual(
-      definitions(),
-      reference
-        .definitions(model)
+      await definitions(),
+      (await reference
+                .definitions(model))
         .map((t) => t.name)
         .sort(),
     );
-    assert(definitions().includes("employee_status"));
+    assert((await definitions()).includes("employee_status"));
     engine.providers.chat = async () => {
       if (++requests === 1) {
         started();
@@ -108,24 +92,24 @@ test("website login and role revocation never filter internal tools or interrupt
       text: "An already-authorized internal task",
     });
     await begun;
-    auth.logout(login.principal.hash);
+    await auth.logout(login.principal.hash);
     await auth.update(user.id, { role: "viewer", disabled: true });
-    assert.equal(auth.authenticate(login.token), undefined);
+    assert.equal(await auth.authenticate(login.token), undefined);
     assert.deepEqual(
-      definitions(),
-      reference
-        .definitions(model)
+      await definitions(),
+      (await reference
+                .definitions(model))
         .map((t) => t.name)
         .sort(),
     );
     release();
     await running;
     assert(
-      store.messages(session.id).some((m) => m.name === "employee_status" && !m.error),
+      (await store.messages(session.id)).some((m) => m.name === "employee_status" && !m.error),
     );
     assert(
-      store
-        .messages(session.id)
+      (await store
+                .messages(session.id))
         .some(
           (m) => m.text === "internal run completed without any website login",
         ),
@@ -145,6 +129,6 @@ test("website login and role revocation never filter internal tools or interrupt
     await tools?.close();
     await reference?.close();
     await engine.close();
-    store.close();
+    await store.close();
   }
 });

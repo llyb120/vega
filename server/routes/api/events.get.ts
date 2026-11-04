@@ -3,16 +3,16 @@ import { app } from "../../core/application";
 
 // Events only: the page sends subscriptions; API calls go over HTTP.
 export default defineWebSocketHandler({
-  upgrade(request) {
+  async upgrade(request) {
     try {
-      app().eventsSocket.authorize(request);
+      await app().eventsSocket.authorize(request);
     } catch {
       return new Response("Realtime connection denied", { status: 403 });
     }
   },
-  open(peer) {
+  async open(peer) {
     try {
-      app().eventsSocket.open(peer);
+      await app().eventsSocket.open(peer);
     } catch {
       peer.close(4403, "实时连接已失效");
     }
