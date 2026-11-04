@@ -104,14 +104,17 @@ export class Store {
     this.files = new Files(files);
   }
   /**
-   * Open the configured database: DB_TYPE=sqlite (default, file VEGA_DB or `target`).
+   * Open the configured database: DB_TYPE=sqlite (default, file VEGA_DB or `target`) or DB_TYPE=mysql (see mysql.ts).
    * ":memory:" is a throwaway database (and file directory) removed on close, on either backend.
    */
   static async open(target = process.env.VEGA_DB || "vega.db") {
     const temporary = target === ":memory:";
     const files = temporary ? await mkdtemp(join(tmpdir(), "vega-files-")) : join(dirname(resolve(target)), "files");
     let db: Db;
-    {
+    if ((process.env.DB_TYPE || "sqlite") === "mysql") {
+      const { Mysql } = await import("./mysql");
+      db = await Mysql.connect(temporary);
+    } else {
       if (!temporary) await mkdir(dirname(resolve(target)), { recursive: true, mode: 0o700 });
       db = new Sqlite(target);
     }

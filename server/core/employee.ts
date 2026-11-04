@@ -656,11 +656,12 @@ export class Employee {
     for (const run of this.busy.values()) this.runtime.cancel(run.session);
     if (!this.root) for (const employee of this.members.values()) employee.close();
   }
+  /** Best-effort notification; a failed count (e.g. during shutdown) is not an error for the caller. */
   async emitChanged() {
-    this.runtime.emit("employee_changed", {
-      employeeId: this.employeeId,
-      activeTasks: await this.store.activeTaskCount(this.employeeId),
-    });
+    const runtime = this.runtime, emit = runtime.emit; // the listener at the time of the change
+    let activeTasks: number;
+    try { activeTasks = await this.store.activeTaskCount(this.employeeId); } catch { return; }
+    emit.call(runtime, "employee_changed", { employeeId: this.employeeId, activeTasks });
   }
   schedule() {
     if (this.closed) return;

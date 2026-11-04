@@ -567,7 +567,8 @@ test("a genuinely new browser handoff is delivered even when its wording matches
 test("restart recovery never restarts human stops, approvals or cancellations", async () => {
   const { store, employee } = await fixture();
   try {
-    const jobs = await Promise.all([task(employee, "interrupted"), task(employee, "paused"), task(employee, "cancelled"), task(employee, "approval")]);
+    const jobs = [];
+    for (const text of ["interrupted", "paused", "cancelled", "approval"]) jobs.push(await task(employee, text));
     await employee.update((s) => { ["running", "stopped", "cancelled", "approval"].forEach((status, index) => s.tasks[index].status = status); });
     await employee.start();
     clearTimeout(employee.timer);
