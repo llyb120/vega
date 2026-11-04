@@ -42,6 +42,7 @@ function script(engine: Engine, replies: Record<string, any[]>) {
       narrated.push({ session: key, messages: JSON.parse(JSON.stringify(messages)), last, setup: setup && JSON.parse(setup) });
       const next = replies.narrator?.shift();
       if (next instanceof Error) throw next;
+      if (next?.text) return { role: "assistant", text: next.text };
       return { role: "assistant", calls: [{ id: "n", name: "route_message", arguments: next ?? { targets: [], reason: "闲聊" } }] };
     }
     const employeeId = (await engine.store.session(key)).employeeId!;
@@ -543,7 +544,7 @@ test("/new in a group: 旁白 and member sessions start over; members then see o
   } finally { await close(); }
 });
 
-test("旁白 without a lightweight model: one notice, then quiet; nothing runs", async () => {
+test("旁白 without a lightweight model: a notice every time (a missed one would leave the group silent); nothing runs", async () => {
   const { store, engine, make, close } = await fixture();
   try {
     const a = await make("小A", "u1");
@@ -554,7 +555,33 @@ test("旁白 without a lightweight model: one notice, then quiet; nothing runs",
     await engine.groups.send(u1, group.id, { text: "在吗" });
     await settle(engine);
     assert.deepEqual([narrated.length, seen.length], [0, 0]);
-    const notices = (await groupMessages(engine, group.id)).filter((m) => m.notice && /未配置轻量模型/.test(String(m.text)));
-    assert.equal(notices.length, 1, "said once");
+    const notices = (await groupMessages(engine, group.id)).filter((m) => m.notice && /未配置「沟通与任务起步」场景模型/.test(String(m.text)));
+    assert.equal(notices.length, 2);
+  } finally { await close(); }
+});
+
+test("旁白 (reported: 「牛马们 起床啦」 got no reply): greetings go to a member; every judgement is recorded; a reply without the call is a visible failure; admins see the session", async () => {
+  const { engine, make, close } = await fixture();
+  try {
+    const a = await make("默认牛马A", "u1"), b = await make("测试牛马", "u1");
+    const group = await engine.groups.create(u1, { name: "牛马小分队", employees: [a, b] });
+    assert.match(NARRATOR_SYSTEM, /打招呼、喊大家（如「起床啦」「有人吗」）[\s\S]*交给最合适的一个牛马/);
+    assert.match(NARRATOR_SYSTEM, /只有消息明确是说给群里的人（用户）听的，targets 才为空/);
+    // The model follows the prompt for a greeting; a model answering in text instead of calling the tool is not silence.
+    const seen = script(engine, { narrator: [{ targets: ["默认牛马A"], reason: "打招呼，交给默认牛马" }, { text: "没有人需要回应" }], [a]: ["早！我在"] });
+    await engine.groups.send(u1, group.id, { text: "牛马们 起床啦" });
+    await settle(engine);
+    assert.deepEqual(seen.map((s) => s.employeeId), [a]);
+    await engine.groups.send(u1, group.id, { text: "没人在吗" });
+    await settle(engine);
+    const last = (await groupMessages(engine, group.id)).at(-1)!;
+    assert(last.notice && /旁白没能判断这条消息该交给谁（模型没有调用 route_message：没有人需要回应）/.test(String(last.text)), String(last.text));
+    // The narrator's own session holds the judged message; the failed one is shown to the next judgement.
+    const state = (await engine.groups.get(group.id))!.narrator!;
+    const rows = await engine.store.messages(state.session);
+    assert.match(String(rows[0].text), /牛马们 起床啦/);
+    assert.deepEqual(rows.map((m) => m.role), ["user", "assistant", "tool"]);
+    const route = readFileSync("server/routes/api/[...path].ts", "utf8");
+    assert(route.includes('kind: "narrator"') && readFileSync("web/src/DebugSessions.vue", "utf8").includes('narrator: "旁白会话"'), "调试会话 lists the 旁白 session");
   } finally { await close(); }
 });

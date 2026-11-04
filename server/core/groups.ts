@@ -30,8 +30,6 @@ export type Group = {
   /** Each employee's session inside this group (its working context; separate from its private chat). */
   memberSessions: Record<string, string>;
   createdAt: number;
-  /** The 旁白 could not run for want of a lightweight model and said so once (cleared when it runs again). */
-  narratorWarned?: boolean;
   /** The 旁白's hidden session: the setup it was opened with (hash) and the last group message it judged. */
   narrator?: { session: string; basis: string; seq: number };
   /** The last /new divider: the 旁白 and member turns see only group messages after it. */
@@ -443,7 +441,11 @@ export class Groups {
     if (!employees.length) return;
     // One judgement at a time per group, so its session stays append-only and in message order.
     const previous = this.narrating.get(group.id) || Promise.resolve();
-    const next = previous.then(() => this.judge(group.id, employees, message));
+    // Any failure is visible: a log line and a one-line group notice.
+    const next = previous.then(() => this.judge(group.id, employees, message)).catch(async (error: any) => {
+      console.warn(`[Vega] 旁白 ${group.id} #${message.seq} 失败：${String(error?.stack || error)}`);
+      await this.notice(group.id, `旁白没能判断这条消息该交给谁（${cut(String(error?.message || error), 120)}），需要牛马回应请直接 @ 它。`);
+    });
     this.narrating.set(group.id, next.catch(() => {}));
     try { return await next; } finally { if (this.narrating.get(group.id) === next) this.narrating.delete(group.id); }
   }
@@ -466,36 +468,28 @@ export class Groups {
       const page = after > floor ? await this.store.messagePage(group.session, { after }) : await this.store.messagePage(group.session, { before: message.seq, limit: limit * 3 });
       return page.messages.filter((m) => m.seq! > Math.max(after, floor) && m.seq! < message.seq! && !m.notice).slice(-limit).map((m) => line(m));
     };
-    let opened = "", result;
-    try {
-      result = await narrate(this.engine, {
-        session: known?.session || "", current: known?.basis === basis, setup, members, message: line(message, 4000),
-        notes: async () => ({ since: known?.session ? await earlier(known.seq, NARRATOR.notes) : [], carry: await earlier(0, NARRATOR.carry) }),
-        open: async () => (opened = (await this.store.newSession({ title: "旁白：" + group.name, ownerId: group.creatorId, groupId: group.id })).id),
-      });
-    } catch (error: any) {
-      await this.notice(group.id, `旁白没能判断这条消息该交给谁（${cut(String(error?.message || error), 120)}），需要牛马回应请直接 @ 它。`);
-      return;
-    }
+    let opened = "";
+    const result = await narrate(this.engine, {
+      session: known?.session || "", current: known?.basis === basis, setup, members, message: line(message, 4000),
+      notes: async () => ({ since: known?.session ? await earlier(known.seq, NARRATOR.notes) : [], carry: await earlier(0, NARRATOR.carry) }),
+      open: async () => (opened = (await this.store.newSession({ title: "旁白：" + group.name, ownerId: group.creatorId, groupId: group.id })).id),
+    });
     if (!result) {
-      // Test-and-set inside the group change, so concurrent messages warn once.
-      if (await this.change(group.id, async (g) => !g.narratorWarned && (g.narratorWarned = true))) {
-        await this.notice(group.id, "未配置轻量模型，旁白无法判断没有 @ 的消息该交给谁；请在设置里为「轻量」场景选择模型，或直接 @ 牛马。");
-      }
+      // Said every time: a missed one-time notice would leave the group silent with no clue why.
+      console.warn(`[Vega] 旁白 ${group.id} #${message.seq}：未配置「沟通与任务起步」场景模型`);
+      await this.notice(group.id, "未配置「沟通与任务起步」场景模型，旁白无法判断没有 @ 的消息该交给谁；请在系统设置 → 场景模型里选择，或直接 @ 牛马。");
       return;
     }
     const replaced = await this.change(group.id, async (g) => {
-      g.narratorWarned = false;
       const old = g.narrator?.session;
       g.narrator = { session: result.session, basis, seq: message.seq! };
       return old && old !== result.session ? old : "";
     });
     if (replaced) await this.dropSession(replaced);
     if (opened && opened !== result.session) await this.dropSession(opened);
-    if (!result.targets.length) return;
     const chosen = employees.filter((p) => result.targets.some((t) => t.id === p.id));
     // The 旁白 only judges: nothing goes into the group; the decision is in its own session (and this log line).
-    console.info(`[Vega] 旁白 ${group.id} #${message.seq} → ${chosen.map((p) => p.name).join("、")}${result.reason ? `（${result.reason}）` : ""}`);
+    console.info(`[Vega] 旁白 ${group.id} #${message.seq} → ${chosen.map((p) => p.name).join("、") || "（不交给牛马）"}${result.reason ? `（${result.reason}）` : ""}`);
     for (const member of chosen) {
       try { await this.turn(group, member, message, result.reason || "按群公告和职责判断"); }
       catch (error: any) { if (!error?.groupReported) await this.notice(group.id, `牛马「${member.name}」没能开始回复：${String(error?.message || error)}`); }
