@@ -152,7 +152,9 @@ const user = ref(null),
   username = ref(""),
   password = ref(""),
   setupToken = ref(""),
-  authBusy = ref(false);
+  authBusy = ref(false),
+  // Until /auth/me answers, show neither login nor shell so a refresh doesn't flash the login page.
+  authChecking = ref(true);
 const isAdmin = computed(() => user.value?.role === "admin"),
   canExecute = computed(() => !!user.value && user.value.role !== "viewer");
 const canWriteCurrent = computed(
@@ -706,12 +708,24 @@ async function logout() {
 }
 onMounted(() => {
   window.addEventListener("popstate", employeeLocationChanged);
-  void attempt(async () => {
+  void checkAuth();
+});
+async function checkAuth(delay = 1000) {
+  try {
     const result = await api("/auth/me");
     setupRequired.value = result.setupRequired;
-    if (result.user) await enter(result);
-  });
-});
+    if (result.user) await attempt(() => enter(result));
+    authChecking.value = false;
+  } catch (e) {
+    // Network failure is not "logged out": keep the splash and retry instead of showing login.
+    if (!e.network) {
+      error.value = e.message;
+      authChecking.value = false;
+      return;
+    }
+    setTimeout(() => checkAuth(Math.min(delay * 2, 10000)), delay);
+  }
+}
 onBeforeUnmount(() => window.removeEventListener("popstate", employeeLocationChanged));
 async function selectSession(session) {
   if (session.taskId) {
@@ -1389,7 +1403,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main v-if="!authenticated" class="login">
+  <div v-if="authChecking" class="auth-splash" aria-busy="true"></div>
+  <main v-else-if="!authenticated" class="login">
     <aside class="login-aside" aria-hidden="true">
       <div class="login-brand"><span class="brand-mark">V</span>Vega</div>
       <div class="login-pitch">
