@@ -3,66 +3,71 @@ import type { Peer } from "crossws";
 import type { Auth, Principal } from "./auth";
 import type { Engine } from "./engine";
 import { eventAllowed } from "./http-auth";
+import { probe, type Probe } from "./ws-probe";
 import { assert, type Obj } from "./util";
 
 type Socket = Pick<Peer, "id" | "send" | "close" | "request">;
-type Dispatch = (
-  method: string,
-  path: string,
-  body: string | undefined,
-  signal: AbortSignal,
-  csrf: string,
-) => Promise<Response>;
-type Pending = AbortController;
-type Ticket = { hash: string; csrf: string; until: number };
-export const WS_BODY_LIMIT = 240 * 1024;
-const HTTP_FALLBACK_LIMIT = 256 * 1024;
-const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+type Ticket = { hash: string; until: number };
+type Entry = { seq: number; at: number; value: Obj; json: string };
+export type EventsOptions = {
+  /** Server heartbeat and dead-peer check interval. */
+  heartbeatMs?: number;
+  /** Window in which streamed deltas of one session are merged into one event. */
+  coalesceMs?: number;
+  /** Live connections per account; zombies are reaped by the heartbeat so honest tabs are not starved. */
+  perUser?: number;
+  /** Replay window for reconnects. */
+  replayMs?: number;
+  replayEvents?: number;
+};
+/** Only the conversation(s) a page shows need token streams and per-tool detail. */
+const STREAM = new Set(["text_delta", "thinking_delta", "tool_start", "context_budget"]);
+const DELTAS = new Set(["text_delta", "thinking_delta"]);
+const SOFT_BUFFER = 1 << 20,
+  HARD_BUFFER = 8 << 20;
 
-async function smallBody(response: Response, limit: number) {
-  if (Number(response.headers.get("content-length")) > limit) return null;
-  if (!response.body) return "";
-  const reader = response.body.getReader(),
-    chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > limit) {
-        await reader.cancel();
-        return null;
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
+/** The page needs these events to know *that* something changed; payloads are fetched over HTTP. */
+export function publicEvent(e: Obj): Obj | undefined {
+  if (e.type === "tool_progress") return;
+  if (e.type === "tool_end")
+    return { ...e, data: { call: { id: e.data?.call?.id, name: e.data?.call?.name }, outcome: { error: !!e.data?.outcome?.error } } };
+  if (e.type === "message_end") {
+    const { data, ...rest } = e;
+    return rest;
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return e;
 }
 
-// HTTP remains the compatibility and large-payload boundary. A request is
-// dispatched once; reconnecting never replays a mutation.
+// Events-only channel: API calls use HTTP. Every event carries a process-wide seq so a reconnect can replay what a
+// page missed instead of reloading everything; outside the replay window the page is told to reset.
 export class EventsSocket {
   sessions = new Map<string, ReturnType<EventsSocket["session"]>>();
   tickets = new Map<string, Ticket>();
+  epoch = randomUUID().slice(0, 8);
+  seq = 0;
+  log: Entry[] = [];
+  private pending = new Map<string, Obj>();
+  private flushTimer?: ReturnType<typeof setTimeout>;
+  private heartbeat: ReturnType<typeof setInterval>;
+  private options: Required<EventsOptions>;
   constructor(
     public engine: Pick<Engine, "events">,
     public auth: Auth,
     public allow: typeof eventAllowed = eventAllowed,
-  ) {}
+    options: EventsOptions = {},
+  ) {
+    this.options = { heartbeatMs: 20000, coalesceMs: 40, perUser: 12, replayMs: 120000, replayEvents: 5000, ...options };
+    engine.events.on("event", this.ingest);
+    this.heartbeat = setInterval(() => this.beat(), this.options.heartbeatMs);
+    this.heartbeat.unref?.();
+  }
   ticket(principal: Principal) {
     assert(this.auth.resolveHash(principal.hash), "登录已失效");
     for (const [id, ticket] of this.tickets)
       if (ticket.until < Date.now()) this.tickets.delete(id);
-    assert(this.tickets.size < 64, "实时连接票据过多");
+    assert(this.tickets.size < 256, "实时连接票据过多");
     const id = randomUUID() + randomUUID();
-    this.tickets.set(id, {
-      hash: principal.hash,
-      csrf: principal.csrf,
-      until: Date.now() + 15000,
-    });
+    this.tickets.set(id, { hash: principal.hash, until: Date.now() + 15000 });
     return { ticket: id };
   }
   authorize(request: Socket["request"], consume = false) {
@@ -72,9 +77,7 @@ export class EventsSocket {
         : url.origin;
     assert(
       request.headers.get("origin") === origin &&
-        !["cross-site", "same-site"].includes(
-          request.headers.get("sec-fetch-site") || "",
-        ),
+        !["cross-site", "same-site"].includes(request.headers.get("sec-fetch-site") || ""),
       "不允许跨站连接",
     );
     const token = (request.headers.get("cookie") || "")
@@ -88,33 +91,68 @@ export class EventsSocket {
     assert(principal && ticket?.hash === principal.hash, "连接票据已失效");
     assert(ticket.until >= Date.now(), "连接票据已过期");
     if (consume) this.tickets.delete(id);
-    return { principal, csrf: ticket.csrf };
+    return { principal };
   }
   open(socket: Socket) {
-    const { principal, csrf } = this.authorize(socket.request, true);
-    assert(this.sessions.size < 64, "实时连接过多");
-    const session = this.session(socket, principal, csrf);
+    const { principal } = this.authorize(socket.request, true);
+    const mine = [...this.sessions.values()].filter((s) => s.principal.user.id === principal.user.id);
+    if (mine.length >= this.options.perUser) {
+      socket.close(4429, "实时连接过多，请关闭部分页面");
+      return;
+    }
+    assert(this.sessions.size < 4096, "实时连接过多");
+    const url = new URL(socket.request.url);
+    const session = this.session(socket, principal);
     this.sessions.set(socket.id, session);
-    this.engine.events.on("event", session.event);
     this.auth.events.on("logout", session.logout);
     this.auth.events.on("revoke", session.revoke);
-    socket.send(JSON.stringify({ type: "ready" }));
+    session.subscribe((url.searchParams.get("sessions") || "").split(",").filter(Boolean));
+    const [epoch, since] = (url.searchParams.get("since") || "").split(":"),
+      from = Number(since),
+      first = this.log[0]?.seq ?? this.seq + 1,
+      replay = epoch === this.epoch && Number.isSafeInteger(from) && from >= first - 1 && from <= this.seq;
+    if (replay) for (const entry of this.log) if (entry.seq > from) session.deliver(entry);
+    session.send({ type: "ready", epoch: this.epoch, seq: this.seq, replayed: replay });
   }
-  session(socket: Socket, principal: Principal, csrf: string) {
-    const pending = new Map<string, Pending>(),
-      completed = new Set<string>(),
+  session(socket: Socket, principal: Principal) {
+    const subscribed = new Set<string>(),
+      allowed = new Map<string, { ok: boolean; until: number }>(),
+      liveness: Probe | undefined = probe(socket),
       close = (code = 1000, reason = "连接已关闭") => {
         if (!this.sessions.has(socket.id)) return;
         this.close(socket.id);
-        socket.close(code, reason);
+        try { socket.close(code, reason); } catch {}
       },
       send = (value: Obj) => {
         if (this.sessions.has(socket.id)) socket.send(JSON.stringify(value));
       },
-      event = (value: Obj) => {
-        const current = this.auth.resolveHash(principal.hash);
-        if (!current) return close(4401, "登录已失效");
-        if (this.allow(current.user, value)) send(value);
+      permitted = (value: Obj) => {
+        // Session events dominate (token streams); their permission is stable for a few seconds.
+        const key = typeof value.session === "string" && !value.targetUser ? value.session : "";
+        const hit = key && allowed.get(key);
+        if (hit && hit.until > Date.now()) return hit.ok;
+        const ok = this.allow(principal.user, value);
+        if (key) {
+          if (allowed.size > 256) allowed.clear();
+          allowed.set(key, { ok, until: Date.now() + 5000 });
+        }
+        return ok;
+      },
+      deliver = (entry: Entry) => {
+        if (!this.sessions.has(socket.id)) return;
+        if (STREAM.has(entry.value.type) && !subscribed.has(entry.value.session)) return;
+        if (!permitted(entry.value)) return;
+        const buffered = liveness?.buffered ?? 0;
+        if (buffered > HARD_BUFFER) return close(4408, "网络拥堵，实时连接已重置");
+        // A slow link sheds token streams first; message_end/done still arrive and trigger a refresh.
+        if (buffered > SOFT_BUFFER && STREAM.has(entry.value.type)) return;
+        socket.send(entry.json);
+      },
+      subscribe = (ids: unknown) => {
+        subscribed.clear();
+        if (Array.isArray(ids))
+          for (const id of ids.slice(0, 16))
+            if (typeof id === "string" && /^[\w-]{1,80}$/.test(id)) subscribed.add(id);
       },
       logout = (hash: string) => {
         if (hash === principal.hash) close(4401, "登录已失效");
@@ -122,113 +160,84 @@ export class EventsSocket {
       revoke = (userId: string) => {
         if (userId === principal.user.id) close(4401, "账号权限已变化");
       };
-    return { pending, completed, close, send, event, logout, revoke, principal, csrf };
+    return { close, send, deliver, subscribe, logout, revoke, principal, liveness, subscribed };
   }
-  message(socket: Socket, raw: string, dispatch: Dispatch) {
+  message(socket: Socket, raw: string) {
     const session = this.sessions.get(socket.id);
     if (!session) return;
     try {
-      assert(Buffer.byteLength(raw) <= WS_BODY_LIMIT + 4096, "请求过大");
+      assert(raw.length <= 8192, "消息过大");
       const value = JSON.parse(raw);
-      if (value?.type === "ping") return session.send({ type: "pong" });
-      assert(value?.type === "request", "消息无效");
-      const id = value.id;
-      assert(
-        typeof id === "string" && /^[a-zA-Z0-9_-]{8,80}$/.test(id),
-        "请求ID无效",
-      );
-      assert(
-        !session.pending.has(id) && !session.completed.has(id),
-        "请求ID重复",
-      );
-      const method = value.method || "GET",
-        path = value.path;
-      assert(METHODS.includes(method), "请求方法无效");
-      assert(
-        typeof path === "string" &&
-          path.startsWith("/") &&
-          !path.startsWith("//") &&
-          path.length <= 8192 &&
-          !path.includes("..") &&
-          !/^\/(auth|blobs|events)(\/|$)/.test(path) &&
-          path !== "/chrome/live",
-        "该接口不能使用实时通道",
-      );
-      const body =
-          value.data === undefined ? undefined : JSON.stringify(value.data),
-        controller = new AbortController();
-      assert(!body || Buffer.byteLength(body) <= WS_BODY_LIMIT, "请求过大");
-      assert(session.pending.size < 32, "等待中的请求过多");
-      session.pending.set(id, controller);
-      void this.dispatch(
-        session,
-        id,
-        method,
-        path,
-        body,
-        controller,
-        dispatch,
-      ).finally(() => {
-        session.pending.delete(id);
-        session.completed.add(id);
-        if (session.completed.size > 1024)
-          session.completed.delete(session.completed.values().next().value!);
-      });
+      if (value?.type === "ping") return session.send({ type: "pong", epoch: this.epoch, seq: this.seq });
+      assert(value?.type === "subscribe", "实时通道只接收订阅与心跳");
+      session.subscribe(value.sessions);
     } catch (e: any) {
       session.send({ type: "error", reason: e.message });
     }
   }
-  async dispatch(
-    session: ReturnType<EventsSocket["session"]>,
-    id: string,
-    method: string,
-    path: string,
-    body: string | undefined,
-    task: Pending,
-    dispatch: Dispatch,
-  ) {
-    try {
-      const response = await dispatch(method, path, body, task.signal, session.csrf),
-        text = await smallBody(
-          response,
-          method === "GET" ? HTTP_FALLBACK_LIMIT : 4 * 1024 * 1024,
-        );
-      if (text === null && method === "GET") {
-        session.send({ type: "response", id, httpFallback: true });
-        return;
+  /** Engine event intake: merge token deltas briefly, keep per-session order, number and fan out. */
+  ingest = (raw: Obj) => {
+    const value = publicEvent(raw);
+    if (!value) return;
+    if (DELTAS.has(value.type) && typeof value.data === "string" && value.session) {
+      const key = value.session + "\0" + value.type,
+        held = this.pending.get(key);
+      if (held) held.data += value.data;
+      else this.pending.set(key, { ...value });
+      this.flushTimer ??= setTimeout(() => this.flush(), this.options.coalesceMs);
+      return;
+    }
+    if (value.session) this.flush(value.session);
+    this.publish(value);
+  };
+  flush(session?: string) {
+    for (const [key, value] of this.pending) {
+      if (session && value.session !== session) continue;
+      this.pending.delete(key);
+      this.publish(value);
+    }
+    if (!this.pending.size && this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+    }
+  }
+  private publish(value: Obj) {
+    const seq = ++this.seq,
+      entry: Entry = { seq, at: Date.now(), value, json: JSON.stringify({ ...value, seq }) };
+    this.log.push(entry);
+    const horizon = Date.now() - this.options.replayMs;
+    let drop = 0;
+    while (drop < this.log.length && (this.log.length - drop > this.options.replayEvents || this.log[drop].at < horizon)) drop++;
+    if (drop) this.log.splice(0, drop);
+    for (const session of [...this.sessions.values()]) session.deliver(entry);
+  }
+  /** Reap dead peers, re-check logins and give every page a cursor even when nothing it may see happened. */
+  beat() {
+    for (const [id, session] of [...this.sessions]) {
+      if (!this.auth.resolveHash(session.principal.hash)) {
+        session.close(4401, "登录已失效");
+        continue;
       }
-      assert(text !== null, "响应过大，操作结果可能已完成，请核对后再操作");
-      session.send({
-        type: "response",
-        id,
-        status: response.status,
-        statusText: response.statusText,
-        contentType: response.headers.get("content-type") || "",
-        body: text,
-      });
-    } catch (e: any) {
-      session.send({
-        type: "response",
-        id,
-        status: 0,
-        error: task.signal.aborted
-          ? "连接中断，操作结果可能已提交，请核对后再操作"
-          : e.message,
-      });
+      if (session.liveness && !session.liveness.ping()) {
+        session.liveness.terminate();
+        this.close(id);
+        continue;
+      }
+      session.send({ type: "heartbeat", epoch: this.epoch, seq: this.seq });
     }
   }
   close(id: string) {
     const session = this.sessions.get(id);
     if (!session) return;
     this.sessions.delete(id);
-    this.engine.events.off("event", session.event);
     this.auth.events.off("logout", session.logout);
     this.auth.events.off("revoke", session.revoke);
-    for (const task of session.pending.values()) task.abort();
   }
   closeAll() {
+    clearInterval(this.heartbeat);
+    this.flush();
+    this.engine.events.off("event", this.ingest);
     this.tickets.clear();
-    for (const session of [...this.sessions.values()])
-      session.close(1001, "服务停止");
+    for (const session of [...this.sessions.values()]) session.close(1001, "服务停止");
   }
 }

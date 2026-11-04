@@ -11,7 +11,7 @@ import { Store } from "../server/core/store";
 import { sleep } from "../server/core/util";
 
 test(
-  "deployed realtime API: ticket auth, CSRF-preserving WS calls, large-read HTTP fallback",
+  "deployed realtime events: ticket auth, events-only socket, replay cursor; API stays on HTTP",
   { timeout: 60000, skip: process.env.VEGA_TEST_DEPLOYED !== "1" },
   async () => {
     const reserve = createServer();
@@ -80,11 +80,11 @@ test(
         (await request("/events", "POST", {}, { ...login, csrf: "" })).response.status,
         403,
       );
-      const ticket = await request("/events", "POST", {}, login);
-      assert(ticket.response.ok, JSON.stringify(ticket.value) + logs);
-      const open = async (cookie: string, origin = base) => {
+      const open = async (cookie: string, origin = base, query = "") => {
+        const ticket = await request("/events", "POST", {}, login);
+        assert(ticket.response.ok, JSON.stringify(ticket.value) + logs);
         const ws = new WebSocket(
-          base.replace("http:", "ws:") + "/api/events?ticket=" + ticket.value.ticket,
+          base.replace("http:", "ws:") + "/api/events?ticket=" + ticket.value.ticket + query,
           { headers: { cookie, origin } },
         );
         sockets.push(ws);
@@ -107,37 +107,23 @@ test(
       await assert.rejects(() => open(""), /upgrade status 403/);
       await assert.rejects(() => open(login.cookie, "https://evil.test"), /upgrade status 403/);
       const { ws, messages } = await open(login.cookie);
-      const call = async (id: string, path: string, method = "GET", data?: any) => {
-        ws.send(JSON.stringify({ type: "request", id, method, path, data }));
-        let message;
-        for (let i = 0; i < 400; i++) {
-          message = messages.find((v) => v.id === id);
-          if (message) break;
-          await sleep(10);
-        }
-        assert(message, "missing WS response " + id + logs);
-        return message;
-      };
-      const bootstrap = await call("request-bootstrap", "/bootstrap");
-      assert.equal(bootstrap.status, 200, bootstrap.error || bootstrap.body);
-      assert.equal(JSON.parse(bootstrap.body).user.username, "admin-events");
-      const created = await call("request-create", "/sessions", "POST", { title: "via WS", cwd: dir });
-      assert.equal(created.status, 200, created.error || created.body + "\n" + logs);
-      assert.equal(JSON.parse(created.body).title, "via WS");
-      ws.send(JSON.stringify({ type: "request", id: "request-create", method: "POST", path: "/sessions", data: { title: "duplicate", cwd: dir } }));
-      for (let i = 0; i < 100 && !messages.some((v) => v.type === "error" && v.reason.includes("重复")); i++)
-        await sleep(10);
-      assert(messages.some((v) => v.type === "error" && v.reason.includes("重复")));
-      const afterDuplicate = await call("request-after-duplicate", "/bootstrap");
-      assert.equal(
-        JSON.parse(afterDuplicate.body).sessions.filter((s: any) => s.title === "via WS").length,
-        1,
-      );
-      const large = await call("request-large", "/sessions/" + seeded.id);
-      assert.equal(large.httpFallback, true);
+      const ready = messages.find((v) => v.type === "ready");
+      assert.equal(typeof ready.epoch, "string");
+      ws.send(JSON.stringify({ type: "request", id: "request-bootstrap", method: "GET", path: "/bootstrap" }));
+      for (let i = 0; i < 100 && !messages.some((v) => v.type === "error"); i++) await sleep(10);
+      assert.match(messages.find((v) => v.type === "error").reason, /只接收订阅/, "API calls are not tunnelled");
+      ws.send(JSON.stringify({ type: "subscribe", sessions: [seeded.id] }));
+      ws.send(JSON.stringify({ type: "ping" }));
+      for (let i = 0; i < 100 && !messages.some((v) => v.type === "pong"); i++) await sleep(10);
+      assert.equal(messages.find((v) => v.type === "pong").epoch, ready.epoch);
+      const replay = await open(login.cookie, base, "&since=" + ready.epoch + ":" + ready.seq);
+      assert.equal(replay.messages.find((v) => v.type === "ready").replayed, true);
       const history = await request("/sessions/" + seeded.id, "GET", undefined, login);
       assert.equal(history.response.ok, true);
       assert.equal(history.value.messages[0].text.length, 300000);
+      assert.ok(history.value.context, "a full read includes the context budget");
+      const incremental = await request("/sessions/" + seeded.id + "?after=1", "GET", undefined, login);
+      assert.equal(incremental.value.context, undefined, "incremental reads skip the budget");
       const plain = await fetch(base + "/api/events", { headers: { cookie: login.cookie } });
       assert.notEqual(plain.headers.get("content-type"), "text/event-stream");
       ws.close();

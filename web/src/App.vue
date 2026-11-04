@@ -253,14 +253,14 @@ let eventsSocket,
   eventGeneration = 0,
   eventReconnect,
   eventRetryDelay = 500,
-  eventsHeartbeat,
+  eventsWatchdog,
+  eventCursor = "",
+  lastEventAt = 0,
   eventQueue = Promise.resolve(),
-  wsRequestSerial = 0,
   closed = false,
   sessionRequest = 0,
   employeeRefreshTimer;
-const wsRequests = new Map(),
-  WS_BODY_LIMIT = 240 * 1024;
+const EVENT_SILENCE_MS = 75000;
 function emptyDuty() {
   return {
     id: "",
@@ -437,96 +437,13 @@ async function httpApi(path, method = "GET", data) {
     ), { status: response.status });
   return result;
 }
-async function api(path, method = "GET", data) {
-  const size = data === undefined ? 0 : new Blob([JSON.stringify(data)]).size;
-  if (
-    size > WS_BODY_LIMIT ||
-    /^\/(auth|blobs)(\/|$)/.test(path) ||
-    path === "/chrome/live" ||
-    isChatSend(path, method, data)
-  )
-    return httpApi(path, method, data);
-  if (eventsReady && eventsSocket?.readyState === WebSocket.OPEN)
-    return new Promise((resolve, reject) => {
-      const id = String(++wsRequestSerial).padStart(8, "0"),
-        timer = setTimeout(() => {
-          wsRequests.delete(id);
-          if (method === "GET") { resolve(httpApi(path, method, data)); return; }
-          reject(
-            Error(
-              method === "GET"
-                ? "实时请求超时"
-                : "操作结果不确定，请核对后再操作，不要重复提交",
-            ),
-          );
-        }, 60000);
-      wsRequests.set(id, { resolve, reject, timer, path, method, data });
-      try {
-        eventsSocket.send(
-          JSON.stringify({ type: "request", id, method, path, data }),
-        );
-      } catch (e) {
-        clearTimeout(timer);
-        wsRequests.delete(id);
-        reject(e);
-      }
-    });
-  if (eventsWasConnected && method !== "GET")
-    throw Error("实时连接中断，请等待重连后再操作，不要重复提交");
+// Token streams and per-tool detail are pushed only for the conversations on screen.
+const subscribedSessions = computed(() => [...new Set([current.value?.id, employee.value?.chatSession, employeeSession.value].filter(Boolean))]);
+// All API calls are plain HTTP; the WebSocket only pushes events.
+function api(path, method = "GET", data) {
   return httpApi(path, method, data);
 }
-function rejectSocketRequests(reason) {
-  for (const request of wsRequests.values()) {
-    clearTimeout(request.timer);
-    if (request.method === "GET" && !closed && authenticated.value) {
-      request.resolve(httpApi(request.path));
-      continue;
-    }
-    request.reject(
-      Error(
-        request.method === "GET"
-          ? reason
-          : "连接中断，操作结果可能已提交，请核对后再操作",
-      ),
-    );
-  }
-  wsRequests.clear();
-}
-function socketMessage(value) {
-  if (value.type === "response") {
-    const request = wsRequests.get(value.id);
-    if (!request) return;
-    wsRequests.delete(value.id);
-    clearTimeout(request.timer);
-    if (value.httpFallback) {
-      request.resolve(httpApi(request.path, request.method, request.data));
-      return;
-    }
-    if (!value.status) {
-      request.reject(Error(value.error || "实时请求失败"));
-      return;
-    }
-    try {
-      const result = value.body ? JSON.parse(value.body) : null;
-      if (value.status === 401 && authenticated.value) resetLogin();
-      if (value.status < 200 || value.status >= 300)
-        throw Object.assign(Error(
-          result?.data?.error ||
-            result?.statusMessage ||
-            result?.message ||
-            (typeof result?.error === "string" ? result.error : "") ||
-            value.statusText,
-        ), { status: value.status });
-      request.resolve(result);
-    } catch (e) {
-      request.reject(e);
-    }
-    return;
-  }
-  if (value.type === "error") {
-    error.value = value.reason;
-    return;
-  }
+function dispatchEvent(value) {
   eventQueue = eventQueue
     .then(() => handleEvent(value))
     .catch((e) => { if (!e.network) error.value = e.message; });
@@ -544,16 +461,17 @@ function connectEvents() {
   if (closed || !authenticated.value || navigator.onLine === false) return;
   const generation = ++eventGeneration;
   clearTimeout(eventReconnect);
-  clearInterval(eventsHeartbeat);
+  clearTimeout(eventsWatchdog);
   eventsReady = false;
   eventsSocket?.close();
-  rejectSocketRequests("实时连接正在恢复");
   void httpApi("/events", "POST", {})
     .then(({ ticket }) => {
       if (generation !== eventGeneration) return;
       const url = new URL("/api/events", window.location.href);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("ticket", ticket);
+      if (eventCursor) url.searchParams.set("since", eventCursor);
+      if (subscribedSessions.value.length) url.searchParams.set("sessions", subscribedSessions.value.join(","));
       openEventSocket(url, generation);
     })
     .catch((e) => {
@@ -565,64 +483,88 @@ function connectEvents() {
       reconnectEvents(generation);
     });
 }
+/**
+ * Armed from network handlers only: background tabs throttle chained timers to once a minute, but a timer set
+ * by a message handler is not chained. The server sends a heartbeat every 20s and pings at protocol level.
+ */
+function watchSilence(ws, generation) {
+  clearTimeout(eventsWatchdog);
+  eventsWatchdog = setTimeout(() => {
+    if (generation === eventGeneration) ws.close();
+  }, EVENT_SILENCE_MS);
+}
 function openEventSocket(url, generation) {
   const ws = new WebSocket(url);
   eventsSocket = ws;
-  let lastMessage = Date.now(), readyAt = 0;
-  eventsHeartbeat = setInterval(() => {
-    if (generation !== eventGeneration) return;
-    if (Date.now() - lastMessage > 30000) { ws.close(); return; }
-    if (readyAt && Date.now() - readyAt >= 30000) eventRetryDelay = 500;
-    if (ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: "ping" })); }
-      catch { ws.close(); }
-    }
-  }, 10000);
+  let readyAt = 0;
+  watchSilence(ws, generation);
   ws.onmessage = ({ data }) => {
     if (generation !== eventGeneration) return;
+    let value;
     try {
-      const value = JSON.parse(data);
-      lastMessage = Date.now();
-      if (value.type === "ready") {
-        const reconnect = eventsWasConnected;
-        eventsReady = true;
-        eventsWasConnected = true;
-        readyAt = Date.now();
-        if (reconnect)
-          void (async () => {
-            await bootstrap();
-            if (generation !== eventGeneration) return;
-            if (current.value) await refreshCurrent();
-            if (view.value === "employee" && !employeeSession.value) await loadEmployee();
-            employeeSessionVersion.value++;
-          })().catch((e) => {
-            if (generation !== eventGeneration) return;
-            if (e.network) ws.close();
-            else error.value = e.message;
-          });
-        return;
-      }
-      if (value.type !== "pong") socketMessage(value);
+      value = JSON.parse(data);
     } catch (e) {
       error.value = `实时消息无效：${e.message}`;
+      return;
     }
+    lastEventAt = Date.now();
+    watchSilence(ws, generation);
+    if (typeof value.epoch === "string" && Number.isSafeInteger(value.seq)) eventCursor = value.epoch + ":" + value.seq;
+    else if (Number.isSafeInteger(value.seq) && eventCursor) eventCursor = eventCursor.split(":")[0] + ":" + value.seq;
+    if (value.type === "ready") {
+      const reconnect = eventsWasConnected;
+      eventsReady = true;
+      eventsWasConnected = true;
+      readyAt = Date.now();
+      if (subscribedSessions.value.join(",") !== (url.searchParams.get("sessions") || ""))
+        ws.send(JSON.stringify({ type: "subscribe", sessions: subscribedSessions.value }));
+      // Missed events were replayed in order; only a page outside the replay window reloads its state.
+      if (reconnect && !value.replayed)
+        void (async () => {
+          await bootstrap();
+          if (generation !== eventGeneration) return;
+          if (current.value) await refreshCurrent();
+          if (view.value === "employee" && !employeeSession.value) await loadEmployee();
+          employeeSessionVersion.value++;
+        })().catch((e) => {
+          if (generation !== eventGeneration) return;
+          if (e.network) ws.close();
+          else error.value = e.message;
+        });
+      return;
+    }
+    if (value.type === "heartbeat" || value.type === "pong") {
+      if (readyAt && Date.now() - readyAt >= 30000) eventRetryDelay = 500;
+      return;
+    }
+    if (value.type === "error") {
+      error.value = value.reason;
+      return;
+    }
+    dispatchEvent(value);
   };
   ws.onerror = () => { if (generation === eventGeneration) ws.close(); };
   ws.onclose = (event) => {
     if (generation !== eventGeneration) return;
     eventsReady = false;
-    clearInterval(eventsHeartbeat);
+    clearTimeout(eventsWatchdog);
     if (event.code === 4401) {
       resetLogin();
       error.value = "登录已过期或被撤销，请重新登录";
       return;
     }
-    rejectSocketRequests("实时连接正在恢复");
+    if (event.code === 4429) eventRetryDelay = 30000;
     reconnectEvents(generation);
   };
 }
+watch(subscribedSessions, (ids, previous) => {
+  if (ids.join(",") === previous?.join(",")) return;
+  if (eventsReady && eventsSocket?.readyState === WebSocket.OPEN)
+    eventsSocket.send(JSON.stringify({ type: "subscribe", sessions: ids }));
+});
 function recoverEvents() {
-  if (!document.hidden && !eventsReady && authenticated.value && !closed) connectEvents();
+  if (document.hidden || !authenticated.value || closed) return;
+  if (!eventsReady || Date.now() - lastEventAt > EVENT_SILENCE_MS) connectEvents();
 }
 onMounted(() => {
   window.addEventListener("online", recoverEvents);
@@ -711,12 +653,12 @@ function resetLogin() {
   closed = true;
   eventGeneration++;
   clearTimeout(eventReconnect);
-  clearInterval(eventsHeartbeat);
+  clearTimeout(eventsWatchdog);
   eventsSocket?.close();
   eventsSocket = null;
   eventsReady = false;
   eventsWasConnected = false;
-  rejectSocketRequests("连接已关闭");
+  eventCursor = "";
   authenticated.value = false;
   user.value = null;
   csrfToken.value = "";
@@ -1373,7 +1315,7 @@ onBeforeUnmount(() => {
   closed = true;
   eventGeneration++;
   clearTimeout(eventReconnect);
-  clearInterval(eventsHeartbeat);
+  clearTimeout(eventsWatchdog);
   eventsSocket?.close();
   localBridge?.close();
 });

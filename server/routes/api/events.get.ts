@@ -1,7 +1,7 @@
 import { defineWebSocketHandler } from "h3";
-import { useNitroApp } from "nitropack/runtime";
 import { app } from "../../core/application";
 
+// Events only: the page sends subscriptions; API calls go over HTTP.
 export default defineWebSocketHandler({
   upgrade(request) {
     try {
@@ -18,23 +18,7 @@ export default defineWebSocketHandler({
     }
   },
   message(peer, message) {
-    const request = peer.request;
-    app().eventsSocket.message(peer, message.text(), (method, path, body, signal, csrf) =>
-      useNitroApp().localFetch("/api" + path, {
-        method,
-        headers: {
-          cookie: request.headers.get("cookie") || "",
-          origin: request.headers.get("origin") || "",
-          host: request.headers.get("host") || "",
-          "sec-fetch-site": "same-origin",
-          "x-csrf-token": csrf,
-          ...(body !== undefined ? { "content-type": "application/json" } : {}),
-        },
-        body,
-        signal,
-        redirect: "manual",
-      }),
-    );
+    app().eventsSocket.message(peer, message.text());
   },
   close(peer) {
     app().eventsSocket.close(peer.id);
