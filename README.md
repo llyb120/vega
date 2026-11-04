@@ -48,6 +48,13 @@ SQLite 图片授权会自动升级到版本 4，并修复旧分叉历史的图�
 
 网站和客户端均支持HTTP/WS与HTTPS/WSS；公网建议使用HTTPS。`VEGA_PUBLIC_URL`设置为实际访问的HTTP(S) origin（如`http://vega.example.com:8080`或`https://vega.example.com`，不带路径），服务按该origin检查请求，仅HTTPS使用Secure Cookie。**HTTP下登录信息、设备凭据与命令明文传输，存在被窃听或篡改的风险。** 不要信任任意客户端传入的Forwarded头。反代保留Host，为`/api/events`、`/api/chrome/live`、`/api/local-agent/socket`转发WebSocket Upgrade/Connection，设备连接还需保留Authorization头。直接本地HTTP开发可不设置此变量。
 
+**实时通道与超时**：网页的所有API都走普通HTTP，`/api/events`只推送事件，不再转发API请求。服务端每20秒发送一次心跳并做协议级ping，网页75秒收不到任何消息才重连；重连带上次的事件序号，2分钟/5000条以内的断线只补发漏掉的事件，不整页刷新。牵牛星客户端每5秒心跳，大于256KB的结果改为`POST /api/local-agent/result`上传（同样需要保留Authorization头，并允许最大48MB请求体）。反代请据此设置：
+
+- WebSocket读超时不低于75秒（nginx `proxy_read_timeout 120s; proxy_send_timeout 120s;`），且不要缓冲WebSocket；
+- `client_max_body_size 90m`（聊天附件上限）以上，`/api/local-agent/result`的请求体可达48MB；
+- 服务端已对超过2KB、且浏览器接受gzip的JSON接口响应做gzip（会话历史一般压缩到1/3以下，1200条的历史约2.0MB→0.6MB），反代无需再压缩`/api`；若反代也开启gzip，已带`Content-Encoding`的响应会被跳过；
+- 每个账号最多同时保持12个实时事件连接（多开标签页/设备合计），超出的新连接收到4429并在30秒后重试；无响应的僵尸连接会在下一次心跳时被清理。
+
 原`VEGA_TOKEN`现在仅用于**首个管理员初始化**和只返回就绪/扩展连接状态的`GET /api/health`，不再是普通网站API的管理员后门。容器启动/健康检查已改用health入口，不需要保存网站账号密码；Token轮换不撤销SQLite中的账号登录。
 
 ## Linux / Docker 自动安装扩展
@@ -155,7 +162,7 @@ WS连接先通过带CSRF校验的POST取得15秒有效、一次性且绑定当�
 
 **无头模式**：设置 `VEGA_BROWSER_MODE=isolated` 后，服务启动一个私有无头 Chrome（与 Docker 同一套扩展协议、独立 profile 目录 `<数据库目录>/chromium`），不占宿主桌面。Linux/Windows/macOS 都支持；Windows 上通过 `VEGA_CHROME_PATH` 指定 chrome.exe，未设置时自动探测常见安装路径。无头实例可多 tab 并行截图和输入；cookie/登录态持久在私有 profile，不与用户日常浏览器共享。Docker 模式同样使用此变量，行为一致。
 
-远程部署仍只需现有网站端口。反向代理须为`/api/events`、`/api/chrome/live`及`/api/local-agent/socket`转发WebSocket的HTTP/1.1 Upgrade/Connection并保留Host，设备连接还须保留Authorization；公网建议配置正确的`VEGA_PUBLIC_URL`并使用HTTPS/WSS，**不要暴露Chrome调试端口或回环扩展端口**。断线后点击刷新重新连接，不自动补发上次操作。
+远程部署仍只需现有网站端口。反向代理须为`/api/events`、`/api/chrome/live`及`/api/local-agent/socket`转发WebSocket的HTTP/1.1 Upgrade/Connection并保留Host，设备连接还须保留Authorization；公网建议配置正确的`VEGA_PUBLIC_URL`并使用HTTPS/WSS，**不要暴露Chrome调试端口或回环扩展端口**。意外断线且没有进行中的操作时自动重连（最多3次），页面切回前台也会自动重连；可能已执行的操作仍要求人工核对，不自动补发上次操作。画面不变时只发送不含图片的确认帧，静止约2秒后采样降为每秒2帧。
 
 ### MCP、技能和团队
 

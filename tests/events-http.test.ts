@@ -121,6 +121,7 @@ test(
       const history = await request("/sessions/" + seeded.id, "GET", undefined, login);
       assert.equal(history.response.ok, true);
       assert.equal(history.value.messages[0].text.length, 300000);
+      assert.equal(history.response.headers.get("content-encoding"), "gzip", "large JSON is compressed");
       assert.ok(history.value.context, "a full read includes the context budget");
       const incremental = await request("/sessions/" + seeded.id + "?after=1", "GET", undefined, login);
       assert.equal(incremental.value.context, undefined, "incremental reads skip the budget");
