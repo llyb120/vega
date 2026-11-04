@@ -17,7 +17,7 @@ const props = defineProps({
 });
 const emit = defineEmits(["tab", "delete", "execution", "toggle-work", "menu"]);
 const menu = ref(null), place = ref(null);
-const icons = { chat: "chat", tasks: "tasks", browser: "globe", duties: "repeat", memories: "memory", capabilities: "zap", settings: "settings" };
+const icons = { chat: "chat", tasks: "tasks", browser: "globe", duties: "repeat", memories: "memory", capabilities: "zap", vault: "key", settings: "settings" };
 const location = computed(() => props.employee?.execution?.localAgent ? props.employee.execution.clientName || "客户端" : "服务端");
 const clients = computed(() => props.employee?.executionClients || []);
 const offlineCurrent = computed(() => props.employee?.execution?.localAgent && !clients.value.some((client) => client.id === props.employee.execution.clientId));

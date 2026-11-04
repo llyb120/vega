@@ -328,7 +328,8 @@ export class Tools {
   }
 
   private async credentialScope(a: Obj) {
-    const entry = this.engine.vault.list().find((item) => item.id === a.id && (!item.tempFor || item.tempFor === this.session.taskId));
+    const vault = this.engine.employeeFor(this.session).vault;
+    const entry = vault.list().find((item) => item.id === a.id && (!item.tempFor || item.tempFor === this.session.taskId));
     assert(entry, "Vault entry not found for this task");
     const task = this.session.taskId ? this.engine.employeeFor(this.session).task(this.engine.employeeFor(this.session).state(), this.session.taskId).text
       : this.engine.store.messages(this.session.id).findLast((message) => message.role === "user")?.text || "";
@@ -341,7 +342,7 @@ export class Tools {
     }));
     const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (a.action === "vault_send" ? "为当前任务提供加密凭据支援" : ""), task: task.slice(0, 4000), ...(a.url ? { url: vaultSite(a.url) } : {}), pages }, this.signal);
     this.signal.throwIfAborted();
-    const latest = this.engine.vault.list().find((item) => item.id === entry.id);
+    const latest = vault.list().find((item) => item.id === entry.id);
     assert(latest?.name === entry.name && latest?.condition === entry.condition, "凭据使用条件已变化，请重新核对");
     return scope;
   }
@@ -370,8 +371,8 @@ export class Tools {
     const waiting = this.session.employeeId && this.session.taskId && this.engine.employeeFor(this.session).state().tasks.find(task => task.id === this.session.taskId)?.workspaceWait;
     if (waiting) return { value: { status: "queued", reason: "工作区写入占用，任务已暂停，本步未执行；资源释放后自动续做。" }, error: true, stop: true };
     if (internal) {
-      const result = internal.tool === "chrome" ? await this.chrome(a) : internal.tool === "vault" ? await this.vault(a) : await this.employee(internal, call.name, rest);
-      if (result.secret && (internal.tool === "vault" || a.action === "vault_get")) {
+      const result = internal.tool === "chrome" ? await this.chrome(a) : await this.employee(internal, call.name, rest);
+      if (result.secret && a.action === "vault_get") {
         const credential = JSON.parse(result.secret);
         this.credentials.push({ site: credential.scopeSite || "", values: credentialValues(credential.content) });
       }
@@ -518,13 +519,6 @@ export class Tools {
     );
     if (a.action === "vault_get" && result.secret) result.secret = JSON.stringify({ ...JSON.parse(result.secret), scopeSite: scope });
     return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? taskLink(result.value.id) : undefined };
-  }
-  private async vault(a: Obj): Promise<Outcome> {
-    assert(!this.session.taskId, "Use the employee vault tools here");
-    const scope = a.action === "get" ? await this.credentialScope(a) : "";
-    const result = this.engine.vault.executeTool(a);
-    if (result.secret) result.secret = JSON.stringify({ ...JSON.parse(result.secret), scopeSite: scope });
-    return result;
   }
   private async chrome(a: Obj): Promise<Outcome> {
     const browser = await this.engine.chromeFor(this.session, this.signal);

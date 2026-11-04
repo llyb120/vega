@@ -131,12 +131,17 @@ test("successful vault reads pass observed-page credential scope into Chrome for
   store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: {} });
   engine.catalog.resolve = async () => ({ selection: "fixture/model" } as any);
   engine.providers.chat = async () => ({ role: "assistant", calls: [{ id: "check", name: "check_credential_use", arguments: { allowed: true, reason: "当前用途符合邮箱登录条件" } }] });
-  const session = store.newSession({ cwd: ".", scene: "computer" });
+  // Vault entries belong to an employee, so the read happens in that employee's computer task session.
+  const worker = engine.employee.for(engine.employee.create({ name: "Worker" }, "owner").id);
+  const job = await worker.execute("", { action: "add", kind: "todo", text: "登录邮箱" });
+  worker.update((state) => { state.tasks[0].status = "running"; });
+  const session = store.newSession({ cwd: ".", scene: "computer", employeeId: worker.employeeId, taskId: job.value.id });
+  worker.busy.set(job.value.id, { session: session.id, computer: true });
   let passed: CredentialBinding[] = [];
   (engine as any).chromeFor = async () => ({ execute: async (_owner: any, _cwd: any, _args: any, _signal: any, bindings: CredentialBinding[]) => { passed = bindings; return { images: [] }; } });
   try {
-    const entry = engine.vault.save({ name: "account", condition: "email login", content: "账号：sample@example.test\n密码：password-example" });
-    const tools = new Tools(engine, session, engine.config(), new AbortController().signal, () => {});
+    const entry = worker.vault.save({ name: "account", condition: "email login", content: "账号：sample@example.test\n密码：password-example" });
+    const tools = new Tools(engine, session, engine.config(session), new AbortController().signal, () => {});
     await tools.execute({ id: "vault", ...vaultCall({ action: "get", id: entry.id, text: "login", url: site }) }, { supportsImages: true } as any);
     await tools.execute({ id: "browser", ...chromeCall({ operation: "inspect", tabTag: "tab" }) }, { supportsImages: true } as any);
     assert.equal(passed[0].site, site);

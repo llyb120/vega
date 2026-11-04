@@ -308,19 +308,23 @@ export class Employee {
   lastActivity = Date.now();
   locked = false;
   nativePresence?: Presence;
+  /** This employee's own credential book; `vaults` only holds the shared key. */
+  vault: Vault;
   constructor(
     public store: Store,
-    public vault: Vault,
+    public vaults: Vault,
     public runtime: EmployeeRuntime,
     public employeeId = "default",
     public root?: Employee,
-  ) {}
+  ) {
+    this.vault = vaults.scoped(employeeId);
+  }
   all(): Employee[] {
     const root = this.root || this;
     if (!root.membersLoaded) {
       for (const row of this.store.objects<EmployeeState>("employee"))
         if (!root.members.has(row.id))
-          root.members.set(row.id, new Employee(this.store, this.vault, this.runtime, row.id, root));
+          root.members.set(row.id, new Employee(this.store, this.vaults, this.runtime, row.id, root));
       root.membersLoaded = true;
     }
     return [...(this.store.get("employee:default-deleted", false) ? [] : [root]), ...root.members.values()];
@@ -355,7 +359,7 @@ export class Employee {
       assert(available.length, "No unused avatar combination available");
       avatar = available[Math.floor(Math.random() * available.length)];
     }
-    const key = id("e"), employee = new Employee(this.store, this.vault, this.runtime, key, this.root || this);
+    const key = id("e"), employee = new Employee(this.store, this.vaults, this.runtime, key, this.root || this);
     const s = employee.state();
     Object.assign(s, { name: a.name.trim(), avatar, instruction: a.instruction || "", ownerId, scope, cwd: a.cwd || process.cwd(), enabled: true, workStart: "00:00", workEnd: "00:00" });
     employee.save(s);
@@ -368,6 +372,7 @@ export class Employee {
     const state = this.state();
     this.store.transaction(() => {
       for (const task of state.tasks) this.vault.dropTemp(task.id);
+      this.store.db.prepare("DELETE FROM objects WHERE kind=?").run(this.vault.kind);
       this.store.db.prepare("DELETE FROM objects WHERE kind=?").run("experience:" + this.employeeId);
       this.store.db.prepare("DELETE FROM objects WHERE kind=?").run("skill:" + this.employeeId);
       this.store.remove("employee-capabilities", this.employeeId);
@@ -684,7 +689,7 @@ export class Employee {
           secret: JSON.stringify(value),
         };
       }
-      throw Error("User-only vault action; use the settings page");
+      throw Error("密码本增删改只能由牛马创建者在牛马配置的「密码本」里操作");
     }
     let stop = false,
       pendingSend: { to: string; type: string; data: any } | undefined;

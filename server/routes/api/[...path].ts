@@ -1,7 +1,7 @@
 import { updateEmployeeAvatar } from "../../core/employee-avatar";
 import { chatHistory } from "../../core/chat-page";
 import { prepareDutyInput } from "../../core/duty-condition";
-import { employeeCapabilities } from "../../core/employee-capabilities";
+import { canConfigureEmployee, employeeCapabilities } from "../../core/employee-capabilities";
 import {
   browserTabs,
   browserScreenshot,
@@ -100,7 +100,7 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 404, statusMessage: "Not found" });
   }
   try {
-    if (["config", "providers", "skills", "employee", "vault"].includes(path[0]))
+    if (["config", "providers", "skills", "employee"].includes(path[0]))
       check(user.role === "admin", 403, "Administrator permission required");
     if (path[0] === "debug") {
       check(user.role === "admin", 403, "Administrator permission required");
@@ -167,7 +167,7 @@ export default defineEventHandler(async (event) => {
       check(!employee.deleting, 409, "牛马正在删除，请稍候");
       const state = employee.state();
       if (method !== "GET") check(user.role !== "viewer", 403, "只读账号不能执行操作");
-      if (["capabilities", "skills", "mcp"].includes(path[2]))
+      if (["capabilities", "skills", "mcp", "vault"].includes(path[2]))
         return await employeeCapabilities(employee, user, method, path.slice(2), a);
       if (path[2] === "avatar") {
         if (method === "GET") {
@@ -250,10 +250,12 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "transcript" && method === "POST") return employee.transcript(a.threadId);
       if (path.length === 2 && method === "GET") {
         const { enabled, workStart, workEnd, ...visible } = state;
-        return { ...visible, canManage: employee.manageable(user), executionClients: employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
+        return { ...visible, canManage: employee.manageable(user), canConfigure: canConfigureEmployee(employee, user), executionClients: employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
       }
       if (path.length === 2 && method === "POST") {
         if (!employee.manageable(user)) check(a.action === "list" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
+        // Same owner-only rule as the vault page: managing an employee does not open its vault.
+        if (typeof a.action === "string" && a.action.startsWith("vault_")) check(canConfigureEmployee(employee, user), 403, "只有牛马创建者可以使用这个牛马的密码本");
         const result = await employee.execute("", await prepareDutyInput(engine, employee, a));
         return result.secret ? JSON.parse(result.secret) : result.value;
       }
@@ -521,17 +523,6 @@ export default defineEventHandler(async (event) => {
         return engine.employee.transcript(a.threadId);
       const out = await engine.employee.execute("", a);
       return out.secret ? JSON.parse(out.secret) : out.value;
-    }
-    if (path[0] === "vault") {
-      const vault = engine.vault;
-      if (method === "GET" && path.length === 1)
-        return { entries: vault.list() };
-      if (method === "POST" && path.length === 1) return vault.save(a);
-      if (method === "DELETE" && path.length === 2) {
-        vault.remove(path[1]);
-        return { ok: true };
-      }
-      check(false, 404, "Vault route not found");
     }
     if (path[0] === "chrome") {
       if (path.length === 2 && path[1] === "tabs" && method === "GET")

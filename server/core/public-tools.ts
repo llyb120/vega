@@ -5,7 +5,7 @@ import { omittable } from "./tool-args";
 
 /**
  * Model-facing tools are narrow, per-purpose schemas. Each one maps onto the existing internal
- * chrome / employee / vault executors, so runtime behaviour (observations, receipts, permissions,
+ * chrome / employee executors (the employee executor also owns each employee's vault), so runtime behaviour (observations, receipts, permissions,
  * suspension) stays in one place. Arguments are validated against the visible schema before any
  * side effect; the only leniency is that an optional field holding null, or an empty value that its
  * own declared lower bound rejects (0 for minimum ≥ 1, "" for minLength ≥ 1, [] for minItems ≥ 1),
@@ -270,9 +270,10 @@ export function employeeTools(ctx: ToolContext): Tool[] {
 }
 
 export function vaultTools(ctx: ToolContext): Tool[] {
-  if (ctx.member) return [];
+  // Each employee owns its book; a plain session has no employee and therefore no credentials.
+  if (ctx.kind === "normal" || ctx.member) return [];
   const out: Tool[] = [
-    tool("vault_list", "列出全局密码本条目的 id、名称和使用条件（不含凭据内容" + (ctx.kind === "task" ? "；包括本任务收到的临时条目" : "") + "）。取用前先看 condition，选出唯一适用的条目。增删改只有用户能在「设置 → 密码本」操作。"),
+    tool("vault_list", "列出当前牛马自己密码本条目的 id、名称和使用条件（不含凭据内容" + (ctx.kind === "task" ? "；包括本任务收到的临时条目" : "") + "）。取用前先看 condition，选出唯一适用的条目。增删改只有牛马创建者能在牛马配置的「密码本」里操作。"),
     tool("vault_get",
       "按 credentialId 取一条凭据供本轮使用：purpose 写清本次用途及为什么符合该条 condition；系统结合当前页面核对条件，不符则拒绝且不取出。凭据内容不进入对话记录，只用于当前授权操作，不写进回复、记忆、计划或交接。",
       { credentialId, purpose: str("本次用途及为什么符合使用条件，1–8000 字", { minLength: 1, maxLength: 8000 }), url: vaultUrl },
@@ -280,11 +281,11 @@ export function vaultTools(ctx: ToolContext): Tool[] {
   ];
   if (ctx.vaultRequest)
     out.push(tool("vault_request",
-      "执行团队成员交代的任务、密码本缺少所需凭据时，请交代人的本地密码本加密支援：requirement 写需要哪个系统的哪类凭据。任务挂起并立即结束本轮；收到后存为本任务的临时条目，用 vault_list / vault_get 取用。必须单独调用。",
+      "执行团队成员交代的任务、密码本缺少所需凭据时，请交代人的本地密码本加密支援：requirement 写需要哪个系统的哪类凭据。任务挂起并立即结束本轮；收到后存为当前牛马密码本里本任务的临时条目，用 vault_list / vault_get 取用。必须单独调用。",
       { requirement: str("需要的凭据，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["requirement"]));
   if (ctx.vaultSend)
     out.push(tool("vault_send",
-      "凭据支援任务专用：把允许共享、非临时且符合使用条件的条目加密发回请求方，不在回复里写明文。立即结束本轮。自己要用凭据用 vault_get。必须单独调用。",
+      "凭据支援任务专用：把当前牛马密码本里允许共享、非临时且符合使用条件的条目加密发回请求方，不在回复里写明文。立即结束本轮。自己要用凭据用 vault_get。必须单独调用。",
       { credentialId, url: vaultUrl }, ["credentialId"]));
   return out;
 }
@@ -300,7 +301,7 @@ export const VAULT_TOOLS = new Set(["vault_list", "vault_get", "vault_request", 
 /** Calls that suspend, hand off or end the turn: they must be the only call in a batch. */
 export const STANDALONE_TOOLS = new Set(["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete", "vault_request", "vault_send"]);
 
-export type Internal = { tool: "chrome" | "employee" | "vault"; args: Obj; target?: "task" | "duty" };
+export type Internal = { tool: "chrome" | "employee"; args: Obj; target?: "task" | "duty" };
 
 /** runAt / delayMinutes → the old nextAt / nextCheckInMinutes; exactly one unless optional. */
 function when(a: Obj, path: string, required = true): Obj {
@@ -435,11 +436,8 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
       if (r.command === "merge") return employee(defined({ action: "memory_resolve", resolveAction: "merge", ids: r.memoryIds, keepId: r.keepId }));
       return employee(defined({ action: "memory_resolve", resolveAction: r.command, id: r.memoryId, claim: r.claim, signal: r.signal }));
     }
-    case "vault_list": return ctx.kind === "normal" ? { tool: "vault", args: { action: "list" } } : employee({ action: "vault_list" });
-    case "vault_get":
-      return ctx.kind === "normal"
-        ? { tool: "vault", args: defined({ action: "get", id: a.credentialId, text: a.purpose, url: a.url }) }
-        : employee(defined({ action: "vault_get", id: a.credentialId, text: a.purpose, url: a.url }));
+    case "vault_list": return employee({ action: "vault_list" });
+    case "vault_get": return employee(defined({ action: "vault_get", id: a.credentialId, text: a.purpose, url: a.url }));
     case "vault_request": return employee({ action: "vault_request", text: a.requirement });
     case "vault_send": return employee(defined({ action: "vault_send", id: a.credentialId, url: a.url }));
   }

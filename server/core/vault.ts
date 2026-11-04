@@ -35,9 +35,16 @@ export const decrypt = (key: Buffer, aad: string, blob: string) => {
     decipher.final(),
   ]);
 };
+/** Each employee keeps its own credential book in this object kind. */
+export const vaultKind = (employeeId: string) => "vault:" + employeeId;
 export class Vault {
   key: Buffer;
-  constructor(public store: Store) {
+  /** kind "vault" is the key holder (and the pre-migration global book); employees use scoped(). */
+  constructor(public store: Store, public kind = "vault", key?: Buffer) {
+    if (key) {
+      this.key = key;
+      return;
+    }
     const env = process.env.VEGA_VAULT_KEY;
     this.key = env
       ? Buffer.from(env, /^[a-f0-9]{64}$/i.test(env) ? "hex" : "base64")
@@ -51,6 +58,10 @@ export class Vault {
       "VEGA_VAULT_KEY must encode exactly 32 bytes",
     );
   }
+  /** The credential book of one employee; same key and encryption, separate entries. */
+  scoped(employeeId: string) {
+    return new Vault(this.store, vaultKind(employeeId), this.key);
+  }
   sealObject(value: any, aad = "subscription") {
     return encrypt(this.key, aad, JSON.stringify(value));
   }
@@ -59,10 +70,10 @@ export class Vault {
   }
   list() {
     const now = Date.now();
-    for (const e of this.store.objects<any>("vault"))
+    for (const e of this.store.objects<any>(this.kind))
       if (e.tempFor && now - e.createdAt > 86400000)
-        this.store.remove("vault", e.id);
-    return this.store.objects<any>("vault").map(({ secret, ...e }) => e);
+        this.store.remove(this.kind, e.id);
+    return this.store.objects<any>(this.kind).map(({ secret, ...e }) => e);
   }
   save(a: Obj) {
     assert(
@@ -80,7 +91,7 @@ export class Vault {
         (typeof a.content === "string" && a.content.length <= 16000),
       "Vault content too long",
     );
-    const old = a.id ? this.store.object<any>("vault", a.id) : undefined;
+    const old = a.id ? this.store.object<any>(this.kind, a.id) : undefined;
     if (a.id) assert(old, "Vault entry not found");
     assert(old || a.content, "New entry requires content");
     assert(old || this.list().length < 200, "Vault capacity reached");
@@ -93,7 +104,7 @@ export class Vault {
       share: a.share ?? old?.share ?? false,
       createdAt: old?.createdAt || Date.now(),
     };
-    this.store.save("vault", entry.id, entry);
+    this.store.save(this.kind, entry.id, entry);
     return { id: entry.id };
   }
   get(key: string, purpose: string, task = "") {
@@ -101,7 +112,7 @@ export class Vault {
       typeof purpose === "string" && purpose.trim(),
       "Vault purpose required",
     );
-    const e = this.store.object<any>("vault", key);
+    const e = this.store.object<any>(this.kind, key);
     assert(e, "Vault entry not found");
     assert(
       !e.tempFor || e.tempFor === task,
@@ -112,7 +123,7 @@ export class Vault {
     const content = decrypt(this.key, "vault", e.secret).toString();
     e.usedAt = Date.now();
     e.usedFor = purpose.slice(0, 100);
-    this.store.save("vault", key, e);
+    this.store.save(this.kind, key, e);
     return {
       id: e.id,
       name: e.name,
@@ -122,36 +133,8 @@ export class Vault {
     };
   }
   remove(key: string) {
-    assert(this.store.object("vault", key), "Vault entry not found");
-    this.store.remove("vault", key);
-  }
-  executeTool(a: Obj) {
-    const action = a.action;
-    if (action === "list")
-      return {
-        value: {
-          entries: this.list().filter((entry) => !entry.tempFor),
-          tip: VAULT_USAGE,
-        },
-      };
-    if (action === "get") {
-      const id = typeof a.id === "string" ? a.id.trim() : "",
-        purpose = typeof a.text === "string" ? a.text.trim() : "";
-      assert(id, "缺少 credentialId：先 vault_list 查看密码本");
-      assert(purpose, "缺少 purpose：写明这次取用的用途");
-      const value = this.get(id, purpose);
-      return {
-        value: {
-          id: value.id,
-          name: value.name,
-          condition: value.condition,
-          content:
-            "[withheld from transcript; available only to current turn]",
-        },
-        secret: JSON.stringify(value),
-      };
-    }
-    throw Error("action 应为 list 或 get；增删改请用户在「设置 → 密码本」操作");
+    assert(this.store.object(this.kind, key), "Vault entry not found");
+    this.store.remove(this.kind, key);
   }
   request(req: string) {
     const { privateKey, publicKey } = generateKeyPairSync("x25519");
@@ -190,7 +173,7 @@ export class Vault {
     return createHash("sha256").update("nova-vault-v1").update(secret).digest();
   }
   sealFor(key: string, req: string, their: string) {
-    const e = this.store.object<any>("vault", key);
+    const e = this.store.object<any>(this.kind, key);
     assert(
       e?.share && !e.tempFor,
       "Credential is not shareable or is temporary",
@@ -229,7 +212,7 @@ export class Vault {
     const key = id("v");
     this.store.transaction(() => {
       this.store.remove("vault-request", req);
-      this.store.save("vault", key, {
+      this.store.save(this.kind, key, {
         id: key,
         name: (data.name || "凭据") + "（对方传来）",
         condition: `仅限任务「${task}」使用，任务结束即删除` + (data.condition ? `；原使用条件：${data.condition}` : ""),
@@ -250,8 +233,24 @@ export class Vault {
   dropTemp(req: string) {
     this.store.transaction(() => {
       this.store.remove("vault-request", req);
-      for (const e of this.store.objects<any>("vault"))
-        if (e.tempFor === req) this.store.remove("vault", e.id);
+      for (const e of this.store.objects<any>(this.kind))
+        if (e.tempFor === req) this.store.remove(this.kind, e.id);
     });
   }
+}
+/**
+ * One-time move of the former global book: every employee used it, so each current employee gets a copy;
+ * a temporary entry goes only to the employee owning its task. The global entries are then deleted.
+ */
+export function migrateGlobalVault(store: Store, current: () => { employeeId: string; taskIds: string[] }[]) {
+  if (store.get("vault:migrated", false)) return;
+  const employees = current();
+  store.transaction(() => {
+    for (const entry of store.objects<any>("vault")) {
+      const owners = entry.tempFor ? employees.filter((employee) => employee.taskIds.includes(entry.tempFor)) : employees;
+      for (const owner of owners) store.save(vaultKind(owner.employeeId), entry.id, entry);
+      store.remove("vault", entry.id);
+    }
+    store.put("vault:migrated", true);
+  });
 }

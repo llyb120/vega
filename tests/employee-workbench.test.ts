@@ -37,7 +37,7 @@ async function segment(employee: Employee, job: Task) {
   return employee.task(employee.state(), job.id);
 }
 
-test("employees isolate state, business keys, conversations and owner access but share credentials; legacy state stays default", async () => {
+test("employees isolate state, business keys, conversations, owner access and credentials; legacy state stays default", async () => {
   const { store, employee, vault } = fixture();
   try {
     employee.update((s) => s.memories.push({ id: "old", claim: "legacy", kind: "convention", scope: "global", scene: "any", confidence: 0.5, usefulness: 0.4, status: "active", links: {}, createdAt: Date.now(), updatedAt: Date.now(), text: "legacy" }));
@@ -63,26 +63,31 @@ test("employees isolate state, business keys, conversations and owner access but
     assert.equal(store.session(a.state().chatSession!).employeeId, a.employeeId);
     assert.throws(() => store.fork(a.state().chatSession!), /workspace/);
     assert.throws(() => store.stage(a.state().chatSession!), /workspace/);
-    const secret = vault.save({ name: "secret", condition: "test", content: "hidden" });
-    a.update((s) => Object.assign(s, { vaultIds: [] })); // Legacy grants must not hide shared entries.
-    for (const worker of [employee, a, b]) {
-      const entries = (await worker.execute("", { action: "vault_list" })).value.entries;
-      assert.deepEqual(entries.map((entry: any) => entry.id), [secret.id]);
-      assert.equal(entries[0].condition, "test");
-      assert(!JSON.stringify(entries).includes("hidden"));
-      await assert.rejects(worker.execute("", { action: "vault_get", id: secret.id, text: " " }), /purpose required/);
-      const result = await worker.execute("", { action: "vault_get", id: secret.id, text: "test" });
-      assert.equal(JSON.parse(result.secret!).content, "hidden");
-      assert(!JSON.stringify(result.value).includes("hidden"));
+    // Each employee reads only its own book; the same id in another book is simply not there.
+    const secret = a.vault.save({ name: "secret", condition: "test", content: "hidden" });
+    const entries = (await a.execute("", { action: "vault_list" })).value.entries;
+    assert.deepEqual(entries.map((entry: any) => entry.id), [secret.id]);
+    assert.equal(entries[0].condition, "test");
+    assert(!JSON.stringify(entries).includes("hidden"));
+    await assert.rejects(a.execute("", { action: "vault_get", id: secret.id, text: " " }), /purpose required/);
+    const result = await a.execute("", { action: "vault_get", id: secret.id, text: "test" });
+    assert.equal(JSON.parse(result.secret!).content, "hidden");
+    assert(!JSON.stringify(result.value).includes("hidden"));
+    for (const other of [employee, b]) {
+      assert.deepEqual((await other.execute("", { action: "vault_list" })).value.entries, []);
+      await assert.rejects(other.execute("", { action: "vault_get", id: secret.id, text: "test" }), /Vault entry not found/);
     }
-    assert.equal(store.object<any>("vault", secret.id).usedFor, "test");
+    assert.equal(store.object<any>(a.vault.kind, secret.id).usedFor, "test");
+    assert.deepEqual(store.objects("vault"), [], "nothing is written to the former global book");
     const reopened = new Employee(store, vault, employee.runtime);
+    assert.equal(reopened.for(a.employeeId).vault.list()[0].id, secret.id);
+    assert.deepEqual(reopened.for(b.employeeId).vault.list(), []);
     assert.match(reopened.for(a.employeeId).state().memories[0].claim, /A-only/);
   } finally { employee.close(); store.close(); }
 });
 
-test("shared vault keeps remote credentials scoped to their original task", async () => {
-  const { store, employee, vault } = fixture();
+test("remote credentials are received into the requesting employee's book and scoped to their original task", async () => {
+  const { store, employee } = fixture();
   try {
     const a = employee.for(employee.create({ name: "A" }, "alice").id);
     const b = employee.for(employee.create({ name: "B" }, "bob").id);
@@ -91,44 +96,47 @@ test("shared vault keeps remote credentials scoped to their original task", asyn
       worker.update((s) => { worker.task(s, job.id).status = "running"; });
       worker.busy.set(job.id, { computer: false, session: "" });
     }
-    const shared = vault.save({ name: "shared", condition: "test", content: "hidden", share: true });
-    const pk = vault.request(own.id);
-    const received = vault.receive(own.id, own.text, vault.sealFor(shared.id, own.id, pk).sealed);
-    for (const [worker, caller, allowed] of [[employee, "", false], [a, "", false], [a, own.id, true], [a, sibling.id, false], [b, peer.id, false]] as const) {
+    // b supports a: the shareable entry lives in b's book; the sealed copy lands in a's book.
+    const shared = b.vault.save({ name: "shared", condition: "test", content: "hidden", share: true });
+    const pk = a.vault.request(own.id);
+    const received = a.vault.receive(own.id, own.text, b.vault.sealFor(shared.id, own.id, pk).sealed);
+    assert.deepEqual(b.vault.list().map((entry) => entry.id), [shared.id]);
+    for (const [worker, caller, visible] of [[employee, "", []], [a, "", []], [a, own.id, [received.id]], [a, sibling.id, []], [b, peer.id, [shared.id]]] as const) {
       const entries = (await worker.execute(caller, { action: "vault_list" })).value.entries;
-      assert.deepEqual(new Set(entries.map((entry: any) => entry.id)), new Set(allowed ? [shared.id, received.id] : [shared.id]));
+      assert.deepEqual(entries.map((entry: any) => entry.id), visible);
       assert(!JSON.stringify(entries).includes("hidden"));
-      assert.equal(JSON.parse((await worker.execute(caller, { action: "vault_get", id: shared.id, text: "test" })).secret!).content, "hidden");
-      if (allowed)
-        assert.equal(JSON.parse((await worker.execute(caller, { action: "vault_get", id: received.id, text: "test" })).secret!).content, "hidden");
-      else
-        await assert.rejects(worker.execute(caller, { action: "vault_get", id: received.id, text: "test" }), /another task/);
     }
-    vault.dropTemp(own.id);
-    assert.deepEqual(vault.list().map((entry) => entry.id), [shared.id]);
+    assert.equal(JSON.parse((await a.execute(own.id, { action: "vault_get", id: received.id, text: "test" })).secret!).content, "hidden");
+    await assert.rejects(a.execute(sibling.id, { action: "vault_get", id: received.id, text: "test" }), /another task/);
+    await assert.rejects(b.execute(peer.id, { action: "vault_get", id: received.id, text: "test" }), /Vault entry not found/);
+    await assert.rejects(a.execute(own.id, { action: "vault_get", id: shared.id, text: "test" }), /Vault entry not found/);
+    a.vault.dropTemp(own.id);
+    assert.deepEqual(a.vault.list(), []);
+    assert.deepEqual(b.vault.list().map((entry) => entry.id), [shared.id]);
+    assert.deepEqual(store.objects("vault"), []);
   } finally { employee.close(); store.close(); }
 });
 
-test("shared vault sends encrypted support without employee grants but still requires share opt-in", async () => {
+test("credential support sends an entry from the supporting employee's own book and still requires share opt-in", async () => {
   const { store, employee, vault, runtime } = fixture();
   try {
     const job = await task(employee);
-    const request = "remote-request", pk = vault.request(request);
+    const remote = vault.scoped("remote-employee"), request = "remote-request", pk = remote.request(request);
     employee.update((s) => Object.assign(employee.task(s, job.id), { status: "running", replyTo: { id: request, token: "remote", name: "Remote" }, vaultPk: pk }));
     employee.busy.set(job.id, { computer: false, session: "" });
-    const secret = vault.save({ name: "service", condition: "test", content: "support-secret" });
+    const secret = employee.vault.save({ name: "service", condition: "test", content: "support-secret" });
     const sent: any[] = [];
     runtime.send = async (to, type, data) => { sent.push({ to, type, data }); return {}; };
     await assert.rejects(employee.execute(job.id, { action: "vault_send", id: secret.id }), /not shareable/);
     assert.equal(sent.length, 0);
-    vault.save({ id: secret.id, name: "service", condition: "test", share: true });
+    employee.vault.save({ id: secret.id, name: "service", condition: "test", share: true });
     assert.equal((await employee.execute(job.id, { action: "vault_send", id: secret.id })).stop, true);
     assert.equal(sent.length, 1);
     assert.equal(sent[0].to, "remote");
     assert.equal(sent[0].type, "starlink.reply");
     assert(!JSON.stringify(sent).includes("support-secret"));
-    const received = vault.receive(request, "remote work", sent[0].data.sealed);
-    assert.equal(vault.get(received.id, "test", request).content, "support-secret");
+    const received = remote.receive(request, "remote work", sent[0].data.sealed);
+    assert.equal(remote.get(received.id, "test", request).content, "support-secret");
   } finally { employee.close(); store.close(); }
 });
 

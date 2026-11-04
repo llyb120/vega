@@ -23,7 +23,7 @@ import { Context, estimate, ACP_GUIDE } from "./context";
 import { Employee, recallMemory, formatMemoriesForPrompt, type EmployeeRuntime } from "./employee";
 import { EmployeeBrowsers } from "./employee-browsers";
 import { LocalBrowsers } from "./local-browsers";
-import { Vault } from "./vault";
+import { Vault, migrateGlobalVault } from "./vault";
 import { Relay } from "./relay";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
 
@@ -223,6 +223,7 @@ export class Engine {
       isolated: true,
     };
     this.employee = new Employee(store, this.vault, runtime);
+    migrateGlobalVault(store, () => this.employee.all().map((employee) => ({ employeeId: employee.employeeId, taskIds: employee.state().tasks.map((task) => task.id) })));
     this.browsers = new EmployeeBrowsers(store, chrome.pageScript);
     this.localBrowsers = new LocalBrowsers(store, this.localAgents, chrome.pageScript);
     this.fire = new Fire(

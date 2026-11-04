@@ -119,7 +119,7 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
   ];
   for (const [name, args, internal, ctx] of cases)
     assert.deepEqual(map(name, args, ctx).args, internal, name + " " + JSON.stringify(args));
-  assert.deepEqual(map("vault_get", { credentialId: "v1", purpose: "login" }), { tool: "vault", args: { action: "get", id: "v1", text: "login" } }, "ordinary sessions keep the standalone vault executor");
+  assert.deepEqual(map("vault_get", { credentialId: "v1", purpose: "login" }, chat), { tool: "employee", args: { action: "vault_get", id: "v1", text: "login" } }, "an employee chat reads its own vault through the employee executor");
   assert.equal(map("employee_task_manage", { taskId: "t1", request: { command: "cancel" } }).target, "task");
   assert.equal(map("employee_duty_manage", { dutyId: "d1", request: { command: "remove" } }).target, "duty");
 });
@@ -189,7 +189,8 @@ test("a whole-schema default fill is rejected before any browser or employee sid
 test("visible tools and branches follow session, scene and permission like the old definitions", () => {
   const names = (ctx: ToolContext) => [...employeeTools(ctx), ...vaultTools(ctx)].map((t) => t.name).sort();
   const commands = (ctx: ToolContext, tool: string) => JSON.stringify(employeeTools(ctx).find((t) => t.name === tool)?.parameters).match(/"enum":\["[^\]]+"\]/g)?.join(",") || "";
-  assert.deepEqual(names({ kind: "normal" }), ["employee_duty_create", "employee_duty_manage", "employee_status", "employee_task_create", "employee_task_manage", "memory_manage", "memory_propose", "memory_search", "vault_get", "vault_list"]);
+  assert.deepEqual(names({ kind: "normal" }), ["employee_duty_create", "employee_duty_manage", "employee_status", "employee_task_create", "employee_task_manage", "memory_manage", "memory_propose", "memory_search"], "a plain session belongs to no employee and has no vault");
+  assert.deepEqual(names(chat).filter((name) => name.startsWith("vault_")), ["vault_get", "vault_list"]);
   assert(!commands({ kind: "normal" }, "employee_task_manage").includes("resume"), "resume/answer/stop are chat-only");
   assert(commands(chat, "employee_task_manage").includes("stop"));
   assert.deepEqual(names({ kind: "chat", member: true }), ["employee_status", "employee_task_create", "employee_task_manage"]);

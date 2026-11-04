@@ -68,7 +68,8 @@ test("ordinary conversations do not depend on employee state, schedule or task r
     assert(rules.includes("普通会话"));
     assert(rules.includes("不需要牛马启用"));
     assert(tools.definitions(model).some((tool) => tool.name === "chrome_act"));
-    assert(tools.definitions(model).some((tool) => tool.name === "vault_get"));
+    assert(!tools.definitions(model).some((tool) => tool.name.startsWith("vault_")), "a plain session belongs to no employee and has no vault");
+    assert(!rules.includes("[密码本]"));
     const readOnlyTools = new Tools(
       engine,
       store.newSession({ title: "readonly", readOnly: true }),

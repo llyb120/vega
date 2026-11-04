@@ -163,7 +163,7 @@ test("switching employee execution defaults never changes old, running, resumed 
   } finally { engine.active.clear(); engine.employee.all().forEach((employee) => employee.busy.clear()); await engine.close(); store.close(); }
 });
 
-test("employee deletion removes its sessions/profile and survives restart without deleting project files, shared credentials or other employees", async () => {
+test("employee deletion removes its sessions/profile and its own vault and survives restart without deleting project files or other employees", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-delete-employee-")), previous = process.env.VEGA_DB;
   process.env.VEGA_DB = join(dir, "database.db");
   const { store, engine } = fixture();
@@ -176,7 +176,8 @@ test("employee deletion removes its sessions/profile and survives restart withou
     const profile = engine.browsers.profile(a.employeeId);
     await mkdir(profile, { recursive: true }); await writeFile(join(profile, "Cookies"), "private");
     await writeFile(join(dir, "project.txt"), "keep");
-    const credential = engine.vault.save({ name: "shared", condition: "authorized", content: "keep" });
+    const credential = a.vault.save({ name: "removed with A", condition: "authorized", content: "gone" }), kept = b.vault.save({ name: "B own", condition: "authorized", content: "keep" });
+    const temp = a.vault.request(job.id) && job.id;
     engine.active.set(chat.id, { control: new AbortController(), steer: [] });
     await assert.rejects(engine.removeEmployee(a.employeeId), /先停止/);
     assert.equal(a.deleting, false);
@@ -187,7 +188,10 @@ test("employee deletion removes its sessions/profile and survives restart withou
     assert.throws(() => store.session(legacy.id), /not found/);
     await assert.rejects(access(profile));
     assert.equal(await readFile(join(dir, "project.txt"), "utf8"), "keep");
-    assert(engine.vault.list().some((entry) => entry.id === credential.id));
+    assert.deepEqual(store.objects(a.vault.kind), [], "deleting an employee deletes its own vault");
+    assert.equal(store.object("vault-request", temp), undefined);
+    assert(!b.vault.list().some((entry) => entry.id === credential.id));
+    assert.deepEqual(b.vault.list().map((entry) => entry.id), [kept.id]);
     assert.equal(engine.employee.for(b.employeeId).state().name, "Keep");
     await engine.removeEmployee("default");
     assert(!engine.employee.all().some((employee) => employee.employeeId === "default"));

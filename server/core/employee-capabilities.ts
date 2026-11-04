@@ -51,7 +51,21 @@ export async function employeeCapabilities(employee: Employee, user: { id: strin
       mcp: Object.keys(config.mcp || {}).map((name) => canEdit ? { name, config: masked![name] } : { name }),
     };
   }
-  check(canEdit, 403, "只有牛马创建者可以查看或修改 skill / MCP 配置详情");
+  check(canEdit, 403, path[0] === "vault" ? "只有牛马创建者可以查看或修改这个牛马的密码本" : "只有牛马创建者可以查看或修改 skill / MCP 配置详情");
+  if (path[0] === "vault") {
+    // The employee's own book: entries never leave it and the secret is never returned.
+    if (method === "GET" && path.length === 1) return { entries: employee.vault.list().filter((entry) => !entry.tempFor) };
+    if (method === "POST" && path.length === 1) {
+      check(!body.id || !employee.vault.list().find((entry) => entry.id === body.id)?.tempFor, 400, "任务临时条目不能编辑");
+      const saved = employee.vault.save({ id: body.id, name: body.name, condition: body.condition, content: body.content, share: typeof body.share === "boolean" ? body.share : undefined });
+      employee.emitChanged(employee.state());
+      return saved;
+    }
+    check(method === "DELETE" && path.length === 2, 404, "Vault route not found");
+    employee.vault.remove(decodeURIComponent(path[1]));
+    employee.emitChanged(employee.state());
+    return { ok: true };
+  }
   if (path[0] === "mcp" && path.length === 1 && method === "PUT") {
     const mcp = body.mcp;
     check(mcp && typeof mcp === "object" && !Array.isArray(mcp) && Object.keys(mcp).length <= 50, 400, "MCP配置必须为对象，最多50项");
