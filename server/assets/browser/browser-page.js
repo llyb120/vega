@@ -1,6 +1,6 @@
 // CDP isolated world: references are never recovered by text or a page-supplied selector.
 (() => {
-  if (globalThis.__novaWebview?.apiVersion === 27) return;
+  if (globalThis.__novaWebview?.apiVersion === 28) return;
   const compact = (text, max = 160) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
   // Icon-only controls (sort carets, filter funnels, close ×) carry their meaning in class names.
   const iconHint = e => {
@@ -192,7 +192,7 @@
     return entry;
   };
   const api = {
-    apiVersion: 27,
+    apiVersion: 28,
     stamp,
     async evaluate(expression, expectedDocument, expectedUrl) {
       // Check and start in the same JS turn: navigation must never redirect a script to a new document.
@@ -458,7 +458,8 @@
       let previous,stableFrames=0,scrolled=false,reason='目标正在移动';
       do {
         if(ref)entryFor(ref);
-        if (disabled(e)) reason='目标不可用';
+        // Hovering a disabled control is allowed: its tooltip often explains why it is disabled.
+        if (mode!=='hover' && disabled(e)) reason='目标不可用';
         else {
           const p=wheel?wheelPoint(e,mode==='scroll_x'?'x':'y'):clickable(e),r=rect(e);
           // Measure this target, not ancestor animation metadata (which can run forever without moving it).
@@ -487,12 +488,12 @@
     },
     verifyPoint(ref,x,y,expectedRect,mode='click') {
       const e=entryFor(ref).e;
-      if (disabled(e) || !sameRect(rect(e),expectedRect) || !receives(e,x,y)) throw Error('目标在鼠标定位后改变或被遮挡，请重新观察');
+      if ((mode!=='hover' && disabled(e)) || !sameRect(rect(e),expectedRect) || !receives(e,x,y)) throw Error('目标在鼠标定位后改变或被遮挡，请重新观察');
       if (mode==='fill' && !editable(e)) throw Error('目标不是可填写字段或只读');
       return true;
     },
-    async coordinate(x,y,expectedStamp,fullPage=false) {
-      if (stamp()!==expectedStamp) throw Error('截图视口已变化，请重新截图');
+    // Coordinates are already mapped from the chosen image to CSS pixels; no check that the image is still current.
+    async coordinate(x,y,fullPage=false) {
       if (![x,y].every(Number.isFinite)||x<0||y<0) throw Error('坐标超出视口');
       if (fullPage) {
         if (x>=Math.max(document.documentElement.scrollWidth,document.body?.scrollWidth||0)||y>=Math.max(document.documentElement.scrollHeight,document.body?.scrollHeight||0)) throw Error('坐标超出文档');
@@ -512,7 +513,7 @@
         entries.set(ref,entry(target));
         hoverTarget={ref,rect:rect(target)};
       }
-      return {x,y,stamp:stamp(),pageX:x+scrollX,pageY:y+scrollY,identity:identity(e),editable:!!e&&editable(e),password:e?.type==='password',canvas:e?.tagName==='CANVAS',hit:e?{tag:e.tagName.toLowerCase(),name:label(e)}:null,hoverTarget};
+      return {x,y,pageX:x+scrollX,pageY:y+scrollY,identity:identity(e),editable:!!e&&editable(e),password:e?.type==='password',canvas:e?.tagName==='CANVAS',hit:e?{tag:e.tagName.toLowerCase(),name:label(e)}:null,hoverTarget};
     },
   };
   Object.defineProperty(globalThis,'__novaWebview',{value:api,configurable:true});

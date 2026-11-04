@@ -17,6 +17,7 @@ test("container Chromium automatically loads the fixed extension in its private 
   assert(args.includes("--user-data-dir=/data/chromium"));
   assert(args.includes("--load-extension=/app/extension"));
   assert(args.includes("--disable-extensions-except=/app/extension"));
+  assert(args.includes("--silent-debugger-extension-api"));
   assert(
     !args.some((arg: string) =>
       /no-sandbox|disable.*sandbox|remote-debugging|ignore-certificate|disable-web-security/.test(

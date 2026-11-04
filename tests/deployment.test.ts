@@ -157,7 +157,7 @@ test(
         base + "/extension/nova-chrome/manifest.json",
       );
       assert.equal(extension.status, 200);
-      assert.equal((await extension.json()).version, "0.1.16");
+      assert.equal((await extension.json()).version, "0.1.17");
       const signed = await api("/auth/setup", "POST", {
         setupToken: token,
         username: "deployed-admin",

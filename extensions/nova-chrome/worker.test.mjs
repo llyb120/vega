@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
 import {webcrypto} from 'node:crypto';
+// The post-attach viewport settle probe (see settleViewport in worker.js) is not a page command.
+const settleProbe=params=>String(params?.expression||'').includes("addEventListener('resize'");
 
 test('native downloads expose progress, interruption and completion without tab guesses or replay',async()=>{
   const event=()=>({addListener(){}});let query,calls=0;
@@ -41,7 +43,7 @@ test('screenshots reveal a minimized window or background tab instead of hanging
   const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},
     tabs:{query:async()=>[tab],get:async()=>({...tab}),update:async(id,props)=>{calls.push(['tab',id,props]);Object.assign(tab,props);},onRemoved:event(),onReplaced:event(),onUpdated:event()},
     windows:{get:async()=>({...win}),update:async(id,props)=>{calls.push(['window',id,props]);win={...win,...props};}},
-    debugger:{attach:async()=>{},sendCommand:async(_t,method)=>{calls.push(['cdp',method]);return {data:'png'};},onEvent:event(),onDetach:event()},
+    debugger:{attach:async()=>{},sendCommand:async(_t,method,params)=>{if(settleProbe(params))return {};calls.push(['cdp',method]);return {data:'png'};},onEvent:event(),onDetach:event()},
     runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
   const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async()=>{throw Error('offline');}};
   runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+
@@ -101,7 +103,7 @@ test('a stuck debugger command times out, polling resumes and late results are n
     extension:{isAllowedIncognitoAccess:async()=>false},
     storage:{session:{get:async()=>({}),set:async()=>{}}},
     tabs:{query:async()=>[{id:11,url:'https://example.com',active:true}],get:async()=>({id:11}),onRemoved:event(),onReplaced:event(),onUpdated:event()},
-    debugger:{attach:async()=>{},sendCommand:()=>{calls++;return new Promise(resolve=>{finishCommand=resolve;});},onDetach:event(),onEvent:event()},
+    debugger:{attach:async()=>{},sendCommand:(_t,_m,params)=>{if(settleProbe(params))return Promise.resolve({});calls++;return new Promise(resolve=>{finishCommand=resolve;});},onDetach:event(),onEvent:event()},
     runtime:{id:'test',onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()},
   };
   const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async(url,options)=>{
@@ -266,7 +268,7 @@ test('ordinary poll and reply failures reconnect automatically without replaying
   const chrome={extension:{isAllowedIncognitoAccess:async()=>false},
     storage:{session:{get:async()=>({}),set:async()=>{}}},
     tabs:{query:async()=>[{id:11,url:'https://example.com',active:true}],get:async()=>({id:11}),onRemoved:event(),onReplaced:event(),onUpdated:event()},
-    debugger:{attach:async()=>{},sendCommand:async()=>{inputs++;return {};},onDetach:event(),onEvent:event()},
+    debugger:{attach:async()=>{},sendCommand:async(_t,_m,params)=>{if(!settleProbe(params))inputs++;return {};},onDetach:event(),onEvent:event()},
     runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
   const scope={chrome,crypto:webcrypto,URL,AbortSignal,clearTimeout,setTimeout:(fn,ms)=>{
     if(ms===500){delays.push(ms);return setTimeout(fn,1);}return setTimeout(fn,ms);
@@ -402,4 +404,20 @@ test('self-reload only targets a numerically newer Nova-bundled version',async()
   assert.equal(scope.newer('0.1.10','0.1.9'),true,'numeric, not string, comparison');
   assert.equal(scope.newer('0.1.11','0.1.11'),false);
   assert.equal(scope.newer('0.1.9','0.1.10'),false,'an older Nova never downgrades the extension');
+});
+
+test('a fresh attach waits for the debugging bar resize once and idle detach waits five minutes',async()=>{
+  const event=()=>({addListener(){}});const sent=[],delays=[];
+  const tab={id:11,windowId:5,url:'https://example.com',active:true};
+  const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},
+    tabs:{query:async()=>[tab],get:async()=>({...tab}),onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{attach:async()=>{sent.push('attach');},sendCommand:async(_t,method,params)=>{sent.push(settleProbe(params)?'settle':method);return {};},onEvent:event(),onDetach:event()},
+    runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,clearTimeout,setTimeout:(fn,ms,...args)=>{delays.push(ms);return setTimeout(fn,ms,...args);},fetch:async()=>{throw Error('offline');}};
+  runInNewContext(await readFile(new URL('./worker.js',import.meta.url),'utf8')+
+    '\nglobalThis.run=async method=>execute({operation:"cdp",args:{tabTag:(await inventory())[0].tag,method},expiresAt:Date.now()+3000});',scope);
+  await scope.run('Runtime.evaluate');await scope.run('Input.dispatchMouseEvent');
+  assert.equal(JSON.stringify(sent),JSON.stringify(['attach','settle','Runtime.evaluate','Input.dispatchMouseEvent']),'settle once, before the first command');
+  assert.ok(delays.includes(300000),'idle detach after five minutes');
+  assert.ok(!delays.includes(30000));
 });

@@ -329,22 +329,24 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
   const chrome = (args: Obj): Internal => ({ tool: "chrome", args });
   const employee = (args: Obj, target?: Internal["target"]): Internal => ({ tool: "employee", args, ...(target ? { target } : {}) });
   const defined = (o: Obj) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+  // Observation summary budgets, shared by every tool that returns an observation (as the old single tool allowed).
+  const budget = defined({ maxItems: a.maxItems, maxTextChars: a.maxTextChars });
   switch (name) {
-    case "chrome_tabs": return chrome(defined({ operation: "tabs", query: a.query, incognito: a.incognito, visual: a.visual }));
+    case "chrome_tabs": return chrome(defined({ operation: "tabs", query: a.query, incognito: a.incognito, visual: a.visual, ...budget }));
     case "chrome_navigate": {
-      const observe = { observe: a.observe, settleMs: a.settleMs, visual: a.visual };
+      const observe = { observe: a.observe, settleMs: a.settleMs, visual: a.visual, ...budget };
       return a.target.kind === "existing_tab"
         ? chrome(defined({ operation: "goto", tabTag: a.target.tabTag, url: a.url, ...observe }))
         : chrome(defined({ operation: "open", url: a.url, incognito: a.target.incognito, ...observe }));
     }
     case "chrome_tab_control":
-      return chrome(defined({ operation: ({ select: "select_tab", close: "close_tab" } as Obj)[a.command] || a.command, tabTag: a.tabTag, observe: a.observe, settleMs: a.settleMs, visual: a.visual }));
+      return chrome(defined({ operation: ({ select: "select_tab", close: "close_tab" } as Obj)[a.command] || a.command, tabTag: a.tabTag, observe: a.observe, settleMs: a.settleMs, visual: a.visual, ...budget }));
     case "chrome_inspect":
       return chrome(defined({ operation: "inspect", tabTag: a.tabTag, query: a.query, scope: a.scope, visual: a.visual, maxItems: a.maxItems, maxTextChars: a.maxTextChars }));
     case "chrome_screenshot": {
       const c = a.capture;
       return chrome(defined({
-        operation: "screenshot", tabTag: a.tabTag, maxEdge: c.maxEdge,
+        operation: "screenshot", tabTag: a.tabTag, maxEdge: c.maxEdge, ...budget,
         ...(c.kind === "page" ? { fullPage: true, tileOffset: c.tileOffset } : {}),
         ...(c.kind === "element" ? { ref: c.ref, frame: c.frame } : {}),
         ...(c.kind === "region" ? { region: c.region } : {}),
@@ -352,9 +354,9 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
       }));
     }
     case "chrome_act":
-      return chrome(defined({ operation: "act", tabTag: a.tabTag, imageId: a.imageId, visual: a.visual, settleMs: a.settleMs, actions: a.actions.map(chromeAction) }));
+      return chrome(defined({ operation: "act", tabTag: a.tabTag, imageId: a.imageId, visual: a.visual, settleMs: a.settleMs, ...budget, actions: a.actions.map(chromeAction) }));
     case "chrome_evaluate":
-      return chrome(defined({ operation: "evaluate", tabTag: a.tabTag, expression: a.expression, frame: a.frame, visual: a.visual, ...(a.observe === false ? { feedback: "none" } : {}) }));
+      return chrome(defined({ operation: "evaluate", tabTag: a.tabTag, expression: a.expression, frame: a.frame, visual: a.visual, ...budget, ...(a.observe === false ? { feedback: "none" } : {}) }));
     case "chrome_run":
       return chrome({ operation: "run", tabTag: a.tabTag, plan: defined({ task: a.task, steps: a.steps, authorization: a.authorization, expectedText: a.expectedText, inputs: a.inputs, maxActions: a.maxActions }) });
     case "chrome_connection": return chrome({ operation: a.command === "cancel_operation" ? "stop" : "status" });
@@ -448,6 +450,7 @@ function chromeAction(v: Obj): Obj {
   const defined = (o: Obj) => Object.fromEntries(Object.entries(o).filter(([, x]) => x !== undefined));
   switch (v.action) {
     case "click": return defined({ action: "click", ref: v.ref, frame: v.frame, button: v.button, click_count: v.clickCount });
+    case "hover": return defined({ action: "hover", ref: v.ref, frame: v.frame });
     case "fill": return defined({ action: "fill", ref: v.ref, text: v.value, frame: v.frame });
     case "type": return { action: "type", text: v.text };
     case "press": return { action: "press", key: v.key };

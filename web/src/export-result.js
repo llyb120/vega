@@ -37,11 +37,52 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef0f7;
 pre{background:#1b1f2a;color:#e3e7f2;padding:10px 12px;overflow:auto;border-radius:8px}
 blockquote{margin:0 0 8px;padding-left:12px;border-left:3px solid #c5cad8;color:#4b5568}
 .markdown-table{overflow-x:auto;margin:8px 0}
+.missing-image{display:block;margin:8px 0;padding:8px 10px;border:1px dashed #c5cad8;color:#8a4b00;background:#fff8ec}
 `;
 
-export function buildResultHtmlDocument({ title, markdown, origin } = {}) {
+const ARCHIVED_IMG = /<img\b[^>]*\bsrc="(\/api\/blobs\/[^"]+)"[^>]*>/gi;
+
+function base64(bytes) {
+  let text = "";
+  for (let at = 0; at < bytes.length; at += 0x8000) text += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  return btoa(text);
+}
+
+/**
+ * Fetch every archived image (/api/blobs/…) the result shows, while the signed-in page can still read it.
+ * The exported file is opened elsewhere (file://, mail, another browser) where the strict session cookie is not
+ * sent, so linked archive images would break; the map holds a data: URI, or null when the image is unavailable.
+ */
+export async function fetchArchivedImages(markdown, fetcher = fetch) {
   const { html } = renderMarkdown(markdown || "");
-  const body = absoluteBlobSrc(html, origin || (typeof location !== "undefined" ? location.origin : ""));
+  const paths = new Set([...html.matchAll(ARCHIVED_IMG)].map((m) => m[1].replace(/&amp;/g, "&")));
+  const images = new Map();
+  await Promise.all([...paths].map(async (path) => {
+    try {
+      const response = await fetcher(path, { credentials: "same-origin" });
+      const mime = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+      if (!response.ok || !/^image\/(?:png|jpeg|gif|webp|bmp|avif)$/.test(mime)) throw Error(String(response.status));
+      images.set(path, `data:${mime};base64,${base64(new Uint8Array(await response.arrayBuffer()))}`);
+    } catch { images.set(path, null); }
+  }));
+  return images;
+}
+
+function inlineArchivedImages(html, images, origin) {
+  return html.replace(ARCHIVED_IMG, (tag, src) => {
+    const path = src.replace(/&amp;/g, "&"), data = images.get(path);
+    if (data) return tag.replace(`src="${src}"`, `src="${data}"`).replace(/\sloading="lazy"/, "");
+    const alt = /\balt="([^"]*)"/.exec(tag)?.[1] || "图片";
+    // Never drop an image silently: say what is missing and where it was.
+    return `<span class="missing-image">[图片无法导出：${alt}；原地址 ${escapeXml(origin + path)}]</span>`;
+  });
+}
+
+/** images: from fetchArchivedImages, to embed archived images; without it they stay absolute links to this server. */
+export function buildResultHtmlDocument({ title, markdown, origin, images } = {}) {
+  const { html } = renderMarkdown(markdown || "");
+  const base = origin || (typeof location !== "undefined" ? location.origin : "");
+  const body = images ? inlineArchivedImages(html, images, base) : absoluteBlobSrc(html, base);
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeXml(title || "任务结果")}</title><style>${PRINT_CSS}</style></head><body><h1>${escapeXml(title || "任务结果")}</h1>${body}</body></html>`;
 }
 
@@ -57,13 +98,14 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function downloadHtml({ title, markdown, filename } = {}) {
-  const doc = buildResultHtmlDocument({ title, markdown });
+export async function downloadHtml({ title, markdown, filename } = {}) {
+  const doc = buildResultHtmlDocument({ title, markdown, images: await fetchArchivedImages(markdown) });
   downloadBlob(new Blob([doc], { type: "text/html;charset=utf-8" }), (filename || exportBasename(title)) + ".html");
 }
 
-export function printPdf({ title, markdown } = {}) {
-  const doc = buildResultHtmlDocument({ title, markdown });
+export async function printPdf({ title, markdown } = {}) {
+  // Embedded images are already decoded when print runs; lazy archive links in a hidden frame may never load.
+  const doc = buildResultHtmlDocument({ title, markdown, images: await fetchArchivedImages(markdown) });
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
   Object.assign(frame.style, { position: "fixed", right: "0", bottom: "0", width: "0", height: "0", border: "0" });
@@ -243,7 +285,8 @@ export function downloadDocx({ title, markdown, filename } = {}) {
   downloadBlob(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }), (filename || exportBasename(title)) + ".docx");
 }
 
-export function exportResult(format, { title, markdown } = {}) {
+/** HTML and PDF fetch archived images first, so this returns a promise for every format. */
+export async function exportResult(format, { title, markdown } = {}) {
   const filename = exportBasename(title);
   if (format === "html") return downloadHtml({ title, markdown, filename });
   if (format === "pdf") return printPdf({ title, markdown });

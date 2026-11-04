@@ -36,6 +36,9 @@ export function headlessArguments(profile: string, extension: string) {
     "--no-default-browser-check",
     "--window-size=1920,1200",
     "--password-store=basic",
+    // No "started debugging this browser" bar (headless shows it too): it shrank the viewport 56px on every attach.
+    // Safe here: the private profile only runs the Nova extension.
+    "--silent-debugger-extension-api",
     "--remote-debugging-port=0",
     `--user-data-dir=${profile}`,
     `--disable-extensions-except=${extension}`,

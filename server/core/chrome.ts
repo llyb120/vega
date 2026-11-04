@@ -395,6 +395,14 @@ export class Chrome {
     }
   }
   summarize(o: Observation, a: Obj) {
+    // Summary only (documentPath keeps the full record): drop what is derivable or a default.
+    // nodeId = page.document + ":" + the part of ref after "."; documentRect = viewportRect + page.viewport scrollX/scrollY.
+    const compactItem = (v: Obj) => {
+      const { nodeId: _node, documentRect: _rect, ...item } = v;
+      for (const key of ["actionable", "disabled", "editable", "password"]) if (item[key] === false) delete item[key];
+      for (const key of ["value", "fieldContext"]) if (item[key] === "") delete item[key];
+      return item;
+    };
     const limit = a.maxItems ?? 60,
       maxText = a.maxTextChars ?? 3000;
     assert(
@@ -426,7 +434,7 @@ export class Chrome {
           maxText,
         ),
         fullText: undefined,
-        items,
+        items: items.map(compactItem),
         elements: items
           .map(
             (v: Obj) =>
@@ -470,16 +478,17 @@ export class Chrome {
     }
     this.store.save("browser-observation", o.id, { ...o, frames: undefined });
     const origin = new URL(o.pages[0].url).origin;
+    // Identifiers and images first: an oversized result is clipped from the end, never these.
     return {
       browser: "chrome",
       tabTag: tag,
       snapshotId: o.id,
-      pages: this.summarize(o, a),
-      coverageGaps: o.coverageGaps,
-      documentPath: `sqlite:browser-observation/${o.id}`,
       images: o.images,
       ...shot,
+      documentPath: `sqlite:browser-observation/${o.id}`,
+      coverageGaps: o.coverageGaps,
       experienceHint: this.experiences.hint(owner, origin),
+      pages: this.summarize(o, a),
     };
   }
   async point(
@@ -708,7 +717,7 @@ export class Chrome {
   }
   private async preflight(o: Observation, actions: Obj[], top: Obj, cwd: string) {
     for (const action of actions) {
-      if (["click", "fill", "scroll"].includes(action.action) && action.ref) {
+      if (["click", "hover", "fill", "scroll"].includes(action.action) && action.ref) {
         const frame = o.pages.findIndex((p) => p.items?.some((v: Obj) => v.ref === action.ref));
         assert(frame >= 0, "ref not found in observed frames; never fabricate refs");
         action.frame = frame;
@@ -771,7 +780,7 @@ export class Chrome {
     const tag = o.tabTag,
       kind = a.action || a.type;
     let frameIndex = a.frame ?? 0;
-    if (["click", "fill", "scroll"].includes(kind) && a.ref) {
+    if (["click", "hover", "fill", "scroll"].includes(kind) && a.ref) {
       const actual = o.pages.findIndex((p) =>
         p.items.some((v: Obj) => v.ref === a.ref),
       );
@@ -793,7 +802,7 @@ export class Chrome {
       await sleep(a.ms, signal);
       return;
     }
-    if (["click", "fill", "scroll"].includes(kind)) {
+    if (["click", "hover", "fill", "scroll"].includes(kind)) {
       assert(frame, "Unknown frame");
       const mode =
         kind === "scroll" ? (a.delta_x ? "scroll_x" : "scroll_y") : kind;
@@ -841,6 +850,8 @@ export class Chrome {
         );
       }
       progress.domPreflight = false;
+      // hover: the pointer stays on the verified element; tooltips and menus show in the following observation.
+      if (kind === "hover") return;
       signal.throwIfAborted();
       await this.mouse(tag, p, a.button || "left", a.click_count || 1);
       progress.focus = p.editable
@@ -1009,7 +1020,7 @@ export class Chrome {
       const p = await this.evaluate(
         tag,
         o.frames[0],
-        `__novaWebview.coordinate(${xy.x},${xy.y},${JSON.stringify(o.pages[0].stamp)},${o.fullPage})`,
+        `__novaWebview.coordinate(${xy.x},${xy.y},${o.fullPage})`,
       );
       changed();
       await this.cdp(tag, "Input.dispatchMouseEvent", {
@@ -1023,8 +1034,6 @@ export class Chrome {
           o.frames[0],
           `__novaWebview.verifyPoint(${JSON.stringify(p.hoverTarget.ref)},${p.x},${p.y},${JSON.stringify(p.hoverTarget.rect)})`,
         );
-        const hovered = await this.evaluate(tag, o.frames[0], `__novaWebview.stamp()`);
-        assert(hovered === p.stamp, "悬停期间视口已变化，停止点击");
       }
       if (kind === "click_at") {
         await this.mouse(tag, p, a.button || "left", a.click_count || 1);
@@ -1351,7 +1360,7 @@ export class Chrome {
       verification: "unverified",
     };
     // Lyra parity: these are emitted only on failure. domPreflight stays true
-    // through a click/fill's hover-verify, so a stamp/iframe-move failure counts
+    // through a click/fill's hover-verify, so an iframe-move failure counts
     // as a preflight abort even after attempted flipped on real input.
     if (error) {
       result.failedAtPreflight = !!progress.domPreflight;
@@ -1360,7 +1369,7 @@ export class Chrome {
     }
     if ((!script || a.feedback !== "none") && (!opened.length || child)) {
       try {
-        if (settleMs > 0 && (opened.length || script || actions.some((v) => ["click", "click_at", "press"].includes(v.action)))) {
+        if (settleMs > 0 && (opened.length || script || actions.some((v) => ["click", "click_at", "press", "hover"].includes(v.action)))) {
           await this.waitForLoad(observedTag, settleMs, signal);
           if (observedTag === tag) await this.evaluate(tag, o.frames[0], `__novaWebview.settle(250,${Math.min(settleMs, 1000)})`, signal).catch(() => {});
         }
@@ -1385,7 +1394,9 @@ export class Chrome {
                 : "操作 " + v.action,
         ),
       );
-    return result;
+    // pages last: an oversized result is clipped from the end, keeping status and images.
+    const { pages, ...head } = result;
+    return pages === undefined ? head : { ...head, pages };
   }
   async run(owner: string, cwd: string, a: Obj, parent: AbortSignal, credentials: CredentialBinding[] = []) {
     const plan = a.plan;
@@ -1502,15 +1513,19 @@ export class Chrome {
     }
     const latest = result.openedTabs?.length && !result.snapshotId ? undefined : observation();
     const done = !reason && completed === plan.steps.length;
+    const { pages: _pages, snapshotId: _snapshot, images: _images, documentPath: _document, tabTag: _tag, ...rest } = result;
+    // Identifiers and images first, pages last: an oversized result is clipped from the end.
     return {
-      ...result, snapshotId: latest?.id, pages: latest ? this.summarize(latest, a) : [], images: latest?.images || [],
+      snapshotId: latest?.id, images: latest?.images || [],
       documentPath: latest ? "sqlite:browser-observation/" + latest.id : undefined, tabTag: tag,
+      ...rest,
       altairRun: {
         status: done ? "completed" : "needs_review", history, checks, executedActions: executed,
         guided: { completedSteps: completed, totalSteps: plan.steps.length, remainingSteps: plan.steps.slice(completed), next: reason },
         verification: done && plan.expectedText ? "subgoal_verified" : "unverified",
         notice: "run validates page evidence only; it is not user authorization or proof of business success.",
       },
+      pages: latest ? this.summarize(latest, a) : [],
     };
   }
 }

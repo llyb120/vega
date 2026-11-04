@@ -15,7 +15,7 @@ import { spawn } from "node:child_process";
 import { windowsShell } from "./presence";
 import { assertShellCommand } from "./shell-policy";
 import sharp from "sharp";
-import { readPath, textSlice } from "./file-read";
+import { archiveSlice, readPath, textSlice } from "./file-read";
 import { materializeSkill, skillEntry, skillKind } from "./skills";
 import { credentialValues, vaultSite, type CredentialBinding } from "./credentials";
 import { verifyVaultUse } from "./vault-use";
@@ -123,7 +123,7 @@ export class Tools {
     const defs: Tool[] = [
       schema(
         "read",
-        "Read numbered lines using 1-based offset/limit; images return their pixels. SQLite archived paths are supported.",
+        "Read numbered lines using 1-based offset/limit; images return their pixels. SQLite archives (documentPath sqlite:browser-observation/…, archivePath sqlite:tool-output/…) read as numbered pretty-JSON lines, lines over 2000 chars wrapped onto the next numbers, about 12KiB per call: continue from nextOffset while hasMore.",
         { path: string, offset: positive, limit: positive },
         ["path"],
       ),
@@ -647,7 +647,8 @@ export class Tools {
       }
       const value = this.engine.store.object(match[1], match[2]);
       assert(value, "Archived observation missing");
-      return { value };
+      // Paged like a text file so records larger than one tool result stay fully readable.
+      return { value: { path: a.path, ...archiveSlice(value, a.offset, a.limit) } };
     }
     const agent = serverOnly ? undefined : this.agent(),
       local = agent ? await localRead(this.engine.localAgents, agent, this.session.cwd, a.path, this.signal) : undefined,

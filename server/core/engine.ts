@@ -1047,6 +1047,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         preview: clip(raw, 32000),
         archivePath: "sqlite:tool-output/" + call.id,
         truncated: true,
+        next: "完整结果用 read 按 offset/limit 分页读 archivePath，hasMore 时从 nextOffset 继续",
       });
     }
     this.store.append(key, {

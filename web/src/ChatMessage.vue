@@ -25,10 +25,10 @@ const exportMarkdown = computed(() => {
 });
 const canExport = computed(() => props.message.delivery && !!exportMarkdown.value);
 const exportTitle = computed(() => linkedTask.value?.text || props.message.tasks?.[0]?.title || "任务结果");
-function runExport(format) {
+async function runExport(format) {
   exportError.value = "";
   try {
-    exportResult(format, { title: exportTitle.value, markdown: exportMarkdown.value });
+    await exportResult(format, { title: exportTitle.value, markdown: exportMarkdown.value });
     exportOpen.value = false;
   } catch (error) {
     exportError.value = error?.message || String(error);

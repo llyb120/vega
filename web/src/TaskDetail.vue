@@ -34,10 +34,10 @@ const progress = computed(() => planProgress(props.task.plan));
 const stepIcon = { completed: "check", in_progress: "play", blocked: "alert" };
 const exportMarkdown = computed(() => String(props.task.result || props.task.completion || props.task.summary || "").trim());
 const canExport = computed(() => !!exportMarkdown.value);
-function runExport(format) {
+async function runExport(format) {
   exportError.value = "";
   try {
-    exportResult(format, { title: props.task.text || "任务结果", markdown: exportMarkdown.value });
+    await exportResult(format, { title: props.task.text || "任务结果", markdown: exportMarkdown.value });
     exportOpen.value = false;
   } catch (error) {
     exportError.value = error?.message || String(error);

@@ -120,7 +120,7 @@ test("coordinate image IDs are optional hints while image scale and tile offsets
     assert.equal(r.status, "executed", r.reason);
     const x = imageId === "second" ? 520 : 120;
     assert.deepEqual(f.sent[0], { method: "Input.dispatchMouseEvent", type: "mouseMoved", x, y: 240 });
-    assert(f.calls.some(call => call.expression === `__novaWebview.coordinate(${x},240,"stamp",true)`));
+    assert(f.calls.some(call => call.expression === `__novaWebview.coordinate(${x},240,true)`));
   }
 });
 

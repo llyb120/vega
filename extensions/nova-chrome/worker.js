@@ -102,8 +102,12 @@ const checkUrl = value => {
   return url.href;
 };
 // Visible marker: tabs under debugger control sit in a blue "Nova" tab group; idle tabs detach so Chrome's debugging bar goes away.
+// The bar (headless too, unless Chrome runs with --silent-debugger-extension-api) resizes the viewport ~56px when it appears
+// or disappears, shifting pages away from earlier screenshots. A model often thinks 30–60s between calls, so detach only
+// after 5 idle minutes, and after a fresh attach wait (bounded) for the bar's resize.
 // ponytail: tabs with an active devtools recording never idle-detach (detaching would drop the log); idle timers die with the worker.
-const IDLE_DETACH_MS = 30000;
+const IDLE_DETACH_MS = 300000;
+const ATTACH_RESIZE_MS = 800, ATTACH_QUIET_MS = 150, ATTACH_SETTLE_CAP_MS = 1500;
 const grouped = new Set(), idle = new Map();
 async function mark(tab) {
   if (tab.groupId !== -1 || grouped.has(tab.id)) return;
@@ -140,6 +144,16 @@ async function attach(command, tab) {
   if (attached.has(tab.id)) return;
   await debuggerCall(command,()=>chrome.debugger.attach({tabId:tab.id},'1.3')); attached.add(tab.id);
   await mark(tab);
+  await settleViewport(command, tab);
+}
+// Chrome shows its debugging bar asynchronously after attach: wait for that resize (or ATTACH_RESIZE_MS without one),
+// then until resizes stop for ATTACH_QUIET_MS, so the first observation already has the final viewport.
+async function settleViewport(command, tab) {
+  const expression=`new Promise(done=>{let timer;const finish=()=>{clearTimeout(timer);clearTimeout(cap);removeEventListener('resize',resized);done([innerWidth,innerHeight])};`+
+    `const resized=()=>{clearTimeout(timer);timer=setTimeout(finish,${ATTACH_QUIET_MS})};const cap=setTimeout(finish,${ATTACH_SETTLE_CAP_MS});`+
+    `addEventListener('resize',resized);timer=setTimeout(finish,${ATTACH_RESIZE_MS})})`;
+  // A page that cannot run script (crashed, paused) is reported by the actual command, not here.
+  await debuggerCall(command,()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true,silent:true})).catch(()=>{});
 }
 async function execute(command) {
   const {operation, args} = command;

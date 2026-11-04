@@ -10,6 +10,7 @@ export function normalizeAction(raw: Obj) {
   assert(
     [
       "click",
+      "hover",
       "fill",
       "upload",
       "press",
@@ -26,6 +27,7 @@ export function normalizeAction(raw: Obj) {
   const kind = a.action,
     allowed: Record<string, string[]> = {
       click: ["frame", "ref", "button", "click_count"],
+      hover: ["frame", "ref"],
       fill: ["frame", "ref", "text"],
       upload: ["frame", "selector", "files"],
       press: ["key"],
@@ -50,14 +52,14 @@ export function normalizeAction(raw: Obj) {
     !unexpected.length,
     `Unexpected Chrome action field for ${kind}: ${unexpected.join(", ")} (allowed: ${allowed[kind].join(", ") || "none"}; omit unused fields)`,
   );
-  if (["click", "fill", "scroll", "upload"].includes(kind)) {
+  if (["click", "hover", "fill", "scroll", "upload"].includes(kind)) {
     a.frame ??= 0;
     assert(
       Number.isInteger(a.frame) && a.frame >= 0 && a.frame < 12,
       "Invalid frame",
     );
   }
-  if (["click", "fill"].includes(kind))
+  if (["click", "hover", "fill"].includes(kind))
     assert(typeof a.ref === "string" && a.ref, "DOM ref required");
   if (["fill", "type"].includes(kind))
     assert(
