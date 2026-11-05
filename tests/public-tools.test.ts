@@ -197,7 +197,7 @@ test("visible tools and branches follow session, scene and permission like the o
   assert.deepEqual(names(chat).filter((name) => name.startsWith("vault_")), ["vault_get", "vault_list"]);
   assert(!commands({ kind: "normal" }, "employee_task_manage").includes("resume"), "resume/answer/stop are chat-only");
   assert(commands(chat, "employee_task_manage").includes("stop"));
-  assert.deepEqual(names({ kind: "chat", member: true }), ["employee_status", "employee_task_create", "employee_task_manage"]);
+  assert.deepEqual(names({ kind: "chat", member: true }), ["employee_status", "employee_task_create", "employee_task_manage", "vault_get", "vault_list"]);
   assert(!/update|set_instructions|set_profile|reschedule|cancel/.test(commands({ kind: "chat", member: true }, "employee_task_manage")));
   const main = names({ kind: "task", dutyCommands: [] });
   assert.deepEqual(main, ["employee_status", "employee_task_create", "memory_manage", "memory_propose", "memory_search", "task_ask_user", "task_complete", "task_progress", "task_relay_computer", "task_request_approval", "task_reschedule", "task_wait", "vault_get", "vault_list"]);

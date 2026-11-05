@@ -120,7 +120,6 @@ export class Tools {
       dutyCommands: duty ? (dynamic ? ["schedule_next", "disable"] : ["disable"]) : [],
       vaultRequest: !!task?.owner?.token,
       vaultSend: !!(task?.replyTo && task?.vaultPk),
-      noVault: !!task?.group && !task.group.byOwner,
     };
   }
   /** Shared rules for the exposed tool families, injected once into the system prompt instead of every description. */
@@ -540,10 +539,10 @@ export class Tools {
     };
     if (internal.target === "task") assert(await employee.findTask(a.id), "taskId 不是当前牛马的任务；职责请用 employee_duty_manage");
     if (internal.target === "duty") assert((await employee.state()).duties.some((d) => d.id === a.id), "dutyId 不是当前牛马的职责；任务请用 employee_task_manage");
-    const memberOnly = (action: string, kind?: string) => ["list", "resume", "answer", "stop"].includes(action) || (action === "add" && kind === "todo");
-    // In a group, anyone but the owner delegates work: tasks only, never duties, memories or the vault.
+    const memberOnly = (action: string, kind?: string) => ["list", "resume", "answer", "stop", "vault_list", "vault_get"].includes(action) || (action === "add" && kind === "todo");
+    // In a group, anyone but the owner delegates work: tasks (and the employee's own vault), never duties or memories.
     const guest = source?.group && !source.group.byOwner ? source.group.from : undefined;
-    if (guest) assert(memberOnly(a.action, a.kind), `这条群聊消息来自${guest.kind === "user" ? "用户" : "牛马"}「${guest.name}」，不是牛马主人：只能派单、查询、补充、续做和停止任务；职责、记忆和密码本只有主人能用`);
+    if (guest) assert(memberOnly(a.action, a.kind), `这条群聊消息来自${guest.kind === "user" ? "用户" : "牛马"}「${guest.name}」，不是牛马主人：只能派单、查询、补充、续做和停止任务；职责和记忆只有主人能用`);
     if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
       const task = employee.task(await employee.state(), a.id);
       assert(!task.owner.token, "Remote tasks require their assigning member");

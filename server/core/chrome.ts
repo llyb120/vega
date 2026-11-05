@@ -32,6 +32,12 @@ type Observation = {
 /** Default navigation settle bound while the page is still loading. */
 export const NAVIGATION_SETTLE_MS = 4000;
 
+/** Attempts at observing a tab while a navigation keeps replacing its frames or contexts. */
+export const CONTEXT_RETRIES = 4;
+/** CDP errors meaning the frame or its execution context went away (a navigation), not that the page failed. */
+export const contextLost = (message?: string) =>
+  /Cannot find context with specified id|Execution context was destroyed|No frame for given id|Cannot find default execution context|Inspected target navigated or closed/i.test(String(message || ""));
+
 export class Chrome {
   gate = new Mutex();
   tabGates = new Map<string, Mutex>();
@@ -91,7 +97,21 @@ export class Chrome {
       return r.result?.value;
     } finally { clearTimeout(timer); }
   }
-  async observe(
+  /**
+   * Observe the tab. A navigation (redirect, SPA reload, a click that leaves the page) can destroy the frames or
+   * execution contexts between resolving and using them; that is a race, not a page error: wait for the load and
+   * resolve the frames again, a bounded number of times, before reporting anything.
+   */
+  async observe(tag: string, scope = "all", signal?: AbortSignal): Promise<Observation> {
+    for (let attempt = 1; ; attempt++) {
+      let o: Observation | undefined;
+      try { o = await this.observeOnce(tag, scope, signal); }
+      catch (error: any) { if (!contextLost(error?.message) || attempt >= CONTEXT_RETRIES) throw error; }
+      if (o && (!o.coverageGaps.some(contextLost) || attempt >= CONTEXT_RETRIES)) return o;
+      await this.waitForLoad(tag, 3000, signal!);
+    }
+  }
+  private async observeOnce(
     tag: string,
     scope = "all",
     signal?: AbortSignal,
@@ -468,20 +488,25 @@ export class Chrome {
     signal?: AbortSignal,
   ) {
     const key = owner + ":" + tag,
-      prior = this.observations.get(key),
-      o = await this.observe(tag, a.scope || "all", signal);
+      prior = this.observations.get(key);
     const capture =
       mode === "screenshot" ||
       a.feedback === "screenshot" ||
       (!["none", "inspect"].includes(a.feedback) && a.visual !== "none");
     assert(mode === "screenshot" || (!a.ref && !a.region), "inspect does not accept region/ref; use screenshot");
-    let shot: Obj = {};
-    if (capture) {
-      try { shot = await this.capture(owner, o, mode === "screenshot" ? a : { ...a, fullPage: false, expandScroll: false }, prior); }
+    let shot: Obj = {}, o: Observation;
+    for (let attempt = 1; ; attempt++) {
+      o = await this.observe(tag, a.scope || "all", signal);
+      shot = {};
+      if (!capture) break;
+      try { shot = await this.capture(owner, o, mode === "screenshot" ? a : { ...a, fullPage: false, expandScroll: false }, prior); break; }
       catch (error: any) {
+        // The page navigated between observing and capturing: observe the new document instead.
+        if (contextLost(error?.message) && attempt < CONTEXT_RETRIES) { await this.waitForLoad(tag, 3000, signal!); continue; }
         if (mode === "screenshot" || a.feedback === "screenshot") throw error;
         o.screenshot = false; o.images = [];
         shot = { screenshotError: error.message };
+        break;
       }
     }
     o.documentPath = await this.store.files.write(await this.fileOwner(owner), this.fileName(owner, tag, o.id, ".json"), JSON.stringify({ ...o, frames: undefined }));

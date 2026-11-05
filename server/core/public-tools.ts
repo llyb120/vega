@@ -133,8 +133,6 @@ export type ToolContext = {
   taskId?: string;
   vaultRequest?: boolean;
   vaultSend?: boolean;
-  /** A task a group member other than the owner asked for: no vault tools. */
-  noVault?: boolean;
 };
 
 export function employeeTools(ctx: ToolContext): Tool[] {
@@ -280,8 +278,8 @@ export function employeeTools(ctx: ToolContext): Tool[] {
 }
 
 export function vaultTools(ctx: ToolContext): Tool[] {
-  // Each employee owns its book; a plain session has no employee and therefore no credentials.
-  if (ctx.kind === "normal" || ctx.member || ctx.noVault) return [];
+  // Each employee always uses its own book, whoever asked for the work; a plain session has no employee and no book.
+  if (ctx.kind === "normal") return [];
   const out: Tool[] = [
     tool("vault_list", "列出当前牛马自己密码本条目的 id、类型（login 账号密码 / token API 密钥或令牌 / ssh_key SSH 私钥 / general 万能）、名称和使用条件（不含凭据内容" + (ctx.kind === "task" ? "；包括本任务收到的临时条目" : "") + "）。取用前先看 condition，选出唯一适用的条目。增删改只有牛马创建者能在牛马配置的「密码本」里操作。"),
     tool("vault_get",

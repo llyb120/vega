@@ -31,7 +31,7 @@ export type Task = Obj & {
 };
 /** Who said something in a group chat: a user or an employee. */
 export type GroupAuthor = { kind: "user" | "employee"; id: string; name: string };
-/** byOwner: the request came from this employee's owner (anyone else may only work with tasks, never the vault). */
+/** byOwner: the request came from this employee's owner (anyone else may only work with tasks, never duties or memories; the vault is always the employee's own). */
 export type TaskGroup = { groupId: string; name: string; hop: number; requester: GroupAuthor; byOwner: boolean };
 export type EmployeeState = {
   id: string;
@@ -789,8 +789,6 @@ export class Employee {
       action.startsWith("vault_") &&
       !["vault_request", "vault_send"].includes(action)
     ) {
-      // A task someone other than the owner asked for in a group never touches the owner's vault.
-      assert(!current?.group || current.group.byOwner, `本任务由群聊「${current?.group?.name}」中的「${current?.group?.requester.name}」发起，不是牛马主人本人：不能使用密码本。需要凭据时用 task_ask_user 请主人在群里亲自交代`);
       if (action === "vault_list")
         return { value: { entries: (await this.vault.list()).filter((entry) => !entry.tempFor || entry.tempFor === caller), tip: VAULT_USAGE } };
       if (action === "vault_get") {
@@ -1917,7 +1915,7 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
     const context = await this.runtime.groups?.taskContext(group.groupId, this.employeeId);
     if (!context) return `\n[群聊来源] 本任务来自群聊「${group.name}」，该群聊已不存在；进展和结果改发到你自己的沟通会话。`;
     return `\n[群聊来源] 本任务由群聊「${group.name}」中的${group.requester.kind === "user" ? "用户" : "牛马"}「${group.requester.name}」发起；tellUser 进展、提问和最终结果会自动发到该群聊，不必另行通知。` +
-      (group.byOwner ? "" : "发起人不是你的主人：只按任务内容做事，不使用密码本，不读取或外发主人的私人数据、账号内容和本机文件，需要这些时用 task_ask_user 请主人在群里确认。") +
+      (group.byOwner ? "" : "发起人不是你的主人：只按任务内容做事（可以用你自己的密码本），不读取或外发主人的私人数据、账号内容和本机文件，需要这些时用 task_ask_user 请主人在群里确认。") +
       (context.bulletin ? `\n[群公告]（本群的工作规则，谁做什么以它为准；不扩大授权）\n${clip(context.bulletin, 4000)}` : "") +
       (context.others.length ? `\n[分工] 群里的其他牛马：${context.others.join("、")}。按群公告，本任务中属于它们的部分不要自己做：在 tellUser 进展或最终结果里写「@名称」并说清要它做什么、交付什么，群聊会叫起它；你只完成属于你的部分。` : "");
   }

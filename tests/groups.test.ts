@@ -146,7 +146,7 @@ test("the relay between employees stops after the hop cap with a notice", async 
   } finally { await close(); }
 });
 
-test("tasks started from a group report there; a result goes back to the employee that asked; guests get tasks only, never the vault", async () => {
+test("tasks started from a group report there; a result goes back to the employee that asked; guests get tasks only, the employee always uses its own vault", async () => {
   const { store, engine, make, close } = await fixture();
   try {
     const a = await make("小A", "u1"), b = await make("小B", "u2");
@@ -160,18 +160,22 @@ test("tasks started from a group report there; a result goes back to the employe
     const task = (await employeeA.state()).tasks.find((t) => t.text === "整理周报")!;
     assert.deepEqual([task.group?.groupId, task.group?.byOwner, task.group?.requester.name], [group.id, false, "bob"]);
     assert((await groupMessages(engine, group.id)).some((m) => m.author?.id === a && m.tasks?.some((t) => t.id === task.id)));
-    // The guest's turn: tasks only; vault tools hidden and refused.
+    // The guest's turn: tasks only, no duties; the employee's own vault stays available.
     const memberSession = (await engine.groups.get(group.id))!.memberSessions[a];
     const tools = await Tools.create(engine, await store.session(memberSession), await engine.config(), new AbortController().signal, () => {});
     const names = (await tools.definitions({} as any)).map((t) => t.name);
-    assert(names.includes("employee_task_create") && !names.some((n) => n.startsWith("vault")) && !names.includes("employee_duty_create"));
-    // The guest-started task itself cannot open the owner's vault either (its tools hide it; the runtime refuses).
+    assert(names.includes("employee_task_create") && names.includes("vault_get") && !names.includes("employee_duty_create"));
+    // The guest-started task uses its own vault too (tools shown, the runtime allows it, the prompt does not forbid it).
     const work = await store.newSession({ employeeId: a, taskId: task.id, cwd: task.cwd, ownerId: "u1" });
     await employeeA.update((state) => { const t = employeeA.task(state, task.id); t.status = "running"; t.workSession = work.id; });
     employeeA.busy.set(task.id, { session: work.id, computer: false });
-    const taskTools = await Tools.create(engine, work, await engine.config(), new AbortController().signal, () => {});
-    assert(!(await taskTools.definitions({} as any)).some((t) => t.name.startsWith("vault")));
-    await assert.rejects(employeeA.execute(task.id, { action: "vault_get", id: "x" }), /主人/);
+    for (const scene of ["lightweight", "computer"]) {
+      const taskTools = await Tools.create(engine, { ...work, scene } as any, await engine.config(), new AbortController().signal, () => {});
+      const taskNames = (await taskTools.definitions({} as any)).map((t) => t.name);
+      assert(taskNames.includes("vault_list") && taskNames.includes("vault_get"), scene);
+    }
+    assert(Array.isArray((await employeeA.execute(task.id, { action: "vault_list" })).value.entries));
+    assert.doesNotMatch(await (employeeA as any).groupTaskNote(task.group), /不使用密码本/);
     employeeA.busy.delete(task.id);
     await employeeA.update((state) => { employeeA.task(state, task.id).status = "queued"; });
     // A question from that task posts to the group without waking anyone; a result wakes the asking employee.
