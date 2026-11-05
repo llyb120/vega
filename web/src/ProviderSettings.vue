@@ -43,7 +43,8 @@ const localSources = {
   workbuddy: "workbuddy",
   devin: "devin",
 };
-const source = computed(() => localSources[preset.value]),
+const buddy = computed(() => preset.value === "codebuddy"),
+  source = computed(() => buddy.value ? (site.value === "workbuddy" ? "workbuddy" : "codebuddy") : localSources[preset.value]),
   webLogin = computed(() =>
     ["codebuddy", "workbuddy", "devin"].includes(source.value),
   ),
@@ -97,6 +98,7 @@ function restorePending() {
       },
     );
     id.value = attempt.id;
+    site.value = attempt.source === "workbuddy" ? "workbuddy" : attempt.site || "global";
     login.value = attempt;
     void poll();
   } catch {
@@ -122,7 +124,8 @@ function edit(key, raw) {
   id.value = key || "provider-" + (providers.value.length + 1);
   draft.value = copy(raw || {});
   name.value = raw?.name || key || "";
-  preset.value = raw?.preset || "openai-compatible";
+  preset.value = raw?.preset === "workbuddy" ? "codebuddy" : raw?.preset || "openai-compatible";
+  site.value = raw?.preset === "workbuddy" || raw?.options?.codebuddySource === "workbuddy" ? "workbuddy" : "global";
   apiType.value = raw?.api || "openai-completions";
   baseURL.value =
     raw?.options?.baseURL ||
@@ -141,6 +144,7 @@ function edit(key, raw) {
   delete o.baseURL;
   delete o.apiKey;
   delete o.headers;
+  if (buddy.value) delete o.codebuddySource;
   options.value = JSON.stringify(o, null, 2);
   query.value = "";
   editingModel.value = "";
@@ -169,6 +173,7 @@ function flatten(models, prefix = "") {
   return out;
 }
 function choosePreset() {
+  site.value = "global";
   const p = presets.value.find((p) => p.id === preset.value);
   baseURL.value = p?.baseURL || "";
   apiType.value = /minimax|kimi-code/.test(preset.value)
@@ -216,6 +221,7 @@ function provider() {
     delete row.options.apiKey;
     delete row.options.headers;
   }
+  if (buddy.value) row.options.codebuddySource = source.value;
   return row;
 }
 async function run(fn) {
@@ -382,6 +388,7 @@ async function begin(manual = false) {
         source: requested.source,
         id: requested.id,
         name: requested.name,
+        site: requested.site,
         expires: Date.now() + 600000,
       };
       login.value = attempt;
@@ -468,11 +475,12 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="source" class="provider-login">
             <div class="login-actions">
-              <select v-if="source === 'codebuddy'" v-model="site" aria-label="CodeBuddy站点" :disabled="!!login"><option value="global">国际站</option><option value="cn">中国站</option></select>
+              <select v-if="buddy" v-model="site" aria-label="登录通道" :disabled="busy || !!login"><option value="global">CodeBuddy 国际站</option><option value="cn">CodeBuddy 中国站</option><option value="workbuddy">WorkBuddy</option></select>
               <button v-if="webLogin" type="button" class="primary sm" :disabled="busy" @click="begin"><Icon name="key" :size="14" />{{ login ? "重新登录" : "登录 " + (name || source) }}</button>
-              <button type="button" class="sm" :disabled="busy" @click="localImport">读取服务端已有登录</button>
+              <button type="button" class="sm" :disabled="busy" @click="localImport">{{ buddy ? '使用 Vega 已有登录' : '读取服务端已有登录' }}</button>
               <button v-if="webLogin && !creating" type="button" class="sm ghost" @click="run(async () => { if (confirm('退出此服务商的网页登录？')) { stopPolling(); await api('/providers/login', 'POST', { action: 'logout', source }); login = null; savePending(null); emit('notice', '已退出服务商登录'); } })">退出登录</button>
             </div>
+            <p v-if="buddy" class="hint">使用 Vega 网页登录，原生直连服务器；不读取本机 CLI 或桌面端配置。</p>
             <div v-if="login" class="login-progress callout info">
               <Icon name="external" :size="14" />
               <div>

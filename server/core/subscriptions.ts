@@ -2,7 +2,7 @@ import { Vault } from "./vault";
 import { Mutex } from "./util";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve, dirname, delimiter } from "node:path";
+import { join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -44,27 +44,6 @@ const parseTOML = (path: string) => {
     throw Error("Invalid CLI TOML configuration");
   }
 };
-export function locateWorkBuddy(configured = "") {
-  const bundle = (root: string) =>
-    join(root, "resources/app.asar.unpacked/cli/bin/codebuddy");
-  if (configured.trim()) {
-    const p = configured.trim();
-    if (existsSync(p) && statSync(p).isDirectory()) return bundle(p);
-    if (/WorkBuddy\.exe$/i.test(p)) return bundle(dirname(p));
-    return p;
-  }
-  if (process.platform === "win32")
-    for (const [variable, relative] of [
-      ["LOCALAPPDATA", "Programs/WorkBuddy"],
-      ["ProgramFiles", "WorkBuddy"],
-      ["ProgramFiles(x86)", "WorkBuddy"],
-    ]) {
-      const root = process.env[variable];
-      if (root && existsSync(bundle(join(root, relative))))
-        return bundle(join(root, relative));
-    }
-  return "";
-}
 export class Subscriptions {
   pending = new Map<
     string,
@@ -85,11 +64,8 @@ export class Subscriptions {
   vault: Vault;
   refreshLocks = new Map<string, Mutex>();
   loginLocks = new Map<string, Mutex>();
-  workbuddyTokens = new Map<string, string>();
-  constructor(
-    public store: Store,
-    public workbuddyHelper: string,
-  ) {
+  // Keep the old constructor call shape compatible; the helper is no longer read or executed.
+  constructor(public store: Store, _legacyHelper?: string) {
     this.vault = new Vault(store);
   }
   async saveLogin(source: string, value: Obj) {
@@ -421,146 +397,21 @@ export class Subscriptions {
   }
   async load(source: string, settings: Obj = {}): Promise<Obj> {
     if (["codebuddy", "workbuddy"].includes(source))
-      return this.buddy(source, settings);
+      return this.buddy(source);
     if (source === "devin") return this.devin(settings);
     return this.local(source);
   }
-  installed() {
-    const roots = [
-      process.env.NOVA_CODEBUDDY_PACKAGE,
-      process.env.APPDATA &&
-        join(
-          process.env.APPDATA,
-          "npm/node_modules/@tencent-ai/codebuddy-code",
-        ),
-      ...(process.env.PATH || "")
-        .split(delimiter)
-        .flatMap((p) => [
-          join(p, "node_modules/@tencent-ai/codebuddy-code"),
-          resolve(p, "../lib/node_modules/@tencent-ai/codebuddy-code"),
-        ]),
-    ].filter(Boolean) as string[];
-    for (const path of roots) {
-      const pkg = localJSON(join(path, "package.json"), true);
-      if (pkg.name === "@tencent-ai/codebuddy-code")
-        return { path, version: pkg.version };
-    }
-    return { path: undefined, version: "2.169.0" };
-  }
-  async buddy(source: string, settings: Obj) {
+  async buddy(source: string) {
     const work = source === "workbuddy",
       prefix = source.toUpperCase(),
-      home = homedir(),
-      dir = process.env[prefix + "_CONFIG_DIR"] || join(home, "." + source);
-    const cfg = localJSON(join(dir, "settings.json"), true);
-    const env = { ...process.env, ...cfg.env };
-    const key = work
-      ? process.env.WORKBUDDY_AUTH_TOKEN ||
-        process.env.WORKBUDDY_API_KEY ||
-        cfg.env?.CODEBUDDY_AUTH_TOKEN ||
-        cfg.env?.CODEBUDDY_API_KEY
-      : env.CODEBUDDY_AUTH_TOKEN || env.CODEBUDDY_API_KEY;
-    const dataRoot =
-      process.platform === "win32"
-        ? join(home, "AppData/Local")
-        : process.platform === "darwin"
-          ? join(home, "Library/Application Support")
-          : join(home, ".local/share");
-    const authPath =
-      process.env["NOVA_" + prefix + "_AUTH_FILE"] ||
-      join(
-        dataRoot,
-        "CodeBuddyExtension/Data/Public/auth",
-        work ? "workbuddy-desktop.info" : "Tencent-Cloud.coding-copilot.info",
-      );
-    let session: Obj = {},
-      pkg = this.installed(),
-      version = work ? "5.8.2" : pkg.version;
-    const configured =
-      process.env.WORKBUDDY_EXE || settings.workbuddyPath || "";
-    const cli = work ? locateWorkBuddy(configured) : "";
-    let packagePath =
-      process.env.NOVA_WORKBUDDY_PACKAGE ||
-      (cli ? dirname(dirname(cli)) : undefined);
-    let exe =
-      process.env.WORKBUDDY_EXE ||
-      (packagePath
-        ? resolve(packagePath, "../../../WorkBuddy.exe")
-        : undefined);
-    if (work && packagePath) {
-      const product = localJSON(join(packagePath, "product.json"));
-      assert(
-        product.authentication?.id === "workbuddy-desktop",
-        "Select WorkBuddy built-in CLI, not global CodeBuddy",
-      );
-      version = product.genieVersion || version;
-    }
-    if (!key && await this.store.get<Obj | null>("subscription:" + source, null))
-      session = await this.saved(source);
-    else if (!key) {
-      try {
-        assert(!existsSync(authPath + ".logged-out"), "CLI is logged out");
-        session = localJSON(authPath);
-        assert(
-          !session.auth?.expiresAt || session.auth.expiresAt > Date.now(),
-          "CLI login expired",
-        );
-        if (work && typeof session.auth?.accessToken === "object") {
-          assert(exe, "Set WorkBuddy executable path to decrypt its login");
-          const identity = createHash("sha256")
-            .update(
-              JSON.stringify([
-                exe,
-                statSync(exe).mtimeMs,
-                session.auth.accessToken,
-              ]),
-            )
-            .digest("hex");
-          if (this.workbuddyTokens.has(identity)) {
-            session.auth.accessToken = this.workbuddyTokens.get(identity);
-          } else {
-            const { stdout } = await exec(
-              exe,
-              [
-                "-e",
-                this.workbuddyHelper,
-                "--",
-                "--nova-workbuddy-login",
-                authPath,
-              ],
-              {
-                env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-                timeout: 15000,
-                maxBuffer: 65536,
-                windowsHide: true,
-              },
-            );
-            const data = JSON.parse(stdout);
-            assert(
-              JSON.stringify(data.envelope) ===
-                JSON.stringify(session.auth.accessToken),
-              "WorkBuddy login changed during decryption",
-            );
-            assert(
-              typeof data.accessToken === "string" && data.accessToken.trim(),
-              "Cannot decrypt WorkBuddy login",
-            );
-            session.auth.accessToken = data.accessToken;
-            this.workbuddyTokens.set(identity, data.accessToken);
-            if (this.workbuddyTokens.size > 16)
-              this.workbuddyTokens.delete(
-                this.workbuddyTokens.keys().next().value!,
-              );
-          }
-        }
-      } catch {
-        session = await this.saved(source);
-      }
-    }
+      key = process.env[prefix + "_AUTH_TOKEN"] || process.env[prefix + "_API_KEY"],
+      session = key ? {} : await this.saved(source);
+    // shortcut: fixed verified protocol versions; update when upstream header requirements change.
+    const version = work ? "5.8.2" : "2.169.0";
     const accessToken = key || session.auth?.accessToken;
     assert(
-      typeof accessToken === "string" && accessToken,
-      `Login to ${source} first`,
+      typeof accessToken === "string" && accessToken.trim(),
+      `Login to ${source} in Vega first`,
     );
     const origin =
       process.env["NOVA_" + prefix + "_ENDPOINT"] ||
@@ -589,15 +440,14 @@ export class Subscriptions {
     ])
       if (session.account?.[k] != null) headers[h] = String(session.account[k]);
     return {
-      name: label + "（本地 API）",
+      name: "CodeBuddy / WorkBuddy",
       api: "codebuddy",
       options: {
         baseURL: url.origin + "/v2",
         apiKey: accessToken,
         headers,
         codebuddySource: source,
-        codebuddyPackage: work ? packagePath : pkg.path,
-        codebuddyModel: process.env[prefix + "_MODEL"] || cfg.model,
+        codebuddyModel: process.env[prefix + "_MODEL"],
         requiresReasoningContentOnAssistantMessages: true,
       },
       models: {},

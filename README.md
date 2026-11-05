@@ -130,18 +130,19 @@ docker run -d --name vega --shm-size=1g \
 }
 ```
 
-场景数组按顺序降级；电脑场景须支持图片。变体 ID 为 `provider/model/variant/high`。厂商目录支持原项目的 30 个 preset，账号目录优先于 models.dev 能力补全；Coding Plan 等没有 `/models` 的端点可回退 models.dev，但不能用目录补回账号无权限模型。
+场景数组按顺序降级；电脑场景须支持图片。变体 ID 为 `provider/model/variant/high`。厂商目录支持预设服务商，账号目录优先于 models.dev 能力补全；Coding Plan 等没有 `/models` 的端点可回退 models.dev，但不能用目录补回账号无权限模型。
 
 ### 专有订阅
 
-设置 →「服务商」选择CodeBuddy/WorkBuddy/Devin，点击登录会立即打开窗口、绑定本次来源/站点并自动检查结果，成功后直接导入账号模型。远程Devin默认回调网站的`/api/providers/callback/devin`，不再要求用户浏览器访问服务器的127.0.0.1端口；公网部署需设置正确的`VEGA_PUBLIC_URL`并使用HTTPS。回调独立校验一次性state/PKCE，轮询绑定发起管理员，错误/过期state不能交换Token。若官方限制回调地址，可改用手动回调登录并粘贴登录后完整跳转地址。CodeBuddy/WorkBuddy使用服务端轮询，不依赖客户端本机安装CLI；仅在点击「读取服务端已有登录」时使用部署端已有凭据。网站新登录优先于部署端旧CLI会话。真实账号及第三方回调白名单仍需在目标部署验收，协议夹具不能代替它。
+设置 →「服务商」选择 **CodeBuddy / WorkBuddy**（统一入口）或 Devin。CodeBuddy / WorkBuddy 登录时选择 CodeBuddy 中国站、国际站或 WorkBuddy，点击登录会立即打开窗口、绑定本次来源/站点并自动检查结果，成功后直接导入账号模型。两者通过 Vega 服务端原生直连上游，不启动本地代理、CLI 或桌面程序；「使用 Vega 已有登录」只复用 Vega 保存的网页登录（或显式环境变量凭据），不读取部署端 CLI 登录。远程 Devin 默认回调网站的`/api/providers/callback/devin`；公网部署需设置正确的`VEGA_PUBLIC_URL`并使用 HTTPS。回调独立校验一次性 state/PKCE，轮询绑定发起管理员；若官方限制回调地址，可改用手动回调并粘贴完整跳转地址。真实账号及第三方回调白名单仍需在目标部署验收。
 
-- **CodeBuddy**：CLI 环境/登录优先，缺少时使用应用内登录；续期、账号/企业请求头、`/v3/config` 和本地 product 默认模型合并、CLI 可用模型过滤、reasoning summary、重复工具 ID/包装 JSON 归一化。
-- **WorkBuddy**：独立认证与模型目录，不能误用 CodeBuddy 的账号；自动查找 `resources/app.asar.unpacked/cli`，使用 WorkBuddy 自己的 Electron helper 只读解密登录。设置页可指定安装目录/`WorkBuddy.exe`/内置 CLI 路径；`WORKBUDDY_EXE` 可显式指定解密运行时。
+- **CodeBuddy / WorkBuddy**：共用原生传输，两个通道的加密会话、续期和账号/企业请求头独立，不混用账号。不读取 CLI 设置、安装包或桌面端加密登录；模型及能力只取自 `/v3/config`，仍遵守服务端 `agents.cli.models` 范围（不是读取本机 CLI）。默认模型失效时回退到列表首项，旧保存的默认别名映射不会覆盖新目录；显式选择不可用模型仍会报错。支持 reasoning summary、重复工具 ID/包装 JSON 归一化。
 - **Devin**：读取 CLI TOML 或应用内登录；直接执行 Connect/Protobuf 推理，回传历史可见 reasoning（消息字段 5），校验 gzip 帧、trailer、停止原因与工具完整性；CLI 不可用时使用原项目的版本化模型快照。**Adaptive 自动路由与参考项目一样不支持，必须选具体模型。**
 - **Codex / Claude Code**：按 CLI 配置识别自定义 API，否则在每次请求前只读订阅认证。官方端点固定，不执行 apiKeyHelper，不代替 CLI 轮换 refresh token；过期须先在 CLI 更新。macOS 支持原项目覆盖的钥匙串形态，其它 keyring 后端不会猜测。
 
-支持原项目的 `CODEBUDDY_CONFIG_DIR`、`WORKBUDDY_CONFIG_DIR`、`NOVA_*_AUTH_FILE`、`NOVA_*_PACKAGE`、`*_MODEL`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DEVIN_CONFIG_HOME` 等定位方式。HTTP(S)/ALL/NO_PROXY 环境变量优先，否则读取 Windows/macOS 静态系统 HTTP(S) 代理，下一次请求重新判断；不跟随专有订阅请求的重定向。
+CodeBuddy / WorkBuddy 的 `*_AUTH_TOKEN` / `*_API_KEY`、`*_MODEL` 和 `NOVA_*_ENDPOINT` 环境变量仍可显式设置；`*_CONFIG_DIR`、`NOVA_*_AUTH_FILE`、`NOVA_*_PACKAGE`、`WORKBUDDY_EXE` 和旧 WorkBuddy 路径设置不再影响它们。旧 `workbuddy` 预设仍可加载，设置页保存时归一到 `preset: "codebuddy"`、`options.codebuddySource: "workbuddy"`，保留 Provider ID、模型和会话引用，不删除或合并已有配置实例。原先只在 CLI/桌面端登录的用户需在 Vega 登录一次；原配置与凭据不会被删除。云端缺失的模型能力采用保守默认值，不再从安装包补齐。
+
+Codex / Claude Code / Devin 的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DEVIN_CONFIG_HOME` 等定位方式保持不变。HTTP(S)/ALL/NO_PROXY 环境变量优先，否则读取 Windows/macOS 静态系统 HTTP(S) 代理，下一次请求重新判断；不跟随专有订阅请求的重定向。
 
 ### 数字牛马工作台
 
@@ -229,6 +230,6 @@ $env:VEGA_TEST_DEPLOYED='1'
 npm test
 ```
 
-测试覆盖原协议夹具、订阅隔离/PKCE/WorkBuddy 解密、三种标准流协议、Devin 原生工具往返、Responses 恢复、MCP stdio+HTTP、牛马审批/交接/挂起、加密支援、上下文与真实 Chrome 的输入/上传/截图/提交。**没有使用真实付费订阅发起计费推理，也没有连接用户的真实团队生产中转站**，这些环境相关路径不应被自动测试数量冒充为实账号验收。
+测试覆盖原协议夹具、订阅隔离/PKCE/统一 Buddy 入口与默认模型回退、三种标准流协议、Devin 原生工具往返、Responses 恢复、MCP stdio+HTTP、牛马审批/交接/挂起、加密支援、上下文与真实 Chrome 的输入/上传/截图/提交。**没有使用真实付费订阅发起计费推理，也没有连接用户的真实团队生产中转站**，这些环境相关路径不应被自动测试数量冒充为实账号验收。
 
 Vue 3.6 当前仍为 RC，已锁定版本；升级请复跑 Vapor 与浏览器测试。OS 状态已在 Windows 实机验证；macOS/Linux 只有适配器与契约测试，尚未在对应系统实机验收。生产依赖审计无已知告警；Nitro 构建链的 deepmerge 相关 3 个低危开发依赖告警暂保留，没有为消告警强行降级/破坏构建链。

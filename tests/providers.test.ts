@@ -4,8 +4,6 @@ import { createServer } from "node:http";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRequire } from "node:module";
-import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { Store, type Message } from "../server/core/store";
 import { promptHistory, archivedResult } from "../server/core/history";
@@ -536,79 +534,96 @@ test("Devin native HTTP validates all declared calls before returning any", asyn
     ),
   );
 });
-test("CodeBuddy and WorkBuddy identities remain separate, CLI env credentials and catalog merge", async () => {
+test("CodeBuddy / WorkBuddy uses isolated Vega logins and ignores CLI state with a valid default fallback", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-buddy-"));
   cleanup.push(() => rm(dir, { recursive: true, force: true }));
-  const env = {
-    CODEBUDDY_CONFIG_DIR: process.env.CODEBUDDY_CONFIG_DIR,
-    WORKBUDDY_CONFIG_DIR: process.env.WORKBUDDY_CONFIG_DIR,
-    CODEBUDDY_AUTH_TOKEN: process.env.CODEBUDDY_AUTH_TOKEN,
-    WORKBUDDY_AUTH_TOKEN: process.env.WORKBUDDY_AUTH_TOKEN,
-    NOVA_CODEBUDDY_ENDPOINT: process.env.NOVA_CODEBUDDY_ENDPOINT,
-    NOVA_WORKBUDDY_ENDPOINT: process.env.NOVA_WORKBUDDY_ENDPOINT,
-  };
-  Object.assign(process.env, {
-    CODEBUDDY_CONFIG_DIR: dir,
-    WORKBUDDY_CONFIG_DIR: dir,
-    CODEBUDDY_AUTH_TOKEN: "codebuddy-key",
-    WORKBUDDY_AUTH_TOKEN: "workbuddy-key",
-  });
+  const sources = ["codebuddy", "workbuddy"];
+  const keys = ["WORKBUDDY_EXE", ...sources.flatMap((source) => {
+    const prefix = source.toUpperCase();
+    return [`${prefix}_CONFIG_DIR`, `${prefix}_AUTH_TOKEN`, `${prefix}_API_KEY`, `${prefix}_MODEL`,
+      `NOVA_${prefix}_AUTH_FILE`, `NOVA_${prefix}_PACKAGE`, `NOVA_${prefix}_ENDPOINT`];
+  })];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  for (const key of keys) delete process.env[key];
   cleanup.push(() => {
-    for (const [k, v] of Object.entries(env)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   });
   const s = await Store.open(":memory:");
   cleanup.push(async () => await s.close());
-  const auth = new Subscriptions(s, "");
-  const code = await auth.load("codebuddy"),
-    work = await auth.load("workbuddy");
-  assert.equal(code.options.apiKey, "codebuddy-key");
-  assert.equal(work.options.apiKey, "workbuddy-key");
-  assert.equal(code.options.headers["X-Product"], "CodeBuddy");
-  assert.equal(work.options.headers["X-Product"], "WorkBuddy");
-  assert.equal(
-    auth.normalizeAuth({ accessToken: "a", expiresIn: 60 }, "www.codebuddy.ai")
-      .domain,
-    "www.codebuddy.ai",
-  );
+  const auth = new Subscriptions(s), catalog = new Catalog(s, auth);
+  assert.equal(auth.normalizeAuth({ accessToken: "a", expiresIn: 60 }, "www.codebuddy.ai").domain, "www.codebuddy.ai");
   assert.throws(() => auth.normalizeAuth({ refreshToken: "r" }, "x"));
+  await writeFile(join(dir, "settings.json"), JSON.stringify({ model: "retired-cli-model", env: { CODEBUDDY_AUTH_TOKEN: "wrong-cli-account" } }));
+  await writeFile(join(dir, "auth.info"), JSON.stringify({ auth: { accessToken: "wrong-cli-account" } }));
+  await writeFile(join(dir, "package.json"), JSON.stringify({ name: "@tencent-ai/codebuddy-code", version: "999.0.0" }));
+  await writeFile(join(dir, "product.json"), "invalid json");
+  process.env.WORKBUDDY_EXE = join(dir, "missing.exe");
+  for (const source of sources) {
+    const prefix = source.toUpperCase();
+    Object.assign(process.env, { [`${prefix}_CONFIG_DIR`]: dir, [`NOVA_${prefix}_AUTH_FILE`]: join(dir, "auth.info"), [`NOVA_${prefix}_PACKAGE`]: dir });
+    await assert.rejects(auth.load(source), /Login/);
+    await auth.saveLogin(source, {
+      origin: auth.origin(source),
+      auth: { accessToken: source + "-key", expiresAt: Date.now() + 3600000 },
+      account: { uid: source + "-user" },
+    });
+    const p = await auth.load(source, { workbuddyPath: dir });
+    assert.equal(p.options.apiKey, source + "-key");
+    assert.equal(p.options.headers["X-User-Id"], source + "-user");
+    assert.equal(p.options.headers["X-Product"], source === "workbuddy" ? "WorkBuddy" : "CodeBuddy");
+    assert.equal(p.options.codebuddyModel, undefined);
+    assert.equal(p.options.codebuddyPackage, undefined);
+  }
+  await writeFile(join(dir, "settings.json"), "invalid json");
+  await writeFile(join(dir, "auth.info.logged-out"), "yes");
+  let empty = false;
   const server = createServer((req, res) => {
-    assert.equal(req.headers.authorization, "Bearer codebuddy-key");
+    const source = req.headers["x-product"] === "WorkBuddy" ? "workbuddy" : "codebuddy";
+    assert.equal(req.url, "/v3/config");
+    assert.equal(req.headers.authorization, `Bearer ${source}-key`);
     res.setHeader("Content-Type", "application/json");
-    res.end(
-      JSON.stringify({
-        code: 0,
-        data: {
-          models: [
-            {
-              id: "m",
-              supportsImages: true,
-              supportsReasoning: true,
-              maxOutputTokens: 1024,
-              reasoning: { supportedEfforts: ["high"] },
-            },
-          ],
-          agents: [{ name: "cli", models: ["m"] }],
-        },
-      }),
-    );
+    res.end(JSON.stringify({ code: 0, data: {
+      models: [{ id: "hidden" }, { id: "m", supportsImages: true, supportsReasoning: true, maxOutputTokens: 1024,
+        reasoning: { supportedEfforts: ["high"] } }, { id: "second" }],
+      agents: [{ name: "cli", models: empty ? [] : ["m", "second"] }],
+    } }));
   });
   await new Promise<void>((yes) => server.listen(0, "127.0.0.1", yes));
-  cleanup.push(
-    () =>
-      new Promise<void>((yes) => {
-        server.closeAllConnections();
-        server.close(() => yes());
-      }),
-  );
-  process.env.NOVA_CODEBUDDY_ENDPOINT = `http://127.0.0.1:${(server.address() as any).port}`;
-  const catalog = new Catalog(s, auth),
-    p = await auth.load("codebuddy"),
-    models = await catalog.models(p, true);
-  assert.equal(models.models.m.modalities.input[1], "image");
-  assert.equal(models.models.m.variants.high.reasoningEffort, "high");
+  cleanup.push(() => new Promise<void>((yes) => { server.closeAllConnections(); server.close(() => yes()); }));
+  for (const source of sources) {
+    const prefix = source.toUpperCase();
+    process.env[`NOVA_${prefix}_ENDPOINT`] = `http://127.0.0.1:${(server.address() as any).port}`;
+    const raw = { preset: "codebuddy", options: { codebuddySource: source, codebuddyModel: "retired", codebuddyPackage: dir },
+      models: { [source]: { localModel: "retired-saved-alias" }, hidden: {} } };
+    const config = { model: `p/${source}`, provider: { p: raw } };
+    const p = await catalog.provider(raw, config), result = await catalog.models(p, true);
+    assert.equal(result.models[source].localModel, "m");
+    assert.equal(result.models.m.modalities.input[1], "image");
+    assert.equal(result.models.m.variants.high.reasoningEffort, "high");
+    assert.equal(result.models.hidden, undefined);
+    assert.equal((await catalog.resolve(config)).id, "m");
+    await assert.rejects(catalog.resolve(config, "p/hidden"), /unavailable/);
+    const preferred = await catalog.models({ ...p, options: { ...p.options, codebuddyModel: "second" } }, true);
+    assert.equal(preferred.models[source].localModel, "second");
+    const fallback = await catalog.models({ ...p, options: { ...p.options, codebuddyModel: undefined } }, true);
+    assert.equal(fallback.models[source].localModel, "m");
+    const legacy = await catalog.provider({ preset: source }, config);
+    assert.equal(legacy.preset, "codebuddy");
+    assert.equal(legacy.options.codebuddySource, source);
+    assert.equal(legacy.options.apiKey, source + "-key");
+    assert.equal(raw.options.codebuddyModel, "retired", "normalization must not mutate saved configuration");
+  }
+  empty = true;
+  await assert.rejects(catalog.models(await auth.load("codebuddy"), true), /no available models/);
+  await auth.logout("workbuddy");
+  process.env.CODEBUDDY_AUTH_TOKEN = "explicit-codebuddy";
+  await assert.rejects(auth.load("workbuddy"), /Login/);
+  assert.equal((await auth.load("codebuddy")).options.apiKey, "explicit-codebuddy");
+  process.env.WORKBUDDY_AUTH_TOKEN = "explicit-workbuddy";
+  assert.equal((await auth.load("workbuddy")).options.apiKey, "explicit-workbuddy");
 });
 
 test("Devin bundled catalog preserves ACP image capabilities", async () => {
@@ -627,50 +642,7 @@ test("Devin bundled catalog preserves ACP image capabilities", async () => {
   assert.deepEqual(result.models["glm-5-3-flash-max"].modalities.input, ["text", "image"]);
   assert.deepEqual(result.models["claude-opus-5-5-medium"].modalities.input, ["text", "image"]);
 });
-test("WorkBuddy original encrypted envelope decoder rejects key substitution", () => {
-  const require = createRequire(import.meta.url),
-    { decodeWorkBuddyToken } = require("../scripts/workbuddy-login.cjs");
-  const secret = "workbuddy-build-key",
-    key = createHash("sha256").update(secret).digest(),
-    keyId = createHash("sha256").update(key).digest("hex").slice(0, 16),
-    nonce = randomBytes(12),
-    u32 = (n: number) => {
-      const b = Buffer.alloc(4);
-      b.writeUInt32BE(n);
-      return b;
-    },
-    text = (s: string) =>
-      Buffer.concat([u32(Buffer.byteLength(s)), Buffer.from(s)]),
-    cipher = createCipheriv("aes-256-gcm", key, nonce);
-  cipher.setAAD(
-    Buffer.concat([
-      Buffer.from("WB-AAD\0"),
-      Buffer.from([1]),
-      text("WBEV1"),
-      text("sym-v1"),
-      u32(1),
-      text(keyId),
-      Buffer.from([2, 0, 0]),
-    ]),
-  );
-  const ciphertext = Buffer.concat([
-      cipher.update("workbuddy-token"),
-      cipher.final(),
-    ]),
-    sealed = {
-      suite: 1,
-      keyId,
-      nonce: nonce.toString("base64"),
-      authTag: cipher.getAuthTag().toString("base64"),
-      ciphertext: ciphertext.toString("base64"),
-    },
-    envelope = {
-      $wbEncrypted: 1,
-      envelope: Buffer.from(JSON.stringify(sealed)).toString("base64"),
-    };
-  assert.equal(decodeWorkBuddyToken(envelope, secret), "workbuddy-token");
-  assert.throws(() => decodeWorkBuddyToken(envelope, "wrong"));
-});
+
 test("Devin login callback requires matching state and PKCE is persisted only as pending memory", async () => {
   const s = await Store.open(":memory:");
   cleanup.push(async () => await s.close());

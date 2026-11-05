@@ -494,8 +494,9 @@ export default defineEventHandler(async (event) => {
             ? "local-codex"
             : a.source === "claude-code"
               ? "local-claude-code"
-              : a.source;
-        const p = await engine.catalog.provider({ preset, models: {} }, cfg);
+              : a.source === "workbuddy" ? "codebuddy" : a.source;
+        const buddyOptions = ["codebuddy", "workbuddy"].includes(a.source) ? { codebuddySource: a.source } : {};
+        const p = await engine.catalog.provider({ preset, options: buddyOptions, models: {} }, cfg);
         const dynamic = await engine.catalog.models(p, true);
         const first =
           Object.keys(dynamic.models)[0] || Object.keys(p.models)[0];
@@ -504,6 +505,7 @@ export default defineEventHandler(async (event) => {
         cfg.provider[key] = {
           ...cfg.provider[key],
           preset,
+          options: { ...cfg.provider[key]?.options, ...buddyOptions },
           name:
             typeof a.name === "string" && a.name.trim()
               ? a.name.trim().slice(0, 200)
@@ -519,7 +521,6 @@ export default defineEventHandler(async (event) => {
       }
       if (path[1] === "paths" && method === "PUT") {
         await store.put("paths", {
-                    workbuddyPath: a.workbuddyPath || "",
                     devinPath: a.devinPath || "",
                   });
         return { ok: true };

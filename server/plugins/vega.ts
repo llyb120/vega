@@ -10,12 +10,9 @@ export default defineNitroPlugin(async (nitro) => {
   });
   const page =
     await useStorage("assets:browser").getItem<string>("browser-page.js");
-  const helper = await useStorage("assets:assets").getItem<string>(
-    "workbuddy-login.cjs",
-  );
-  if (!page || !helper) throw Error("Bundled migration assets missing");
+  if (!page) throw Error("Bundled browser asset missing");
   const { store, engine, browserLive, employeeLives, eventsSocket, clientSockets, headless } =
-    await initialize(page, helper);
+    await initialize(page);
   nitro.hooks.hook("close", async () => {
     eventsSocket.closeAll();
     clientSockets.closeAll();

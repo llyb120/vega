@@ -31,21 +31,27 @@ export class Catalog {
   ) {}
   async provider(raw: Obj, config: Config) {
     validateContextRules(raw.contextRules);
-    const p = clone(raw),
-      preset = presets.find((v) => v.id === p.preset);
+    const p = clone(raw);
+    // Keep legacy provider IDs/model references, but use one preset and an explicit login channel.
+    if (p.preset === "workbuddy") {
+      p.preset = "codebuddy";
+      p.options = { ...p.options, codebuddySource: "workbuddy" };
+    }
+    const preset = presets.find((v) => v.id === p.preset);
     const source =
       p.preset === "local-codex"
         ? "codex"
         : p.preset === "local-claude-code"
           ? "claude-code"
-          : ["codebuddy", "workbuddy", "devin"].includes(p.preset)
-            ? p.preset
-            : undefined;
+          : p.preset === "codebuddy"
+            ? p.options?.codebuddySource === "workbuddy" ? "workbuddy" : "codebuddy"
+            : p.preset === "devin" ? "devin" : undefined;
     if (source) {
       const local = await this.auth.load(source, await this.store.get("paths", {}));
       const subscription = !!local.localAuth;
       const options = { ...local.options, ...p.options };
       options.apiKey = local.options.apiKey;
+      if (["codebuddy", "workbuddy"].includes(source)) options.codebuddySource = source;
       if (subscription) {
         options.baseURL = local.options.baseURL;
         options.headers = local.options.headers;
@@ -113,25 +119,14 @@ export class Catalog {
         response.code === 0 && Array.isArray(response.data?.models),
         "Invalid CodeBuddy catalog",
       );
-      const defaults: Obj[] = [];
-      if (p.options.codebuddyPackage) {
-        for (const name of [
-          "product.json",
-          ...(/copilot.tencent.com|codebuddy.cn/.test(p.options.baseURL)
-            ? ["product.internal.json"]
-            : []),
-        ]) {
-          const pkg = localJSON(p.options.codebuddyPackage + "/" + name, true);
-          defaults.push(...(pkg.models || []));
-        }
-      }
       const merged = new Map<string, Obj>();
-      for (const m of [...defaults, ...response.data.models])
-        merged.set(m.id, { ...merged.get(m.id), ...m });
-      const allowed =
-        response.data.agents?.find((a: Obj) => a.name === "cli")?.models ||
-        response.data.models.map((m: Obj) => m.id);
-      raw = allowed.map((id: string) => merged.get(id) || { id });
+      for (const m of response.data.models)
+        if (typeof m?.id === "string") merged.set(m.id, { ...merged.get(m.id), ...m });
+      const allowed = response.data.agents?.find((a: Obj) => a.name === "cli")?.models;
+      raw = (Array.isArray(allowed) ? allowed : [...merged.keys()])
+        .filter((id: unknown) => typeof id === "string")
+        .map((id: string) => merged.get(id) || { id });
+      assert(raw!.length, "CodeBuddy / WorkBuddy has no available models");
       for (const m of raw!) {
         const variants = Object.fromEntries(
           [
@@ -160,13 +155,12 @@ export class Catalog {
           },
         };
       }
-      const defaultID = p.options.codebuddyModel || raw![0]?.id;
-      if (defaultID && models[defaultID])
-        models[p.options.codebuddySource || "codebuddy"] = {
-          ...models[defaultID],
-          name: "跟随 CLI 默认模型",
-          localModel: defaultID,
-        };
+      const defaultID = raw!.find((m) => m.id === p.options.codebuddyModel)?.id || raw![0].id;
+      models[p.options.codebuddySource || "codebuddy"] = {
+        ...models[defaultID],
+        name: "CodeBuddy / WorkBuddy（默认模型）",
+        localModel: defaultID,
+      };
     } else if (p.api === "devin") {
       let data: Obj = clone(snapshot);
       version = "3000.11.228";
@@ -420,6 +414,11 @@ export class Catalog {
     ) {
       dynamic = await this.models(p);
       p.models = { ...catalogContextModels(dynamic.models), ...modelEntries(p.models) };
+      if (p.api === "codebuddy") {
+        const alias = p.options.codebuddySource || "codebuddy";
+        // Old saved alias mappings must not override the current account's available default.
+        p.models[alias].localModel = dynamic.models[alias].localModel;
+      }
     }
     const effective = {
         ...config,
