@@ -14,7 +14,7 @@ async function fixture() {
   const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
   await store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, model: "fixture/model", provider: {} });
-  const employee = await engine.employee.for((await engine.employee.create({ name: "E" }, "admin", "personal")).id);
+  const employee = await engine.employee.for((await engine.employee.create({ name: "E" }, "admin")).id);
   const created = await employee.execute("", { action: "add", kind: "todo", text: "work" });
   return { store, engine, employee, id: created.value.id as string };
 }

@@ -62,3 +62,8 @@ export function employeeAvatarURL(employeeId?: string, avatar?: string) {
   if (employeeId && /^blob-[a-f\d]{32}$/.test(avatar)) return `/api/employees/${encodeURIComponent(employeeId)}/avatar?v=${avatar}`;
   return "";
 }
+
+/** A user's uploaded avatar (blob id from /bootstrap or a group view); "" shows the initial instead. */
+export function userAvatarURL(userId?: string, avatar?: string) {
+  return userId && avatar && /^blob-[a-f\d]{32}$/.test(avatar) ? `/api/avatars/users/${encodeURIComponent(userId)}?v=${avatar}` : "";
+}

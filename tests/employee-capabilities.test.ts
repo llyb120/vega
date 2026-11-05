@@ -20,8 +20,8 @@ async function fixture() {
   const store = await Store.open(":memory:");
   const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
-  const a = await engine.employee.for((await engine.employee.create({ name: "A" }, alice.id, "team")).id);
-  const b = await engine.employee.for((await engine.employee.create({ name: "B" }, bob.id, "team")).id);
+  const a = await engine.employee.for((await engine.employee.create({ name: "A" }, alice.id)).id);
+  const b = await engine.employee.for((await engine.employee.create({ name: "B" }, bob.id)).id);
   return { store, engine, a, b };
 }
 function bundle(text: string, name = "same-name") {
@@ -34,7 +34,9 @@ test("only the creator can edit or read details, including when the other user i
   try {
     await employeeCapabilities(a, alice, "PUT", ["mcp"], { mcp: { shared: { url: "https://private.example/mcp", headers: { Authorization: "private-token" } } } });
     await employeeCapabilities(a, alice, "POST", ["skills", "upload"], bundle("private-instructions"));
-    for (const user of [bob, admin, viewer]) {
+    // Employees are private to their owner: other users do not even see them; administrators see names only.
+    for (const user of [bob, viewer]) await assert.rejects(employeeCapabilities(a, user, "GET", ["capabilities"]), (error: any) => error.statusCode === 404);
+    for (const user of [admin]) {
       const result = await employeeCapabilities(a, user, "GET", ["capabilities"]);
       assert.deepEqual(result, { canEdit: false, skills: [{ name: "same-name" }], mcp: [{ name: "shared" }] });
       for (const [method, path, body] of [

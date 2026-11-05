@@ -867,7 +867,7 @@ test(
       );
       await t.test("chat drafts restore text and images across real mobile session switches", async () => {
         await upload(".composer input[type=file]", photo);
-        await until(`document.querySelector('.attachments')?.innerText.includes('图片 1')`);
+        await until(`document.querySelector('.attachments')?.innerText.includes('photo.png')`);
         await evaluate(`document.querySelector('.session-row.active').dataset.draftTest='original'`);
         await tap('.mobile-header [aria-label="新建会话"]');
         await until(`document.querySelector('textarea[aria-label="消息"]')?.value===''&&!document.querySelector('.attachments')`);
@@ -877,7 +877,7 @@ test(
         await tap('[data-draft-test="original"] > button:first-child');
         await until(`document.querySelector('textarea[aria-label="消息"]')?.value==='ordinary draft stays in its own conversation'`);
         await until(`!document.querySelector('.workspace').inert&&document.querySelector('.sidebar').getBoundingClientRect().right<=1`);
-        assert(await evaluate(`document.querySelector('.attachments')?.innerText.includes('图片 1')`), "switching sessions must restore both text and images");
+        assert(await evaluate(`document.querySelector('.attachments')?.innerText.includes('photo.png')`), "switching sessions must restore both text and images");
         assert.equal(requests.length, 0, "switching must not submit any draft");
         await tap(".attachments button");
       });
@@ -1365,7 +1365,7 @@ test(
       assert.equal(requests.length, 0);
       await upload(".composer input[type=file]", photo);
       await until(
-        `document.querySelector('.attachments')?.innerText.includes('图片 1')`,
+        `document.querySelector('.attachments')?.innerText.includes('photo.png')`,
       );
       await tap(".composer .primary");
       await until(`document.body.innerText.includes('移动端回归回复')`);

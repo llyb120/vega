@@ -7,6 +7,7 @@ import snapshot from "../../shared/devin-models.json";
 import type { Store } from "./store";
 import type { Config, Model } from "./config";
 import { modelEntries, resolveModel } from "./config";
+import { catalogContextModels, modelContext, validateContextRules } from "../../shared/context-rules";
 import { Subscriptions } from "./subscriptions";
 import {
   assert,
@@ -29,21 +30,28 @@ export class Catalog {
     public auth: Subscriptions,
   ) {}
   async provider(raw: Obj, config: Config) {
-    const p = clone(raw),
-      preset = presets.find((v) => v.id === p.preset);
+    validateContextRules(raw.contextRules);
+    const p = clone(raw);
+    // Keep legacy provider IDs/model references, but use one preset and an explicit login channel.
+    if (p.preset === "workbuddy") {
+      p.preset = "codebuddy";
+      p.options = { ...p.options, codebuddySource: "workbuddy" };
+    }
+    const preset = presets.find((v) => v.id === p.preset);
     const source =
       p.preset === "local-codex"
         ? "codex"
         : p.preset === "local-claude-code"
           ? "claude-code"
-          : ["codebuddy", "workbuddy", "devin"].includes(p.preset)
-            ? p.preset
-            : undefined;
+          : p.preset === "codebuddy"
+            ? p.options?.codebuddySource === "workbuddy" ? "workbuddy" : "codebuddy"
+            : p.preset === "devin" ? "devin" : undefined;
     if (source) {
       const local = await this.auth.load(source, await this.store.get("paths", {}));
       const subscription = !!local.localAuth;
       const options = { ...local.options, ...p.options };
       options.apiKey = local.options.apiKey;
+      if (["codebuddy", "workbuddy"].includes(source)) options.codebuddySource = source;
       if (subscription) {
         options.baseURL = local.options.baseURL;
         options.headers = local.options.headers;
@@ -54,25 +62,12 @@ export class Catalog {
         api: subscription ? local.api : local.api,
         localAuth: local.localAuth,
         options,
-        models: { ...local.models, ...modelEntries(p.models) },
+        models: { ...catalogContextModels(local.models), ...modelEntries(p.models) },
       };
     }
-    if (p.preset === "server-support") {
-      const relay = config.relay;
-      assert(
-        relay?.server && relay?.token,
-        "Configure relay server and token first",
-      );
-      p.options = {
-        ...p.options,
-        baseURL: relay.server.replace(/\/$/, "") + "/cc",
-        apiKey: expand(relay.token),
-      };
-    } else {
-      p.options = { ...p.options };
-      if (!p.options.baseURL && !p.baseURL && preset)
-        p.options.baseURL = preset.baseURL;
-    }
+    p.options = { ...p.options };
+    if (!p.options.baseURL && !p.baseURL && preset)
+      p.options.baseURL = preset.baseURL;
     p.api ??= /minimax|kimi-code/.test(p.preset || "")
       ? "anthropic-messages"
       : "openai-completions";
@@ -124,25 +119,14 @@ export class Catalog {
         response.code === 0 && Array.isArray(response.data?.models),
         "Invalid CodeBuddy catalog",
       );
-      const defaults: Obj[] = [];
-      if (p.options.codebuddyPackage) {
-        for (const name of [
-          "product.json",
-          ...(/copilot.tencent.com|codebuddy.cn/.test(p.options.baseURL)
-            ? ["product.internal.json"]
-            : []),
-        ]) {
-          const pkg = localJSON(p.options.codebuddyPackage + "/" + name, true);
-          defaults.push(...(pkg.models || []));
-        }
-      }
       const merged = new Map<string, Obj>();
-      for (const m of [...defaults, ...response.data.models])
-        merged.set(m.id, { ...merged.get(m.id), ...m });
-      const allowed =
-        response.data.agents?.find((a: Obj) => a.name === "cli")?.models ||
-        response.data.models.map((m: Obj) => m.id);
-      raw = allowed.map((id: string) => merged.get(id) || { id });
+      for (const m of response.data.models)
+        if (typeof m?.id === "string") merged.set(m.id, { ...merged.get(m.id), ...m });
+      const allowed = response.data.agents?.find((a: Obj) => a.name === "cli")?.models;
+      raw = (Array.isArray(allowed) ? allowed : [...merged.keys()])
+        .filter((id: unknown) => typeof id === "string")
+        .map((id: string) => merged.get(id) || { id });
+      assert(raw!.length, "CodeBuddy / WorkBuddy has no available models");
       for (const m of raw!) {
         const variants = Object.fromEntries(
           [
@@ -171,16 +155,15 @@ export class Catalog {
           },
         };
       }
-      const defaultID = p.options.codebuddyModel || raw![0]?.id;
-      if (defaultID && models[defaultID])
-        models[p.options.codebuddySource || "codebuddy"] = {
-          ...models[defaultID],
-          name: "跟随 CLI 默认模型",
-          localModel: defaultID,
-        };
+      const defaultID = raw!.find((m) => m.id === p.options.codebuddyModel)?.id || raw![0].id;
+      models[p.options.codebuddySource || "codebuddy"] = {
+        ...models[defaultID],
+        name: "CodeBuddy / WorkBuddy（默认模型）",
+        localModel: defaultID,
+      };
     } else if (p.api === "devin") {
       let data: Obj = clone(snapshot);
-      version = "3000.11.205";
+      version = "3000.11.228";
       try {
         const binary = p.options.devinCli || "devin";
         const [catalog, v] = await Promise.all([
@@ -206,20 +189,28 @@ export class Catalog {
       }
       raw = (data.families || []).filter((f: Obj) => f.slug !== "fusion");
       for (const family of raw!) {
+        const bundled = snapshot.families.find((f) => f.slug === family.slug);
         for (const m of family.variants || [])
-          if (m.model_uid && m.model_uid !== "adaptive")
+          if (m.model_uid && m.model_uid !== "adaptive") {
+            const supportsImages =
+              m.supports_images ??
+              bundled?.variants?.find((v) => v.model_uid === m.model_uid)?.supports_images ??
+              bundled?.variants?.[0]?.supports_images ??
+              false;
             models[m.model_uid] = {
               name: m.label || m.model_uid,
               limit: {
                 context: m.max_context_tokens || 128000,
                 output: Math.min(128000, m.max_output_tokens || 128000),
               },
-              modalities: { input: ["text", "image"] },
+              // CLI models list 不含模态；快照 supports_images 来自 ACP cognition.ai/supportsImages。
+              modalities: { input: supportsImages ? ["text", "image"] : ["text"] },
               options: {
                 supportsReasoningEffort: false,
                 supportsThinkingToggle: false,
               },
             };
+          }
       }
       if (p.options.devinModel && p.options.devinModel !== "adaptive") {
         const uid = this.devinModel(raw!, p.options.devinModel);
@@ -252,8 +243,7 @@ export class Catalog {
         [
           "commandcode",
           "opendesign",
-          "server-support",
-          "local-codex",
+                    "local-codex",
           "local-claude-code",
         ].includes(p.preset);
       if (needsMetadata && (!metadata || Date.now() - metadata.at > 21600000)) {
@@ -335,7 +325,7 @@ export class Catalog {
         assert(page < 999, "Model catalog page limit reached");
       }
       const catalogID =
-        p.preset === "server-support" ? "commandcode" : p.preset || "";
+        p.preset || "";
       models = convertCatalog(
         availability ? { data: entriesAll } : null,
         preset?.modelsDev ? metadata?.data?.[catalogID] : undefined,
@@ -423,7 +413,12 @@ export class Catalog {
       !Object.keys(p.models || {}).length
     ) {
       dynamic = await this.models(p);
-      p.models = { ...dynamic.models, ...modelEntries(p.models) };
+      p.models = { ...catalogContextModels(dynamic.models), ...modelEntries(p.models) };
+      if (p.api === "codebuddy") {
+        const alias = p.options.codebuddySource || "codebuddy";
+        // Old saved alias mappings must not override the current account's available default.
+        p.models[alias].localModel = dynamic.models[alias].localModel;
+      }
     }
     const effective = {
         ...config,
@@ -479,7 +474,7 @@ export class Catalog {
         const p = await this.provider(raw, config);
         let models = modelEntries(p.models);
         if (p.preset || !Object.keys(models).length) {
-          models = { ...(await this.models(p, force)).models, ...models };
+          models = { ...catalogContextModels((await this.models(p, force)).models), ...models };
         }
         for (const [key, m] of Object.entries(models)) {
           if (
@@ -498,7 +493,7 @@ export class Catalog {
               m.supportsImages ??
               m.modalities?.input?.includes("image") ??
               false,
-            context: m.limit?.context,
+            context: modelContext(p, key, m).context,
             output: m.limit?.output,
             provider: id,
             available: true,

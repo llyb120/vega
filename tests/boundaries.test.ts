@@ -1,7 +1,5 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { gunzipSync, gzipSync, deflateRawSync } from "node:zlib";
-import { decodeRelayFrame, legacyRelayData } from "../server/core/relay";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { shell, Tools } from "../server/core/tools";
 import { assertShellCommand, SHELL_POLICY_ERROR } from "../server/core/shell-policy";
@@ -13,25 +11,6 @@ import commandCases from "../local/testdata/shell-policy.json";
 const cleanup: (() => any)[] = [];
 afterEach(async () => {
   for (const f of cleanup.splice(0).reverse()) await f();
-});
-test("StarLink original gzip SSE and legacy _z raw-deflate envelopes", () => {
-  const value = {
-      op: "event",
-      event: { type: "starlink.notify", data: { text: "hello" } },
-    },
-    encoded = {
-      encoding: "gzip",
-      data: gzipSync(JSON.stringify(value)).toString("base64"),
-    };
-  assert.deepEqual(decodeRelayFrame(JSON.stringify(encoded)), value);
-  assert.deepEqual(
-    legacyRelayData({
-      _z: deflateRawSync(JSON.stringify(value)).toString("base64"),
-    }),
-    value,
-  );
-  assert.throws(() => decodeRelayFrame('{"encoding":"gzip"}'));
-  assert.deepEqual(legacyRelayData({ _z: "bad" }), { _z: "bad" });
 });
 test("Chrome extension bridge pairing, client identity binding and no unauthorized commands", async () => {
   const bridge = new ChromeBridge();

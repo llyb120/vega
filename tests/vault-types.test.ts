@@ -48,15 +48,6 @@ test("vault entry types: labels by default, ssh_key validated and normalised", a
   } finally { await store.close(); }
 });
 
-test("encrypted support carries the entry type", async () => {
-  const first = await Store.open(":memory:"), second = await Store.open(":memory:"), source = new Vault(first), receiver = new Vault(second);
-  try {
-    const saved = await source.save({ type: "ssh_key", name: "deploy", condition: "git only", content: pem, share: true });
-    const pk = await receiver.request("task"), received = await receiver.receive("task", "task", (await source.sealFor(saved.id, "task", pk)).sealed);
-    assert.equal((await receiver.list())[0].type, "ssh_key");
-    assert.equal((await receiver.get(received.id, "use", "task")).content, pem.trim() + "\n");
-  } finally { await first.close(); await second.close(); }
-});
 
 test("vault_get of an ssh_key writes a 0600 file, returns GIT_SSH_COMMAND without the key, and removes it when the run ends", async () => {
   const store = await Store.open(":memory:");

@@ -4,7 +4,7 @@ import { renderMarkdown } from "./markdown";
 import { useStreamingText } from "./streaming-text.js";
 const props = defineProps({ text: String, streaming: Boolean });
 const text = useStreamingText(() => props.text || "", () => props.streaming, 120, onBeforeUnmount);
-// @名称 of employees the user can see become links that open that employee.
+// @名称 of people the reader knows are highlighted; employees the reader can open become links.
 const mentions = inject("mentions", null);
 const rendered = computed(() => renderMarkdown(text.value, { mentions: mentions?.people.value }));
 async function copy(event) {
@@ -36,7 +36,7 @@ async function copy(event) {
   </div>
 </template>
 <style scoped>
-.markdown-body :deep(a.mention) {
+.markdown-body :deep(.mention) {
   color: var(--accent, #4f46e5);
   font-weight: 500;
   text-decoration: none;

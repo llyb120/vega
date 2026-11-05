@@ -98,7 +98,7 @@ docker run -d --name vega --shm-size=1g \
 | 内置命令 | `/skill:name`、`/plan`、`/easy`、`/setup`、`/stage`；SQLite 配置虚拟路径有当轮显式授权/修改分区约束；`/fire ... /target ...` 为独立执行/验收链，最多20轮，可暂停/重启后显式续做 |
 | 工具 | read / bash / edit / write / change_working_directory、同会话持久 MCP 渐进发现、Chrome、employee。**不提供 Polaris / Jianlai** |
 | 数字牛马 | 多牛马独立身份/职责/记忆/任务/凭据授权及持久浏览器；用户向牛马交代工作，由牛马新建/续写内部会话；全局最多3任务并发，每牛马1个浏览器任务；统一故障诊断、有限恢复、验证交付、审批/补充/挂起/续做和任务时间线 |
-| 牛马会话 | 与普通聊天隔离：任务固定主会话 + 独立固定 Chrome 会话，仅从牛马看板打开执行记录，不混入普通会话列表/默认选中项；relay 交接后结束本轮、结果自动回任务主会话；defer 保存恢复点、释放名额，到期只检查原作业 |
+| 牛马会话 | 与普通聊天隔离：任务固定主会话 + 独立固定 Chrome 会话，仅从牛马看板打开执行记录，不混入普通会话列表/默认选中项；task_relay_computer 交接后结束本轮、结果自动回任务主会话；defer 保存恢复点、释放名额，到期只检查原作业 |
 | 记忆 / 密码本 | 相关性检索、强化/衰减/永久重要性、300 条记忆上限；AES-256-GCM、使用条件/用途审计、X25519 跨机加密支援、任务专属临时条目与清理 |
 | StarLink | 原 v2 HTTP + SSE 中转协议、群组/设备/纪元/游标、gzip 与旧 `_z` 信封、messageId 幂等重传、成员派单、交代人审批/补充、加密凭据支援与任务时间线 |
 | Chrome | 原版 0.1.17 扩展与 DOM 脚本；稳定 tag、多实例/多浏览器、iframe/OOPIF、Shadow DOM、DOM/ref、真实 CDP 输入、焦点/遮挡/像素前检、截图分片/裁剪/长图、上传下载、DevTools、run 短程计划、经验图谱 |
@@ -130,18 +130,19 @@ docker run -d --name vega --shm-size=1g \
 }
 ```
 
-场景数组按顺序降级；电脑场景须支持图片。变体 ID 为 `provider/model/variant/high`。厂商目录支持原项目的 30 个 preset，账号目录优先于 models.dev 能力补全；Coding Plan 等没有 `/models` 的端点可回退 models.dev，但不能用目录补回账号无权限模型。
+场景数组按顺序降级；电脑场景须支持图片。变体 ID 为 `provider/model/variant/high`。厂商目录支持预设服务商，账号目录优先于 models.dev 能力补全；Coding Plan 等没有 `/models` 的端点可回退 models.dev，但不能用目录补回账号无权限模型。
 
 ### 专有订阅
 
-设置 →「服务商」选择CodeBuddy/WorkBuddy/Devin，点击登录会立即打开窗口、绑定本次来源/站点并自动检查结果，成功后直接导入账号模型。远程Devin默认回调网站的`/api/providers/callback/devin`，不再要求用户浏览器访问服务器的127.0.0.1端口；公网部署需设置正确的`VEGA_PUBLIC_URL`并使用HTTPS。回调独立校验一次性state/PKCE，轮询绑定发起管理员，错误/过期state不能交换Token。若官方限制回调地址，可改用手动回调登录并粘贴登录后完整跳转地址。CodeBuddy/WorkBuddy使用服务端轮询，不依赖客户端本机安装CLI；仅在点击「读取服务端已有登录」时使用部署端已有凭据。网站新登录优先于部署端旧CLI会话。真实账号及第三方回调白名单仍需在目标部署验收，协议夹具不能代替它。
+设置 →「服务商」选择 **CodeBuddy / WorkBuddy**（统一入口）或 Devin。CodeBuddy / WorkBuddy 登录时选择 CodeBuddy 中国站、国际站或 WorkBuddy，点击登录会立即打开窗口、绑定本次来源/站点并自动检查结果，成功后直接导入账号模型。两者通过 Vega 服务端原生直连上游，不启动本地代理、CLI 或桌面程序；「使用 Vega 已有登录」只复用 Vega 保存的网页登录（或显式环境变量凭据），不读取部署端 CLI 登录。远程 Devin 默认回调网站的`/api/providers/callback/devin`；公网部署需设置正确的`VEGA_PUBLIC_URL`并使用 HTTPS。回调独立校验一次性 state/PKCE，轮询绑定发起管理员；若官方限制回调地址，可改用手动回调并粘贴完整跳转地址。真实账号及第三方回调白名单仍需在目标部署验收。
 
-- **CodeBuddy**：CLI 环境/登录优先，缺少时使用应用内登录；续期、账号/企业请求头、`/v3/config` 和本地 product 默认模型合并、CLI 可用模型过滤、reasoning summary、重复工具 ID/包装 JSON 归一化。
-- **WorkBuddy**：独立认证与模型目录，不能误用 CodeBuddy 的账号；自动查找 `resources/app.asar.unpacked/cli`，使用 WorkBuddy 自己的 Electron helper 只读解密登录。设置页可指定安装目录/`WorkBuddy.exe`/内置 CLI 路径；`WORKBUDDY_EXE` 可显式指定解密运行时。
+- **CodeBuddy / WorkBuddy**：共用原生传输，两个通道的加密会话、续期和账号/企业请求头独立，不混用账号。不读取 CLI 设置、安装包或桌面端加密登录；模型及能力只取自 `/v3/config`，仍遵守服务端 `agents.cli.models` 范围（不是读取本机 CLI）。默认模型失效时回退到列表首项，旧保存的默认别名映射不会覆盖新目录；显式选择不可用模型仍会报错。支持 reasoning summary、重复工具 ID/包装 JSON 归一化。
 - **Devin**：读取 CLI TOML 或应用内登录；直接执行 Connect/Protobuf 推理，回传历史可见 reasoning（消息字段 5），校验 gzip 帧、trailer、停止原因与工具完整性；CLI 不可用时使用原项目的版本化模型快照。**Adaptive 自动路由与参考项目一样不支持，必须选具体模型。**
 - **Codex / Claude Code**：按 CLI 配置识别自定义 API，否则在每次请求前只读订阅认证。官方端点固定，不执行 apiKeyHelper，不代替 CLI 轮换 refresh token；过期须先在 CLI 更新。macOS 支持原项目覆盖的钥匙串形态，其它 keyring 后端不会猜测。
 
-支持原项目的 `CODEBUDDY_CONFIG_DIR`、`WORKBUDDY_CONFIG_DIR`、`NOVA_*_AUTH_FILE`、`NOVA_*_PACKAGE`、`*_MODEL`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DEVIN_CONFIG_HOME` 等定位方式。HTTP(S)/ALL/NO_PROXY 环境变量优先，否则读取 Windows/macOS 静态系统 HTTP(S) 代理，下一次请求重新判断；不跟随专有订阅请求的重定向。
+CodeBuddy / WorkBuddy 的 `*_AUTH_TOKEN` / `*_API_KEY`、`*_MODEL` 和 `NOVA_*_ENDPOINT` 环境变量仍可显式设置；`*_CONFIG_DIR`、`NOVA_*_AUTH_FILE`、`NOVA_*_PACKAGE`、`WORKBUDDY_EXE` 和旧 WorkBuddy 路径设置不再影响它们。旧 `workbuddy` 预设仍可加载，设置页保存时归一到 `preset: "codebuddy"`、`options.codebuddySource: "workbuddy"`，保留 Provider ID、模型和会话引用，不删除或合并已有配置实例。原先只在 CLI/桌面端登录的用户需在 Vega 登录一次；原配置与凭据不会被删除。云端缺失的模型能力采用保守默认值，不再从安装包补齐。
+
+Codex / Claude Code / Devin 的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DEVIN_CONFIG_HOME` 等定位方式保持不变。HTTP(S)/ALL/NO_PROXY 环境变量优先，否则读取 Windows/macOS 静态系统 HTTP(S) 代理，下一次请求重新判断；不跟随专有订阅请求的重定向。
 
 ### 数字牛马工作台
 
@@ -178,13 +179,11 @@ WS连接先通过带CSRF校验的POST取得15秒有效、一次性且绑定当�
 
 远程部署仍只需现有网站端口。反向代理须为`/api/events`、`/api/chrome/live`及`/api/local-agent/socket`转发WebSocket的HTTP/1.1 Upgrade/Connection并保留Host，设备连接还须保留Authorization；公网建议配置正确的`VEGA_PUBLIC_URL`并使用HTTPS/WSS，**不要暴露Chrome调试端口或回环扩展端口**。意外断线且没有进行中的操作时自动重连（最多3次），页面切回前台也会自动重连；可能已执行的操作仍要求人工核对，不自动补发上次操作。画面不变时只发送不含图片的确认帧，静止约2秒后采样降为每秒2帧。
 
-### MCP、技能和团队
+### MCP 和技能
 
 - MCP 配置为 `{"server": {"command":"node", "args":["server.js"], "env":{}}}` 或 `{"server":{"url":"https://example/mcp","headers":{}}}`。先 list → describe → call；定义变化须重新 describe。只读模式须由用户配置本地 `readOnlyTools` 允许列表，远端 `readOnlyHint` 不是授权。
 - 不提供独立图片生成/改图服务。聊天附图、视觉模型、read图片和Chrome截图不受影响；旧图片服务配置不再使用，历史图片保留。
 - 技能在设置页选择本地ZIP上传，不需要填写服务器目录；**正文和附属脚本/参考资源一起存入SQLite**，同名覆盖须确认。运行时按内容摘要物化可再生缓存，不自动运行导入脚本；拒绝目录穿越、链接和超限资源。原服务端目录/ZIP/SKILL.md导入API与`VEGA_SKILLS_DIR`仍保留供已有部署兼容，不在界面暴露目录配置。先展示元数据，按需读取正文，支持`/skill:name`。
-- `relay: {"server":"https://relay.example","token":"{env:RELAY_TOKEN}","groups":"team-a"}` 接入原中转站。牛马页 → 团队牛马，只有公开的牛马可接指令；对方的补充请求必须来自曾经交代过任务的成员。仅交代人可补充/审批其任务，凭据用密码本加密传回。
-
 牛马每天时刻和职责的 `nextAt` 统一按**北京时间 Asia/Shanghai**解释，列表日期也按北京时间显示；牛马自身无工作时段限制。旧固定时刻职责升级后按北京时间运行；旧星轨数据保留，但事件职责不再触发，需改成手动/固定/动态安排。
 
 界面适配手机与平板：小屏使用可展开的完整导航及会话列表，内容区独立滚动；触控按钮至少44px，表单输入保持16px以避免iOS自动放大；触屏应用窗口只允许横向/纵向滚动，不用双指或双击缩放整页，浏览器菜单和系统无障碍放大仍保留。浏览器预览区的滚轮缩放和画面拖动独立于页面窗口。聊天手机回车换行、点击发送，桌面保留Enter发送并防止中文输入法误发；软键盘/地址栏变化按可视视口调整，刘海及底部安全区留白。服务商登录在本标签短期保存不含凭据的发起信息，切回或重载后继续同一次登录；服务端完成回执短期幂等，不重复交换授权码。浏览器截图可打开原图放大。移动回归使用独立Chrome触控模拟，覆盖320–1024px、横屏及键盘缩小视口；未进行iPhone/Safari、Android实体手机实机验收。
@@ -231,6 +230,6 @@ $env:VEGA_TEST_DEPLOYED='1'
 npm test
 ```
 
-测试覆盖原协议夹具、订阅隔离/PKCE/WorkBuddy 解密、三种标准流协议、Devin 原生工具往返、Responses 恢复、MCP stdio+HTTP、牛马审批/交接/挂起、加密支援、上下文与真实 Chrome 的输入/上传/截图/提交。**没有使用真实付费订阅发起计费推理，也没有连接用户的真实团队生产中转站**，这些环境相关路径不应被自动测试数量冒充为实账号验收。
+测试覆盖原协议夹具、订阅隔离/PKCE/统一 Buddy 入口与默认模型回退、三种标准流协议、Devin 原生工具往返、Responses 恢复、MCP stdio+HTTP、牛马审批/交接/挂起、加密支援、上下文与真实 Chrome 的输入/上传/截图/提交。**没有使用真实付费订阅发起计费推理，也没有连接用户的真实团队生产中转站**，这些环境相关路径不应被自动测试数量冒充为实账号验收。
 
 Vue 3.6 当前仍为 RC，已锁定版本；升级请复跑 Vapor 与浏览器测试。OS 状态已在 Windows 实机验证；macOS/Linux 只有适配器与契约测试，尚未在对应系统实机验收。生产依赖审计无已知告警；Nitro 构建链的 deepmerge 相关 3 个低危开发依赖告警暂保留，没有为消告警强行降级/破坏构建链。

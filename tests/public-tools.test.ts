@@ -14,7 +14,7 @@ const schemaOf = (name: string, ctx: ToolContext) => {
   return tool.parameters;
 };
 const map = (name: string, args: any, ctx: ToolContext = { kind: "normal" }) => toInternal(name, checkArgs(schemaOf(name, ctx), args), ctx);
-const task: ToolContext = { kind: "task", dutyCommands: ["schedule_next", "disable"], vaultRequest: true, vaultSend: true };
+const task: ToolContext = { kind: "task", dutyCommands: ["schedule_next", "disable"] };
 const chat: ToolContext = { kind: "chat" };
 
 test("every public tool maps onto the unchanged internal executor arguments", () => {
@@ -119,7 +119,6 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["memory_manage", { request: { command: "forget", memoryId: "a" } }, { action: "memory_resolve", resolveAction: "drop", id: "a" }, chat],
     ["memory_manage", { request: { command: "unpin", memoryId: "a" } }, { action: "memory_pin", id: "a", pinned: false }, chat],
     ["vault_get", { credentialId: "v1", purpose: "login" }, { action: "vault_get", id: "v1", text: "login" }, task],
-    ["vault_send", { credentialId: "v1" }, { action: "vault_send", id: "v1" }, task],
   ];
   for (const [name, args, internal, ctx] of cases)
     assert.deepEqual(map(name, args, ctx).args, internal, name + " " + JSON.stringify(args));
@@ -152,7 +151,7 @@ test("branch errors name the field and the chosen branch's structure", () => {
   assert.throws(() => map("employee_duty_create", { instructions: "x", trigger: { kind: "daily", times: ["9:00"] } }), /times/);
   assert.throws(() => map("employee_duty_create", { instructions: "x", trigger: { kind: "interval", everyMinutes: 30, times: ["09:00"] } }), /不接受字段 times/);
   assert.throws(() => map("employee_task_create", { instructions: "x", profile: "computer" }), /profile/);
-  assert.throws(() => map("employee_task_create", { instructions: "x", profile: "电脑" }), /profile/, "computer work goes through relay, as before");
+  assert.throws(() => map("employee_task_create", { instructions: "x", profile: "电脑" }), /profile/, "computer work goes through task_relay_computer, as before");
   assert.throws(() => map("employee_task_manage", { taskId: "t1", request: { command: "update" } }), /至少要改一项/);
   assert.throws(() => map("employee_duty_manage", { dutyId: "d1", request: { command: "update", note: null } }), /至少要改一项/);
   assert.throws(() => map("employee_task_manage", { taskId: "t1", request: { command: "update", runAt: "2030-01-01 09:00", delayMinutes: 5 } }), /恰好填一个/);
@@ -197,17 +196,17 @@ test("visible tools and branches follow session, scene and permission like the o
   assert.deepEqual(names(chat).filter((name) => name.startsWith("vault_")), ["vault_get", "vault_list"]);
   assert(!commands({ kind: "normal" }, "employee_task_manage").includes("resume"), "resume/answer/stop are chat-only");
   assert(commands(chat, "employee_task_manage").includes("stop"));
-  assert.deepEqual(names({ kind: "chat", member: true }), ["employee_status", "employee_task_create", "employee_task_manage"]);
+  assert(names(chat).includes("memory_propose"), "owner chat exposes memory_propose");
+  assert.deepEqual(names({ kind: "chat", member: true }), ["employee_status", "employee_task_create", "employee_task_manage", "vault_get", "vault_list"]);
+  assert(!names({ kind: "chat", member: true }).includes("memory_propose"), "group guest has no memory tools");
   assert(!/update|set_instructions|set_profile|reschedule|cancel/.test(commands({ kind: "chat", member: true }, "employee_task_manage")));
   const main = names({ kind: "task", dutyCommands: [] });
   assert.deepEqual(main, ["employee_status", "employee_task_create", "memory_manage", "memory_propose", "memory_search", "task_ask_user", "task_complete", "task_progress", "task_relay_computer", "task_request_approval", "task_reschedule", "task_wait", "vault_get", "vault_list"]);
   const computer = names({ kind: "task", computer: true, dutyCommands: [] });
   assert(!computer.includes("task_relay_computer") && !computer.includes("task_complete"));
-  assert(names({ kind: "task", vaultRequest: true, vaultSend: true }).includes("vault_request"));
-  assert(names({ kind: "task", vaultRequest: true, vaultSend: true }).includes("vault_send"));
   assert.equal(commands({ kind: "task", dutyCommands: ["disable"] }, "employee_duty_manage"), '"enum":["disable"]', "fixed duty: a task may only disable its own duty");
   assert(commands({ kind: "task", dutyCommands: ["schedule_next", "disable"] }, "employee_duty_manage").includes("schedule_next"));
-  for (const name of ["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete", "vault_request", "vault_send"]) assert(STANDALONE_TOOLS.has(name));
+  for (const name of ["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete"]) assert(STANDALONE_TOOLS.has(name));
 });
 
 test("chrome tools appear only where the old chrome tool did", async (t) => {
@@ -230,4 +229,13 @@ test("dispatch and status descriptions steer away from copied tool names and red
   assert.match((create.parameters as any).properties.dedupeKey.description, /重做已完成的事时用新 key/);
   assert.match(status.description, /自动去重/);
   assert.deepEqual(Object.keys((status.parameters as any).properties), ["taskId", "dedupeKey", "status", "memoryQuery"]);
+});
+
+test("memory prompt: tool-list gate and owner remember-now rule", async () => {
+  const { readFileSync } = await import("node:fs");
+  const prompt = readFileSync("server/core/prompt.ts", "utf8");
+  assert.match(prompt, /以本轮工具列表为准：有 memory_propose 就能写/);
+  assert.match(prompt, /主人要求记住的跨会话偏好或事实/);
+  assert.match(prompt, /记忆工具仍按本轮列表使用/);
+  assert(!/schema 无记忆写入权限/.test(prompt));
 });

@@ -13,7 +13,7 @@ const types = [
   { value: "general", label: "万能", placeholder: "任意文本，例如账号、密钥和使用说明的组合", hint: "不好归类的凭据选这一项，内容原样提供给牛马。" },
 ];
 const typeOf = (value) => types.find((type) => type.value === value) || types[3];
-const busy = ref(false), entries = ref([]), form = ref({ type: "login", name: "", condition: "", content: "", share: false });
+const busy = ref(false), entries = ref([]), form = ref({ type: "login", name: "", condition: "", content: "" });
 let disposed = false;
 async function run(fn) {
   if (busy.value) return;
@@ -23,10 +23,10 @@ async function run(fn) {
   finally { busy.value = false; }
 }
 function reset() {
-  form.value = { type: "login", name: "", condition: "", content: "", share: false };
+  form.value = { type: "login", name: "", condition: "", content: "" };
 }
 function edit(item) {
-  form.value = { id: item.id, type: item.type, name: item.name, condition: item.condition, content: "", share: !!item.share };
+  form.value = { id: item.id, type: item.type, name: item.name, condition: item.condition, content: "" };
 }
 async function load() {
   const value = await props.api(base);
@@ -64,14 +64,13 @@ onBeforeUnmount(() => { disposed = true; });
         <label>名称<input v-model="form.name" required maxlength="100" placeholder="不要包含密钥内容" /></label>
         <label class="span-2">允许使用的条件<input v-model="form.condition" required maxlength="500" placeholder="例如：仅用于某系统的邮箱密码登录，不用于 OA 登录" /></label>
         <label class="span-2">凭据<textarea v-model="form.content" :required="!form.id" :class="{ mono: form.type === 'ssh_key' }" :placeholder="form.id ? '凭据已加密，留空视为不修改凭据' : typeOf(form.type).placeholder" :rows="form.type === 'ssh_key' ? 8 : 3" maxlength="16000" autocomplete="off" spellcheck="false"></textarea><small class="hint">{{ typeOf(form.type).hint }}</small></label>
-        <label class="check span-2"><input v-model="form.share" type="checkbox" />允许在团队成员请求凭据支援时加密发送给对方</label>
         <div class="span-2 actions end"><button class="primary sm" :disabled="busy"><Icon name="lock" :size="14" />{{ form.id ? '保存修改' : '新增并加密保存' }}</button></div>
       </form>
       <p v-if="!entries.length" class="empty-state">还没有凭据</p>
       <ul v-else class="item-list">
         <li v-for="item in entries" :key="item.id">
           <span class="item-icon" aria-hidden="true"><Icon name="key" :size="15" /></span>
-          <span class="item-text"><strong>{{ item.name }}</strong><small>{{ typeOf(item.type).label }} · {{ item.condition }}{{ item.share ? ' · 可加密共享' : '' }}</small></span>
+          <span class="item-text"><strong>{{ item.name }}</strong><small>{{ typeOf(item.type).label }} · {{ item.condition }}</small></span>
           <button type="button" class="sm" :disabled="busy" @click="edit(item)">编辑</button>
           <button type="button" class="sm danger-text" :disabled="busy" @click="remove(item)">删除凭据</button>
         </li>

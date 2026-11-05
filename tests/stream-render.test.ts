@@ -30,7 +30,7 @@ function mount() {
     employeeSession: ref(""), employeeSessionVersion: ref(0), selectedEmployee: ref(""), activeTaskCount: ref(0), employeeError: ref(""),
     transcript: ref({ scrollHeight: 1000, scrollTop: 600, clientHeight: 400 }),
     refreshCurrent: slow("refreshCurrent"), bootstrap: slow("bootstrap"), refreshEmployee: slow("refreshEmployee"),
-    loadModels: async () => {}, selectSession: async () => {}, queueEmployeeRefresh() {}, toast() {}, api: async () => {},
+    loadModels: async () => {}, selectSession: async () => {}, queueEmployeeRefresh() {}, toast() {}, api: async () => {}, unread: { onEvent() {} },
     scrollBottom: async () => { calls.push("scroll"); },
   };
   const start = source.indexOf("/** Runs fn at most once at a time;");

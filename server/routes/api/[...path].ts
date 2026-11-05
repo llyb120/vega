@@ -1,5 +1,4 @@
-import { updateEmployeeAvatar } from "../../core/employee-avatar";
-import { colleaguesOf } from "../../core/colleagues";
+import { updateEmployeeAvatar, updateUserAvatar } from "../../core/employee-avatar";
 import { chatHistory } from "../../core/chat-page";
 import { prepareDutyInput } from "../../core/duty-condition";
 import { canConfigureEmployee, employeeCapabilities } from "../../core/employee-capabilities";
@@ -24,6 +23,8 @@ import {
   send,
 } from "h3";
 import { app, employeeLive } from "../../core/application";
+import { safeFileName, storeAttachments } from "../../core/attachments";
+import { newCommand } from "../../core/new-session";
 import { CLIENT_BODY_LIMIT } from "../../core/client-socket";
 import { assert, filterAsync, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
@@ -34,40 +35,12 @@ async function inputMessage(
   store: ReturnType<typeof app>["store"],
   sessionId: string,
 ) {
-  assert(
-    typeof a.text === "string" || Array.isArray(a.images),
-    "Message required",
-  );
-  assert((a.text || "").trim() || a.images?.length, "Empty message");
-  assert(
-    (a.text || "").length <= 2 << 20 && (!a.images || a.images.length <= 16),
-    "Message too large",
-  );
+  assert(typeof a.text === "string" || Array.isArray(a.images) || Array.isArray(a.files), "Message required");
+  assert((a.text || "").trim() || a.images?.length || a.files?.length, "Empty message");
+  assert((a.text || "").length <= 2 << 20, "Message too large");
   const quote = a.quoteSeq === undefined ? undefined : await store.quote(sessionId, a.quoteSeq);
-  const images: { mime: string; blobId?: string; data?: string }[] = [];
-  let total = 0;
-  for (const image of a.images || []) {
-    assert(
-      [
-        "image/png",
-        "image/jpeg",
-        "image/gif",
-        "image/webp",
-        "image/bmp",
-      ].includes(image.mime) && typeof image.data === "string",
-      "Invalid image",
-    );
-    const data = Buffer.from(image.data, "base64");
-    total += data.length;
-    assert(
-      data.length <= 25 << 20 && total <= 64 << 20,
-      "Image attachment limit exceeded",
-    );
-    const blobId = await store.blob(image.mime, data);
-    await store.grantBlob(blobId, sessionId);
-    images.push({ mime: image.mime, blobId });
-  }
-  return { role: "user", text: a.text || "", images, quote };
+  const { images, files } = await storeAttachments(store, sessionId, a);
+  return { role: "user" as const, text: a.text || "", images, files: files.length ? files : undefined, quote };
 }
 export default defineEventHandler(async (event) => {
   const { store, engine, auth } = app(),
@@ -120,18 +93,21 @@ export default defineEventHandler(async (event) => {
       check(user.role === "admin", 403, "Administrator permission required");
       check(method === "GET" && path[1] === "sessions" && path.length === 2, 404, "Debug route not found");
       const names = new Map(await Promise.all((await engine.employee.all()).map(async (employee) => { const s = await employee.profile(); return [s.id, s.name] as const; })));
-      return Promise.all((await store.employeeSessions()).map(async (session) => {
+      // Each group's 旁白 session too (it belongs to no employee).
+      const narrators = (await engine.groups.all()).filter((g) => g.narrator?.session).map((g) => [g.narrator!.session, g.name] as const);
+      const narratorSessions = (await Promise.all(narrators.map(async ([id, name]) => await store.hasSession(id) ? { ...await store.session(id), employeeId: "", employeeName: "旁白 · " + name, taskText: "", kind: "narrator", running: false } : undefined))).filter(Boolean);
+      return [...narratorSessions, ...await Promise.all((await store.employeeSessions()).map(async (session) => {
         const linked = session.taskId ? await store.employeeTask(session.taskId) : undefined;
         const employeeId = session.employeeId || linked?.employee || "";
-        return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联牛马", taskText: linked?.task.text || "", kind: !session.taskId ? "chat" : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
-      }));
+        return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联牛马", taskText: linked?.task.text || "", kind: !session.taskId ? (session.groupId ? "group" : "chat") : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
+      }))];
     }
     if (path[0] === "bootstrap" && method === "GET")
       return {
         user,
         // Admins also see unowned conversations; everyone else only their own (indexed by owner).
         sessions: await filterAsync(user.role === "admin" ? await store.plainSessions() : await store.sessionsBy("owner", user.id),
-          async (s) => !s.taskId && !s.employeeId && await auth.canRead(user, s)),
+          async (s) => !s.taskId && !s.employeeId && !s.groupId && await auth.canRead(user, s)),
         running: Object.fromEntries(
           (await filterAsync([...engine.active.keys()], async (key) => {
             try {
@@ -142,6 +118,7 @@ export default defineEventHandler(async (event) => {
             }
           })).map((id) => [id, true]),
         ),
+        avatar: (await store.object<{ avatar: string }>("user-avatar", user.id))?.avatar || "",
         config:
           user.role === "admin"
             ? maskedConfig(await engine.config())
@@ -167,24 +144,34 @@ export default defineEventHandler(async (event) => {
       check(await auth.canBlob(user, path[1]), 404, "Blob not found");
       const blob = await store.blobData(path[1]);
       assert(blob, "Blob not found");
-      setHeader(event, "Content-Type", blob.mime);
+      setHeader(event, "X-Content-Type-Options", "nosniff");
+      // Only known image types render inline; any other attachment is a download, never same-origin HTML or script.
+      if (/^image\/[\w.+-]+$/.test(blob.mime) && !blob.mime.startsWith("image/svg")) setHeader(event, "Content-Type", blob.mime);
+      else {
+        setHeader(event, "Content-Type", "application/octet-stream");
+        setHeader(event, "Content-Disposition", `attachment; filename="file"; filename*=UTF-8''${encodeURIComponent(safeFileName(getRequestURL(event).searchParams.get("name")))}`);
+      }
       return send(event, Buffer.from(blob.data));
     }
     if (path[0] === "employees") {
       if (path.length === 1) {
         if (method === "GET") return Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
           const s = await employee.state();
-          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, publicSummary: s.publicSummary || "", acceptsColleagues: s.acceptsColleagues !== false, scope: s.scope, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, runningTasks: s.tasks.filter((t) => t.status === "running").length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
+          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, ownerId: s.ownerId, mine: s.ownerId === user.id, chatSession: s.chatSession || "", unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, runningTasks: s.tasks.filter((t) => t.status === "running").length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
         }));
         if (method === "POST") {
           check(user.role !== "viewer", 403, "Execution permission required");
-          return await engine.employee.create(a, user.id, user.role === "admin" ? "team" : "personal");
+          return await engine.employee.create(a, user.id);
         }
       }
       const employee = (await engine.employee.all()).find((employee) => employee.employeeId === path[1]);
-      check(employee && await employee.accessible(user), 404, "Employee not found");
+      // Group members see each other's employee avatars.
+      const avatarOnly = path[2] === "avatar" && path.length === 3 && method === "GET" && !!employee && await engine.groups.sharesGroup(user.id, { employee: employee.employeeId });
+      check(employee && (avatarOnly || await employee.accessible(user)), 404, "Employee not found");
       check(!employee.deleting, 409, "牛马正在删除，请稍候");
       const state = await employee.state();
+      // Marking the chat read is reading: read-only accounts may do it.
+      if (path[2] === "chat" && path[3] === "read" && path.length === 4 && method === "POST") return { seq: state.chatSession ? await store.markRead(user.id, state.chatSession) : 0 };
       if (method !== "GET") check(user.role !== "viewer", 403, "只读账号不能执行操作");
       if (["capabilities", "skills", "mcp", "vault"].includes(path[2]))
         return await employeeCapabilities(employee, user, method, path.slice(2), a);
@@ -235,10 +222,21 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "messages" && method === "POST") {
         check(a.clientMessageId === undefined || (typeof a.clientMessageId === "string" && /^[a-zA-Z0-9_-]{16,80}$/.test(a.clientMessageId)), 400, "Invalid message ID");
         const session = await employee.chat(user.id);
+        // /new [text]: a new model context first; the rest (or attachments), if any, is the first message in it.
+        const command = newCommand(a.text);
+        if (command) {
+          check(!engine.active.has(session.id), 409, "对话仍在进行，请先停止后再开启新会话");
+          check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
+          if (a.clientMessageId && await store.clientMessage(session.id, user.id, a.clientMessageId)) return { id: session.id };
+          const alone = !command.rest && !a.images?.length && !a.files?.length;
+          await engine.newChatContext(session.id, alone ? { actorId: user.id, clientMessageId: a.clientMessageId } : {});
+          if (alone) return { id: session.id, newSession: true };
+          a = { ...a, text: command.rest };
+        }
         const message = {
           ...await inputMessage(a, store, session.id), actorId: user.id,
           clientMessageId: a.clientMessageId,
-          clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.quoteSeq ?? null])).digest("hex") : undefined,
+          clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.files || [], a.quoteSeq ?? null])).digest("hex") : undefined,
         };
         check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
         await engine.submitChat(session.id, message);
@@ -272,11 +270,9 @@ export default defineEventHandler(async (event) => {
         return employee.control(a);
       }
       if (path[2] === "transcript" && method === "POST") return await employee.transcript(a.threadId);
-      if (path[2] === "colleagues" && path.length === 3 && method === "GET")
-        return (await colleaguesOf(employee)).map(({ profile: p }) => ({ id: p.id, name: p.name, scope: p.scope, publicSummary: p.publicSummary || "", acceptsColleagues: p.acceptsColleagues !== false }));
       if (path.length === 2 && method === "GET") {
         const { enabled, workStart, workEnd, ...visible } = state;
-        return { ...visible, acceptsColleagues: state.acceptsColleagues !== false, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
+        return { ...visible, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
       }
       if (path.length === 2 && method === "POST") {
         if (!await employee.manageable(user)) check(a.action === "list" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
@@ -287,6 +283,18 @@ export default defineEventHandler(async (event) => {
       }
       check(false, 404, "Employee route not found");
     }
+    if (path[0] === "me" && path[1] === "avatar" && path.length === 2 && method === "POST")
+      return await updateUserAvatar(store, user.id, a);
+    if (path[0] === "avatars" && path[1] === "users" && path.length === 3 && method === "GET") {
+      check(path[2] === user.id || await engine.groups.sharesGroup(user.id, { user: path[2] }), 404, "Avatar not found");
+      const blob = (await store.object<{ avatar: string }>("user-avatar", path[2]))?.avatar;
+      const image = blob && await store.blobData(blob);
+      check(image && image.mime === "image/webp", 404, "Avatar not found");
+      setHeader(event, "Content-Type", "image/webp");
+      setHeader(event, "Cache-Control", "private, max-age=86400");
+      return send(event, Buffer.from(image.data));
+    }
+    if (path[0] === "groups") return await groupRoute(path, method, a, user, getRequestURL(event).searchParams);
     if (path[0] === "sessions") {
       if (path.length === 1 && method === "POST") {
         assert(!a.model || typeof a.model === "string", "Invalid model");
@@ -312,6 +320,7 @@ export default defineEventHandler(async (event) => {
       const key = path[1],
         session = await auth.session(user, key, method !== "GET");
       if (session.employeeId && method !== "GET") check(false, 400, "Use the employee workspace to manage its conversations");
+      if (session.groupId && method !== "GET") check(false, 400, "群聊请在群聊页面操作");
       if (path[2] === "access")
         check(false, 404, "Private sessions cannot be shared");
 
@@ -369,6 +378,7 @@ export default defineEventHandler(async (event) => {
           /^\s*\/fire(?:\s|$)/i.test(message.text)
         ) {
           assert(!engine.active.has(key), "Session already running");
+          assert(!message.files?.length, "/fire does not support attachments");
           return await engine.fire.start(key, message.text, message.images);
         }
         if (
@@ -382,7 +392,7 @@ export default defineEventHandler(async (event) => {
         let target = key;
         if (stage) {
           assert(
-            !message.images?.length,
+            !message.images?.length && !message.files?.length,
             "/stage does not support attachments",
           );
           if (stage.current)
@@ -476,8 +486,7 @@ export default defineEventHandler(async (event) => {
             "codebuddy",
             "workbuddy",
             "devin",
-            "server-support",
-          ].includes(a.source),
+                      ].includes(a.source),
           "Unknown local source",
         );
         const preset =
@@ -485,8 +494,9 @@ export default defineEventHandler(async (event) => {
             ? "local-codex"
             : a.source === "claude-code"
               ? "local-claude-code"
-              : a.source;
-        const p = await engine.catalog.provider({ preset, models: {} }, cfg);
+              : a.source === "workbuddy" ? "codebuddy" : a.source;
+        const buddyOptions = ["codebuddy", "workbuddy"].includes(a.source) ? { codebuddySource: a.source } : {};
+        const p = await engine.catalog.provider({ preset, options: buddyOptions, models: {} }, cfg);
         const dynamic = await engine.catalog.models(p, true);
         const first =
           Object.keys(dynamic.models)[0] || Object.keys(p.models)[0];
@@ -495,6 +505,7 @@ export default defineEventHandler(async (event) => {
         cfg.provider[key] = {
           ...cfg.provider[key],
           preset,
+          options: { ...cfg.provider[key]?.options, ...buddyOptions },
           name:
             typeof a.name === "string" && a.name.trim()
               ? a.name.trim().slice(0, 200)
@@ -510,7 +521,6 @@ export default defineEventHandler(async (event) => {
       }
       if (path[1] === "paths" && method === "PUT") {
         await store.put("paths", {
-                    workbuddyPath: a.workbuddyPath || "",
                     devinPath: a.devinPath || "",
                   });
         return { ok: true };
@@ -578,11 +588,6 @@ export default defineEventHandler(async (event) => {
       return engine.chrome.experiences.graph(
         (await engine.chrome.experiences.all()).filter((e) => !e.disabled),
       );
-    if (path[0] === "team") {
-      if (path[1] === "call")
-        return engine.relay.call(a.peer, a.command, a.args || {});
-      return { connected: engine.relay.connected, peers: engine.relay.peers };
-    }
     throw createError({
       statusCode: 404,
       statusMessage: "API route not found",
@@ -596,3 +601,43 @@ export default defineEventHandler(async (event) => {
     });
   }
 });
+
+/** 群聊 (groups.ts). Reading is open to every user in the group; changing anything needs a non-viewer account. */
+async function groupRoute(path: string[], method: string, a: Obj, user: { id: string; role: string }, query: URLSearchParams) {
+  const { engine, store } = app(), groups = engine.groups;
+  if (path.length === 1 && method === "GET") return await groups.list(user);
+  if (path[1] === "directory" && method === "GET") return await groups.directory();
+  // Marking read is reading: read-only accounts may do it.
+  if (path[2] === "read" && path.length === 3 && method === "POST") return { seq: await store.markRead(user.id, (await groups.mine(user, path[1])).session) };
+  const leaving = method === "DELETE" && path[2] === "users" && path[3] === user.id;
+  if (method !== "GET" && !leaving) check(user.role !== "viewer", 403, "只读账号不能在群聊中操作");
+  if (path.length === 1 && method === "POST") return await groups.create(user, a);
+  const id = path[1];
+  if (path.length === 2) {
+    if (method === "GET") return await groups.view(await groups.mine(user, id), user);
+    if (method === "PATCH") return await groups.update(user, id, a);
+    if (method === "DELETE") return await groups.remove(user, id);
+  }
+  if (path[2] === "messages" && path.length === 3) {
+    const group = await groups.mine(user, id);
+    if (method === "GET") {
+      const page = await chatHistory(store, group.session, query);
+      return { ...page, group: await groups.view(group, user), taskStatus: await groups.taskStatus(page.messages) };
+    }
+    if (method === "POST") {
+      const input = await inputMessage({ text: typeof a.text === "string" ? a.text : "", images: a.images, files: a.files }, store, group.session);
+      return await groups.send(user, id, { text: input.text, clientMessageId: a.clientMessageId, images: input.images, files: input.files });
+    }
+  }
+  if (path[2] === "users") {
+    if (path.length === 3 && method === "POST") { await groups.addUsers(user, id, Array.isArray(a.userIds) ? a.userIds : []); return { ok: true }; }
+    if (path.length === 4 && method === "DELETE") return await groups.removeUser(user, id, path[3]);
+  }
+  if (path[2] === "employees") {
+    if (path.length === 3 && method === "POST") { await groups.addEmployee(user, id, a.employeeId); return { ok: true }; }
+    if (path.length === 4 && method === "DELETE") return await groups.removeEmployee(user, id, path[3]);
+  }
+  if (path[2] === "tasks" && path.length === 3 && method === "GET") return await groups.tasks(user, id);
+  if (path[2] === "cancel" && method === "POST") return await groups.cancel(user, id, String(a.employeeId || ""));
+  throw createError({ statusCode: 404, statusMessage: "Group route not found" });
+}

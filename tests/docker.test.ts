@@ -111,7 +111,6 @@ test("dedicated container browser tasks start without claiming a physical deskto
     emit: (type) => {
       if (type === "employee_takeover") takeovers++;
     },
-    send: async () => {},
     config: () => ({ scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] }, model: "p/vision" }),
     presence: async () => isolatedBrowserPresence("linux", "isolated")!,
   });

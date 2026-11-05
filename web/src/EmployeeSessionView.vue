@@ -45,7 +45,7 @@ async function refresh() {
       "/sessions/" + encodeURIComponent(props.sessionId) + (initial ? "?limit=" + CHAT_PAGE_SIZE : "?after=" + last),
     );
     if (current !== version || request !== refreshVersion) return;
-    if (!result.session.taskId && !(props.debug && result.session.employeeId)) throw Error("这不是牛马的会话");
+    if (!result.session.taskId && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是牛马的会话");
     if (!initial && Number.isSafeInteger(result.lastSeq) && result.lastSeq < last) {
       record.value = null;
       messages.value = [];
@@ -96,7 +96,7 @@ async function loadOlder() {
       "/sessions/" + encodeURIComponent(props.sessionId) + "?before=" + first + "&limit=" + CHAT_PAGE_SIZE,
     );
     if (request !== version || messages.value[0]?.seq !== first) return;
-    if (!result.session.taskId && !(props.debug && result.session.employeeId)) throw Error("这不是牛马的会话");
+    if (!result.session.taskId && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是牛马的会话");
     const height = el?.scrollHeight ?? 0, top = el?.scrollTop ?? 0;
     messages.value = mergeMessages(result.messages || [], messages.value);
     hasMore.value = !!result.hasMore;

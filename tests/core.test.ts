@@ -48,7 +48,6 @@ async function employee(given?: Store) {
     cancel: () => {},
     isRunning: () => false,
     emit: () => {},
-    send: async () => {},
     config: () => ({}),
   };
   instance = new Employee(s, vault, runtime);
@@ -350,28 +349,6 @@ test("memory relevance floor, migration and feedback-driven usefulness", () => {
   assert.equal(state.memories.find((m: any) => m.id === "code").claim, "长期项目使用TS");
   assert(state.memories.find((m: any) => m.id === "code").usefulness > 0.3);
   assert.equal(retention(state.memories.find((m: any) => m.id === "perm"), now), 1);
-});
-test("vault AES-GCM/X25519 matches original wire format and task-limited temporary entries", async () => {
-  const s1 = await store(),
-    s2 = await store(),
-    a = new Vault(s1),
-    b = new Vault(s2);
-  const entry = (await a.save({
-      name: "service",
-      condition: "authorized use",
-      content: "super-secret",
-      share: true,
-    })).id;
-  const pk = await b.request("req"),
-    sealed = await a.sealFor(entry, "req", pk),
-    received = await b.receive("req", "test task", sealed.sealed);
-  await assert.rejects(async () => await b.get(received.id, "purpose", "another-task"));
-  assert.equal((await b.get(received.id, "purpose", "req")).content, "super-secret");
-  assert(!JSON.stringify(await a.list()).includes("super-secret"));
-  await b.dropTemp("req");
-  assert.equal((await b.list()).length, 0);
-  await assert.rejects(async () => await b.receive("req", "task", sealed.sealed));
-  assert(!JSON.stringify(await s1.objects("vault")).includes("super-secret"));
 });
 test("experience routes dedup wording, share only identical prefixes and fail closed on scope", async () => {
   const e = new Experiences(await store()),

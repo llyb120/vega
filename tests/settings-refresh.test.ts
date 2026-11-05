@@ -184,7 +184,6 @@ test("removed Orbit is not exposed to the website or scheduler; prior data is re
       cancel: () => {},
       isRunning: () => false,
       emit: () => {},
-      send: async () => {},
       config: () => ({}),
     });
   employee.closed = true;

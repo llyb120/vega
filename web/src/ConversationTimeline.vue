@@ -4,6 +4,7 @@ import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import TurnProcess from "./TurnProcess.vue";
 import ToolSteps from "./ToolSteps.vue";
+import FileCard from "./FileCard.vue";
 import { conversationTurns } from "./conversation";
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -21,6 +22,7 @@ const turns = computed((previous) => conversationTurns(props.messages, { running
     <article v-if="turn.user" class="message user">
       <UserMessage v-if="turn.user.text" :text="turn.user.displayText || turn.user.text" />
       <img v-for="(image, n) in turn.user.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="用户附图" />
+      <FileCard v-for="(file, n) in turn.user.files || []" :key="'f' + n" :file="file" />
     </article>
     <div v-if="turn.body.length || turn.running" class="message-meta"><span>{{ name }}</span><span>{{ turn.body.findLast((message) => message.model)?.model || (turn.running ? model : '') || '' }}</span></div>
     <TurnProcess v-if="turn.process.length" :messages="turn.body" :started-at="turn.user?.at" :running="turn.running">

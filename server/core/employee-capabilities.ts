@@ -54,10 +54,9 @@ export async function employeeCapabilities(employee: Employee, user: { id: strin
   check(canEdit, 403, path[0] === "vault" ? "只有牛马创建者可以查看或修改这个牛马的密码本" : "只有牛马创建者可以查看或修改 skill / MCP 配置详情");
   if (path[0] === "vault") {
     // The employee's own book: entries never leave it and the secret is never returned.
-    if (method === "GET" && path.length === 1) return { entries: (await employee.vault.list()).filter((entry) => !entry.tempFor) };
+    if (method === "GET" && path.length === 1) return { entries: await employee.vault.list() };
     if (method === "POST" && path.length === 1) {
-      check(!body.id || !(await employee.vault.list()).find((entry) => entry.id === body.id)?.tempFor, 400, "任务临时条目不能编辑");
-      const saved = await employee.vault.save({ id: body.id, type: body.type, name: body.name, condition: body.condition, content: body.content, share: typeof body.share === "boolean" ? body.share : undefined });
+      const saved = await employee.vault.save({ id: body.id, type: body.type, name: body.name, condition: body.condition, content: body.content });
       await employee.emitChanged();
       return saved;
     }

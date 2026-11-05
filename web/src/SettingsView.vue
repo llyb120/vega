@@ -1,5 +1,5 @@
 <script setup vapor>
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import ProviderSettings from "./ProviderSettings.vue";
 import SceneSettings from "./SceneSettings.vue";
 import PageHeader from "./PageHeader.vue";
@@ -9,10 +9,14 @@ const props = defineProps({
   config: Object,
   models: Array,
   userId: String,
+  tab: String,
 });
-const emit = defineEmits(["saved", "error", "notice"]);
+const emit = defineEmits(["saved", "error", "notice", "tab"]);
 const sections = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"]];
+// The open section lives in the address (/settings/scenes) so refresh keeps it.
 const section = ref("providers");
+watch(() => props.tab, (tab) => { section.value = sections.some(([id]) => id === tab) ? tab : "providers"; }, { immediate: true });
+watch(section, (id) => { if (id !== (props.tab || "providers")) emit("tab", id === "providers" ? "" : id); });
 </script>
 <template>
   <PageHeader title="系统设置" :subtitle="sections.find((entry) => entry[0] === section)[3]" />

@@ -15,7 +15,6 @@ import { Catalog } from "../server/core/catalog";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Chrome } from "../server/core/chrome";
 import { Engine } from "../server/core/engine";
-import { Relay } from "../server/core/relay";
 import { compileScript, parse } from "@vue/compiler-sfc";
 import { envelope, fieldBytes, fieldNumber } from "../server/core/devin";
 import { chromeCall, employeeCall } from "./public-call";
@@ -341,41 +340,6 @@ test("employee external-job defer and Chrome relay reuse exactly two isolated se
   assert.equal((await e.store.sessions()).length, 2);
   assert.equal(calls, 5);
   assert.equal(e.employee.busy.size, 0);
-});
-test("StarLink validates peer identity and preserves authenticated owner for tasks and support", async () => {
-  const e = await setup("https://unused.test");
-  await e.employee.update((s) => (s.public = true));
-  const owner = { token: "alice/token", name: "Alice" };
-  await e.relay.serve(owner, "employee_say", { text: "remote task" });
-  const task = (await e.employee.state()).tasks[0];
-  assert.equal(task.owner.token, owner.token);
-  await assert.rejects(() =>
-    e.employee.control(
-      { action: "remove", id: task.id },
-      { token: "other/token", name: "Other" },
-    ),
-  );
-  await assert.rejects(() =>
-    e.employee.remote({ token: "unsolicited", name: "Bad" }, "starlink.help", {
-      id: "r",
-      question: "do something",
-    }),
-  );
-  await e.employee.update((s) => s.links.push(owner.token));
-  await e.employee.remote(owner, "starlink.help", {
-    id: "request",
-    task: "need info",
-    question: "what is the value?",
-  });
-  await e.employee.remote(owner, "starlink.help", {
-    id: "request",
-    task: "need info",
-    question: "duplicate",
-  });
-  assert.equal(
-    (await e.employee.state()).tasks.filter((t) => t.replyTo?.id === "request").length,
-    1,
-  );
 });
 test("all Vue components use Vapor compiler, not VDOM fallback", () => {
   const files = readdirSync("web/src", {

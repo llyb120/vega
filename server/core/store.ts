@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Db, Sqlite, type Dialect } from "./db";
 import { Files } from "./files";
+import type { FileRef } from "./attachments";
 import { assert, id } from "./util";
+/** Unread counts stop here (the badge shows 99+). */
+export const UNREAD_MAX = 100;
 export type Part = { type: string; [key: string]: any };
 export type Message = {
   seq?: number;
@@ -17,11 +20,18 @@ export type Message = {
   quote?: { seq: number; role: string; text: string; taskId?: string };
   tasks?: { id: string; title: string; status: string }[];
   delivery?: boolean;
+  /** Group chat (groups.ts): who said it, in the group's own session. */
+  author?: { kind: "user" | "employee"; id: string; name: string };
   /**
-   * A colleague employee's message. In the receiver's chat (role user): the handoff origin (HandoffOrigin in
-   * colleagues.ts) and the sender's name. In the sender's chat (role assistant): who replied ({ employeeId, name }).
+   * Group chat relay depth: 0 for a user's message, n for the n-th employee turn handed on by @mentions since then.
+   * In a member's own group session (role user) also the group message it answers (seq) and who sent it.
    */
-  colleague?: { employeeId: string; name: string; [key: string]: any };
+  hop?: number;
+  group?: { groupId: string; name: string; seq: number; from: { kind: "user" | "employee"; id: string; name: string }; byOwner: boolean };
+  /** A group notice from the system (member joined/left, relay limit reached). */
+  notice?: boolean;
+  /** /new divider: the model context of this session starts after it (context.ts sinceNewSession). */
+  newSession?: boolean;
   /** A task milestone the executing session chose to tell the user (task_progress tellUser). */
   progress?: boolean;
   thinking?: string;
@@ -32,6 +42,8 @@ export type Message = {
   name?: string;
   /** blobId: attachments and normal tool images in SQLite; path/url: a Chrome screenshot file (see Files). */
   images?: { mime: string; data?: string; blobId?: string; path?: string; url?: string }[];
+  /** Attached non-image files (stored as blobs; see attachments.ts for how a run gets them on disk). */
+  files?: FileRef[];
   error?: boolean;
   model?: string;
   usage?: any;
@@ -57,6 +69,8 @@ export type Session = {
   readerIds?: string[];
   fireRoot?: string;
   fireRole?: "work" | "judge";
+  /** A group chat's own session (no employee), or a member employee's session inside that group. */
+  groupId?: string;
   createdAt: number;
 };
 /** Schema version kept in settings; a database of another version is refused (no migrations). */
@@ -314,6 +328,30 @@ export class Store {
     await this.run("DELETE FROM employee_runs WHERE employee=?", employee);
   }
   private parseMessage(row: any): Message { return { ...JSON.parse(row.data), seq: Number(row.seq) }; }
+  /**
+   * Unread messages: one read marker (the last seq seen) per user and conversation, so reading writes one row per open,
+   * never per message. Unread counts what others said after it: employees' visible replies and other users' messages in
+   * a group (never tool output, system notices or the viewer's own messages); counting stops at UNREAD_MAX.
+   */
+  async markRead(user: string, session: string) {
+    const last = (await this.one("SELECT MAX(seq) AS seq FROM messages WHERE session=?", session))?.seq;
+    const seq = Number(last || 0), key = user + "/" + session;
+    if (seq > ((await this.object<{ seq: number }>("read", key))?.seq || 0)) await this.save("read", key, { seq });
+    return seq;
+  }
+  async unread(user: string, session: string) {
+    let after = (await this.object<{ seq: number }>("read", user + "/" + session))?.seq || 0, count = 0;
+    for (;;) {
+      const rows = await this.all("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq LIMIT 200", session, after) as any[];
+      for (const row of rows) {
+        const m = this.parseMessage(row);
+        const visible = m.role === "assistant" ? !!(m.text?.trim() || m.delivery || m.images?.length || m.tasks?.length) : m.role === "user" && !!m.author && m.actorId !== user;
+        if (visible && !m.notice && ++count >= UNREAD_MAX) return count;
+      }
+      if (rows.length < 200) return count;
+      after = Number(rows.at(-1).seq);
+    }
+  }
   /** Newest message of a session, optionally only an assistant message or one with images. */
   async lastMessage(key: string, only?: "assistant" | "user" | "images"): Promise<Message | undefined> {
     const where = only === "assistant" || only === "user" ? ` AND ${this.json("$.role")}='${only}'` : only === "images" ? ` AND ${this.jsonLength("$.images")}>0` : "";

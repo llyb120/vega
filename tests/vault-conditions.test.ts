@@ -127,20 +127,6 @@ test("employee task vault reads pass the same semantic check before releasing a 
   } finally { employee.busy.clear(); await engine.close(); await store.close(); }
 });
 
-test("encrypted support retains original usage conditions and task limits, without requiring a website", async () => {
-  const first = await Store.open(":memory:"), second = await Store.open(":memory:"), source = new Vault(first), receiver = new Vault(second);
-  try {
-    const saved = await source.save({ name: "account", condition: "仅用于只读核对审批待办", content: "shared-secret", share: true });
-    const pk = await receiver.request("task"), sealed = await source.sealFor(saved.id, "task", pk);
-    const received = await receiver.receive("task", "authorized task", sealed.sealed);
-    assert.match((await receiver.list())[0].condition, /仅用于只读核对审批待办/);
-    await assert.rejects(async () => await receiver.get(received.id, "operation", "other"), /another task/);
-    assert.equal((await receiver.get(received.id, "operation", "task")).content, "shared-secret");
-    const entry = await second.object<any>("vault", received.id);
-    await second.save("vault", received.id, { ...entry, createdAt: Date.now() - 86400001 });
-    await assert.rejects(async () => await receiver.get(received.id, "operation", "task"), /expired/);
-  } finally { await first.close(); await second.close(); }
-});
 
 test("credential components are redacted in audit copies without replacing actual tool inputs", () => {
   for (const content of ['账号：sample@example.test\n密码：password-example', '{"username":"sample@example.test","password":"password-example"}']) {

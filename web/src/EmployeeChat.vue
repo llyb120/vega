@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue"
 import ChatMessage from "./ChatMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
+import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 import { employeeChatMessages, continuesPrevious } from "./conversation";
 import { createChatHistory } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
@@ -10,7 +11,7 @@ const props = defineProps({ api: Function, userId: String, employeeId: String, n
 const emit = defineEmits(["task"]);
 const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
-const files = computed({ get: () => props.composer.images, set: (images) => props.composer.images = images });
+const files = computed({ get: () => props.composer.attachments, set: (items) => props.composer.attachments = items });
 const quoted = computed({ get: () => props.composer.quote, set: (quote) => props.composer.quote = quote });
 // shortcut: unsent messages live with this page; use durable storage if reload recovery is required.
 const outbox = computed(() => props.composer.outbox ||= []);
@@ -127,20 +128,7 @@ function finishTurn() {
 }
 async function upload(event) {
   error.value = "";
-  try {
-    const incoming = [...event.target.files];
-    if (files.value.length + incoming.length > 16) throw Error("最多16张图片");
-    for (const file of incoming) {
-      if (!["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"].includes(file.type) || file.size > 25 * 1024 * 1024) throw Error("请使用25MiB以内的图片");
-    }
-    if (files.value.reduce((sum, file) => sum + file.size, 0) + incoming.reduce((sum, file) => sum + file.size, 0) > 64 * 1024 * 1024) throw Error("图片总大小不能超过64MiB");
-    files.value = [...files.value, ...await Promise.all(incoming.map((file) => new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve({ name: file.name, size: file.size, mime: file.type, data: reader.result.split(",")[1] });
-      reader.onerror = () => reject(Error("读取图片失败"));
-      reader.readAsDataURL(file);
-    })))];
-  } catch (e) { error.value = e.message; }
+  try { files.value = [...files.value, ...await readAttachments(event.target.files, files.value)]; } catch (e) { error.value = e.message; }
   event.target.value = "";
 }
 async function send() {
@@ -149,7 +137,7 @@ async function send() {
   error.value = "";
   // getRandomValues also works over LAN HTTP, where randomUUID is unavailable.
   const clientMessageId = [...crypto.getRandomValues(new Uint8Array(16))].map((n) => n.toString(16).padStart(2, "0")).join("");
-  outbox.value.push({ role: "user", text: draft.value, images: files.value.map(({ mime, data }) => ({ mime, data })), quote: quoted.value, clientMessageId, afterSeq: history.lastSeq(), at: Date.now(), sendStatus: "pending" });
+  outbox.value.push({ role: "user", text: draft.value, ...attachmentPayload(files.value), quote: quoted.value, clientMessageId, afterSeq: history.lastSeq(), at: Date.now(), sendStatus: "pending" });
   const message = outbox.value.at(-1);
   draft.value = ""; files.value = []; quoted.value = undefined;
   void scroll();
@@ -165,7 +153,7 @@ function retry(message) {
     try {
       if (disposed || props.readonly) throw Error("发送已暂停，请回到对话后重发");
       await props.api(`/employees/${employeeId}/messages`, "POST", {
-        text: message.text, images: message.images, clientMessageId: message.clientMessageId,
+        text: message.text, images: message.images, files: message.files, clientMessageId: message.clientMessageId,
         ...(message.quote ? { quoteSeq: message.quote.seq } : {}),
       });
       message.sendStatus = "sent";
@@ -247,7 +235,10 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
             <button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><Icon name="tasks" :size="15" />看看工作进度</button>
           </div>
         </div>
-        <ChatMessage v-for="{ message, continued } in displayed" :key="message.clientMessageId || message.seq || message.liveKey" :message="message" :continued="continued" :name="name" :avatar="avatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        <template v-for="{ message, continued } in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
+        <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
+        <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        </template>
         <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
           <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>
           <span v-else class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" /></span>
@@ -258,18 +249,18 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         </article>
       </div>
     </div>
-    <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号仅可查看团队牛马的对话和任务。</p>
+    <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号只能查看这个牛马的对话和任务。</p>
     <form v-else class="chat-composer" @submit.prevent="send">
       <div v-if="quoted" class="composer-quote"><Icon name="reply" :size="14" /><button type="button" @click="jumpTo(quoted.seq)"><strong>引用 {{ quoted.role === 'user' ? '我' : name }}</strong><span>{{ quoted.text }}</span></button><button type="button" class="icon sm" aria-label="取消引用" @click="quoted = undefined"><Icon name="close" :size="14" /></button></div>
-      <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon name="image" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
+      <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon :name="isImage(file) ? 'image' : 'file'" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
       <div class="composer-row">
-        <input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden multiple @change="upload" />
-        <button type="button" class="icon attach" aria-label="添加图片" title="添加图片" @click="fileInput.click()"><Icon name="image" /></button>
+        <input ref="fileInput" type="file" hidden multiple @change="upload" />
+        <button type="button" class="icon attach" aria-label="添加附件" title="附件（图片或文件）" @click="fileInput.click()"><Icon name="paperclip" /></button>
         <textarea ref="input" v-model="draft" aria-label="给牛马的消息" placeholder="告诉我目标，剩下的交给我…" rows="1" @keydown="keydown"></textarea>
         <button v-if="running" type="button" class="stop" title="停止本轮" @click="stop"><Icon name="stop" :size="14" /><span>停止本轮</span></button>
         <button class="primary send" :disabled="!draft.trim() && !files.length" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
       </div>
-      <p class="composer-hint">Enter 发送 · Shift + Enter 换行</p>
+      <p class="composer-hint">/new 开启新会话（不再参考之前的对话） · Enter 发送 · Shift + Enter 换行</p>
     </form>
   </section>
 </template>
@@ -309,6 +300,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
 .attach { width: 36px; min-height: 36px; color: var(--muted); }
 .send { width: 36px; min-height: 36px; padding: 0; border-radius: 10px; }
 .stop { min-height: 36px; padding: 0 10px; border-color: var(--border); color: var(--danger); font-size: 12px; }
+.chat-notice { margin: 4px auto 14px; max-width: 80%; color: var(--muted); font-size: 11px; text-align: center; }
 .composer-hint { padding: 0 8px 0 44px; color: var(--faint); font-size: 11px; }
 .composer-quote { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 4px 4px 4px 10px; border-left: 3px solid var(--accent); border-radius: 4px var(--r-md) var(--r-md) 4px; background: var(--surface-2); color: var(--muted); }
 .composer-quote > button:nth-child(2) { display: grid; justify-content: stretch; flex: 1; gap: 1px; min-width: 0; height: auto; min-height: 0; padding: 2px 0; border: 0; background: transparent; font-weight: 400; text-align: left; }

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { computed, nextTick, ref } from "vue";
+import { attachmentPayload, isImage, readAttachments } from "../web/src/attachments.js";
 
 const source = readFileSync("web/src/App.vue", "utf8");
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end));
@@ -35,10 +36,13 @@ function mount(handler: (path: string, method: string, data: any) => any = () =>
     localBridge: null, stopPresence() {}, employeeLoadVersion: 0, clearChatCache: async () => {}, employeeRefreshTimer: undefined, closed: false, eventGeneration: 0,
     eventReconnect: undefined, eventsWatchdog: undefined, eventCursor: "", eventsSocket: null, eventsReady: false, eventsWasConnected: false,
     resetLive() {}, clearTimeout, clearInterval, authenticated: ref(true), password: ref(""), setupToken: ref(""),
-    employees: ref([]), selectedEmployee: ref(""), employeeEvent: ref(null), employeeComposers: ref({}),
+    employees: ref([]), selectedEmployee: ref(""), groups: ref([]), selectedGroup: ref(""), employeeEvent: ref(null), employeeComposers: ref({}),
     employeeTab: ref("chat"), creatingEmployee: ref(false), newEmployeeName: ref(""), newEmployeeInstruction: ref(""), vaultEntries: ref([]), employee: ref({}), taskText: ref(""), memoryText: ref(""), memoryID: ref(""), dutyOpen: ref(false), duty: ref({}), emptyDuty: () => ({}),
     onlineClients: ref([]), localPairing: ref(null), clientListReady: ref(true), config: ref({}), catalogModels: ref([]), activeTaskCount: ref(null), employeeSession: ref(""), employeeError: ref(""),
   };
+  // readAttachments (a module) reads through the global FileReader.
+  (globalThis as any).FileReader = context.FileReader;
+  Object.assign(context, { attachmentPayload, isImage, readAttachments });
   context.attempt = async (fn: any) => { try { return await fn(); } catch (e: any) { context.error.value = e.message; } };
   const state = vm.runInNewContext([
     between("const sessions = ref([])", "const contextBudget ="),
@@ -51,7 +55,7 @@ function mount(handler: (path: string, method: string, data: any) => any = () =>
   ].join("\n"), context);
   return { ...state, calls, readers, context, select: (id: string) => state.selectSession({ id }) };
 }
-const image = () => ({ mime: "image/png", data: "YQ==" });
+const image = () => ({ name: "a.png", size: 1, mime: "image/png", data: "YQ==" });
 
 test("sending scrolls immediately before the response and stays at the bottom after refresh", async () => {
   const response = deferred();
@@ -191,4 +195,23 @@ test("image reads stay with the originating draft; logout clears all drafts and 
   assert.equal(s.draft.value, "carol draft");
   assert.equal(s.drafts.has("bob-created"), false);
   assert.equal(s.calls.filter((c: any) => c.method === "POST").length, 1);
+});
+
+test("the attachment button takes any file: images go as images, other files as files, within the limits", async () => {
+  const s = mount();
+  await s.select("a");
+  const reading = s.upload({ target: { files: [{ name: "shot.png", type: "image/png", size: 1 }, { name: "report.pdf", type: "application/pdf", size: 1 }, { name: "data.bin", type: "", size: 1 }], value: "x" } });
+  for (const reader of s.readers) reader.onload();
+  await reading;
+  assert.deepEqual(JSON.parse(JSON.stringify(s.attachments.value.map((a: any) => [a.name, a.mime]))), [["shot.png", "image/png"], ["report.pdf", "application/pdf"], ["data.bin", "application/octet-stream"]]);
+  await s.send();
+  const body = JSON.parse(JSON.stringify(s.calls.find((c: any) => c.method === "POST").data));
+  assert.deepEqual(body.images, [{ mime: "image/png", data: "YQ==" }]);
+  assert.deepEqual(body.files.map((f: any) => f.name), ["report.pdf", "data.bin"]);
+  assert.equal(s.attachments.value.length, 0);
+  await s.upload({ target: { files: [{ name: "big.zip", type: "application/zip", size: 26 << 20 }], value: "x" } });
+  assert.match(s.context.error.value, /25MiB/);
+  await s.upload({ target: { files: Array.from({ length: 17 }, (_, i) => ({ name: i + ".txt", type: "text/plain", size: 1 })), value: "x" } });
+  assert.match(s.context.error.value, /16 个附件/);
+  assert.equal(s.attachments.value.length, 0, "rejected picks add nothing");
 });

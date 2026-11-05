@@ -1,6 +1,7 @@
 import type { Obj } from "./util";
 import { assert, expand, httpURL, object, clone } from "./util";
 import { validateMcpServer } from "../../shared/mcp-config";
+import { modelContext, validateContextRules } from "../../shared/context-rules";
 export type Config = {
   model: string;
   provider: Record<string, Obj>;
@@ -8,7 +9,6 @@ export type Config = {
   systemPrompt?: string;
   contextMode?: string;
   mcp?: Record<string, Obj>;
-  relay?: Obj;
   skills?: Obj[];
   employeeId?: string;
   skillsDirectory?: string;
@@ -44,6 +44,7 @@ export function modelEntries(models: Obj, prefix = ""): Record<string, Obj> {
         "options",
         "variants",
         "contextWindow",
+        "contextSource",
         "supportsImages",
       ].some((k) => k in row)
     )
@@ -104,7 +105,7 @@ export function resolveModel(config: Config, selection = config.model): Model {
     baseURL = "https://chatgpt.com/backend-api/codex";
   if (p.localAuth === "claude-code") baseURL = "https://api.anthropic.com";
   httpURL(baseURL);
-  const contextWindow = m.limit?.context || m.contextWindow || 200000,
+  const contextWindow = modelContext(p, key, m).context,
     maxOutputTokens = m.limit?.output || m.maxOutputTokens || 32000;
   assert(
     Number.isSafeInteger(contextWindow) &&
@@ -146,6 +147,7 @@ export function resolveModel(config: Config, selection = config.model): Model {
   };
 }
 export function validateConfig(c: Config) {
+  for (const p of Object.values(c.provider || {})) validateContextRules(p.contextRules);
   if (c.model) resolveModel(c);
   assert(
     !c.contextMode || ["auto", "acp"].includes(c.contextMode),
@@ -181,7 +183,6 @@ export function maskedConfig(config: Config) {
     for (const h of [p.headers, p.options?.headers])
       if (h) for (const k in h) h[k] = mask(h[k]);
   }
-  if (copy.relay) copy.relay.token = mask(copy.relay.token);
   for (const m of Object.values(copy.mcp || {}))
     for (const h of [m.env, m.headers])
       if (h) for (const k in h) h[k] = mask(h[k]);

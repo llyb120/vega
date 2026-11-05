@@ -2,11 +2,15 @@
 import { ref } from "vue";
 import Icon from "./Icon.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
+import GroupAvatar from "./GroupAvatar.vue";
+import UserAvatar from "./UserAvatar.vue";
 const props = defineProps({
   user: Object,
   isAdmin: Boolean,
   canExecute: Boolean,
   groups: Array,
+  chats: Array,
+  selectedGroup: String,
   selectedEmployee: String,
   view: String,
   creating: Boolean,
@@ -20,12 +24,13 @@ const props = defineProps({
   running: Object,
   currentRoot: String,
 });
-const emit = defineEmits(["choose", "create", "navigate", "logout", "close", "expand", "retry-pairing", "select-session", "remove-session"]);
+const emit = defineEmits(["choose", "open-group", "create", "navigate", "logout", "close", "expand", "retry-pairing", "select-session", "remove-session"]);
 const clientOpen = ref(false);
 const roleLabel = { admin: "管理员", operator: "操作用户", viewer: "只读用户" };
 const adminNav = [["experiences", "经验图谱", "graph"], ["debug", "调试会话", "code"], ["settings", "系统设置", "settings"]];
 function employeeTone(entry) { return entry.attentionTasks ? "warn" : entry.activeTasks ? "info" : ""; }
 function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionTasks} 项待你处理` : entry.activeTasks ? `${entry.activeTasks} 项进行中` : "空闲"; }
+const unreadLabel = (n) => n > 99 ? "99+" : String(n);
 </script>
 <template>
   <div class="sidebar-inner">
@@ -41,7 +46,7 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
         <span class="nav-label">数字牛马</span>
         <button v-if="canExecute" type="button" class="icon sm add-employee" :class="{ active: creating }" aria-label="创建牛马" title="创建牛马" @click="emit('create')"><Icon name="plus" :size="16" /></button>
       </div>
-      <template v-for="group in groups" :key="group.scope">
+      <template v-for="group in groups" :key="group.key">
         <div v-if="groups.length > 1" class="sidebar-group nav-label">{{ group.label }}</div>
         <button
           v-for="entry in group.entries"
@@ -55,11 +60,32 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
         >
           <span class="nav-avatar"><EmployeeAvatar :employee-id="entry.id" :name="entry.name" :avatar="entry.avatar" :animate="!!entry.runningTasks" /><span v-if="employeeTone(entry)" :class="['avatar-dot', employeeTone(entry)]" aria-hidden="true"></span></span>
           <span class="nav-text nav-label"><strong class="truncate">{{ entry.name }}</strong><small :class="employeeTone(entry)">{{ employeeLine(entry) }}</small></span>
+          <span v-if="entry.unread" class="unread" :aria-label="entry.unread + ' 条未读消息'">{{ unreadLabel(entry.unread) }}</span>
           <span v-if="entry.attentionTasks" class="count warn nav-label">{{ entry.attentionTasks }}</span>
           <span v-else-if="entry.activeTasks" class="count nav-label">{{ entry.activeTasks }}</span>
         </button>
       </template>
       <p v-if="!groups.length" class="sidebar-empty nav-label">还没有牛马</p>
+
+      <div class="sidebar-section-head">
+        <span class="nav-label">群聊</span>
+        <button v-if="user?.role !== 'viewer'" type="button" class="icon sm add-employee" :class="{ active: view === 'group' && !selectedGroup }" aria-label="发起群聊" title="发起群聊" @click="emit('open-group', '')"><Icon name="plus" :size="16" /></button>
+      </div>
+      <button
+        v-for="chat in chats"
+        :key="chat.id"
+        type="button"
+        class="nav-item employee-item"
+        :class="{ active: view === 'group' && selectedGroup === chat.id }"
+        :aria-current="view === 'group' && selectedGroup === chat.id ? 'page' : undefined"
+        :title="chat.name"
+        @click="emit('open-group', chat.id)"
+      >
+        <span class="nav-avatar group-nav-avatar"><GroupAvatar :group="chat" /><span v-if="chat.running?.length" class="avatar-dot info" aria-hidden="true"></span></span>
+        <span class="nav-text nav-label"><strong class="truncate">{{ chat.name }}</strong><small class="truncate">{{ chat.running?.length ? '牛马回复中…' : chat.lastText || `${chat.users.length} 人 · ${chat.employees.length} 个牛马` }}</small></span>
+        <span v-if="chat.unread" class="unread" :aria-label="chat.unread + ' 条未读消息'">{{ unreadLabel(chat.unread) }}</span>
+      </button>
+      <p v-if="!chats?.length" class="sidebar-empty nav-label">拉上同事和牛马一起干活</p>
 
       <template v-if="view === 'chat' && sessions?.length">
         <div class="sidebar-section-head"><span class="nav-label">历史会话</span><span class="count nav-label">{{ sessions.length }}</span></div>
@@ -94,7 +120,7 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
       </div>
       <div class="account-row">
         <button type="button" class="nav-item account-item" :class="{ active: view === 'account' }" title="账号与安全" @click="emit('navigate', 'account')">
-          <span class="account-avatar" aria-hidden="true">{{ user?.username?.slice(0, 1).toUpperCase() }}</span>
+          <span class="account-avatar" aria-hidden="true"><UserAvatar :user-id="user?.id" :name="user?.username" :avatar="user?.avatar" /></span>
           <span class="nav-label nav-text"><strong class="truncate">{{ user?.username }}</strong><small>{{ roleLabel[user?.role] }} · 账号与安全</small></span>
         </button>
         <button type="button" class="icon nav-label" aria-label="退出登录" title="退出登录" @click="emit('logout')"><Icon name="logout" :size="17" /></button>
@@ -103,6 +129,7 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
   </div>
 </template>
 <style scoped>
+.unread { flex: none; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--danger); color: #fff; font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; }
 .sidebar-inner { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .sidebar-brand { display: flex; align-items: center; gap: 10px; flex: none; height: 52px; padding: 0 12px 0 16px; }
 .sidebar-brand .brand-mark { width: 28px; height: 28px; border-radius: 8px; font-size: 14px; }
@@ -121,6 +148,8 @@ function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionT
 .nav-avatar, .nav-icon { position: relative; display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 8px; }
 .nav-avatar { background: var(--accent-soft); color: var(--accent-text); font-size: 12px; font-weight: 600; }
 .nav-icon { color: var(--muted); }
+.group-nav-avatar { font-size: 7px; }
+.account-avatar { overflow: hidden; }
 .nav-item.active .nav-icon { color: var(--accent); }
 .avatar-dot { position: absolute; right: -2px; bottom: -2px; width: 10px; height: 10px; border: 2px solid var(--sidebar); border-radius: 50%; background: var(--faint); }
 .avatar-dot.info { background: var(--info); }

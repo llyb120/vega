@@ -2,18 +2,24 @@
 import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
+import UserAvatar from "./UserAvatar.vue";
 import Icon from "./Icon.vue";
+import FileCard from "./FileCard.vue";
 import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
+import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean });
-const emit = defineEmits(["quote", "jump", "task", "retry", "remember"]);
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean });
+const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author", "mention"]);
+// In a group, long-pressing an employee's avatar @mentions it in the composer (mentionAuthor); a tap still opens it.
+const pressable = computed(() => props.mentionAuthor && sender.value.kind === "employee");
 const exportOpen = ref(false), exportError = ref("");
 // Task links show the employee's live task status (the copy stored in the message is a snapshot from when it was written).
-// A colleague employee's message sits on the employee side with its own name and avatar, never as "me".
-const mine = computed(() => props.message.role === "user" && !props.message.colleague);
-const sender = computed(() => props.message.colleague ? { id: props.message.colleague.employeeId, name: `牛马「${props.message.colleague.name}」`, avatar: props.message.colleague.avatar || "" } : { id: props.employeeId, name: props.name, avatar: props.avatar });
+// In a group every message carries its author (a user or an employee, avatar filled in by the group view); only the
+// viewer's own messages sit on the right. A private chat has no authors: user messages are mine, the rest the employee's.
+const mine = computed(() => props.message.role === "user" && (!props.message.author || props.message.author.id === props.viewerId));
+const sender = computed(() => props.message.author ? { kind: props.message.author.kind, id: props.message.author.id, name: props.message.author.name, avatar: props.message.author.avatar || "" } : { kind: "employee", id: props.employeeId, name: props.name, avatar: props.avatar });
 const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
 const linkedTask = computed(() => {
   const id = props.message.tasks?.[0]?.id;
@@ -39,13 +45,15 @@ async function runExport(format) {
 }
 </script>
 <template>
-  <article class="chat-message" :class="[mine ? 'user' : 'assistant', { continued, colleague: !!message.colleague }]" :data-message-seq="message.seq" tabindex="-1">
+  <article class="chat-message" :class="[mine ? 'user' : 'assistant', { continued, authored: !!message.author }]" :data-message-seq="message.seq" tabindex="-1">
     <span v-if="!mine && continued" class="chat-avatar spacer" aria-hidden="true"></span>
-    <span v-else-if="!mine" class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></span>
+    <button v-else-if="!mine && openAuthor" type="button" class="chat-avatar author-link" :aria-label="'打开和 ' + sender.name + ' 的聊天'" :title="'打开和 ' + sender.name + ' 的聊天'" @click="emit('author', sender.id)"><PressMention :name="sender.name" :disabled="!pressable" @press="emit('mention', $event)"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></PressMention></button>
+    <span v-else-if="!mine" class="chat-avatar" aria-hidden="true"><UserAvatar v-if="sender.kind === 'user'" :user-id="sender.id" :name="sender.name" :avatar="sender.avatar" /><PressMention v-else :name="sender.name" :disabled="!pressable" @press="emit('mention', $event)"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></PressMention></span>
     <div class="chat-content">
       <div class="chat-heading">
-        <strong v-if="!mine && !continued">{{ sender.name }}</strong>
-        <span v-if="message.colleague" class="colleague-tag">{{ message.role === 'user' ? '同事转交' : '同事回复' }}</span>
+        <button v-if="!mine && !continued && openAuthor" type="button" class="author-name" @click="emit('author', sender.id)">{{ sender.name }}</button>
+        <strong v-else-if="!mine && !continued">{{ sender.name }}</strong>
+        <span v-if="!mine && sender.kind === 'user' && message.author" class="author-tag">用户</span>
         <time v-if="message.at">{{ shortTime(message.at) }}</time>
         <button v-if="quotable && message.seq" type="button" class="chat-reply" aria-label="引用这条消息" title="引用" @click="emit('quote', message)"><Icon name="reply" :size="13" /><span class="reply-label">引用</span></button>
         <button v-if="rememberable && !mine && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
@@ -55,6 +63,7 @@ async function runExport(format) {
         <UserMessage v-if="message.role === 'user' && message.text" :text="message.displayText || message.text" />
         <MessageText v-else-if="message.text" :text="message.displayText || message.text" :streaming="message.streaming" />
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
+        <FileCard v-for="(file, index) in message.files || []" :key="'f' + index" :file="file" />
       </div>
       <div v-if="message.sendStatus" class="chat-send-status" role="status">
         <span v-if="message.sendStatus === 'sending'"><span class="spinner" aria-hidden="true"></span>发送中…</span>
@@ -77,6 +86,7 @@ async function runExport(format) {
         <p v-if="exportError" class="chat-export-error" role="alert">{{ exportError }}</p>
       </div>
     </div>
+    <span v-if="mine && message.author" class="chat-avatar" aria-hidden="true"><UserAvatar :user-id="message.author.id" :name="message.author.name" :avatar="message.author.avatar" /></span>
   </article>
 </template>
 <style scoped>
@@ -94,8 +104,7 @@ async function runExport(format) {
 .user .chat-content > * { max-width: 100%; }
 .chat-heading { display: flex; align-items: center; gap: 8px; min-height: 20px; color: var(--muted); font-size: 11px; }
 .chat-heading strong { color: var(--text-2); font-size: 12px; font-weight: 600; }
-.colleague-tag { padding: 0 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; }
-.colleague .chat-bubble { box-shadow: inset 2px 0 var(--accent); }
+.author-tag { padding: 0 6px; border-radius: 999px; background: var(--surface-3); color: var(--muted); font-size: 11px; }
 .chat-send-status { color: var(--muted); font-size: 11px; }
 .chat-send-status > span { display: flex; align-items: center; gap: 5px; }
 .chat-send-status .spinner { width: 11px; height: 11px; }
@@ -109,6 +118,10 @@ async function runExport(format) {
 .chat-message:focus .chat-bubble { outline: 2px solid var(--accent); outline-offset: 2px; }
 .chat-bubble :deep(.message-text) { font-size: 14px; }
 .chat-bubble :deep(.code-block) { margin-left: -4px; margin-right: -4px; }
+.author-link { padding: 0; border: 0; cursor: pointer; }
+.author-link:hover:not(:disabled) { background: var(--accent-soft); filter: brightness(1.05); }
+.author-name { height: auto; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--text-2); font-size: 12px; font-weight: 600; }
+.author-name:hover:not(:disabled) { background: transparent; color: var(--accent-text); text-decoration: underline; }
 .chat-bubble img { display: block; max-width: 100%; max-height: 360px; margin-top: 6px; border-radius: var(--r-md); }
 .chat-quote { display: grid; justify-content: stretch; justify-items: start; gap: 1px; width: 100%; height: auto; min-height: 0; margin: 0 0 6px; padding: 4px 8px; border: 0; border-left: 2px solid var(--accent); border-radius: 2px 6px 6px 2px; background: rgb(255 255 255 / 60%); color: var(--text-2); font-weight: 400; text-align: left; white-space: normal; }
 .chat-quote strong { font-size: 11px; }

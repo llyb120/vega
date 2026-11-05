@@ -320,15 +320,14 @@ export class Auth {
     await this.revoke(id);
   }
   async canRead(user: User, session: Session) {
+    // A group chat's own session: everyone in the group (groups.ts).
+    if (session.groupId && !session.employeeId)
+      return !!(await this.store.object<{ users: string[] }>("group", session.groupId))?.users.includes(user.id);
     if (session.employeeId) {
       const employee = session.employeeId === "default"
         ? await this.store.get<any>("employee", {})
         : await this.store.object<any>("employee", session.employeeId);
-      if (employee) {
-        const owner = employee.ownerId ? await this.user(employee.ownerId) : undefined;
-        if (employee.scope === "team" || (!employee.scope && (session.employeeId === "default" || owner?.role === "admin"))) return true;
-        if (user.role === "admin" || employee.ownerId === user.id) return true;
-      }
+      if (employee && (user.role === "admin" || employee.ownerId === user.id)) return true;
     }
     return (
       session.ownerId === user.id ||

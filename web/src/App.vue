@@ -14,7 +14,7 @@ import EmployeeTasks from "./EmployeeTasks.vue";
 import EmployeeDuties from "./EmployeeDuties.vue";
 import EmployeeMemories from "./EmployeeMemories.vue";
 import EmployeeSettings from "./EmployeeSettings.vue";
-import MentionTextarea from "./MentionTextarea.vue";
+import GroupChat from "./GroupChat.vue";
 import EmployeeCapabilities from "./EmployeeCapabilities.vue";
 import EmployeeVault from "./EmployeeVault.vue";
 import WorkPanel from "./WorkPanel.vue";
@@ -24,6 +24,9 @@ import Icon from "./Icon.vue";
 import DebugSessions from "./DebugSessions.vue";
 import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
+import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
+import { useUnread } from "./unread.js";
+import { ADMIN_PAGES, parseRoute, formatRoute } from "./router.js";
 import {
   computed,
   nextTick,
@@ -68,6 +71,7 @@ function retryLocalPairing() {
 const mobileTitles = {
   chat: "对话",
   employee: "数字牛马",
+  group: "群聊",
   debug: "调试会话",
   browser: "浏览器",
   experiences: "经验图谱",
@@ -186,14 +190,14 @@ const sessions = ref([]),
   sessionLoading = ref(false),
   folds = ref([]),
   running = ref({}),
-  composer = ref({ text: "", images: [] }),
+  composer = ref({ text: "", attachments: [] }),
   draft = computed({
     get: () => composer.value.text,
     set: (text) => { composer.value.text = text; },
   }),
   attachments = computed({
-    get: () => composer.value.images,
-    set: (images) => { composer.value.images = images; },
+    get: () => composer.value.attachments,
+    set: (items) => { composer.value.attachments = items; },
   }),
   sending = ref(false),
   draftExecution = ref(null),
@@ -203,7 +207,7 @@ const sessions = ref([]),
 const drafts = new Map([["", composer.value]]);
 function restoreDraft() {
   const id = current.value?.id || "";
-  composer.value = drafts.get(id) || { text: "", images: [] };
+  composer.value = drafts.get(id) || { text: "", attachments: [] };
   drafts.set(id, composer.value);
 }
 const contextBudget = ref(null),
@@ -234,6 +238,10 @@ const employee = ref({
   debugRevision = ref(0),
   employees = ref([]),
   selectedEmployee = ref(""),
+  // 群聊: the viewer's groups (sidebar), the open one ("" with view "group" = the create form) and its live revision.
+  groups = ref([]),
+  selectedGroup = ref(""),
+  groupRevision = ref(0),
   employeeEvent = ref(null),
   employeeComposers = ref({}),
   creatingEmployee = ref(false),
@@ -378,9 +386,9 @@ function showTasks(filter = "active") {
   workRailOpen.value = false;
   employeeTab.value = "tasks";
 }
-// A new employee is a team employee when an admin creates it (reaches the team), else the user's personal one (reaches the list: team + own).
-const newEmployeeColleagues = computed(() => employees.value.filter((entry) => !isAdmin.value || entry.scope === "team"));
-const employeeGroups = computed(() => [['team', '团队牛马'], ['personal', isAdmin.value ? '个人牛马' : '我的牛马']].map(([scope, label]) => ({ scope, label, entries: employees.value.filter((employee) => employee.scope === scope) })).filter((group) => group.entries.length));
+// Every employee belongs to its owner; administrators also see everyone else's (to oversee them).
+const employeeGroups = computed(() => [['mine', '我的牛马', true], ['others', '其他用户的牛马', false]].map(([key, label, mine]) => ({ key, label, entries: employees.value.filter((employee) => !!employee.mine === mine) })).filter((group) => group.entries.length));
+const myEmployees = computed(() => employees.value.filter((employee) => employee.mine));
 const labels = {
   queued: "排队中",
   running: "执行中",
@@ -594,14 +602,29 @@ function toast(text) {
 }
 async function bootstrap() {
   const b = await api("/bootstrap");
-  user.value = b.user;
   sessions.value = (b.sessions || []).filter((session) => !session.taskId);
   running.value = b.running || {};
   onlineClients.value = b.clients || [];
   clientListReady.value = true;
   config.value = b.config || {};
+  user.value = { ...b.user, avatar: b.avatar || "" };
   if (!project.value) project.value = b.cwd;
+  await loadGroups();
   return b;
+}
+async function loadGroups() {
+  try { groups.value = await api("/groups"); } catch (e) { if (!e.network) error.value = e.message; }
+}
+function openGroup(id = "") {
+  selectedGroup.value = id;
+  creatingEmployee.value = false;
+  view.value = "group";
+  closeNavigation();
+}
+async function groupClosed() {
+  selectedGroup.value = "";
+  await loadGroups();
+  view.value = "employee";
 }
 async function enter(result) {
   user.value = result.user;
@@ -613,14 +636,20 @@ async function enter(result) {
   await bootstrap();
   startLocalPairing();
   if (isAdmin.value) startPresence();
+  // Open the page in the address bar: an employee link is checked against the visible list by loadEmployee.
+  const route = parseRoute(window.location.href);
+  routeReady = false;
+  if (route.employee) selectedEmployee.value = route.employee;
   await Promise.all([loadModels(), refreshEmployee()]);
-  view.value = "employee";
+  await applyRoute(route);
   try {
     const pending = JSON.parse(
       sessionStorage.getItem("vega:provider-login:" + user.value.id) || "null",
     );
     if (isAdmin.value && pending?.expires > Date.now()) view.value = "settings";
   } catch {}
+  routeReady = true;
+  syncRoute(true);
   closed = false;
 }
 async function login() {
@@ -643,6 +672,7 @@ async function login() {
   authBusy.value = false;
 }
 function resetLogin() {
+  routeReady = false;
   void clearChatCache(user.value?.id);
   employeeLoadVersion++;
   try {
@@ -696,6 +726,8 @@ function resetLogin() {
   employeeSession.value = "";
   employees.value = [];
   selectedEmployee.value = "";
+  groups.value = [];
+  selectedGroup.value = "";
   employeeEvent.value = null;
   employeeComposers.value = {};
   employeeError.value = "";
@@ -711,7 +743,7 @@ async function logout() {
   }
 }
 onMounted(() => {
-  window.addEventListener("popstate", employeeLocationChanged);
+  window.addEventListener("popstate", routeChanged);
   void checkAuth();
 });
 async function checkAuth(delay = 1000) {
@@ -730,7 +762,7 @@ async function checkAuth(delay = 1000) {
     setTimeout(() => checkAuth(Math.min(delay * 2, 10000)), delay);
   }
 }
-onBeforeUnmount(() => window.removeEventListener("popstate", employeeLocationChanged));
+onBeforeUnmount(() => window.removeEventListener("popstate", routeChanged));
 async function selectSession(session) {
   if (session.taskId) {
     openEmployee(session.id);
@@ -846,7 +878,8 @@ async function send() {
   if (uploading.value) return;
   sending.value = true;
   const pending = composer.value,
-    body = { text: pending.text, images: [...pending.images] },
+    items = [...pending.attachments],
+    body = { text: pending.text, ...attachmentPayload(items) },
     account = csrfToken.value,
     request = sessionRequest;
   let session = current.value;
@@ -872,10 +905,10 @@ async function send() {
     const path = running.value[id] ? "steer" : "messages";
     const result = await api(`/sessions/${id}/${path}`, "POST", body);
     if (csrfToken.value !== account) return;
-    if (pending.text === body.text && pending.images.length === body.images.length &&
-        pending.images.every((image, i) => image === body.images[i])) {
+    if (pending.text === body.text && pending.attachments.length === items.length &&
+        pending.attachments.every((item, i) => item === items[i])) {
       pending.text = "";
-      pending.images = [];
+      pending.attachments = [];
     }
     if (current.value?.id !== id) return;
     if (result.id && result.id !== id) {
@@ -909,36 +942,9 @@ async function upload(event) {
     id = current.value?.id || "",
     account = csrfToken.value;
   await attempt(async () => {
-    const files = [...event.target.files];
-    if (files.length + target.images.length > 16)
-      throw Error("每条消息最多16张图片");
-    if (
-      files.reduce((n, f) => n + f.size, 0) +
-        target.images.reduce((n, f) => n + (f.data.length * 3) / 4, 0) >
-      64 * 1024 * 1024
-    )
-      throw Error("图片总大小不能超过64MiB");
-    for (const file of files) {
-      if (
-        ![
-          "image/png",
-          "image/jpeg",
-          "image/webp",
-          "image/gif",
-          "image/bmp",
-        ].includes(file.type) ||
-        file.size > 25 * 1024 * 1024
-      )
-        throw Error("请选择PNG、JPEG、WebP、GIF或BMP图片，单张不能超过25MiB");
-      const data = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result).split(",")[1]);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      if (csrfToken.value !== account || drafts.get(id) !== target) return;
-      target.images.push({ mime: file.type, data });
-    }
+    const items = await readAttachments(event.target.files, target.attachments);
+    if (csrfToken.value !== account || drafts.get(id) !== target) return;
+    target.attachments.push(...items);
   });
   event.target.value = "";
   uploading.value = false;
@@ -984,6 +990,7 @@ function background(promise) {
 }
 const refreshCurrentSoon = coalesced(() => refreshCurrent()),
   bootstrapSoon = coalesced(() => bootstrap()),
+  loadGroupsSoon = coalesced(() => loadGroups()),
   refreshEmployeeSoon = coalesced(() => refreshEmployee());
 /** Streamed tokens are buffered and painted once per frame (hidden tabs: every 250ms). */
 let pendingLive = "", pendingThinking = "", liveFrame = 0, liveTimer, liveEpoch = 0;
@@ -1022,6 +1029,17 @@ function handleEvent(event) {
   if (view.value === "debug" && ["started", "message_end", "tool_end", "done", "employee_changed"].includes(event.type)) debugRevision.value++;
   if (event.session && event.session === employee.value.chatSession) {
     employeeEvent.value = event;
+    unread.onEvent(event);
+    return;
+  }
+  unread.onEvent(event);
+  if (event.type === "group_changed") {
+    background((async () => {
+      await loadGroupsSoon();
+      if (view.value !== "group" || event.data?.groupId !== selectedGroup.value) return;
+      if (groups.value.some((g) => g.id === selectedGroup.value)) groupRevision.value++;
+      else { toast("你已不在这个群聊中（被移出或群聊已解散）"); selectedGroup.value = ""; view.value = "employee"; }
+    })());
     return;
   }
   if (event.type === "clients_changed") {
@@ -1169,19 +1187,10 @@ function selectedNow(session) {
   return current.value?.id === session;
 }
 let employeeLoadVersion = 0;
-function employeeLocationChanged() {
-  if (user.value) return chooseEmployee(new URL(window.location.href).searchParams.get("employee") || "");
-}
-function setEmployeeURL(id, replace = false) {
-  const url = new URL(window.location.href);
-  if (id) url.searchParams.set("employee", id);
-  else url.searchParams.delete("employee");
-  if (url.href !== window.location.href) window.history[replace ? "replaceState" : "pushState"](null, "", url.href);
-}
 function prepareEmployee(id) {
   const entry = employees.value.find((item) => item.id === id);
   if (!entry) return;
-  employeeComposers.value[id] ||= { text: "", images: [] };
+  employeeComposers.value[id] ||= { text: "", attachments: [] };
   if (employee.value.id !== id)
     employee.value = { ...entry, canManage: false, duties: [], tasks: [], memories: [], runs: [] };
 }
@@ -1193,10 +1202,8 @@ async function loadEmployee() {
   void pruneChatCache(owner, list.map((entry) => entry.id));
   employees.value = list;
   activeTaskCount.value = list.reduce((count, employee) => count + employee.activeTasks, 0);
-  const requested = selectedEmployee.value || new URL(window.location.href).searchParams.get("employee");
-  const id = list.find((entry) => entry.id === requested)?.id || list[0]?.id || "";
+  const id = list.find((entry) => entry.id === selectedEmployee.value)?.id || list[0]?.id || "";
   selectedEmployee.value = id;
-  setEmployeeURL(id, true);
   if (!id) {
     employee.value = { duties: [], tasks: [], memories: [], runs: [] };
     employeeSession.value = "";
@@ -1219,7 +1226,6 @@ function employeeBrowserApi(path, method = "GET", data) {
 async function chooseEmployee(id) {
   selectedEmployee.value = id;
   prepareEmployee(id);
-  setEmployeeURL(id);
   employeeSession.value = "";
   employeeEvent.value = null;
   employeeTab.value = "chat";
@@ -1320,11 +1326,14 @@ async function openEmployeeTask(id) {
   employeeTaskFocus.value = id;
   employeeTab.value = "tasks";
 }
-/** 转交 links: open a task on another employee (only one the current user can see). */
-async function openColleagueTask({ employeeId, taskId }) {
+/** A task link in a group chat: open it on the (own) employee that runs it. */
+async function openEmployeeTaskOf({ employeeId, taskId }) {
   if (!employees.value.some((entry) => entry.id === employeeId)) { toast("你没有权限查看这个牛马"); return; }
-  if (selectedEmployee.value !== employeeId) await chooseEmployee(employeeId);
+  if (selectedEmployee.value !== employeeId || view.value !== "employee") await chooseEmployee(employeeId);
   if (selectedEmployee.value === employeeId) await openEmployeeTask(taskId);
+}
+function openGroupEmployee(id) {
+  if (employees.value.some((entry) => entry.id === id)) void chooseEmployee(id);
 }
 async function employeeTabChanged(id) {
   employeeTab.value = id;
@@ -1398,8 +1407,6 @@ async function saveEmployeeSettings() {
       action: "settings",
       name: employee.value.name,
       instruction: employee.value.instruction,
-      publicSummary: employee.value.publicSummary || "",
-      acceptsColleagues: employee.value.acceptsColleagues !== false,
       cwd: employee.value.cwd,
     });
     toast("牛马设置已保存");
@@ -1416,6 +1423,57 @@ onBeforeUnmount(() => {
   eventsSocket?.close();
   localBridge?.close();
 });
+// 路由: the address bar mirrors the open page and its tab (router.js); refresh, links and back/forward restore it.
+// User navigation pushes; restoring a route and falling back from unknown or forbidden ids replace.
+// Each page remembers its own tab for this visit (settings section, debug session, …); group side panels do not.
+
+const pageTabs = ref({});
+const pageKey = computed(() => view.value === "group" ? "group:" + selectedGroup.value : view.value);
+const pageSub = computed(() => pageTabs.value[pageKey.value] || "");
+function setPageTab(tab) { pageTabs.value = { ...pageTabs.value, [pageKey.value]: tab || "" }; }
+const routePath = computed(() => user.value ? formatRoute({
+  view: view.value, employee: selectedEmployee.value, creating: creatingEmployee.value, tab: employeeTab.value, task: employeeTaskFocus.value,
+  session: view.value === "employee" ? employeeSession.value : current.value?.id, group: selectedGroup.value, sub: pageSub.value,
+}) : "");
+let routeReady = false, routing = 0;
+function syncRoute(replace) {
+  const path = routePath.value;
+  if (routeReady && path && path !== window.location.pathname + window.location.search) window.history[replace ? "replaceState" : "pushState"](null, "", path);
+}
+watch(routePath, () => syncRoute(routing > 0));
+async function applyRoute(route) {
+  routing++;
+  try {
+    if (route.view === "group" && route.group && !groups.value.some((g) => g.id === route.group)) route = { view: "employee" };
+    if (ADMIN_PAGES.includes(route.view) && !isAdmin.value) route = { view: "employee" };
+    if (route.view === "group") openGroup(route.group);
+    else if (route.view === "chat") {
+      const session = route.session && sessions.value.find((s) => s.id === route.session);
+      if (session) await attempt(() => selectSession(session));
+      else { current.value = null; view.value = "chat"; }
+    } else if (route.view !== "employee") view.value = route.view;
+    else if (route.creating && canExecute.value) { creatingEmployee.value = true; openEmployee(); }
+    else {
+      const id = employees.value.some((e) => e.id === route.employee) ? route.employee : selectedEmployee.value;
+      if (id && (id !== selectedEmployee.value || creatingEmployee.value || employee.value.id !== id)) await chooseEmployee(id);
+      else { creatingEmployee.value = false; employeeSession.value = ""; employeeTaskFocus.value = ""; employeeTab.value = "chat"; view.value = "employee"; }
+      if (id && selectedEmployee.value === id) {
+        if (route.session) openEmployee(route.session);
+        else if (route.task) await openEmployeeTask(route.task);
+        else if (employeeTabs.value.some(([tab]) => tab === route.tab)) employeeTab.value = route.tab;
+      }
+    }
+    setPageTab(route.sub);
+  } finally {
+    await nextTick();
+    routing--;
+  }
+}
+function routeChanged() {
+  if (user.value && routeReady) void applyRoute(parseRoute(window.location.href));
+}
+// Last, once all the state it reads exists.
+const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, employeeTab, selectedEmployee, employees, employee, groups, background }));
 </script>
 
 <template>
@@ -1465,6 +1523,8 @@ onBeforeUnmount(() => {
         :is-admin="isAdmin"
         :can-execute="canExecute"
         :groups="employeeGroups"
+        :chats="groups"
+        :selected-group="selectedGroup"
         :selected-employee="selectedEmployee"
         :view="view"
         :creating="view === 'employee' && creatingEmployee"
@@ -1478,6 +1538,7 @@ onBeforeUnmount(() => {
         :running="running"
         :current-root="rootSession?.id"
         @choose="chooseEmployee"
+        @open-group="openGroup"
         @create="creatingEmployee = true; openEmployee()"
         @navigate="view = $event"
         @logout="logout"
@@ -1519,11 +1580,11 @@ onBeforeUnmount(() => {
         <p v-if="!canWriteCurrent" class="context-note">历史会话仅供查阅；继续工作请交给牛马，执行会话由牛马管理。</p>
         <div v-if="canWriteCurrent" class="composer-wrap">
           <form class="composer" @submit.prevent="send">
-            <div v-if="attachments.length" class="attachments"><button v-for="(im, i) in attachments" :key="i" type="button" @click="attachments.splice(i, 1)"><Icon name="image" :size="12" />图片 {{ i + 1 }}<Icon name="close" :size="12" /></button></div>
+            <div v-if="attachments.length" class="attachments"><button v-for="(item, i) in attachments" :key="i" type="button" :title="'移除 ' + item.name" @click="attachments.splice(i, 1)"><Icon :name="isImage(item) ? 'image' : 'file'" :size="12" />{{ item.name }}<Icon name="close" :size="12" /></button></div>
             <textarea v-model="draft" aria-label="消息" :placeholder="isRunning ? '补充当前任务的约束，不会重开任务…' : '输入消息，Enter 发送…'" rows="2" enterkeyhint="enter" @keydown="messageKey"></textarea>
             <div class="composer-bottom">
-              <button type="button" class="attach icon" aria-label="添加图片" :disabled="uploading" @click="imageInput.click()"><Icon name="image" /></button>
-              <input ref="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple hidden @change="upload" />
+              <button type="button" class="attach icon" aria-label="添加附件" title="附件（图片或文件）" :disabled="uploading" @click="imageInput.click()"><Icon name="paperclip" /></button>
+              <input ref="imageInput" type="file" multiple hidden @change="upload" />
               <button type="button" class="execution-switch" role="switch" aria-label="客户端执行（关闭时在服务端执行）" :aria-checked="executionLocal" :class="{ local: executionLocal }" :title="executionHint" :disabled="executionBusy || (!executionLocal && !localConnected)" @click="toggleExecution">
                 <span :class="{ selected: !executionLocal }">服务端</span><span class="execution-track" aria-hidden="true"></span><span :class="{ selected: executionLocal }">客户端</span>
               </button>
@@ -1533,26 +1594,27 @@ onBeforeUnmount(() => {
               </select>
               <span class="hint">Enter 发送 · Shift + Enter 换行</span>
               <button v-if="isRunning" type="button" class="danger-text" @click="attempt(() => api(`/sessions/${current.id}/cancel`, 'POST', {}))"><Icon name="stop" :size="14" />停止</button>
-              <button class="primary" :disabled="sending || switchingExecution || uploading || executionUnavailable || (!draft.trim() && !attachments.length)">{{ uploading ? "读取图片…" : sending ? "提交中…" : isRunning ? "补充约束" : "发送" }}<Icon name="send" :size="14" /></button>
+              <button class="primary" :disabled="sending || switchingExecution || uploading || executionUnavailable || (!draft.trim() && !attachments.length)">{{ uploading ? "读取附件…" : sending ? "提交中…" : isRunning ? "补充约束" : "发送" }}<Icon name="send" :size="14" /></button>
             </div>
           </form>
           <p v-if="executionUnavailable" class="execution-warning" role="status">所选客户端已离线或尚未选择，请选择在线客户端或切换到服务端；不会自动切换或重试操作。</p>
         </div>
       </template>
+      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @read="unread.groupRead" />
       <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
-      <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" />
+      <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" :tab="pageSub" @tab="setPageTab" />
       <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" />
       <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
         <template v-if="(creatingEmployee || !employees.length)">
           <PageHeader :title="canExecute ? '创建新牛马' : '数字牛马'" :subtitle="canExecute ? '取个名字，交代工作方向，就可以开始了。' : ''" :back="employees.length ? '返回' : ''" @back="creatingEmployee = false" />
           <div class="page-scroll create-page">
             <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭牛马错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
-            <div v-if="!canExecute" class="empty-state"><Icon name="users" :size="28" /><strong>还没有团队牛马</strong><span>管理员创建的团队牛马会出现在这里。</span></div>
+            <div v-if="!canExecute" class="empty-state"><Icon name="users" :size="28" /><strong>只读账号不能创建牛马</strong><span>被拉进群聊后，可以在群里查看大家和牛马的协作。</span></div>
             <form v-else class="card create-card" @submit.prevent="createEmployee">
-              <div class="create-head"><span class="create-icon" aria-hidden="true"><Icon name="users" :size="22" /></span><div><h3>你想把什么交给他？</h3><p class="hint">{{ isAdmin ? '团队牛马 · 所有成员可见' : '个人牛马 · 仅本人和管理员可见' }}</p></div></div>
+              <div class="create-head"><span class="create-icon" aria-hidden="true"><Icon name="users" :size="22" /></span><div><h3>你想把什么交给他？</h3><p class="hint">仅你和管理员可见；需要和别人或别的牛马协作时，拉个群聊。</p></div></div>
               <div class="form-grid">
                 <label>牛马名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
-                <label>工作方向<MentionTextarea v-model="newEmployeeInstruction" :colleagues="newEmployeeColleagues" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果；发布相关的工作转交给 @发布助手。" /></label>
+                <label>工作方向<textarea v-model="newEmployeeInstruction" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
               </div>
               <ul class="create-facts">
                 <li><Icon name="check" :size="14" />创建后即可接活，无需设置启用或工作时间</li>
@@ -1609,7 +1671,6 @@ onBeforeUnmount(() => {
             @select="employeeTaskFocus = $event"
             @inspect="openEmployee($event)"
             @chat="employeeTab = 'chat'"
-            @open-task="openColleagueTask"
           />
           <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
           <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" /></div>
@@ -1634,8 +1695,8 @@ onBeforeUnmount(() => {
       </section>
       <ResourcesView v-else-if="view === 'resources'" />
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" />
-      <ExperiencesView v-else-if="view === 'experiences' && isAdmin" :api="api" />
-      <SettingsView v-else-if="view === 'settings' && isAdmin" :api="api" :config="config" :user-id="user.id" :models="catalogModels" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
+      <ExperiencesView v-else-if="view === 'experiences' && isAdmin" :api="api" :tab="pageSub" @tab="setPageTab" />
+      <SettingsView v-else-if="view === 'settings' && isAdmin" :api="api" :config="config" :user-id="user.id" :models="catalogModels" :tab="pageSub" @tab="setPageTab" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
     </section>
     <div class="toasts" aria-live="polite">
       <div v-if="error" class="toast error" role="alert"><Icon name="alert" :size="16" /><span>{{ error }}</span><button type="button" class="icon" aria-label="关闭错误" @click="error = ''"><Icon name="close" :size="14" /></button></div>

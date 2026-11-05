@@ -26,14 +26,8 @@
   {
     "baseURL": "",
     "modelsDev": false,
-    "name": "CodeBuddy（本地 API）",
+    "name": "CodeBuddy / WorkBuddy",
     "id": "codebuddy"
-  },
-  {
-    "baseURL": "",
-    "modelsDev": false,
-    "name": "WorkBuddy（本地 API）",
-    "id": "workbuddy"
   },
   {
     "baseURL": "https://api.commandcode.ai/provider/v1",

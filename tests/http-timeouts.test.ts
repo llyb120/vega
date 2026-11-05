@@ -73,11 +73,11 @@ test("Nova response-header timeout is 180s while explicit non-stream request dea
   assert.equal(regular.requests[0].signal.aborted, true);
   assert.match((await result).message, /total request timeout/);
 
-  const relay = transport();
-  const relayResult = relay.request("https://fixture.test/events", {}, 0, 20000).then(() => undefined, (error: Error) => error);
+  const long = transport();
+  const longResult = long.request("https://fixture.test/events", {}, 0, 20000).then(() => undefined, (error: Error) => error);
   await flush();
-  relay.advance(20000);
-  assert.match((await relayResult).message, /response headers.*20s/, "relay connection keeps its separate existing header deadline");
+  long.advance(20000);
+  assert.match((await longResult).message, /response headers.*20s/, "SSE-style long header deadline stays independent");
 });
 
 test("stream idle timeout resets per received chunk, even when total elapsed time exceeds 180s", async () => {

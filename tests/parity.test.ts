@@ -4,7 +4,8 @@ import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Store } from "../server/core/store";
-import { Subscriptions, locateWorkBuddy } from "../server/core/subscriptions";
+import { Subscriptions } from "../server/core/subscriptions";
+import presets from "../shared/provider-presets.json";
 import {
   loadSkills,
   skillMetadata,
@@ -50,21 +51,14 @@ test("skills index/frontmatter and explicit /skill invocation remain readable wi
     await rm(dir, { recursive: true, force: true });
   }
 });
-test("WorkBuddy built-in CLI locator uses reference app.asar.unpacked layout", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "vega-wb-"));
-  try {
-    assert.equal(
-      locateWorkBuddy(join(dir, "WorkBuddy.exe")),
-      join(dir, "resources/app.asar.unpacked/cli/bin/codebuddy"),
-    );
-    assert.equal(
-      locateWorkBuddy(dir),
-      join(dir, "resources/app.asar.unpacked/cli/bin/codebuddy"),
-    );
-    assert.equal(locateWorkBuddy("/explicit/cli"), "/explicit/cli");
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+test("CodeBuddy / WorkBuddy has one preset, selectable login channels and no bundled CLI helper", async () => {
+  assert.deepEqual(presets.filter((p) => ["codebuddy", "workbuddy"].includes(p.id)).map((p) => [p.id, p.name]), [["codebuddy", "CodeBuddy / WorkBuddy"]]);
+  const view = await readFile("web/src/ProviderSettings.vue", "utf8");
+  assert.match(view, /aria-label="登录通道"/);
+  assert.match(view, /value="workbuddy">WorkBuddy/);
+  assert.match(view, /raw\?\.preset === "workbuddy" \? "codebuddy"/);
+  assert.match(view, /row\.options\.codebuddySource = source\.value/);
+  assert.doesNotMatch(await readFile("server/plugins/vega.ts", "utf8"), /workbuddy-login|helper/);
 });
 test("subscription sessions encrypt before SQLite persistence; native wrapped args stay objects", async () => {
   const s = await Store.open(":memory:");
