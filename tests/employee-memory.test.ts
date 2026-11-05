@@ -233,6 +233,18 @@ test("model writes: environment is active at once, person_org waits for confirma
   assert(user.ok && user.memory.status === "active");
 });
 
+test("owner private chat definitions include memory_propose; guest chat context does not", async () => {
+  const { store, engine, employee, chat } = await fixture();
+  try {
+    const { Tools } = await import("../server/core/tools");
+    const ownerTools = await Tools.create(engine, chat, await engine.config(), new AbortController().signal, () => {});
+    const ownerNames = (await ownerTools.definitions({} as any)).map((t: { name: string }) => t.name);
+    assert(ownerNames.includes("memory_propose") && ownerNames.includes("memory_search"), ownerNames.join(","));
+    const { employeeTools } = await import("../server/core/public-tools");
+    assert(!employeeTools({ kind: "chat", member: true }).some((t) => t.name === "memory_propose"));
+  } finally { await engine.close(); await store.close(); }
+});
+
 test("employee memory tools propose/search/resolve and refresh prompt in the same turn", async () => {
   const { store, engine, employee, chat } = await fixture();
   let phase = "propose", requests = 0, memory = "";

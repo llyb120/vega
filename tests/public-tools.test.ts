@@ -196,7 +196,9 @@ test("visible tools and branches follow session, scene and permission like the o
   assert.deepEqual(names(chat).filter((name) => name.startsWith("vault_")), ["vault_get", "vault_list"]);
   assert(!commands({ kind: "normal" }, "employee_task_manage").includes("resume"), "resume/answer/stop are chat-only");
   assert(commands(chat, "employee_task_manage").includes("stop"));
+  assert(names(chat).includes("memory_propose"), "owner chat exposes memory_propose");
   assert.deepEqual(names({ kind: "chat", member: true }), ["employee_status", "employee_task_create", "employee_task_manage", "vault_get", "vault_list"]);
+  assert(!names({ kind: "chat", member: true }).includes("memory_propose"), "group guest has no memory tools");
   assert(!/update|set_instructions|set_profile|reschedule|cancel/.test(commands({ kind: "chat", member: true }, "employee_task_manage")));
   const main = names({ kind: "task", dutyCommands: [] });
   assert.deepEqual(main, ["employee_status", "employee_task_create", "memory_manage", "memory_propose", "memory_search", "task_ask_user", "task_complete", "task_progress", "task_relay_computer", "task_request_approval", "task_reschedule", "task_wait", "vault_get", "vault_list"]);
@@ -227,4 +229,13 @@ test("dispatch and status descriptions steer away from copied tool names and red
   assert.match((create.parameters as any).properties.dedupeKey.description, /重做已完成的事时用新 key/);
   assert.match(status.description, /自动去重/);
   assert.deepEqual(Object.keys((status.parameters as any).properties), ["taskId", "dedupeKey", "status", "memoryQuery"]);
+});
+
+test("memory prompt: tool-list gate and owner remember-now rule", async () => {
+  const { readFileSync } = await import("node:fs");
+  const prompt = readFileSync("server/core/prompt.ts", "utf8");
+  assert.match(prompt, /以本轮工具列表为准：有 memory_propose 就能写/);
+  assert.match(prompt, /主人要求记住的跨会话偏好或事实/);
+  assert.match(prompt, /记忆工具仍按本轮列表使用/);
+  assert(!/schema 无记忆写入权限/.test(prompt));
 });

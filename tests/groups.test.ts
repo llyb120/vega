@@ -164,7 +164,7 @@ test("tasks started from a group report there; a result goes back to the employe
     const memberSession = (await engine.groups.get(group.id))!.memberSessions[a];
     const tools = await Tools.create(engine, await store.session(memberSession), await engine.config(), new AbortController().signal, () => {});
     const names = (await tools.definitions({} as any)).map((t) => t.name);
-    assert(names.includes("employee_task_create") && names.includes("vault_get") && !names.includes("employee_duty_create"));
+    assert(names.includes("employee_task_create") && names.includes("vault_get") && !names.includes("employee_duty_create") && !names.includes("memory_propose"), "group guest: tasks+vault, no duties/memory");
     // The guest-started task uses its own vault too (tools shown, the runtime allows it, the prompt does not forbid it).
     const work = await store.newSession({ employeeId: a, taskId: task.id, cwd: task.cwd, ownerId: "u1" });
     await employeeA.update((state) => { const t = employeeA.task(state, task.id); t.status = "running"; t.workSession = work.id; });
