@@ -143,7 +143,6 @@ test("employee deletion removes its sessions/profile and its own vault and survi
     await mkdir(profile, { recursive: true }); await writeFile(join(profile, "Cookies"), "private");
     await writeFile(join(dir, "project.txt"), "keep");
     const credential = await a.vault.save({ name: "removed with A", condition: "authorized", content: "gone" }), kept = await b.vault.save({ name: "B own", condition: "authorized", content: "keep" });
-    const temp = await a.vault.request(job.id) && job.id;
     engine.active.set(chat.id, { control: new AbortController(), steer: [] });
     await assert.rejects(engine.removeEmployee(a.employeeId), /先停止/);
     assert.equal(a.deleting, false);
@@ -155,7 +154,6 @@ test("employee deletion removes its sessions/profile and its own vault and survi
     await assert.rejects(access(profile));
     assert.equal(await readFile(join(dir, "project.txt"), "utf8"), "keep");
     assert.deepEqual(await store.objects(a.vault.kind), [], "deleting an employee deletes its own vault");
-    assert.equal(await store.object("vault-request", temp), undefined);
     assert(!(await b.vault.list()).some((entry) => entry.id === credential.id));
     assert.deepEqual((await b.vault.list()).map((entry) => entry.id), [kept.id]);
     assert.equal((await (await engine.employee.for(b.employeeId)).state()).name, "Keep");

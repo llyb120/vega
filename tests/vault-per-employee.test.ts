@@ -11,7 +11,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Tools } from "../server/core/tools";
 import { vaultCall } from "./public-call";
 
-const runtime: EmployeeRuntime = { run: async () => {}, cancel() {}, isRunning: () => false, emit() {}, send: async () => ({}), config: () => ({ model: "", provider: {} }), isolated: true };
+const runtime: EmployeeRuntime = { run: async () => {}, cancel() {}, isRunning: () => false, emit() {}, config: () => ({ model: "", provider: {} }), isolated: true };
 const engineFor = async (store: Store) => {
   const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;

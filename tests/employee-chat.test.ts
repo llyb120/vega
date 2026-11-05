@@ -435,7 +435,6 @@ test("resetEmployee drops all sessions and tasks but keeps memories, settings, d
     await employee.update((state) => { state.tasks[0].workSession = work.id; });
     const memory = await employee.execute("", { action: "memory_propose", claim: "回复一律用中文，结论先行", memoryKind: "preference", source: "ui" });
     const credential = await employee.vault.save({ name: "keep", condition: "authorized", content: "secret" });
-    await employee.vault.request("task-waiting");
     const events: any[] = [];
     engine.events.on("event", (event) => events.push(event));
     assert.deepEqual(await engine.resetEmployee(employee.employeeId), { ok: true });
@@ -444,7 +443,6 @@ test("resetEmployee drops all sessions and tasks but keeps memories, settings, d
     assert.deepEqual(state.runs, []);
     await assert.rejects(async () => await store.session(work.id), /not found/);
     assert.equal(await store.object("context-state", work.id), undefined);
-    assert.equal(await store.object("vault-request", "task-waiting"), undefined, "task-scoped credential requests go with their task");
     assert.equal((await store.messages(chat.id)).length, 0);
     assert.equal(state.chatSession, chat.id, "the chat session itself stays so open pages keep their subscription");
     assert.equal(state.instruction, "keep instruction");

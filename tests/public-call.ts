@@ -39,8 +39,6 @@ export function employeeCall(a: Obj, target: "task" | "duty" | "self" = "task"):
     case "complete": return call("task_complete", { evidence: a.text, summary: a.summary, deliverableRefs: a.deliverableRef === undefined ? undefined : [].concat(a.deliverableRef) });
     case "vault_list": return call("vault_list");
     case "vault_get": return call("vault_get", { credentialId: a.id, purpose: a.text, url: a.url });
-    case "vault_request": return call("vault_request", { requirement: a.text });
-    case "vault_send": return call("vault_send", { credentialId: a.id, url: a.url });
     case "memory_search": return call("memory_search", { query: a.query, status: a.status, memoryScene: a.memoryScene || a.scene });
     case "memory_propose": return call("memory_propose", { claim: a.claim, memoryKind: a.memoryKind || a.kind, scope: a.scope, memoryScene: a.memoryScene || a.scene, evidence: a.evidence, memoryId: a.id, pinned: a.pinned });
     case "memory_resolve": {

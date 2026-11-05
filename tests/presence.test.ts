@@ -27,7 +27,6 @@ test("locked computer tasks remain queued, unlock resumes same task without LLM 
     },
     cancel: () => {},
     isRunning: () => false,
-    send: async () => {},
     emit: () => {},
     config: () => ({ scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] }, model: "p/m" }),
     presence: async () => ({
@@ -73,7 +72,6 @@ test("new physical user activity yields active computer work while preserving it
     run: async () => {},
     cancel: (s) => (cancelled = s),
     isRunning: () => true,
-    send: async () => {},
     emit: () => {},
     config: () => ({}),
     presence: async () => ({

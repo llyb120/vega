@@ -131,8 +131,6 @@ export type ToolContext = {
   dutyCommands?: string[];
   /** Task session: the current task's id (target of task_reschedule). */
   taskId?: string;
-  vaultRequest?: boolean;
-  vaultSend?: boolean;
 };
 
 export function employeeTools(ctx: ToolContext): Tool[] {
@@ -280,22 +278,13 @@ export function employeeTools(ctx: ToolContext): Tool[] {
 export function vaultTools(ctx: ToolContext): Tool[] {
   // Each employee always uses its own book, whoever asked for the work; a plain session has no employee and no book.
   if (ctx.kind === "normal") return [];
-  const out: Tool[] = [
-    tool("vault_list", "列出当前牛马自己密码本条目的 id、类型（login 账号密码 / token API 密钥或令牌 / ssh_key SSH 私钥 / general 万能）、名称和使用条件（不含凭据内容" + (ctx.kind === "task" ? "；包括本任务收到的临时条目" : "") + "）。取用前先看 condition，选出唯一适用的条目。增删改只有牛马创建者能在牛马配置的「密码本」里操作。"),
+  return [
+    tool("vault_list", "列出当前牛马自己密码本条目的 id、类型（login 账号密码 / token API 密钥或令牌 / ssh_key SSH 私钥 / general 万能）、名称和使用条件（不含凭据内容）。取用前先看 condition，选出唯一适用的条目。增删改只有牛马创建者能在牛马配置的「密码本」里操作。"),
     tool("vault_get",
       "按 credentialId 取一条凭据供本轮使用：purpose 写清本次用途及为什么符合该条 condition；系统结合当前页面核对条件，不符则拒绝且不取出。凭据内容不进入对话记录，只用于当前授权操作，不写进回复、记忆、计划或交接。ssh_key 类型不返回私钥原文：系统在当前执行位置（服务端或所选客户端）写入本轮临时私钥文件，返回 keyFile 和可直接用于 git 的 GIT_SSH_COMMAND，本轮结束自动删除。",
       { credentialId, purpose: str("本次用途及为什么符合使用条件，1–8000 字", { minLength: 1, maxLength: 8000 }), url: vaultUrl },
       ["credentialId", "purpose"]),
   ];
-  if (ctx.vaultRequest)
-    out.push(tool("vault_request",
-      "执行团队成员交代的任务、密码本缺少所需凭据时，请交代人的本地密码本加密支援：requirement 写需要哪个系统的哪类凭据。任务挂起并立即结束本轮；收到后存为当前牛马密码本里本任务的临时条目（保留对方条目的类型），用 vault_list / vault_get 取用。必须单独调用。",
-      { requirement: str("需要的凭据，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["requirement"]));
-  if (ctx.vaultSend)
-    out.push(tool("vault_send",
-      "凭据支援任务专用：把当前牛马密码本里允许共享、非临时且符合使用条件的条目（连同类型）加密发回请求方，不在回复里写明文。立即结束本轮。自己要用凭据用 vault_get。必须单独调用。",
-      { credentialId, url: vaultUrl }, ["credentialId"]));
-  return out;
 }
 
 export const CHROME_TOOL_DEFINITIONS = chromeTools as Tool[];
@@ -305,9 +294,9 @@ export const EMPLOYEE_TOOLS = new Set([
   "task_progress", "task_reschedule", "task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete",
   "memory_search", "memory_propose", "memory_manage",
 ]);
-export const VAULT_TOOLS = new Set(["vault_list", "vault_get", "vault_request", "vault_send"]);
+export const VAULT_TOOLS = new Set(["vault_list", "vault_get"]);
 /** Calls that suspend, hand off or end the turn: they must be the only call in a batch. */
-export const STANDALONE_TOOLS = new Set(["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete", "vault_request", "vault_send"]);
+export const STANDALONE_TOOLS = new Set(["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete"]);
 
 export type Internal = { tool: "chrome" | "employee"; args: Obj; target?: "task" | "duty" };
 
@@ -446,8 +435,6 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
     }
     case "vault_list": return employee({ action: "vault_list" });
     case "vault_get": return employee(defined({ action: "vault_get", id: a.credentialId, text: a.purpose, url: a.url }));
-    case "vault_request": return employee({ action: "vault_request", text: a.requirement });
-    case "vault_send": return employee(defined({ action: "vault_send", id: a.credentialId, url: a.url }));
   }
   throw new ArgumentError("Unknown tool " + name);
 }

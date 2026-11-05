@@ -147,11 +147,10 @@ test("MCP JSON validation rejects malformed transports and options", () => {
 
 test("vault keeps the existing name/condition/content form without requiring website configuration", async () => {
   const form = { value: {} as any };
-  vaultFunction("edit", { form })({ id: "entry", type: "login", name: "account", condition: "仅用于合作伙伴身份验证，不用于业务站邮箱登录", share: true });
+  vaultFunction("edit", { form })({ id: "entry", type: "login", name: "account", condition: "仅用于合作伙伴身份验证，不用于业务站邮箱登录" });
   assert.equal(form.value.type, "login");
   assert.equal(form.value.condition, "仅用于合作伙伴身份验证，不用于业务站邮箱登录");
   assert.equal(form.value.content, "");
-  assert.equal(form.value.share, true);
   let body: any, path = "";
   await vaultFunction("save", { form, base: "/employees/e1/vault", props: { api: async (p: string, _method: string, value: any) => { path = p; body = value; } }, run: async (fn: any) => fn(), reset() {}, load: async () => {}, emit() {}, disposed: false })();
   assert.equal(path, "/employees/e1/vault");

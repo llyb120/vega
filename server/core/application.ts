@@ -59,7 +59,6 @@ export async function initialize(pageScript: string, helper: string) {
   await application.headless.start(dbPath);
   await bridge.start();
   await engine.employee.start();
-  await engine.relay.restart();
   return application;
 }
 export async function employeeLive(employeeId?: string) {

@@ -9,7 +9,6 @@ test("completed records and business keys are not silently deleted when history 
       run: async () => {},
       cancel: () => {},
       isRunning: () => false,
-      send: async () => {},
       emit: () => {},
       config: () => ({ scenes: { lightweight: ["p/m"], coding: ["p/m"], computer: ["p/m"] }, model: "p/m" }),
     });

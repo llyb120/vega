@@ -94,7 +94,7 @@ test("ordinary conversations do not depend on employee state, schedule or task r
       (await taskTools.rules(model)).includes("当前会话属于牛马任务"),
     );
     assert(
-      !(await taskTools.definitions(model)).some((tool) => ["vault_request", "vault_send"].includes(tool.name)),
+      !(await taskTools.definitions(model)).some((tool) => ["vault_request", "vault_send"].includes(tool.name)), // tools removed with remote relay
     );
     await engine.run(taskSession.id, {
       role: "user",

@@ -486,8 +486,7 @@ export default defineEventHandler(async (event) => {
             "codebuddy",
             "workbuddy",
             "devin",
-            "server-support",
-          ].includes(a.source),
+                      ].includes(a.source),
           "Unknown local source",
         );
         const preset =
@@ -588,11 +587,6 @@ export default defineEventHandler(async (event) => {
       return engine.chrome.experiences.graph(
         (await engine.chrome.experiences.all()).filter((e) => !e.disabled),
       );
-    if (path[0] === "team") {
-      if (path[1] === "call")
-        return engine.relay.call(a.peer, a.command, a.args || {});
-      return { connected: engine.relay.connected, peers: engine.relay.peers };
-    }
     throw createError({
       statusCode: 404,
       statusMessage: "API route not found",

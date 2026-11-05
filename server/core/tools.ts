@@ -118,8 +118,6 @@ export class Tools {
       taskId: this.session.taskId,
       computer: this.session.scene === "computer",
       dutyCommands: duty ? (dynamic ? ["schedule_next", "disable"] : ["disable"]) : [],
-      vaultRequest: !!task?.owner?.token,
-      vaultSend: !!(task?.replyTo && task?.vaultPk),
     };
   }
   /** Shared rules for the exposed tool families, injected once into the system prompt instead of every description. */
@@ -343,7 +341,7 @@ export class Tools {
 
   private async credentialScope(a: Obj) {
     const vault = (await this.engine.employeeFor(this.session)).vault;
-    const entry = (await vault.list()).find((item) => item.id === a.id && (!item.tempFor || item.tempFor === this.session.taskId));
+    const entry = (await vault.list()).find((item) => item.id === a.id);
     assert(entry, "Vault entry not found for this task");
     const task = this.session.taskId ? (await this.engine.employeeFor(this.session)).task(await (await this.engine.employeeFor(this.session)).state(), this.session.taskId).text
       : (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "";
@@ -354,7 +352,7 @@ export class Tools {
       url: vaultSite(page.url) + new URL(page.url).pathname, title: page.title || "", text: String(page.visibleText || page.text || "").slice(0, 2000),
       fields: (page.items || []).filter((item: Obj) => item.editable && item.inView !== false).slice(0, 12).map((item: Obj) => ({ name: item.name, context: item.fieldContext })),
     }));
-    const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (a.action === "vault_send" ? "为当前任务提供加密凭据支援" : ""), task: task.slice(0, 4000), ...(a.url ? { url: vaultSite(a.url) } : {}), pages }, this.signal);
+    const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (""), task: task.slice(0, 4000), ...(a.url ? { url: vaultSite(a.url) } : {}), pages }, this.signal);
     this.signal.throwIfAborted();
     const latest = (await vault.list()).find((item) => item.id === entry.id);
     assert(latest?.name === entry.name && latest?.condition === entry.condition, "凭据使用条件已变化，请重新核对");
@@ -545,12 +543,11 @@ export class Tools {
     if (guest) assert(memberOnly(a.action, a.kind), `这条群聊消息来自${guest.kind === "user" ? "用户" : "牛马"}「${guest.name}」，不是牛马主人：只能派单、查询、补充、续做和停止任务；职责和记忆只有主人能用`);
     if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
       const task = employee.task(await employee.state(), a.id);
-      assert(!task.owner.token, "Remote tasks require their assigning member");
       const value = await employee.control(a);
       return { value, task: await taskLink(a.id, a.action !== "stop" && !value.duplicate) };
     }
-    if (["vault_get", "vault_send"].includes(a.action)) employee.authorize(await employee.state(), this.session.taskId || "", a);
-    const scope = ["vault_get", "vault_send"].includes(a.action) ? await this.credentialScope(a) : "";
+    if (a.action === "vault_get") employee.authorize(await employee.state(), this.session.taskId || "", a);
+    const scope = a.action === "vault_get" ? await this.credentialScope(a) : "";
     const result = await employee.execute(
       this.session.taskId || "",
       await prepareDutyInput(this.engine, employee, { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) }, this.session.taskId || "", this.signal),

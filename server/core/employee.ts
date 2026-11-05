@@ -55,7 +55,6 @@ export type EmployeeState = {
   memories: Obj[];
   runs: Obj[];
   orbit: Obj[];
-  links: string[];
 };
 /** The employee record alone (tasks and runs are rows, loaded by state()). */
 export type EmployeeProfile = Omit<EmployeeState, "tasks" | "runs">;
@@ -318,7 +317,6 @@ export type EmployeeRuntime = {
   cancel: (session: string) => void;
   isRunning: (session: string) => boolean;
   emit: (type: string, data?: any) => void;
-  send: (to: string, type: string, data: any) => Promise<any>;
   config: () => Obj | Promise<Obj>;
   isolated?: boolean;
   presence?: () => Promise<Presence>;
@@ -419,7 +417,6 @@ export class Employee {
     assert(this.deleting && !this.busy.size, "Employee deletion requires an idle employee");
     const state = await this.state();
     await this.store.transaction(async () => {
-      for (const task of state.tasks) await this.vault.dropTemp(task.id);
       for (const kind of [this.vault.kind, "experience:" + this.employeeId, "skill:" + this.employeeId]) await this.store.removeKind(kind);
       await this.store.dropEmployeeRows(this.employeeId);
       await this.store.remove("employee-capabilities", this.employeeId);
@@ -452,7 +449,6 @@ export class Employee {
           return ids;
         });
     for (const taskId of taskIds) {
-      await this.vault.dropTemp(taskId);
       this.releaseWorkspace(taskId);
     }
     this.takeovers.clear();
@@ -607,7 +603,6 @@ export class Employee {
       duties: [],
       memories: [],
       orbit: [],
-      links: [],
     } as unknown as EmployeeProfile;
     const state: EmployeeProfile = this.employeeId === "default"
       ? await this.store.get<EmployeeProfile>("employee", fallback)
@@ -730,8 +725,6 @@ export class Employee {
         "forget",
         "vault_list",
         "vault_get",
-        "vault_request",
-        "vault_send",
       ].includes(action)
     )
       return t;
@@ -785,12 +778,9 @@ export class Employee {
       );
     const initial = await this.state(),
       current = this.authorize(initial, caller, a);
-    if (
-      action.startsWith("vault_") &&
-      !["vault_request", "vault_send"].includes(action)
-    ) {
+    if (action.startsWith("vault_")) {
       if (action === "vault_list")
-        return { value: { entries: (await this.vault.list()).filter((entry) => !entry.tempFor || entry.tempFor === caller), tip: VAULT_USAGE } };
+        return { value: { entries: await this.vault.list(), tip: VAULT_USAGE } };
       if (action === "vault_get") {
         const value = await this.vault.get(a.id, a.text, caller);
         return {
@@ -808,7 +798,6 @@ export class Employee {
       throw Error("密码本增删改只能由牛马创建者在牛马配置的「密码本」里操作");
     }
     let stop = false,
-      pendingSend: { to: string; type: string; data: any } | undefined,
       pendingTell: { session: string; message: Message; group?: Task["group"] } | undefined;
     const value = await this.update(async (s) => {
           const t = caller ? this.authorize(s, caller, a) : undefined,
@@ -966,7 +955,6 @@ export class Employee {
                 assert(!this.busy.has(task.id), "Stop running task first");
                 task.status = "cancelled";
                 task.finishedAt = now;
-                await this.vault.dropTemp(task.id);
                 return { ok: true };
               }
               const d = s.duties.find((d) => d.id === a.id);
@@ -1051,10 +1039,9 @@ export class Employee {
             case "defer":
             case "progress":
             case "relay":
-            case "vault_request":
-            case "vault_send": {
+            {
               assert(t, "Action requires a running task");
-              if (action !== "vault_send") assert(content, "text required");
+              assert(content, "text required");
               if (action === "progress") {
                 assert([...content].length <= 200, "task_progress.message is at most 200 chars");
                 if (a.plan) {
@@ -1116,39 +1103,11 @@ export class Employee {
                 t.status = "approval";
                 t.approval = content;
                 this.note(s, t, "confirm", owner.name || "牛马", content);
-                if (t.owner.token)
-                  pendingSend = {
-                    to: t.owner.token,
-                    type: "starlink.notify",
-                    data: { text: "需要你确认：" + clip(content, 80) },
-                  };
               }
-              if (action === "help" || action === "vault_request") {
-                if (action === "vault_request") {
-                  assert(
-                    t.owner.token,
-                    "Local task must use task_ask_user for missing credentials",
-                  );
-                  t.vaultPk = await this.vault.request(t.id);
-                }
+              if (action === "help") {
                 t.status = "waiting";
-                t.waiting =
-                  action === "vault_request"
-                    ? "【请求密码本里的凭据】" + content
-                    : content;
+                t.waiting = content;
                 this.note(s, t, "help", "牛马", t.waiting);
-                if (t.owner.token)
-                  pendingSend = {
-                    to: t.owner.token,
-                    type: "starlink.help",
-                    data: {
-                      id: t.id,
-                      task: t.text,
-                      question: t.waiting,
-                      vaultKey: t.vaultPk || "",
-                      shot: await this.latestShot(t),
-                    },
-                  };
               }
               if (action === "defer") {
                 const at = requestedTime(a, now);
@@ -1168,24 +1127,6 @@ export class Employee {
                 t.handoffRevision = (t.handoffRevision || 0) + 1;
                 t.status = "queued";
                 t.nextCheckAt = 0;
-              }
-              if (action === "vault_send") {
-                assert(
-                  t.replyTo && t.vaultPk,
-                  "Not a remote credential support task",
-                );
-                const sealed = await this.vault.sealFor(a.id, t.replyTo.id, t.vaultPk);
-                pendingSend = {
-                  to: t.replyTo.token,
-                  type: "starlink.reply",
-                  data: {
-                    id: t.replyTo.id,
-                    text: "已通过密码本加密发来「" + sealed.name + "」",
-                    sealed: sealed.sealed,
-                  },
-                };
-                t.replyTo = null;
-                t.vaultPk = "";
               }
               stop = true;
               return {
@@ -1276,10 +1217,6 @@ export class Employee {
               throw Error("Unknown employee action " + action);
           }
         });
-    if (pendingSend) {
-      const send = pendingSend as { to: string; type: string; data: any };
-      await this.runtime.send(send.to, send.type, send.data);
-    }
     if (pendingTell) {
       const tell = pendingTell as { session: string; message: Message; group?: Task["group"] };
       await this.toChat(tell.session, tell.group, tell.message, false);
@@ -1328,7 +1265,6 @@ export class Employee {
     }
   }
   async control(a: Obj, owner: Owner = { token: "", name: "" }) {
-    let reply: any;
     let chatReply: { text: string; taskId: string } | undefined;
     const value = await this.update(async (s) => {
           if (a.action === "settings") {
@@ -1416,7 +1352,6 @@ export class Employee {
               t.supplementPending = false;
               t.finishedAt ||= Date.now();
               this.releaseWorkspace(t.id);
-              await this.vault.dropTemp(t.id);
               for (const session of new Set([t.workSession, t.computerSession].filter(Boolean)))
                 this.runtime.cancel(session);
               this.note(s, t, "seal", owner.name || "用户", "任务已封存");
@@ -1445,11 +1380,6 @@ export class Employee {
               t.nextCheckAt = 0;
               this.note(s, t, "answer", owner.name || "用户", a.text);
               chatReply = { text: a.text.trim(), taskId: t.id };
-              if (t.replyTo) {
-                reply = { ...t.replyTo, text: a.text };
-                t.replyTo = null;
-                t.status = "done";
-              }
               break;
             case "approve":
               assert(t.status === "approval", "Task not awaiting approval");
@@ -1464,17 +1394,12 @@ export class Employee {
               } else {
                 t.status = "cancelled";
                 t.result = "审批被驳回";
-                await this.vault.dropTemp(t.id);
               }
               break;
             case "resume":
               assert(
                 ended(t.status) && t.status !== "done",
                 "Only stopped/failed/cancelled tasks may continue",
-              );
-              assert(
-                !t.vaultPk || await this.store.object("vault-request", t.id),
-                "Credential request expired; create a new request",
               );
               t.status = "queued";
               t.nextCheckAt = 0;
@@ -1509,7 +1434,6 @@ export class Employee {
             case "remove":
               assert(ended(t.status), "Only ended task records may be deleted");
               s.tasks = s.tasks.filter((v) => v.id !== t.id);
-              await this.vault.dropTemp(t.id);
               await this.store.files.remove(this.store.files.task(this.employeeId, t.id));
               break;
             default:
@@ -1533,11 +1457,6 @@ export class Employee {
       if (await this.appendChatReply(state.chatSession, delivery, chatReply.text))
         this.runtime.emit("employee_changed", { employeeId: this.employeeId });
     }
-    if (reply)
-      await this.runtime.send(reply.token, "starlink.reply", {
-        id: reply.id,
-        text: reply.text,
-      });
     return value;
   }
   fire(s: EmployeeState, d: Obj, now: number, event?: string) {
@@ -1870,14 +1789,6 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                     d.lastRunAt = t.finishedAt;
                     d.lastResult = t.result || result;
                   }
-                  await this.vault.dropTemp(t.id);
-                  if (t.replyTo) {
-                    void this.runtime.send(t.replyTo.token, "starlink.reply", {
-                      id: t.replyTo.id,
-                      text: t.result || result,
-                    });
-                    t.replyTo = null;
-                  }
                 }
               });
       const state = await this.state(), task = state.tasks.find((t) => t.id === job.id);
@@ -1966,77 +1877,6 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
               this.takeovers.delete(a.id);
             }
           });
-  }
-  async remote(from: Owner, kind: string, data: Obj) {
-    const s = await this.state();
-    if (kind === "starlink.help") {
-      assert(
-        s.links.includes(from.token),
-        "Unsolicited support request rejected",
-      );
-      assert(data.id && data.question, "Incomplete support request");
-      if (
-        s.tasks.some(
-          (t) => t.replyTo?.token === from.token && t.replyTo?.id === data.id,
-        )
-      )
-        return;
-      await this.update(async (s) => {
-                const task: Task = {
-                  id: id("t"),
-                  text: `替「${from.name}」的数字牛马补充信息（它在做：${clip(data.task || "", 60)}）：${clip(data.question, 7000)}`,
-                  status: "queued",
-                  createdAt: Date.now(),
-                  profile: "lightweight",
-                  cwd: s.cwd,
-                  owner: { token: "", name: "" },
-                  replyTo: { token: from.token, name: from.name, id: data.id },
-                  vaultPk:
-                    Buffer.from(data.vaultKey || "", "base64").length === 32
-                      ? data.vaultKey
-                      : "",
-                  plan: [],
-                  progress: [],
-                };
-                if (data.shot?.data && Buffer.byteLength(data.shot.data) <= 6 << 20) {
-                  const blob = await this.store.blob(
-                                      "image/" +
-                                        (/^(jpg|jpeg|png|webp)$/.test(data.shot.ext)
-                                          ? data.shot.ext
-                                          : "jpeg"),
-                                      Buffer.from(data.shot.data, "base64"),
-                                    );
-                  task.shot = `sqlite:blob/${blob}`;
-                }
-                s.tasks.push(task);
-              });
-      return;
-    }
-    if (kind === "starlink.reply") {
-      const task = s.tasks.find(
-        (t) =>
-          t.id === data.id &&
-          t.status === "waiting" &&
-          t.owner.token === from.token,
-      );
-      assert(task, "No outstanding request for this member");
-      let answer = data.text;
-      if (data.sealed) {
-        const entry = await this.vault.receive(
-                  task.id,
-                  clip(task.text, 40),
-                  data.sealed,
-                );
-        answer = `对方已加密发来「${entry.name}」，临时条目 ${entry.id}；使用 vault_get，任务结束自动删除。`;
-      }
-      await this.control({ action: "answer", id: task.id, text: answer }, from);
-      return;
-    }
-    if (kind === "starlink.notify") {
-      assert(s.links.includes(from.token), "Unsolicited notification rejected");
-      this.runtime.emit("employee_notification", { from, text: data.text });
-      return;
-    }
   }
   async transcript(session: string) {
     const s = await this.state(),

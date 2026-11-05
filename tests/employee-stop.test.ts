@@ -90,11 +90,3 @@ test("queued work stops immediately and already completed work keeps its complet
   } finally { await engine.close(); await store.close(); }
 });
 
-test("chat stopping respects task ownership instead of cancelling foreign work", async () => {
-  const { store, engine, employee, stop } = await fixture();
-  try {
-    await employee.update((state) => { state.tasks[0].owner = { token: "remote-member", name: "remote" }; });
-    await assert.rejects(stop(), /assigning member/);
-    assert.equal((await employee.state()).tasks[0].status, "queued");
-  } finally { await engine.close(); await store.close(); }
-});

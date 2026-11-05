@@ -59,22 +59,9 @@ export class Catalog {
         models: { ...catalogContextModels(local.models), ...modelEntries(p.models) },
       };
     }
-    if (p.preset === "server-support") {
-      const relay = config.relay;
-      assert(
-        relay?.server && relay?.token,
-        "Configure relay server and token first",
-      );
-      p.options = {
-        ...p.options,
-        baseURL: relay.server.replace(/\/$/, "") + "/cc",
-        apiKey: expand(relay.token),
-      };
-    } else {
-      p.options = { ...p.options };
-      if (!p.options.baseURL && !p.baseURL && preset)
-        p.options.baseURL = preset.baseURL;
-    }
+    p.options = { ...p.options };
+    if (!p.options.baseURL && !p.baseURL && preset)
+      p.options.baseURL = preset.baseURL;
     p.api ??= /minimax|kimi-code/.test(p.preset || "")
       ? "anthropic-messages"
       : "openai-completions";
@@ -262,8 +249,7 @@ export class Catalog {
         [
           "commandcode",
           "opendesign",
-          "server-support",
-          "local-codex",
+                    "local-codex",
           "local-claude-code",
         ].includes(p.preset);
       if (needsMetadata && (!metadata || Date.now() - metadata.at > 21600000)) {
@@ -345,7 +331,7 @@ export class Catalog {
         assert(page < 999, "Model catalog page limit reached");
       }
       const catalogID =
-        p.preset === "server-support" ? "commandcode" : p.preset || "";
+        p.preset || "";
       models = convertCatalog(
         availability ? { data: entriesAll } : null,
         preset?.modelsDev ? metadata?.data?.[catalogID] : undefined,

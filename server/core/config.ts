@@ -9,7 +9,6 @@ export type Config = {
   systemPrompt?: string;
   contextMode?: string;
   mcp?: Record<string, Obj>;
-  relay?: Obj;
   skills?: Obj[];
   employeeId?: string;
   skillsDirectory?: string;
@@ -184,7 +183,6 @@ export function maskedConfig(config: Config) {
     for (const h of [p.headers, p.options?.headers])
       if (h) for (const k in h) h[k] = mask(h[k]);
   }
-  if (copy.relay) copy.relay.token = mask(copy.relay.token);
   for (const m of Object.values(copy.mcp || {}))
     for (const h of [m.env, m.headers])
       if (h) for (const k in h) h[k] = mask(h[k]);

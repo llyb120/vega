@@ -531,7 +531,7 @@ test(
       // Each employee's creator maintains that employee's own vault; nobody else reads or edits it.
       const own: Record<string, string> = {};
       for (const [worker, login] of [[team, admin], [workerA, a], [workerB, b]] as const) {
-        own[worker.id] = (await ok(`/employees/${worker.id}/vault`, "POST", { name: worker.name + " service", condition: "authorized test", content: worker.id + "-secret", share: true }, login)).id;
+        own[worker.id] = (await ok(`/employees/${worker.id}/vault`, "POST", { name: worker.name + " service", condition: "authorized test", content: worker.id + "-secret" }, login)).id;
         assert.equal((await ok(`/employees/${worker.id}`, "GET", undefined, login)).canConfigure, true);
         const listed = await ok(`/employees/${worker.id}/vault`, "GET", undefined, login);
         assert.deepEqual(listed.entries.map((entry: any) => [entry.id, entry.share]), [[own[worker.id], true]]);
