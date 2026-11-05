@@ -14,7 +14,7 @@ import (
 //go:embed icon.ico
 var iconData []byte
 
-func systrayRun(configure, supplement, onQuit func()) {
+func systrayRun(configure, onQuit func()) {
 	systray.Run(func() {
 		systray.SetIcon(iconData)
 		systray.SetTitle("牵牛星")
@@ -22,16 +22,13 @@ func systrayRun(configure, supplement, onQuit func()) {
 		trayState.ready = true
 		systray.SetTooltip(connectionTooltip(trayState.connected))
 		trayState.Unlock()
-		mConfigure := systray.AddMenuItem("连接授权", "查看或撤销已信任的 Vega 站点")
-		mSupplement := systray.AddMenuItem("补充内容", "编辑本机项目目录等辅助提示")
+		mConfigure := systray.AddMenuItem("连接授权", "管理站点授权、补充内容和流量中继")
 		mQuit := systray.AddMenuItem("退出", "Stop local agent")
 		go func() {
 			for {
 				select {
 				case <-mConfigure.ClickedCh:
 					configure()
-				case <-mSupplement.ClickedCh:
-					supplement()
 				case <-mQuit.ClickedCh:
 					onQuit()
 					return

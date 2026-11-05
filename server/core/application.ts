@@ -52,7 +52,7 @@ export async function initialize(pageScript: string) {
     browserLive: new BrowserLive(chrome, auth),
     employeeLives: new Map(),
     eventsSocket: new EventsSocket(engine, auth),
-    clientSockets: new ClientSockets(store, auth, engine.localAgents, async (clientId) => await engine.clientInUse(clientId)),
+    clientSockets: new ClientSockets(store, auth, engine.localAgents, async (clientId) => await engine.clientInUse(clientId), engine.relay),
     headless: new HeadlessBrowser(),
   };
   const dbPath = process.env.VEGA_DB || "vega.db";

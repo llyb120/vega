@@ -73,7 +73,7 @@ func main() {
 	must(notifyUpdateReady())
 	a.startConnections(ctx)
 	configure := func() { openBrowser("http://" + localAddress + "/config/" + a.configToken) }
-	fmt.Fprintln(os.Stderr, "vega-local: running on "+localAddress)
+	fmt.Fprintln(os.Stderr, "vega-local: connection settings at http://"+localAddress+"/config/"+a.configToken)
 	quit := func() {
 		cancel()
 		a.mu.Lock()
@@ -88,12 +88,7 @@ func main() {
 		os.Exit(0)
 	}
 	go a.autoUpdate(ctx, quit)
-	supplement := func() {
-		if err := a.editSupplement(promptSupplement); err != nil {
-			reportSupplementError(err)
-		}
-	}
-	systrayRun(configure, supplement, quit)
+	systrayRun(configure, quit)
 }
 
 type job struct {

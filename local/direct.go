@@ -23,9 +23,10 @@ import (
 const reconnectGrace = 60 * time.Second
 
 type ServerCredential struct {
-	Origin string `json:"origin"`
-	UserID string `json:"userId"`
-	Token  string `json:"token"`
+	Origin string   `json:"origin"`
+	UserID string   `json:"userId"`
+	Token  string   `json:"token"`
+	Relay  []string `json:"relay,omitempty"`
 }
 type connectionStatus struct {
 	Code       string `json:"code"`
@@ -70,6 +71,8 @@ func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredentia
 	for _, item := range a.config.Servers {
 		if item.Origin != origin || item.UserID != proof.UserID {
 			next.Servers = append(next.Servers, item)
+		} else {
+			saved.Relay = item.Relay
 		}
 	}
 	if len(next.Servers) >= 8 {
@@ -136,6 +139,7 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	ctx, cancel := context.WithCancel(parent)
 	connection := &directConnection{origin: saved.Origin, token: token, instance: instance, jobs: newJobRunner(ctx, true), cancel: cancel, status: connectionStatus{Code: "backend_connecting"}, changed: make(chan struct{})}
 	connection.jobs.supplement = a.config.Supplement
+	a.configureRelay(connection, saved, ctx)
 	a.direct[key] = connection
 	go func() {
 		defer func() { cancel(); connection.jobs.close() }()
@@ -217,8 +221,11 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	a.mu.Lock()
 	clientID, supplement := a.config.ClientID, a.config.Supplement
 	a.mu.Unlock()
+	connection.jobs.mu.Lock()
+	rules := append([]string{}, connection.jobs.relayRules...)
+	connection.jobs.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "relay": rules, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true, false
 	}
@@ -280,6 +287,9 @@ type jobRunner struct {
 	updateReady  chan bool
 	recovery     *time.Timer
 	upload       func(context.Context, []byte) error
+	relayRules   []string
+	relay        func(context.Context, job)
+	relayCancel  context.CancelFunc
 }
 
 func newJobRunner(ctx context.Context, resumable bool) *jobRunner {
@@ -301,6 +311,9 @@ func (runner *jobRunner) close() {
 		task.cancel()
 	}
 	localChrome.releaseConnection(runner.ctx)
+	if runner.relayCancel != nil {
+		runner.relayCancel()
+	}
 }
 func (runner *jobRunner) suspend(conn *websocket.Conn) {
 	runner.mu.Lock()
@@ -402,7 +415,11 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 			case <-ticker.C:
 				runner.mu.Lock()
 				if runner.conn == conn {
-					runner.write(map[string]string{"type": "ping", "supplement": runner.supplement})
+					message := map[string]any{"type": "ping", "supplement": runner.supplement}
+					if runner.relay != nil {
+						message["relay"] = runner.relayRules
+					}
+					runner.write(message)
 				}
 				runner.mu.Unlock()
 			}
@@ -414,6 +431,15 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 		var request job
 		if conn.ReadJSON(&request) != nil {
 			return
+		}
+		if request.Type == "relay" {
+			runner.mu.Lock()
+			relay := runner.relay
+			runner.mu.Unlock()
+			if relay != nil {
+				go relay(ctx, request)
+			}
+			continue
 		}
 		if request.Type == "pong" {
 			runner.mu.Lock()

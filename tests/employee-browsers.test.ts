@@ -4,10 +4,10 @@ import { Store } from "../server/core/store";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge, requestTimeout } from "../server/core/chrome-bridge";
 import { EmployeeBrowsers } from "../server/core/employee-browsers";
-import { HeadlessBrowser } from "../server/core/headless";
+import { HeadlessBrowser, headlessArguments } from "../server/core/headless";
 
-async function fixture(t: TestContext) {
-  const store = await Store.open(":memory:"), browsers = new EmployeeBrowsers(store, "");
+async function fixture(t: TestContext, networkProxy?: (id: string) => Promise<string | undefined>) {
+  const store = await Store.open(":memory:"), browsers = new EmployeeBrowsers(store, "", networkProxy);
   const bridge = new ChromeBridge(true), chrome = new Chrome(store, bridge, ""), browser = new HeadlessBrowser();
   const client = crypto.randomUUID();
   const connect = () => bridge.clients.set(client, { at: Date.now(), browser: "Google Chrome" });
@@ -25,6 +25,22 @@ async function fixture(t: TestContext) {
   t.after(async () => { await browsers.close(); await store.close(); });
   return { browsers, chrome, bridge, browser, start, close, probe, connect };
 }
+
+test("employee browsers automatically receive the owner's stable network proxy", async (t) => {
+  const proxy = "socks5://127.0.0.1:12345", requests: string[] = [];
+  const f = await fixture(t, async (id) => { requests.push(id); return proxy; });
+  await f.browsers.get("ea");
+  await f.browsers.get("ea");
+  assert.deepEqual(requests, ["ea"]);
+  assert.equal((f.start.mock.calls[0].arguments as any[])[1].proxy, proxy);
+  const args = headlessArguments("profile", "extension", { proxy, port: 47653 });
+  assert(args.includes("--proxy-server=" + proxy));
+  assert(args.includes("--proxy-bypass-list=<-loopback>;127.0.0.1:47653"));
+  assert(args.includes("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"));
+  assert(args.includes("--disable-quic"));
+  assert(args.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
+  assert(!headlessArguments("profile", "extension").some((arg) => arg.startsWith("--proxy-")));
+});
 
 test("employee browsers start lazily, share concurrent recovery and stay resident across tasks", async (t) => {
   const f = await fixture(t);

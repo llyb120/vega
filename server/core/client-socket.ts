@@ -4,6 +4,7 @@ import { Auth, digest } from "./auth";
 import type { Store } from "./store";
 import { CLIENT_HEARTBEAT_TIMEOUT, LocalAgents, validateClient, type Agent } from "./local-agent";
 import { assert, type Obj } from "./util";
+import type { NetworkRelay } from "./network-relay";
 
 /** Large results are posted over HTTP (up to CLIENT_BODY_LIMIT); socket messages stay small so heartbeats never queue behind them. */
 export const CLIENT_BODY_LIMIT = 48 << 20, CLIENT_SOCKET_LIMIT = 1 << 20;
@@ -15,7 +16,7 @@ export class ClientSockets {
   private connections = new Map<string, Connection>();
   private timer: ReturnType<typeof setInterval>;
   private onRevoke = async (userId: string) => await this.revoke(userId);
-  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>) {
+  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>, private relay?: NetworkRelay) {
     auth.events.on("revoke", this.onRevoke);
     this.timer = setInterval(async () => {
       for (const [id, connection] of this.connections) {
@@ -81,6 +82,7 @@ export class ClientSockets {
         assert(value.type === "hello" && value.clientId === grant.clientId, "Client identity mismatch");
         validateClient(value);
         assert(value.version === undefined || (typeof value.version === "string" && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(value.version)), "Invalid client version");
+        if (value.relay !== undefined) await this.relay?.configure(grant, value.relay);
         // Read before connecting, so nothing awaits between connect and "ready" (queued jobs follow "ready").
         const busy = value.autoUpdate === true && value.resume === true && !!value.version ? await this.clientInUse(grant.clientId) : false;
         const previous = this.hub.active(grant.userId, grant.clientId);
@@ -108,6 +110,7 @@ export class ClientSockets {
         accepted = true;
         socket.send(JSON.stringify({ type: idle ? "update_ready" : "update_busy" }));
       } else if (value.type === "ping") {
+        if (value.relay !== undefined) await this.relay?.configure(grant, value.relay);
         if ("supplement" in value) {
           validateClient({ ...connection.details, supplement: value.supplement });
           connection.details.supplement = value.supplement;
@@ -147,6 +150,7 @@ export class ClientSockets {
     if (!connection) return;
     this.connections.delete(id);
     if (connection.details) {
+      this.relay?.disconnect(connection.grant.userId, connection.grant.clientId, connection.transport);
       if (permanent) this.hub.disconnect(connection.grant.userId, connection.details.instance, connection.transport);
       else this.hub.suspend(connection.grant.userId, connection.details.instance, connection.transport);
     }

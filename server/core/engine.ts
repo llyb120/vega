@@ -26,6 +26,7 @@ import { Tools, type Outcome } from "./tools";
 import { Context, estimate, ACP_GUIDE } from "./context";
 import { Employee, recallMemory, formatMemoriesForPrompt, type EmployeeRuntime } from "./employee";
 import { EmployeeBrowsers } from "./employee-browsers";
+import { NetworkRelay } from "./network-relay";
 import { LocalBrowsers } from "./local-browsers";
 import { Vault } from "./vault";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
@@ -101,6 +102,7 @@ export class Engine {
   providers = new Providers();
   employee: Employee;
   browsers: EmployeeBrowsers;
+  relay: NetworkRelay;
   localBrowsers: LocalBrowsers;
   vault: Vault;
   /** Group chats: users and their employees working together (groups.ts). */
@@ -121,6 +123,7 @@ export class Engine {
     return client;
   }
   async clientInUse(clientId: string) {
+    if (this.relay.inUse(clientId)) return true;
     for (const key of [...this.active.keys(), ...this.fire.running.keys()]) {
       const session = await this.store.session(key);
       if (session.localAgent && session.clientId === clientId) return true;
@@ -246,7 +249,11 @@ export class Engine {
     };
     this.groups = new Groups(this);
     this.employee = new Employee(store, this.vault, runtime);
-    this.browsers = new EmployeeBrowsers(store, chrome.pageScript);
+    this.relay = new NetworkRelay(store, this.localAgents);
+    this.browsers = new EmployeeBrowsers(store, chrome.pageScript, async (id) => {
+      const { ownerId } = await (await this.employee.for(id)).state();
+      return ownerId ? this.relay.proxy(ownerId) : undefined;
+    });
     this.localBrowsers = new LocalBrowsers(store, this.localAgents, chrome.pageScript);
     this.fire = new Fire(
       store,
@@ -370,6 +377,7 @@ export class Engine {
     this.catalog.auth.close();
     this.chrome.bridge.close();
     await this.browsers.close();
+    await this.relay.close();
     await this.localBrowsers.close();
   }
   async removeEmployee(key: string, beforeRemove: () => Promise<void> = async () => {}) {

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -45,6 +46,13 @@ func newAgent() (*Agent, error) {
 	}
 	if err = validateSupplement(a.config.Supplement); err != nil {
 		return nil, err
+	}
+	for i, saved := range a.config.Servers {
+		rules, ruleErr := relayRules(strings.Join(saved.Relay, "\n"))
+		if ruleErr != nil {
+			return nil, ruleErr
+		}
+		a.config.Servers[i].Relay = rules
 	}
 	if a.config.ClientID == "" {
 		id := make([]byte, 16)
@@ -125,7 +133,28 @@ func (a *Agent) allowOrigin(origin string) bool {
 	return false
 }
 
-var pairingPage = template.Must(template.New("pairing").Parse(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>牵牛星 本机连接授权</title><style>body{font:16px system-ui;background:#f5f6fa;color:#202431;margin:0;padding:32px}main{max-width:520px;margin:auto;background:white;padding:28px;border-radius:16px}button{font:inherit;padding:10px 18px;border:0;border-radius:8px;background:#5147dd;color:white}code{overflow-wrap:anywhere}form{padding:16px 0;border-top:1px solid #ddd}p{line-height:1.7}</style><main><h1>牵牛星 本机连接授权</h1><p>只允许你信任的 Vega 站点。允许后，该站点登录的账号可在本机读写文件、执行命令。无需配置 Key。</p>{{if .Approved}}<p role="status"><strong>站点权限已保存。</strong>请回到 Vega 网站查看登录验证和后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输，存在被窃听或篡改的风险。</p>{{end}}{{if .Revoked}}<p role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</p>{{end}}{{range .Pending}}<form method="post"><p>请求连接的站点：<br><strong><code>{{.}}</code></strong></p><button name="origin" value="{{.}}">允许此站点</button></form>{{else}}<p>当前没有新的连接请求。请保持客户端运行，并登录 Vega 网站。</p>{{end}}{{if .Trusted}}<h2>已信任站点</h2>{{range .Trusted}}<form method="post"><code>{{.}}</code> <button name="remove" value="{{.}}">撤销授权</button></form>{{end}}{{end}}</main></html>`))
+var pairingPage = template.Must(template.New("pairing").Parse(`<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>牵牛星 本机连接授权</title><style>
+body{font:16px system-ui;background:#f5f6fa;color:#202431;margin:0;padding:24px}main{max-width:680px;margin:auto;background:white;padding:28px;border-radius:16px}button{font:inherit;padding:10px 18px;border:0;border-radius:8px;background:#5147dd;color:white;cursor:pointer}button:focus-visible,textarea:focus-visible{outline:3px solid #292177;outline-offset:3px}code{overflow-wrap:anywhere}form{padding:16px 0;border-top:1px solid #ddd}p{line-height:1.7}textarea{box-sizing:border-box;width:100%;font:14px monospace;padding:12px;margin:10px 0;border:1px solid #888;border-radius:8px}small{display:block;line-height:1.6;color:#555}
+</style><main><h1>牵牛星 本机连接授权</h1>
+<p>只允许你信任的 Vega 站点。允许后，该站点登录的账号可在本机读写文件、执行命令。无需配置 Key。</p>
+{{if .Approved}}<p role="status"><strong>站点权限已保存。</strong>请回到 Vega 网站查看登录验证和后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输，存在被窃听或篡改的风险。</p>{{end}}
+{{if .Revoked}}<p role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</p>{{end}}
+{{if .Saved}}<p role="status">本地配置已保存，将同步到已连接的后端；离线时请等待客户端重新连接。</p>{{end}}
+{{range .Pending}}<form method="post"><p>请求连接的站点：<br><strong><code>{{.}}</code></strong></p><button name="origin" value="{{.}}">允许此站点</button></form>{{else}}<p>当前没有新的连接请求。请保持客户端运行，并登录 Vega 网站。</p>{{end}}
+{{if .Trusted}}<h2>已信任站点</h2>{{range .Trusted}}<form method="post"><code>{{.}}</code> <button name="remove" value="{{.}}">撤销授权</button></form>{{end}}{{end}}
+<h2>补充内容</h2><form method="post"><label for="supplement">本机项目目录等辅助提示</label>
+<small id="supplement-help">最多 8192 UTF-8 字节。同步到此客户端授权的站点，仅供绑定本机的会话参考。不要填写密码或密钥；清空后保存可移除。</small>
+<textarea id="supplement" name="supplement" rows="6" aria-describedby="supplement-help">{{.Supplement}}</textarea><button name="saveSupplement" value="1">保存补充内容</button></form>
+<h2>流量中继</h2><p>按配对账户授权内网域名，该账户的服务端牛马浏览器自动使用本机网络，不改变任务执行位置。</p>
+<small>每行填写一个精确域名或域名:端口，省略端口表示 80 和 443，最多 64 条域名端口规则。不支持通配符、IP、localhost 或 URL；留空保存关闭该账户的中继。请使用 HTTPS 站点保护隧道。网站内容会进入服务端浏览器，登录态不会从本机复制。</small>
+{{range .Accounts}}<form method="post"><p><strong><code>{{.Origin}}</code></strong><br>账户：<code>{{.UserID}}</code><br>连接状态：{{.Status}}</p>
+<input type="hidden" name="relayOrigin" value="{{.Origin}}"><input type="hidden" name="relayUser" value="{{.UserID}}">
+<label>允许中继的域名和端口<textarea name="relayRules" rows="5" placeholder="git.company.internal&#10;dev.company.internal:8080">{{.Rules}}</textarea></label>
+<small>命中域名但客户端离线、端口未授权或多个客户端配置冲突时拒绝连接，不回退公网。保存规则会断开受影响账户的现有浏览器网络连接，不自动重放请求。</small>
+<button name="saveRelay" value="1">保存此账户的中继配置</button></form>{{else}}<p>尚无配对账户。允许站点后，请回到 Vega 完成连接。</p>{{end}}
+</main></html>`))
 
 func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -141,9 +170,23 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid origin", 403)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		if r.ParseForm() != nil {
 			http.Error(w, "Invalid form", 400)
+			return
+		}
+		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" {
+			var err error
+			if r.FormValue("saveSupplement") == "1" {
+				err = a.editSupplement(func(string) (string, bool, error) { return r.FormValue("supplement"), true, nil })
+			} else {
+				err = a.saveRelay(r.FormValue("relayOrigin"), r.FormValue("relayUser"), r.FormValue("relayRules"))
+			}
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			http.Redirect(w, r, r.URL.Path+"?saved=1", http.StatusSeeOther)
 			return
 		}
 		origin, remove := r.FormValue("origin"), r.FormValue("remove")
@@ -203,12 +246,27 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		pending = append(pending, origin)
 	}
 	trusted := append([]string{}, a.config.TrustedOrigins...)
+	type account struct{ Origin, UserID, Rules, Status string }
+	accounts := []account{}
+	for _, saved := range a.config.Servers {
+		status := "未连接"
+		if connection := a.direct[saved.Origin+"\x00"+saved.UserID]; connection != nil {
+			status = connection.status.Code
+			if status == "connected" {
+				status = "已连接"
+			}
+		}
+		accounts = append(accounts, account{saved.Origin, saved.UserID, strings.Join(saved.Relay, "\n"), status})
+	}
+	supplement := a.config.Supplement
 	a.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pairingPage.Execute(w, struct {
-		Pending, Trusted  []string
-		Approved, Revoked bool
-	}{pending, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1"})
+		Pending, Trusted         []string
+		Approved, Revoked, Saved bool
+		Supplement               string
+		Accounts                 []account
+	}{pending, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", supplement, accounts})
 }
 
 type loginProof struct {

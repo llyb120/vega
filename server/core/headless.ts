@@ -19,7 +19,7 @@ export function extensionDirectory(moduleUrl = import.meta.url, entry = process.
   return directory;
 }
 
-type PrivateBrowser = { profile: string; port: number; token: string };
+type PrivateBrowser = { profile: string; port: number; token: string; proxy?: string };
 export function privateWorker(source: string, instance: Pick<PrivateBrowser, "port" | "token">) {
   const loop = 'for (let port=47653; port<=47662; port++) void connect(`http://127.0.0.1:${port}`);';
   const pair = "{method:'POST',signal:AbortSignal.timeout(3000)}";
@@ -29,7 +29,7 @@ export function privateWorker(source: string, instance: Pick<PrivateBrowser, "po
     .replace(pair, `{method:'POST',headers:{Authorization:${JSON.stringify("Bearer " + instance.token)}},signal:AbortSignal.timeout(3000)}`);
 }
 
-export function headlessArguments(profile: string, extension: string) {
+export function headlessArguments(profile: string, extension: string, network?: Pick<PrivateBrowser, "port" | "proxy">) {
   const args = [
     "--headless=new",
     "--no-first-run",
@@ -45,6 +45,12 @@ export function headlessArguments(profile: string, extension: string) {
     `--load-extension=${extension}`,
     "about:blank",
   ];
+  if (network?.proxy) args.unshift(
+    `--proxy-server=${network.proxy}`,
+    `--proxy-bypass-list=<-loopback>;127.0.0.1:${network.port}`,
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+  );
   return args;
 }
 
@@ -202,7 +208,7 @@ export class HeadlessBrowser {
       // A fresh script URL prevents Chromium's service-worker cache from retaining an old bridge address.
       await writeFile(join(extension, worker), privateWorker(await readFile(join(source, "worker.js"), "utf8"), instance), { mode: 0o600 });
     }
-    const args = headlessArguments(this.dir, extension);
+    const args = headlessArguments(this.dir, extension, instance);
     if (instance) {
       args.splice(args.indexOf("--remote-debugging-port=0"), 1, "--remote-debugging-pipe", "--enable-unsafe-extension-debugging");
       args.splice(args.findIndex((arg) => arg.startsWith("--disable-extensions-except=")), 1);

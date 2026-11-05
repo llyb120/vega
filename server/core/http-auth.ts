@@ -73,7 +73,7 @@ export async function gate(event: H3Event, path: string) {
   if (path === "/api/providers/callback/devin" && event.method === "GET")
     return;
   if (path === "/api/local-agent/verify" && event.method === "POST") return;
-  if (path === "/api/local-agent/socket" && event.method === "GET") return;
+  if ((path === "/api/local-agent/socket" || path === "/api/local-agent/relay") && event.method === "GET") return;
   sameOrigin(event);
   if (path === "/api/health") {
     check(

@@ -16,7 +16,7 @@ export class EmployeeBrowsers {
   static BACKOFF_MS = [5000, 15000, 60000];
   closed = false;
   removed = new Set<string>();
-  constructor(public store: Store, public pageScript: string) {}
+  constructor(public store: Store, public pageScript: string, private networkProxy?: (id: string) => Promise<string | undefined>) {}
   profile(id: string) {
     assert(/^(default|e[a-zA-Z0-9_-]+)$/.test(id), "Invalid employee browser ID");
     return join(dirname(resolve(process.env.VEGA_DB || "vega.db")), "employee-browsers", id);
@@ -59,7 +59,7 @@ export class EmployeeBrowsers {
         try {
           await current.chrome.bridge.start();
           await current.browser.start(process.env.VEGA_DB || "vega.db", {
-            profile: this.profile(id), port: current.chrome.bridge.port, token: current.chrome.bridge.token,
+            profile: this.profile(id), port: current.chrome.bridge.port, token: current.chrome.bridge.token, proxy: await this.networkProxy?.(id),
           });
         } catch (error) {
           if (this.closed || current.stopping) throw error;

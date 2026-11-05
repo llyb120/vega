@@ -4,20 +4,46 @@ import { Auth } from "../server/core/auth";
 import { Store } from "../server/core/store";
 import { CLIENT_HEARTBEAT_TIMEOUT, CLIENT_RECONNECT_GRACE, LocalAgents, LocalAgentUnavailable } from "../server/core/local-agent";
 import { ClientSockets } from "../server/core/client-socket";
+import { NetworkRelay } from "../server/core/network-relay";
 
 const details = { clientId: "d".repeat(32), instance: "a".repeat(32), name: "Office PC", cwd: "C:\\work", platform: "windows" };
 async function fixture(t: any, clientInUse: (clientId: string) => boolean = () => false) {
   const store = await Store.open(":memory:"), auth = new Auth(store, "client-pairing-fixture-token");
   const login = await auth.setup({ setupToken: "client-pairing-fixture-token", username: "admin", password: "Long pairing fixture password" });
-  const events: any[] = [], hub = new LocalAgents((event) => events.push(event)), sockets = new ClientSockets(store, auth, hub, clientInUse);
-  t.after(async () => { sockets.closeAll(); hub.close(); await store.close(); });
+  const events: any[] = [], hub = new LocalAgents((event) => events.push(event)), relay = new NetworkRelay(store, hub), sockets = new ClientSockets(store, auth, hub, clientInUse, relay);
+  t.after(async () => { sockets.closeAll(); hub.close(); await relay.close(); await store.close(); });
   const ticket = () => hub.ticket(login.principal, details.instance).ticket;
   const peer = (token: string, id = "native") => {
     const messages: any[] = [], closed: any[] = [];
     return { id, request: new Request("http://localhost/api/local-agent/socket", { headers: { authorization: "Bearer " + token } }), send: (raw: string) => { messages.push(JSON.parse(raw)); }, close: (...args: any[]) => { closed.push(args); }, messages, closed };
   };
-  return { store, auth, login, events, hub, sockets, ticket, peer };
+  return { store, auth, login, events, hub, sockets, relay, ticket, peer };
 }
+
+test("relay policy follows authenticated account and device on hello and heartbeat", async (t) => {
+  const f = await fixture(t), paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
+  const socket = f.peer(paired.deviceToken), owner = f.login.principal.user.id;
+  await f.sockets.open(socket);
+  await f.sockets.message(socket, JSON.stringify({ type: "hello", ...details, userId: "other", relay: ["git.internal:443"] }));
+  assert.equal((await f.relay.route(owner, "git.internal", 443))?.agent.clientId, details.clientId);
+  assert.equal(await f.relay.route("other", "git.internal", 443), undefined);
+  const agent = f.hub.active(owner, details.clientId)!;
+  await f.sockets.message(socket, JSON.stringify({ type: "ping", relay: ["api.internal:8080"] }));
+  assert.equal(f.hub.active(owner, details.clientId), agent);
+  assert.equal(await f.relay.route(owner, "git.internal", 443), undefined);
+  assert.equal((await f.relay.route(owner, "api.internal", 8080))?.agent.clientId, details.clientId);
+  f.sockets.close(socket.id);
+  await assert.rejects(f.relay.route(owner, "api.internal", 8080), /离线/);
+});
+
+test("invalid relay policy is rejected without clearing the last protected domains", async (t) => {
+  const f = await fixture(t), paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId }), socket = f.peer(paired.deviceToken);
+  await f.sockets.open(socket);
+  await f.sockets.message(socket, JSON.stringify({ type: "hello", ...details, relay: ["git.internal:443"] }));
+  await f.sockets.message(socket, JSON.stringify({ type: "ping", relay: ["localhost:80"] }));
+  assert.equal(socket.closed.length, 1);
+  await assert.rejects(f.relay.route(f.login.principal.user.id, "git.internal", 443), /离线/);
+});
 
 test("device pairing is one-use, hashed, scoped and persists without a website login or connection", async (t) => {
   const f = await fixture(t), oneUse = f.ticket();
