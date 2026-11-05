@@ -608,7 +608,8 @@ async function bootstrap() {
   clientListReady.value = true;
   config.value = b.config || {};
   user.value = { ...b.user, avatar: b.avatar || "" };
-  if (!project.value) project.value = b.cwd;
+  if (b.cloudError) error.value = b.cloudError;
+  if (!project.value || (b.cloudIsolated && project.value !== b.cwd && !project.value.startsWith(b.cwd + "/"))) project.value = b.cwd;
   await loadGroups();
   return b;
 }

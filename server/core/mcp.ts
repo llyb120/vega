@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { assert, expand, id, object, clip, type Obj } from "./util";
+import type { CloudRuntime } from "./cloud";
 export class MCP {
   connections = new Map<string, Client>();
   connecting = new Map<string, Promise<Client>>();
@@ -28,6 +29,7 @@ export class MCP {
   constructor(
     public config: Record<string, Obj> = {},
     public cwd: string,
+    private cloud?: CloudRuntime,
   ) {}
   async connect(name: string) {
     if (this.connections.has(name)) return this.connections.get(name)!;
@@ -39,20 +41,20 @@ export class MCP {
     );
     const expanded = (h: Obj) =>
       Object.fromEntries(
-        Object.entries(h || {}).map(([k, v]) => [k, expand(String(v))]),
+        Object.entries(h || {}).map(([k, v]) => [k, this.cloud ? String(v) : expand(String(v))]),
       );
+    const launch = !cfg.url && this.cloud?.launch(cfg.command, cfg.args || [], cfg.cwd || this.cwd || (await this.cloud.identity()).cwd, expanded(cfg.env));
     const transport = cfg.url
       ? new StreamableHTTPClientTransport(new URL(cfg.url), {
           requestInit: { headers: expanded(cfg.headers) },
         })
       : new StdioClientTransport({
-          command: cfg.command,
-          args: cfg.args || [],
-          cwd: cfg.cwd || this.cwd,
-          env: { ...process.env, ...expanded(cfg.env) } as Record<
-            string,
-            string
-          >,
+          ...(launch || {
+            command: cfg.command,
+            args: cfg.args || [],
+            cwd: cfg.cwd || this.cwd,
+            env: { ...process.env, ...expanded(cfg.env) } as Record<string, string>,
+          }),
           stderr: "pipe",
         });
     try {

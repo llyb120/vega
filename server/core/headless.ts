@@ -7,6 +7,8 @@ import { hostname, platform } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Duplex } from "node:stream";
 import { assert, sleep } from "./util";
+import * as filesystem from "node:fs/promises";
+import type { CloudRuntime } from "./cloud";
 
 export function extensionDirectory(moduleUrl = import.meta.url, entry = process.argv[1]) {
   const candidates = [
@@ -112,12 +114,14 @@ let exitHook = false;
  * SingletonLock is a symlink "host-pid"; the holder is reclaimed only when it is on
  * this host, alive, and its cmdline uses exactly this --user-data-dir.
  */
-export async function reclaimProfile(profile: string): Promise<"none" | "stale" | "killed" | "foreign"> {
+export async function reclaimProfile(profile: string, cloud?: CloudRuntime): Promise<"none" | "stale" | "killed" | "foreign"> {
+  const { readFile, readlink } = cloud?.fs || filesystem;
+  const isAlive = async (pid: number) => cloud ? cloud.signal(pid, 0).then(() => true, (error: any) => error.code === "EPERM") : alive(pid);
   if (platform() !== "linux") return "none";
   let target: string;
   try { target = await readlink(join(profile, "SingletonLock")); } catch { return "none"; }
   const cut = target.lastIndexOf("-"), host = target.slice(0, cut), pid = Number(target.slice(cut + 1));
-  if (host === hostname() && Number.isInteger(pid) && pid > 0 && alive(pid)) {
+  if (host === hostname() && Number.isInteger(pid) && pid > 0 && await isAlive(pid)) {
     let cmdline: string;
     // Chromium rewrites its process title, so argv may appear as one space-joined string.
     try { cmdline = (await readFile(`/proc/${pid}/cmdline`, "utf8")).replace(/\0/g, " ") + " "; } catch { return "foreign"; }
@@ -125,21 +129,21 @@ export async function reclaimProfile(profile: string): Promise<"none" | "stale" 
     if (!cmdline.includes(` --user-data-dir=${profile} `)) return "foreign";
     let group = false;
     try { group = Number((await readFile(`/proc/${pid}/stat`, "utf8")).split(") ")[1]?.split(" ")[2]) === pid; } catch {}
-    const kill = (signal: NodeJS.Signals) => group ? killTree(pid, signal) : (() => { try { process.kill(pid, signal); } catch {} })();
-    kill("SIGTERM");
-    for (let i = 0; i < 30 && alive(pid); i++) await sleep(100);
-    if (alive(pid)) { kill("SIGKILL"); for (let i = 0; i < 20 && alive(pid); i++) await sleep(100); }
-    if (alive(pid)) return "foreign";
-    await removeSingletons(profile);
+    const kill = async (signal: NodeJS.Signals) => cloud ? cloud.signal(group ? -pid : pid, signal).catch(() => {}) : group ? killTree(pid, signal) : (() => { try { process.kill(pid, signal); } catch {} })();
+    await kill("SIGTERM");
+    for (let i = 0; i < 30 && await isAlive(pid); i++) await sleep(100);
+    if (await isAlive(pid)) { await kill("SIGKILL"); for (let i = 0; i < 20 && await isAlive(pid); i++) await sleep(100); }
+    if (await isAlive(pid)) return "foreign";
+    await removeSingletons(profile, cloud);
     return "killed";
   }
   // Holder is gone, or the lock was written by another host name (container recreated
   // on the same volume): the profile belongs to this server only, so the lock is stale.
-  await removeSingletons(profile);
+  await removeSingletons(profile, cloud);
   return "stale";
 }
-const removeSingletons = (profile: string) =>
-  Promise.all(["SingletonLock", "SingletonSocket", "SingletonCookie"].map((name) => rm(join(profile, name), { force: true })));
+const removeSingletons = (profile: string, cloud?: CloudRuntime) =>
+  Promise.all(["SingletonLock", "SingletonSocket", "SingletonCookie"].map((name) => (cloud?.fs || { rm }).rm(join(profile, name), { force: true })));
 
 function startupError(code: number | null, signal: NodeJS.Signals | null, stderr: string, cause: unknown) {
   const tail = stderr.trim().split("\n").slice(-12).join("\n").slice(-1500);
@@ -178,7 +182,8 @@ function chromeBinary(): string | undefined {
 export class HeadlessBrowser {
   child?: ChildProcess;
   dir?: string;
-  async start(dbPath: string, instance?: PrivateBrowser) {
+  async start(dbPath: string, instance?: PrivateBrowser, cloud?: CloudRuntime) {
+    const { mkdir, rm, cp, readFile, writeFile } = cloud?.fs || filesystem;
     if (!instance && (
       process.env.VEGA_BROWSER_MODE !== "isolated" ||
       process.env.VEGA_CHROMIUM_EXTERNAL === "1"
@@ -216,9 +221,11 @@ export class HeadlessBrowser {
     }
     if (process.env.VEGA_CHROMIUM_NO_SANDBOX === "1" || platform() === "win32")
       args.unshift("--no-sandbox");
-    if (instance) await reclaimProfile(this.dir);
+    if (instance) await reclaimProfile(this.dir, cloud);
     // Detached = own process group, so close/exit can kill the whole Chromium tree at once.
-    this.child = spawn(binary, args, {
+    const launch = cloud?.launch(binary, args, (await cloud.identity()).cwd, {}, !!instance);
+    this.child = spawn(launch?.command || binary, launch?.args || args, {
+      ...(launch ? { cwd: launch.cwd, env: launch.env } : {}),
       stdio: instance ? ["ignore", "ignore", "pipe", "pipe", "pipe"] : "ignore",
       windowsHide: true,
       detached: platform() !== "win32",

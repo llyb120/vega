@@ -118,7 +118,7 @@ onMounted(() => void run(refresh));
           <div><h3>成员 <span class="count">{{ users.length }}</span></h3><p class="hint">管理员可管理网站，操作用户可提交任务，只读用户仅可查看授权内容。</p></div>
           <button type="button" class="sm" :class="creating ? '' : 'primary'" @click="creating = !creating"><Icon :name="creating ? 'close' : 'plus'" :size="14" />{{ creating ? '取消' : '新建账号' }}</button>
         </div>
-        <p class="callout"><Icon name="alert" :size="16" /><span>执行任务的 agent 拥有容器/服务器工具能力，提交任务的账号必须可信。网站角色不是内部运行权限，也不是多租户沙箱。</span></p>
+        <p class="callout"><Icon name="alert" :size="16" /><span>网站角色控制站点权限，不等于执行沙箱。Docker 镜像按用户系统身份隔离私有目录；非 Docker 默认仍共享系统身份。不要向任务暴露宿主目录或管理凭据。</span></p>
         <form v-if="creating" class="create-form" @submit.prevent="add">
           <div class="form-grid four">
             <label>用户名<input v-model="create.username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9][a-zA-Z0-9_.\-]{2,63}" autocomplete="off" autocapitalize="none" spellcheck="false" /></label>

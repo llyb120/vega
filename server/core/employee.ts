@@ -14,6 +14,8 @@ import { Vault, VAULT_USAGE } from "./vault";
 import { requireSceneModel } from "./config";
 import { loadRows, baseRecord, saveRows } from "./employee-rows";
 import { assertNameFree } from "./names";
+import { cloudFor } from "./cloud";
+
 export type Execution = Pick<Session, "localAgent" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
 export type Owner = { token: string; name: string };
 export type Task = Obj & {
@@ -401,11 +403,13 @@ export class Employee {
       assert(available.length, "No unused avatar combination available");
       avatar = available[Math.floor(Math.random() * available.length)];
     }
+    const cloud = cloudFor({ ownerId });
+    const cwd = cloud ? await cloud.cwd(a.cwd) : a.cwd || process.cwd();
     const key = id("e"), employee = new Employee(this.store, this.vaults, this.runtime, key, this.root || this);
     const s = await this.store.transaction(async () => {
       await assertNameFree(this, a.name, { id: key, ownerId });
       const s = await employee.profile();
-      Object.assign(s, { name: a.name.trim(), avatar, instruction: a.instruction || "", ownerId, cwd: a.cwd || process.cwd(), enabled: true, workStart: "00:00", workEnd: "00:00" });
+      Object.assign(s, { name: a.name.trim(), avatar, instruction: a.instruction || "", ownerId, cwd, enabled: true, workStart: "00:00", workEnd: "00:00" });
       await employee.save(s);
       (this.root || this).members.set(key, employee);
       return s;

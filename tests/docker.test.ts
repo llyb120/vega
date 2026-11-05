@@ -55,6 +55,8 @@ test("externally supervised Chromium prevents Nitro from spawning a competing in
 
 test("container health requires authenticated extension pairing, not merely an alive HTTP server", async () => {
   let paired = false,
+    isolated = false,
+    ready = true,
     status = 200,
     calls = 0;
   const token = "test-only-docker-access-token";
@@ -63,7 +65,7 @@ test("container health requires authenticated extension pairing, not merely an a
     assert.equal(req.url, "/api/health");
     assert.equal(req.headers.authorization, "Bearer " + token);
     res.writeHead(status, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ connected: paired }));
+    res.end(JSON.stringify({ connected: paired, ready, isolated }));
   });
   await new Promise<void>((yes) => server.listen(0, "127.0.0.1", yes));
   const env = {
@@ -79,7 +81,14 @@ test("container health requires authenticated extension pairing, not merely an a
     assert.throws(() => apiAddress({ ...env, VEGA_TOKEN: "short" }));
     assert.throws(() => apiAddress({ ...env, NITRO_PORT: "0" }));
     assert.throws(() => apiAddress({ ...env, NITRO_PORT: "not-a-port" }));
-    assert.equal(calls, 3);
+    status = 200; paired = false; isolated = true;
+    const cloud = { ...env, VEGA_CLOUD_ISOLATION: "1" };
+    assert.equal(await connected(cloud), true, "cloud health does not require a shared browser");
+    ready = false;
+    assert.equal(await connected(cloud), false, "identity executor failure is not healthy");
+    ready = true; isolated = false;
+    assert.equal(await connected(cloud), false, "a legacy shared process is not an isolated executor");
+    assert.equal(calls, 6);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((yes) => server.close(() => yes()));
@@ -139,14 +148,21 @@ test("dedicated container browser tasks start without claiming a physical deskto
   }
 });
 
-test("Docker image builds Linux-native artifacts, runs non-root, persists state and keeps bridge/debug ports private", () => {
+test("Docker image builds Linux-native artifacts, uses a restricted identity launcher and keeps bridge/debug ports private", () => {
   const docker = readFileSync("Dockerfile", "utf8"),
     ignore = readFileSync(".dockerignore", "utf8");
   assert.match(docker, /FROM node:24-bookworm-slim AS build/);
   assert.match(docker, /RUN npm ci/);
   assert.match(docker, /RUN npm run build/);
   assert.match(docker, /COPY --from=build \/app\/\.output \/app\/\.output/);
-  assert.match(docker, /USER node/);
+  assert.match(docker, /USER root/);
+  assert.match(docker, /cloud-supervisor\.mjs/);
+  assert.match(docker, /VEGA_CLOUD_ISOLATION=1/);
+  const launcher = readFileSync("docker/cloud-supervisor.mjs", "utf8");
+  assert.match(launcher, /dropPrivileges\(\{ uid: 1000 \}\)/);
+  assert.match(launcher, /--clear-groups/);
+  assert.match(launcher, /--no-new-privs/);
+  assert.match(launcher, /--bounding-set=-all/);
   assert.match(docker, /chromium-sandbox/);
   assert.match(docker, /VEGA_CHROMIUM_NO_SANDBOX=0/);
   assert.deepEqual(docker.match(/^EXPOSE .+$/gm), ["EXPOSE 8080"]);
@@ -159,18 +175,19 @@ test("Docker image builds Linux-native artifacts, runs non-root, persists state 
   assert.equal(
     JSON.parse(readFileSync("docker/chromium-policy.json", "utf8"))
       .DownloadDirectory,
-    "/data/downloads",
+    "${user_home}/Downloads",
   );
 });
 
 test("Dockerfile.mysql differs from Dockerfile only by its header comment and MySQL ENV defaults", () => {
   const strip = (text: string) =>
     text
+      .replace(/\r\n/g, "\n")
       .split("\n")
       .filter((line) => !/^# (Vega 镜像|运行时传|  docker build -f)/.test(line))
       .join("\n")
       .replace(/ \\\n {4}DB_TYPE=mysql \\\n {4}MYSQL_HOST=mysql \\\n {4}MYSQL_PORT=3306 \\\n {4}MYSQL_USER=vega \\\n {4}MYSQL_DATABASE=vega\n/, "\n");
   const mysql = readFileSync("Dockerfile.mysql", "utf8");
   assert.match(mysql, /DB_TYPE=mysql/);
-  assert.equal(strip(mysql), readFileSync("Dockerfile", "utf8"));
+  assert.equal(strip(mysql), strip(readFileSync("Dockerfile", "utf8")));
 });

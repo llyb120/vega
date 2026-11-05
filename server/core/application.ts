@@ -7,6 +7,7 @@ import { ChromeBridge } from "./chrome-bridge";
 import { Chrome } from "./chrome";
 import { Engine } from "./engine";
 import { HeadlessBrowser } from "./headless";
+import { cloudEnabled } from "./cloud";
 import { BrowserLive } from "./browser-live";
 import { EventsSocket } from "./events-socket";
 import { ClientSockets } from "./client-socket";
@@ -56,8 +57,10 @@ export async function initialize(pageScript: string) {
     headless: new HeadlessBrowser(),
   };
   const dbPath = process.env.VEGA_DB || "vega.db";
-  await application.headless.start(dbPath);
-  await bridge.start();
+  if (!cloudEnabled()) {
+    await application.headless.start(dbPath);
+    await bridge.start();
+  }
   await engine.employee.start();
   return application;
 }

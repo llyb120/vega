@@ -5,9 +5,11 @@ import { Chrome } from "../server/core/chrome";
 import { ChromeBridge, requestTimeout } from "../server/core/chrome-bridge";
 import { EmployeeBrowsers } from "../server/core/employee-browsers";
 import { HeadlessBrowser, headlessArguments } from "../server/core/headless";
+import type { CloudRuntime } from "../server/core/cloud";
+import { join, resolve } from "node:path";
 
-async function fixture(t: TestContext, networkProxy?: (id: string) => Promise<string | undefined>) {
-  const store = await Store.open(":memory:"), browsers = new EmployeeBrowsers(store, "", networkProxy);
+async function fixture(t: TestContext, networkProxy?: (id: string) => Promise<string | undefined>, isolation?: (id: string) => Promise<CloudRuntime | undefined>) {
+  const store = await Store.open(":memory:"), browsers = new EmployeeBrowsers(store, "", networkProxy, isolation);
   const bridge = new ChromeBridge(true), chrome = new Chrome(store, bridge, ""), browser = new HeadlessBrowser();
   const client = crypto.randomUUID();
   const connect = () => bridge.clients.set(client, { at: Date.now(), browser: "Google Chrome" });
@@ -40,6 +42,25 @@ test("employee browsers automatically receive the owner's stable network proxy",
   assert(args.includes("--disable-quic"));
   assert(args.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
   assert(!headlessArguments("profile", "extension").some((arg) => arg.startsWith("--proxy-")));
+});
+
+test("cloud browsers use the owner's identity for profiles, uploads and cleanup without shared fallback", async (t) => {
+  const home = resolve("private-alice"), removed: string[] = [];
+  const cloud = { identity: async () => ({ home }), fs: {
+    realpath: async (path: string) => resolve(path), stat: async () => ({ isFile: () => true }),
+    rm: async (path: string) => { removed.push(path); },
+  } } as unknown as CloudRuntime;
+  const f = await fixture(t, undefined, async () => cloud);
+  await f.browsers.get("ea");
+  assert.equal((f.start.mock.calls[0].arguments as any[])[2], cloud);
+  assert.equal((f.start.mock.calls[0].arguments as any[])[1].profile, join(home, "browsers", "ea"));
+  assert.equal(await f.chrome.workspaceFile(home, "report.txt"), join(home, "report.txt"));
+  await assert.rejects(f.chrome.workspaceFile(home, "../private-bob/report.txt"), /within the working directory/);
+  await f.browsers.remove("ea");
+  assert.deepEqual(removed, [join(home, "browsers", "ea")]);
+  const failed = await fixture(t, undefined, async () => { throw Error("identity initialization failed"); });
+  await assert.rejects(failed.browsers.get("ea"), /identity initialization failed/);
+  assert.equal(failed.start.mock.callCount(), 0);
 });
 
 test("employee browsers start lazily, share concurrent recovery and stay resident across tasks", async (t) => {

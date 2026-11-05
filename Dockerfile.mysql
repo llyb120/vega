@@ -34,7 +34,7 @@ RUN npm run build
 FROM node:24-bookworm-slim AS runtime
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates chromium chromium-sandbox git openssh-client ripgrep tini \
+        ca-certificates chromium chromium-sandbox git openssh-client ripgrep tini util-linux passwd \
         fontconfig fonts-liberation fonts-croscore fonts-crosextra-carlito \
         fonts-crosextra-caladea fonts-dejavu-core fonts-noto-core fonts-noto-mono \
         fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei \
@@ -47,6 +47,7 @@ ENV NODE_ENV=production \
     NITRO_PORT=8080 \
     VEGA_DB=/data/vega.db \
     VEGA_SKILL_CACHE=/data/skill-cache \
+    VEGA_CLOUD_ISOLATION=1 \
     VEGA_CHROMIUM_NO_SANDBOX=0 \
     DB_TYPE=mysql \
     MYSQL_HOST=mysql \
@@ -56,13 +57,14 @@ ENV NODE_ENV=production \
 COPY --from=build /app/.output /app/.output
 COPY --from=build /app/extensions/nova-chrome /app/extension
 COPY docker /app/docker
+COPY shared/cloud-wire.mjs /app/shared/cloud-wire.mjs
 COPY docker/chromium-policy.json /etc/chromium/policies/managed/vega.json
 COPY docker/fonts.conf /etc/fonts/local.conf
 RUN fc-cache -f
-USER node
+USER root
 WORKDIR /workspace
 VOLUME ["/data", "/workspace"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=75s --retries=3 \
     CMD ["node", "/app/docker/healthcheck.mjs"]
-ENTRYPOINT ["/usr/bin/tini", "--", "node", "/app/docker/start.mjs"]
+ENTRYPOINT ["/usr/bin/tini", "--", "node", "/app/docker/cloud-supervisor.mjs"]

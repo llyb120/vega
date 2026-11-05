@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type { Agent, LocalAgents } from "./local-agent";
 import type { Message, Session, Store } from "./store";
 import { assert, type Obj } from "./util";
+import { cloudFor } from "./cloud";
 
 /** A file attached to a message: the bytes live in the blobs table, readable by whoever can read the conversation. */
 export type FileRef = { name: string; mime: string; size: number; blobId: string };
@@ -89,7 +90,16 @@ export class AttachmentFiles {
           const server = await this.server(file);
           let agent: Agent | undefined;
           try { agent = this.shell ? this.agent() : undefined; } catch { agent = undefined; }
-          if (!agent) return server;
+          if (!agent) {
+            const cloud = cloudFor(this.session());
+            if (!cloud) return server;
+            const blob = await this.store.blobData(file.blobId);
+            assert(blob, "附件已不存在");
+            const path = join(this.session().cwd, ".vega-attachments", file.blobId.replace(/^blob-/, "").slice(0, 12), safeFileName(file.name));
+            await cloud.fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+            await cloud.fs.writeFile(path, blob.data, { mode: 0o600 });
+            return path;
+          }
           try { return `${await this.client(file, agent)}（客户端副本，命令行用；服务端存档 ${server} 可用 read 读取）`; }
           catch (e: any) { return `${server}（服务端存档，可用 read 读取；未能复制到客户端：${String(e?.message || e)}）`; }
         })());

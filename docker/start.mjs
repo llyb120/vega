@@ -116,6 +116,12 @@ export async function supervise() {
     }
     if (!ready)
       throw Error("Nitro did not become ready within the startup budget");
+    if (env.VEGA_CLOUD_ISOLATION === "1") {
+      if (!await connected(env)) throw Error("Cloud identity executor is not ready");
+      console.info("[Vega] Per-user cloud execution ready; private browsers start on demand.");
+      const result = await Promise.race([stopped, ...children.map((child) => child.done)]);
+      return stop.signal.aborted ? 0 : result || 1;
+    }
     launch("Chromium", "/usr/bin/chromium", args);
     let paired = false;
     for (const deadline = Date.now() + 50000; Date.now() < deadline; ) {

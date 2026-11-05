@@ -1,6 +1,6 @@
 # Docker：自动加载容器内 Chromium 扩展
 
-镜像包含 Nitro、Linux 原生构建的前端/`sharp`、Debian Chromium 和现有 Nova Chrome 扩展。启动时先等 Nitro 就绪，再以独立持久化 profile 启动无头 Chromium，通过 `--load-extension` 自动加载扩展，无需打开扩展管理页。扩展的 manifest key 保留原固定 ID；启动器确认扩展已配对才报告就绪，健康检查也验证连接状态。
+镜像包含 Nitro、Linux 原生构建的前端/`sharp`、Debian Chromium 和现有 Nova Chrome 扩展。只运行一个容器：受信启动器管理系统身份，网站服务降权为 UID 1000，云端文件工具、shell、技能、MCP 子进程和 Chromium 使用所属用户的独立 UID/GID。浏览器按需启动并自动加载扩展，不要求先启动公共浏览器。
 
 **这是容器里的专用浏览器，不是给宿主机或访问网页的客户端浏览器静默安装扩展。** 使用 Debian Chromium 而不是受近年扩展命令行限制影响的品牌版 Google Chrome，不篡改用户 Preferences，也不需要签名私钥或 Web Store 发布。
 
@@ -36,10 +36,10 @@ docker logs vega
 docker inspect --format '{{.State.Health.Status}}' vega
 ```
 
-成功启动日志包含 `loaded and paired`。`healthy`通过专用`/api/health`检查服务和扩展连接，不登录网站、不持有管理员Cookie，也不执行网页输入或业务提交。
+成功启动日志包含 `Per-user cloud execution ready`；`healthy`通过专用`/api/health`确认身份执行器可用。首次浏览器操作才启动该用户/牛马的 Chromium，并检查扩展连接。
 
 - 只发布 **8080**；扩展桥接固定在容器内 `127.0.0.1:47653`，不发布桥接或远程调试端口。
-- `tini` 管理子进程；Nitro 或 Chromium 退出时容器会退出，Docker 重启策略可重新启动；SIGTERM 会关闭二者，不让孤儿浏览器留在后台。
+- `tini` 管理子进程；Nitro 退出时停止执行器并退出容器。单个用户的浏览器退出不拖垮网站，后续操作按原恢复机制处理；SIGTERM 关闭执行进程组。
 - 不挂宿主机 X11/Wayland socket，不挂 Docker socket，不使用 `--privileged`。
 
 ## 客户端下载
@@ -53,21 +53,29 @@ docker inspect --format '{{.State.Health.Status}}' vega
 | 路径 | 内容 |
 |---|---|
 | `/data/vega.db` | 会话、任务、配置与技能资源的 SQLite 权威存储 |
-| `/data/chromium` | Chromium profile、cookie/登录态与扩展状态 |
-| `/data/downloads` | 浏览器下载，使用受管策略关闭保存路径弹窗 |
-| `/data/skill-cache` | 从 SQLite 技能资源再生的文件缓存 |
-| `/workspace` | agent 的默认工作目录与代码/文件产物 |
+| `/data/.vega-identities/users.sqlite` | 受信启动器独占的用户ID→UID/GID映射，SQLite/MySQL部署都必须保留 |
+| `/workspace/.vega-users/<用户ID>/workspace` | 该用户的默认云端工作区，权限0700 |
+| `/workspace/.vega-users/<用户ID>/home` | 私有 HOME，包含技能缓存、浏览器 Profile 和下载 |
+| `/workspace/.vega-users/<用户ID>/tmp` | 私有临时目录，SSH 临时私钥正常结束/重启时清理 |
+| `/data/chromium`、`/data/downloads`、`/data/skill-cache`、旧 `/workspace` 内容 | 旧数据原位保留，不自动迁移给某个用户 |
 
 重建或删除容器不会删除命名卷。不要用多个运行中的容器同时共享同一个 Chromium profile。浏览器登录态**不会自动导入宿主机**，在容器浏览器中登录后由 profile 卷保留；订阅 CLI 凭据同样不会从宿主机自动复制。
 
-默认使用非 root 的 `node` 用户（UID/GID 1000）。命名卷会继承镜像目录权限；如改用 bind mount，先确保目录可由 UID 1000 读写，不要通过 root 启动或给整个宿主目录开放权限。要操作既有项目，可将 `vega-workspace` 替换为精确授权的项目 bind mount：
+网站账号仍在「账号与权限」创建。首次进入可执行工作台时自动分配 UID/GID（从10001起，避开已有系统账号），创建禁止交互登录的 `vega_u<UID>` 系统账号；重建镜像时按映射恢复，不回收旧 UID。用户私有目录外还有 root 拥有的组可遍历保护目录，因此任务不能靠 chmod 自己的工作区把它开放给其他用户。
+
+入口需要容器内 root 管理身份，随后网站服务降权到 `node`（UID/GID1000），任务清空额外组/capabilities并禁止提权。**不要覆盖入口或使用 `--user` 强制普通身份，也不需要 `--privileged`、Docker socket 或宿主机管理权限。** 身份执行器失败时请求报错，不以公共身份重试。云端 MCP 不继承或插值网站服务的环境变量；所需环境变量/凭据在对应牛马的 MCP 配置中显式提供。
+
+升级前备份两个卷。启动器会收紧旧数据顶层条目的组/其他用户权限，保留内容和原属主；遇到顶层符号链接或未知 UID 的旧数据会拒绝启动，需管理员先处理。旧会话/任务中的公共路径不会自动转换，需新建私有工作区会话，或确认文件归属后迁移。旧浏览器登录态也不会自动复制给新用户。
+
+继续使用原来的两个命名卷即可；卷必须真实支持 POSIX UID/GID 和权限，设置后校验不符会拒绝启动。不要将多个服务共用的项目目录直接作为整个 `/workspace` bind mount：上述权限收紧会影响宿主文件。迁移既有项目应按用户 UID 放入其私有 workspace，保留身份数据库与工作区卷成对备份；不要挂整个 home、SSH目录、系统根目录或其他用户卷。
+
+镜像构建后、挂生产卷之前可运行权限自检：
 
 ```sh
-# 在上面的 docker run 中替换 /workspace 卷参数
---mount type=bind,src=/srv/my-project,dst=/workspace
+docker run --rm --entrypoint node vega:local /app/docker/isolation-check.mjs
 ```
 
-所有工作台工具均在容器内运行，修改 bind mount 会直接改宿主文件。不要挂整个 home、SSH 目录、系统根目录或其他不相关凭据。
+该检查用临时目录验证不同 UID、文件/shell/符号链接/切目录越权拒绝、启动器不可访问、环境清理、浏览器管道、重启后身份稳定和身份数据库丢失时拒绝启动。Windows 单元测试不能替代此 Linux 检查。文件权限隔离不隔离网络、进程可见性、CPU/内存或内核；不要把凭据放在命令行参数里，强对抗代码仍需更强执行沙箱。
 
 `/data` 中含会话、配置和敏感浏览器登录态。无桌面 keyring，Chromium 使用 basic password store；必须保护数据卷和备份，不能把本机加密当成数据库/卷被窃取后的保障。密码本可通过 `.env.docker` 设置独立 `VEGA_VAULT_KEY`（32字节 Base64 或64位hex），保存在数据库外，升级时保持不变。
 

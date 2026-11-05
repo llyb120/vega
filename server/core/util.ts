@@ -137,16 +137,16 @@ export function localJSON(file: string, optional = false, max = 4 << 20): Obj {
     throw e;
   }
 }
-export async function workspaceFile(cwd: string, input: string) {
+export async function workspaceFile(cwd: string, input: string, fs = { realpath, stat: async (path: string) => statSync(path) }) {
   assert(input.trim(), "File required");
-  const root = await realpath(cwd),
-    file = await realpath(resolve(root, input)),
+  const root = await fs.realpath(cwd),
+    file = await fs.realpath(resolve(root, input)),
     rel = relative(root, file);
   assert(
     rel !== ".." &&
       !rel.startsWith(".." + sep) &&
       !isAbsolute(rel) &&
-      statSync(file).isFile(),
+      (await fs.stat(file)).isFile(),
     "Only regular files within the working directory may be uploaded",
   );
   return file;

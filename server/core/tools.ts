@@ -9,6 +9,8 @@ import {
   realpath,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import * as filesystem from "node:fs/promises";
+import { cloudFor, type CloudRuntime } from "./cloud";
 import { resolve, dirname, extname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { spawn } from "node:child_process";
@@ -72,6 +74,7 @@ export class Tools {
   actorId?: string;
   private credentials: CredentialBinding[] = [];
   private keys: KeyFiles;
+  private cloud?: CloudRuntime;
   /** Message attachments put on disk for this run (see attachments.ts). */
   attachments: AttachmentFiles;
   private browserTab?: string;
@@ -89,7 +92,8 @@ export class Tools {
     public context: Context,
     public mcp: MCP,
   ) {
-    this.keys = new KeyFiles(keyDir(engine.store.files.root), engine.localAgents);
+    this.cloud = cloudFor(session);
+    this.keys = new KeyFiles(keyDir(engine.store.files.root), engine.localAgents, this.cloud);
     // Employee chats have no shell: their files stay on the server, readable with `read`.
     this.attachments = new AttachmentFiles(engine.store, engine.localAgents, () => this.session, () => this.agent(), signal, !(session.employeeId && !session.taskId));
   }
@@ -345,7 +349,7 @@ export class Tools {
     assert(entry, "Vault entry not found for this task");
     const task = this.session.taskId ? (await this.engine.employeeFor(this.session)).task(await (await this.engine.employeeFor(this.session)).state(), this.session.taskId).text
       : (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "";
-    const browser = this.session.localAgent ? this.engine.localBrowsers.peek(this.session.id) : this.session.employeeId ? this.engine.browsers.peek(this.session.employeeId) : this.engine.chrome;
+    const browser = this.session.localAgent ? this.engine.localBrowsers.peek(this.session.id) : this.session.employeeId ? this.engine.browsers.peek(this.session.employeeId) : this.cloud ? this.engine.browsers.peek("user_" + this.session.ownerId) : this.engine.chrome;
     const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
     const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
     const pages = (observation?.pages || []).filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
@@ -434,21 +438,21 @@ export class Tools {
         return call.name === "write"
           ? localWrite(this.engine.localAgents, agent, this.session.cwd, a, this.signal)
           : localEdit(this.engine.localAgents, agent, this.session.cwd, a, this.signal);
-      return { value: await mutate(this.session.cwd, call.name, a) };
+      return { value: await mutate(this.session.cwd, call.name, a, this.cloud?.fs) };
     }
     if (call.name === "bash") {
       const agent = this.agent();
       return agent
         ? localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal)
-        : shell(this.session.cwd, a, this.signal, this.emit);
+        : shell(this.session.cwd, a, this.signal, this.emit, this.cloud);
     }
     if (call.name === "change_working_directory") {
       assert(typeof a.path === "string" && a.path, "path required");
       const agent = this.agent();
       const path = agent
         ? await localCwdExists(this.engine.localAgents, agent, this.session.cwd, a.path, this.signal)
-        : resolve(this.session.cwd, a.path);
-      if (!agent) assert((await stat(path)).isDirectory(), "Existing cwd directory required");
+        : this.cloud ? await this.cloud.cwd(resolve(this.session.cwd, a.path)) : resolve(this.session.cwd, a.path);
+      if (!agent && !this.cloud) assert((await stat(path)).isDirectory(), "Existing cwd directory required");
       if (this.session.employeeId && this.session.taskId && path !== this.session.cwd) (await this.engine.employeeFor(this.session)).releaseWorkspace(this.session.taskId);
       this.session.cwd = path;
       await this.engine.store.saveSession(this.session);
@@ -560,7 +564,7 @@ export class Tools {
     return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? await taskLink(result.value.id) : undefined };
   }
   private async chrome(a: Obj): Promise<Outcome> {
-    const employeeId = !this.session.localAgent && (this.session.employeeId || this.session.taskId) ? (await this.engine.employeeFor(this.session)).employeeId : "";
+    const employeeId = !this.session.localAgent && (this.session.employeeId || this.session.taskId) ? (await this.engine.employeeFor(this.session)).employeeId : this.cloud ? "user_" + this.session.ownerId : "";
     let browser: Awaited<ReturnType<Engine["chromeFor"]>>;
     try { browser = await this.engine.chromeFor(this.session, this.signal); }
     catch (error) {
@@ -655,7 +659,8 @@ export class Tools {
       const path = rest.length ? skillEntry(rest.join("/")) : "SKILL.md";
       let result: Outcome;
       if (skill.assets?.length) {
-        const cache = await materializeSkill(this.engine.store, skill);
+        const skillCloud = cloudFor({ ownerId: this.session.ownerId });
+        const cache = await materializeSkill(this.engine.store, skill, skillCloud);
         assert(
           skill.assets.some((asset: Obj) => asset.path === path),
           "Skill resource not found",
@@ -673,6 +678,9 @@ export class Tools {
     if (a.path.startsWith("sqlite:")) {
       const match = /^sqlite:blob\/(.+)$/.exec(a.path);
       assert(match, "Invalid SQLite archive path");
+      const granted = await this.engine.store.one("SELECT 1 AS allowed FROM blob_access a JOIN sessions s ON s.id=a.session WHERE a.blob_id=? AND (s.id=? OR s.owner=?) LIMIT 1", match[1], this.session.id, this.session.ownerId || "");
+      const attached = !granted && (await this.engine.store.messages(this.session.id)).some((message) => [...(message.images || []), ...(message.files || [])].some((file) => file.blobId === match[1]));
+      assert(granted || attached, "Archived blob is not accessible to this user/session");
       const blob = await this.engine.store.blobData(match[1]);
       assert(blob, "Archived blob missing");
       await this.engine.store.grantBlob(match[1], this.session.id);
@@ -694,17 +702,18 @@ export class Tools {
       // Paged like a text file so records larger than one tool result stay fully readable.
       else return { value: { path, ...archiveSlice(JSON.parse(data.toString("utf8")), a.offset, a.limit) } };
     }
+    const cloud = attachment ? undefined : serverOnly ? cloudFor({ ownerId: this.session.ownerId }) : this.cloud, fs = cloud?.fs || filesystem;
     const agent = serverOnly || attachment ? undefined : this.agent(),
       local = agent ? await localRead(this.engine.localAgents, agent, this.session.cwd, a.path, this.signal) : undefined,
-      path = attachment || local?.path || await readPath(this.session.cwd, a.path),
-      st = local ? { size: local.data.length, isFile: () => true } : await stat(path);
+      path = attachment || local?.path || await readPath(this.session.cwd, a.path, fs, cloud ? (await cloud.identity()).home : undefined),
+      st = local ? { size: local.data.length, isFile: () => true } : await fs.stat(path);
     assert(st.isFile(), "Regular file required");
     const extension = extname(path).toLowerCase();
     if (
       [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"].includes(extension)
     ) {
       assert(st.size <= 25 << 20, "Image exceeds25MiB");
-      const data = local?.data || await readFile(path),
+      const data = local?.data || await fs.readFile(path),
         metadata = await sharp(data, { limitInputPixels: 64000000 }).metadata();
       const blobId = await this.engine.store.blob(
               "image/" + (metadata.format === "jpeg" ? "jpeg" : metadata.format),
@@ -728,7 +737,7 @@ export class Tools {
       "Text file exceeds32MiB; use bounded shell extraction",
     );
     const content = new TextDecoder("utf-8", { fatal: true }).decode(
-      local?.data || await readFile(path),
+      local?.data || await fs.readFile(path),
     );
     assert(!content.includes("\0"), "Not a UTF-8 text file");
     return { value: { path, ...textSlice(content, a.offset, a.limit) } };
@@ -738,10 +747,11 @@ export class Tools {
     finally { if (this.signal.aborted) await this.engine.releaseSession(this.session.id); }
   }
 }
-export async function mutate(cwd: string, name: string, a: Obj) {
+export async function mutate(cwd: string, name: string, a: Obj, fs = filesystem) {
+  const { realpath, stat, mkdir, readFile, writeFile, rename, unlink } = fs;
   assert(typeof a.path === "string" && a.path, "path required");
   let path = resolve(cwd, a.path),
-    mode = 0o644;
+    mode = fs === filesystem ? 0o644 : 0o600;
   try {
     path = await realpath(path);
     const st = await stat(path);
@@ -831,6 +841,7 @@ export async function shell(
   a: Obj,
   parent: AbortSignal,
   emit: (type: string, data: any) => void,
+  cloud?: CloudRuntime,
 ): Promise<Outcome> {
   assert(typeof a.command === "string" && a.command.trim(), "command required");
   assertShellCommand(a.command);
@@ -844,13 +855,14 @@ export async function shell(
   const win = process.platform === "win32",
     bin = win ? windowsShell() : "/bin/sh";
   return await new Promise((resolve) => {
+    const args = win ? ["-NoProfile", "-NonInteractive", "-Command", a.command] : ["-c", a.command];
+    const launch = cloud?.launch(bin, args, cwd);
     const child = spawn(
-      bin,
-      win
-        ? ["-NoProfile", "-NonInteractive", "-Command", a.command]
-        : ["-c", a.command],
+      launch?.command || bin,
+      launch?.args || args,
       {
-        cwd,
+        cwd: launch?.cwd || cwd,
+        ...(launch ? { env: launch.env } : {}),
         windowsHide: true,
         detached: !win,
         stdio: ["ignore", "pipe", "pipe"],

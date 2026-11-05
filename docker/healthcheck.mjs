@@ -21,7 +21,8 @@ export async function connected(env = process.env) {
     await response.body?.cancel();
     return false;
   }
-  return (await response.json()).connected === true;
+  const health = await response.json();
+  return env.VEGA_CLOUD_ISOLATION === "1" ? health.ready === true && health.isolated === true : health.connected === true;
 }
 
 if (

@@ -1,3 +1,4 @@
+import { cloudFor, cloudEnabled } from "./cloud";
 import { NEW_SESSION_NOTICE } from "./new-session";
 import { Fire } from "./fire";
 import { Groups } from "./groups";
@@ -118,7 +119,9 @@ export class Engine {
       existing = this.mcpSessions.get(session.id);
     if (existing?.key === key) return existing.client;
     if (existing) void existing.client.close();
-    const client = new MCP(config.mcp, session.cwd);
+    const cloud = cloudFor({ ownerId: session.ownerId });
+    const cwd = cloud && session.localAgent ? "" : session.cwd;
+    const client = new MCP(config.mcp, cwd, cloud);
     this.mcpSessions.set(session.id, { key, client });
     return client;
   }
@@ -151,12 +154,14 @@ export class Engine {
       const agent = localAgent ? this.localAgents.active(ownerId, clientId ?? source.clientId) : undefined;
       assert(!localAgent || agent, "所选客户端未连接，或存在多个客户端；请选择在线客户端");
       if (!!source.localAgent === localAgent && (!localAgent || source.clientId === agent!.clientId)) return source;
+      const cloud = cloudFor({ ownerId, localAgent });
       const target = agent ? "client:" + agent.clientId : "server",
         saved = source.executionCwds?.[target],
-        fallback = agent?.cwd || process.cwd(),
+        fallback = agent?.cwd || (cloud ? (await cloud.identity()).cwd : process.cwd()),
         signal = AbortSignal.timeout(10000);
       const validate = async (path: string) => {
         if (agent) return localCwdExists(this.localAgents, agent, agent.cwd, path, signal);
+        if (cloud) return cloud.cwd(path);
         assert((await stat(path)).isDirectory(), "Existing server cwd directory required");
         return path;
       };
@@ -198,11 +203,12 @@ export class Engine {
     assert(!localAgent || agent, "所选客户端未连接，请选择在线客户端");
     this.executionSwitches.add(lock);
     try {
+      const cloud = cloudFor({ ownerId, localAgent });
       const target = agent ? "client:" + agent.clientId : "server";
       const previous = state.execution?.localAgent ? "client:" + state.execution.clientId : "server";
-      const cwd = state.executionCwds?.[target] || (agent ? agent.cwd : target === previous ? state.cwd : process.cwd());
-      const path = agent ? await localCwdExists(this.localAgents, agent, agent.cwd, cwd, AbortSignal.timeout(10000)) : cwd;
-      if (!agent) assert((await stat(path)).isDirectory(), "服务端工作目录不存在");
+      const cwd = state.executionCwds?.[target] || (agent ? agent.cwd : cloud ? (await cloud.identity()).cwd : target === previous ? state.cwd : process.cwd());
+      const path = agent ? await localCwdExists(this.localAgents, agent, agent.cwd, cwd, AbortSignal.timeout(10000)) : cloud ? await cloud.cwd(cwd) : cwd;
+      if (!agent && !cloud) assert((await stat(path)).isDirectory(), "服务端工作目录不存在");
       if (agent) assert(this.localAgents.active(ownerId, agent.clientId) === agent, "客户端已断开，请重连后再切换");
       assert(!employee.deleting && !this.closing, "牛马正在删除或服务已停止");
       return await employee.update((next) => {
@@ -250,10 +256,11 @@ export class Engine {
     this.groups = new Groups(this);
     this.employee = new Employee(store, this.vault, runtime);
     this.relay = new NetworkRelay(store, this.localAgents);
+    const browserOwner = async (id: string) => id.startsWith("user_") ? id.slice(5) : (await (await this.employee.for(id)).state()).ownerId;
     this.browsers = new EmployeeBrowsers(store, chrome.pageScript, async (id) => {
-      const { ownerId } = await (await this.employee.for(id)).state();
+      const ownerId = await browserOwner(id);
       return ownerId ? this.relay.proxy(ownerId) : undefined;
-    });
+    }, async (id) => cloudEnabled() ? cloudFor({ ownerId: await browserOwner(id) }) : undefined);
     this.localBrowsers = new LocalBrowsers(store, this.localAgents, chrome.pageScript);
     this.fire = new Fire(
       store,
@@ -471,7 +478,7 @@ export class Engine {
   }
   async chromeFor(session: Session, signal?: AbortSignal) {
     if (session.localAgent) return this.localBrowsers.get(session, signal);
-    if (!session.employeeId && !session.taskId) return this.chrome;
+    if (!session.employeeId && !session.taskId) return cloudFor(session) ? this.browsers.get("user_" + session.ownerId) : this.chrome;
     return this.browsers.get((await this.employeeFor(session)).employeeId);
   }
   async compact(tools: Tools, model: Model, system: string, force = false) {
@@ -671,6 +678,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     const groupTasks = new Map<string, NonNullable<Message["tasks"]>[number]>();
     try {
       session = await this.store.session(key);
+      const cloud = cloudFor(session);
+      if (cloud) session.cwd = await cloud.cwd(session.cwd);
       original = { model: session.model, scene: session.scene };
       let config = await this.config(session);
       if (session.employeeId && !session.taskId) {
@@ -753,7 +762,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           emit("steer", m);
         }
         if (session.employeeId && session.taskId && session.scene === "coding" && !await (await this.employeeFor(session)).claimWorkspace(session, true)) return;
-        const skills = await loadSkills(config, this.store, session.cwd);
+        const skills = await loadSkills(config, this.store, session.cwd, cloudFor({ ownerId: session.ownerId }));
         const employeeState = await worker?.state();
         const memories = employeeState ? formatMemoriesForPrompt(recallMemory(employeeState, memoryQuery, Date.now(), false) as any) : "";
         const taskIndex = employeeState ? "\n当前任务索引（内容已节选；完整内容、进度和结果用employee_status传taskId查看）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: [...task.text].slice(0, 120).join(""), status: task.status, ...(task.key ? { dedupeKey: task.key } : {}) }))) : "";

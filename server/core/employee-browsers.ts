@@ -4,21 +4,22 @@ import type { Store } from "./store";
 import { Chrome } from "./chrome";
 import { ChromeBridge } from "./chrome-bridge";
 import { HeadlessBrowser } from "./headless";
-import { assert, sleep } from "./util";
+import { assert, sleep, workspaceFile } from "./util";
+import type { CloudRuntime } from "./cloud";
 
 type StartFailure = { count: number; error: string; at: number; retryAt: number };
 
 // One persistent profile and private, authenticated bridge per employee.
 export class EmployeeBrowsers {
-  entries = new Map<string, { chrome: Chrome; browser: HeadlessBrowser; starting?: Promise<Chrome>; stopping?: boolean; probedAt?: number; failure?: StartFailure }>();
+  entries = new Map<string, { chrome: Chrome; browser: HeadlessBrowser; cloud?: CloudRuntime; profile?: string; starting?: Promise<Chrome>; stopping?: boolean; probedAt?: number; failure?: StartFailure }>();
   static PROBE_TTL_MS = 3000;
   // After the 2nd consecutive failed launch, wait before respawning so each chrome_* call does not relaunch a dying Chromium.
   static BACKOFF_MS = [5000, 15000, 60000];
   closed = false;
   removed = new Set<string>();
-  constructor(public store: Store, public pageScript: string, private networkProxy?: (id: string) => Promise<string | undefined>) {}
+  constructor(public store: Store, public pageScript: string, private networkProxy?: (id: string) => Promise<string | undefined>, private isolation?: (id: string) => Promise<CloudRuntime | undefined>) {}
   profile(id: string) {
-    assert(/^(default|e[a-zA-Z0-9_-]+)$/.test(id), "Invalid employee browser ID");
+    assert(/^(default|e[a-zA-Z0-9_-]+|user_[a-zA-Z0-9_-]+)$/.test(id), "Invalid employee browser ID");
     return join(dirname(resolve(process.env.VEGA_DB || "vega.db")), "employee-browsers", id);
   }
   peek(id: string) { return this.entries.get(id)?.chrome; }
@@ -57,10 +58,13 @@ export class EmployeeBrowsers {
         current.probedAt = undefined;
         assert(!this.closed && !current.stopping, "Browser manager stopped");
         try {
+          current.cloud = await this.isolation?.(id);
+          current.profile = current.cloud ? join((await current.cloud.identity()).home, "browsers", id) : this.profile(id);
+          if (current.cloud) current.chrome.workspaceFile = (cwd, file) => workspaceFile(cwd, file, current.cloud!.fs);
           await current.chrome.bridge.start();
           await current.browser.start(process.env.VEGA_DB || "vega.db", {
-            profile: this.profile(id), port: current.chrome.bridge.port, token: current.chrome.bridge.token, proxy: await this.networkProxy?.(id),
-          });
+            profile: current.profile, port: current.chrome.bridge.port, token: current.chrome.bridge.token, proxy: await this.networkProxy?.(id),
+          }, current.cloud);
         } catch (error) {
           if (this.closed || current.stopping) throw error;
           const message = error instanceof Error ? error.message : String(error);
@@ -110,7 +114,9 @@ export class EmployeeBrowsers {
     this.removed.add(id);
     try {
       await this.stop(id);
-      await rm(this.profile(id), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      const cloud = this.entries.get(id)?.cloud || await this.isolation?.(id);
+      const profile = cloud ? join((await cloud.identity()).home, "browsers", id) : this.profile(id);
+      await (cloud?.fs || { rm }).rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       this.entries.delete(id);
     } catch (error) { this.removed.delete(id); throw error; }
   }

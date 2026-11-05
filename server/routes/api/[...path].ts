@@ -24,6 +24,7 @@ import {
 } from "h3";
 import { app, employeeLive } from "../../core/application";
 import { safeFileName, storeAttachments } from "../../core/attachments";
+import { cloudFor, cloudEnabled, cloudHealthy } from "../../core/cloud";
 import { newCommand } from "../../core/new-session";
 import { CLIENT_BODY_LIMIT } from "../../core/client-socket";
 import { assert, filterAsync, object, type Obj } from "../../core/util";
@@ -50,7 +51,7 @@ export default defineEventHandler(async (event) => {
       .split("/")
       .filter(Boolean);
   if (path[0] === "health")
-    return { connected: engine.chrome.bridge.status().connected, ready: true };
+    return cloudEnabled() ? { connected: false, ready: await cloudHealthy() === true, isolated: true } : { connected: engine.chrome.bridge.status().connected, ready: true };
   if (["auth", "users"].includes(path[0])) return authRoute(event, path);
   if (path[0] === "local-agent" && path[1] === "verify" && method === "POST") {
     const body = await bodyJSON(event, 4096);
@@ -102,7 +103,12 @@ export default defineEventHandler(async (event) => {
         return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联牛马", taskText: linked?.task.text || "", kind: !session.taskId ? (session.groupId ? "group" : "chat") : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
       }))];
     }
-    if (path[0] === "bootstrap" && method === "GET")
+    if (path[0] === "bootstrap" && method === "GET") {
+      let cwd = "", cloudError = "";
+      if (user.role !== "viewer") {
+        try { cwd = await cloudFor({ ownerId: user.id })?.cwd() || process.cwd(); }
+        catch (error: any) { cloudError = "云端工作区初始化失败，云端执行已禁止：" + String(error.message); }
+      }
       return {
         user,
         // Admins also see unowned conversations; everyone else only their own (indexed by owner).
@@ -123,7 +129,9 @@ export default defineEventHandler(async (event) => {
           user.role === "admin"
             ? maskedConfig(await engine.config())
             : { model: (await engine.config()).model, provider: {} },
-        cwd: user.role === "viewer" ? "" : process.cwd(),
+        cloudIsolated: cloudEnabled(),
+        cwd,
+        ...(cloudError ? { cloudError } : {}),
         clients: engine.localAgents.list(user.id),
         stack: {
           frontend: "Vue 3.6 Vapor",
@@ -131,6 +139,7 @@ export default defineEventHandler(async (event) => {
           storage: "SQLite",
         },
       };
+    }
     if (path[0] === "files" && method === "GET") {
       const file = store.files.fromUrl(path.slice(1)), parts = file.slice(store.files.root.length + 1).split(sep), mime = store.files.mime(file);
       check(mime && await auth.canFile(user, parts), 404, "File not found");
@@ -555,8 +564,10 @@ export default defineEventHandler(async (event) => {
       return out.secret ? JSON.parse(out.secret) : out.value;
     }
     if (path[0] === "chrome") {
+      const cloud = cloudFor({ ownerId: user.id });
+      const browser = cloud ? await engine.browsers.get("user_" + user.id) : engine.chrome;
       if (path.length === 2 && path[1] === "tabs" && method === "GET")
-        return browserTabs(engine.chrome);
+        return browserTabs(browser);
       if (path.length === 2 && path[1] === "screenshot" && method === "POST") {
         check(
           Object.keys(a).every((key) => key === "tabTag"),
@@ -564,25 +575,26 @@ export default defineEventHandler(async (event) => {
           "Screenshot requests only accept tabTag",
         );
         return await browserScreenshot(
-          engine.chrome,
+          browser,
           "browser-view:" + user.id,
           a.tabTag,
         );
       }
       if (path.length === 2 && path[1] === "control" && method === "POST")
         return await browserControl(
-          engine.chrome,
+          browser,
           "browser-view:" + user.id,
           a,
         );
       if (path[1] === "tool")
-        return engine.chrome.execute("browser-view:" + user.id, a.cwd || process.cwd(), a);
+        return browser.execute("browser-view:" + user.id, cloud ? await cloud.cwd(a.cwd) : a.cwd || process.cwd(), a);
       if (a.operation === "close") {
-        engine.chrome.bridge.close();
+        if (cloud) await engine.browsers.stop("user_" + user.id);
+        else browser.bridge.close();
         return { ok: true };
       }
-      await engine.chrome.bridge.start();
-      return engine.chrome.bridge.status();
+      await browser.bridge.start();
+      return browser.bridge.status();
     }
     if (path[0] === "experiences" && method === "GET")
       return engine.chrome.experiences.graph(

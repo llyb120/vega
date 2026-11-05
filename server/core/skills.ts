@@ -1,3 +1,5 @@
+import * as filesystem from "node:fs/promises";
+import type { CloudRuntime } from "./cloud";
 import {
   readFile,
   stat,
@@ -258,14 +260,15 @@ export async function importSkill(
   };
 }
 const locks = new Map<string, Mutex>();
-export async function materializeSkill(store: Store, skill: Obj) {
+export async function materializeSkill(store: Store, skill: Obj, cloud?: CloudRuntime) {
+  const { mkdir, lstat, readFile, realpath, writeFile, rename, chmod, rm } = cloud?.fs || filesystem;
   if (!skill.assets?.length)
     return { path: "sqlite:skill/" + skill.id, resourceRoot: undefined };
   const safe = createHash("sha256")
       .update((skill.employeeId || "") + ":" + skill.id + ":" + skill.digest)
       .digest("hex"),
     root = resolve(
-      process.env.VEGA_SKILL_CACHE || join(tmpdir(), "vega-skill-cache"),
+      cloud ? join((await cloud.identity()).home, "skills") : process.env.VEGA_SKILL_CACHE || join(tmpdir(), "vega-skill-cache"),
       safe,
     );
   let lock = locks.get(root);

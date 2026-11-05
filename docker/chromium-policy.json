@@ -1,4 +1,4 @@
 {
-  "DownloadDirectory": "/data/downloads",
+  "DownloadDirectory": "${user_home}/Downloads",
   "PromptForDownloadLocation": false
 }

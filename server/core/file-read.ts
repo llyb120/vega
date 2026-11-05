@@ -2,10 +2,10 @@ import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve, dirname, basename, join } from "node:path";
 import { assert } from "./util";
-export async function readPath(cwd: string, input: string) {
+export async function readPath(cwd: string, input: string, fs = { stat }, home = homedir()) {
   let value = input.trim().replace(/^@/, "");
   if (value === "~" || /^~[\\/]/.test(value))
-    value = join(homedir(), value.slice(2));
+    value = join(home, value.slice(2));
   const first = resolve(cwd, value),
     name = basename(first),
     variants = [
@@ -17,7 +17,7 @@ export async function readPath(cwd: string, input: string) {
     ];
   for (const path of new Set(variants)) {
     try {
-      if ((await stat(path)).isFile()) return path;
+      if ((await fs.stat(path)).isFile()) return path;
     } catch (e: any) {
       if (e.code !== "ENOENT" && e.code !== "ENOTDIR") throw e;
     }

@@ -2,6 +2,7 @@ import { chmod, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Db, Sqlite, type Dialect } from "./db";
+import { cloudFor } from "./cloud";
 import { Files } from "./files";
 import type { FileRef } from "./attachments";
 import { assert, id } from "./util";
@@ -228,9 +229,10 @@ export class Store {
     return { mime: blob.mime, data: Buffer.from(blob.data).toString("base64") };
   }
   async newSession(input: Partial<Session> = {}) {
-    const cwd = input.localAgent ? input.cwd! : resolve(input.cwd || process.cwd());
+    const cloud = cloudFor(input);
+    const cwd = input.localAgent ? input.cwd! : cloud ? await cloud.cwd(input.cwd) : resolve(input.cwd || process.cwd());
     assert(typeof cwd === "string" && cwd.length > 0, "cwd required");
-    if (!input.localAgent) assert((await stat(cwd)).isDirectory(), "cwd must be an existing directory");
+    if (!input.localAgent && !cloud) assert((await stat(cwd)).isDirectory(), "cwd must be an existing directory");
     const s: Session = { ...input, id: id(), title: input.title || "新会话", cwd, createdAt: Date.now() };
     await this.saveSession(s);
     return s;

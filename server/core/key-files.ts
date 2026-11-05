@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Agent, LocalAgents } from "./local-agent";
 import { assert } from "./util";
+import type { CloudRuntime } from "./cloud";
 
 /** Server-side key files live under the files root but are never served (no image type) nor readable through `read` (no session scope). */
 export const keyDir = (filesRoot: string) => join(filesRoot, "keys");
@@ -20,7 +21,7 @@ export function gitSshCommand(path: string) {
  */
 export class KeyFiles {
   private written: { path: string; agent?: Agent }[] = [];
-  constructor(private dir: string, private hub: LocalAgents) {}
+  constructor(private dir: string, private hub: LocalAgents, private cloud?: CloudRuntime) {}
   async write(key: string, agent: Agent | undefined, signal: AbortSignal) {
     let path: string;
     if (agent) {
@@ -29,9 +30,11 @@ export class KeyFiles {
       assert(!r.error && typeof r.path === "string", "客户端未能写入私钥临时文件：" + (r.error || "无效结果"));
       path = r.path;
     } else {
-      await mkdir(this.dir, { recursive: true, mode: 0o700 });
-      path = join(this.dir, randomUUID());
-      await writeFile(path, key, { mode: 0o600, flag: "wx" });
+      const fs = this.cloud?.fs || { mkdir, writeFile };
+      const dir = this.cloud ? join((await this.cloud.identity()).tmp, "keys") : this.dir;
+      await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+      path = join(dir, randomUUID());
+      await fs.writeFile(path, key, { mode: 0o600, flag: "wx" });
     }
     this.written.push({ path, agent });
     return path;
@@ -40,6 +43,6 @@ export class KeyFiles {
     const written = this.written.splice(0);
     await Promise.all(written.map(({ path, agent }) => agent
       ? this.hub.request(agent, "key", { op: "remove", path }, AbortSignal.timeout(15000)).catch(() => {}) // the client also clears its key directory on start
-      : rm(path, { force: true })));
+      : (this.cloud?.fs || { rm }).rm(path, { force: true })));
   }
 }
