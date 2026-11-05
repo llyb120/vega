@@ -2,7 +2,6 @@
 // Paths only describe the page; App.vue checks that the ids exist and are visible before opening them.
 export const PAGES = ["resources", "browser", "experiences", "debug", "settings", "account"];
 export const ADMIN_PAGES = ["browser", "experiences", "debug", "settings"];
-export const GROUP_PANELS = ["work", "members"];
 /** Page sub-views kept in the path: a fixed list, or any id (the selected item) when true. */
 const PAGE_SUBS = { settings: ["scenes"], debug: true, experiences: true };
 const pageSub = (page, sub) => PAGE_SUBS[page] === true || PAGE_SUBS[page]?.includes(sub);
@@ -27,7 +26,8 @@ export function parseRoute(href = "/") {
     if (EMPLOYEE_TABS.includes(sub) && !extra) return { view: "employee", employee: id, tab: sub };
     return { view: "employee", employee: id };
   }
-  if (root === "groups" && id && !extra) return { view: "group", group: id === "new" ? "" : id, ...(id !== "new" && GROUP_PANELS.includes(sub) ? { sub } : {}) };
+  // Side panels (work / members) stay in the component; old /groups/:id/work|members links just open the group.
+  if (root === "groups" && id && (!sub || !extra)) return { view: "group", group: id === "new" ? "" : id };
   if (root === "chat" && !sub) return id ? { view: "chat", session: id } : { view: "chat" };
   if (PAGES.includes(root) && !sub) return { view: root, ...(id && pageSub(root, id) ? { sub: id } : {}) };
   return { view: "employee" };
@@ -44,7 +44,7 @@ export function formatRoute(route) {
     if (tab === "tasks" && task) return base + "/tasks/" + encode(task);
     return EMPLOYEE_TABS.includes(tab) ? base + "/" + tab : base;
   }
-  if (view === "group") return group ? "/groups/" + encode(group) + (GROUP_PANELS.includes(sub) ? "/" + sub : "") : "/groups/new";
+  if (view === "group") return group ? "/groups/" + encode(group) : "/groups/new";
   if (view === "chat") return session ? "/chat/" + encode(session) : "/chat";
   if (!PAGES.includes(view)) return "/";
   return "/" + view + (sub && pageSub(view, sub) ? "/" + encode(sub) : "");

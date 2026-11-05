@@ -300,6 +300,8 @@ test("工作面板 UI: a header button opens it beside the chat; owners open tas
   assert.match(chat, /@click="toggleWork"><Icon name="tasks" :size="15" \/><span class="hide-mobile">工作面板<\/span>/);
   assert.match(chat, /<GroupWork v-if="work && group" :members="workMembers"/);
   assert.match(chat, /props\.api\(`\/groups\/\$\{id\}\/tasks`\)/);
+  assert.match(chat, /matchMedia\("\(min-width: 768px\)"\)/, "work panel defaults open when it sits beside the chat");
+  assert(!/emit\(["']tab["']\)|:tab=|props\.tab/.test(chat) && !/GROUP_PANELS/.test(await readFile("web/src/router.js", "utf8")), "panels stay local; not in the route");
   assert.match(panel, /if \(member\.mine\) emit\("open", \{ employeeId: member\.id, taskId: task\.id \}\);\n  else selected\.value = task;/);
   assert.match(panel, /<TaskDetail :task="selected" readonly/);
   assert.match(panel, /\{\{ requester\(task\) \}\} 发起/);

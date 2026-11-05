@@ -9,13 +9,15 @@ import { SPA_ROOTS, spaPage } from "../server/core/spa";
 test("router: paths round-trip through parse and format, tabs and selected items included", () => {
   const paths = [
     "/employees/e1", "/employees/e1/tasks", "/employees/e1/tasks/t1", "/employees/e1/sessions/s1", "/employees/e1/settings",
-    "/employees/e1/memories", "/employees/e1/vault", "/employees/new", "/groups/g1", "/groups/g1/work", "/groups/g1/members",
+    "/employees/e1/memories", "/employees/e1/vault", "/employees/new", "/groups/g1", "/groups/new",
     "/groups/new", "/chat", "/chat/s1", "/resources", "/settings", "/settings/scenes", "/debug", "/debug/s9", "/experiences/r1", "/account",
     "/employees/%E7%89%9B%20%2F1",
   ];
   for (const path of paths) assert.equal(formatRoute(parseRoute(path)), path, path);
   assert.deepEqual(parseRoute("/employees/e1/tasks/t1"), { view: "employee", employee: "e1", tab: "tasks", task: "t1" });
-  assert.deepEqual(parseRoute("/groups/g1/work"), { view: "group", group: "g1", sub: "work" });
+  assert.deepEqual(parseRoute("/groups/g1/work"), { view: "group", group: "g1" }, "old panel links open the group without a panel");
+  assert.deepEqual(parseRoute("/groups/g1/members"), { view: "group", group: "g1" });
+  assert.equal(formatRoute({ view: "group", group: "g1", sub: "work" }), "/groups/g1");
   assert.deepEqual(parseRoute("/employees/%E7%89%9B%20%2F1"), { view: "employee", employee: "牛 /1" });
   assert.equal(formatRoute({ view: "employee", employee: "e1", tab: "chat" }), "/employees/e1", "chat is the default tab");
   assert.equal(formatRoute({ view: "settings", sub: "" }), "/settings");
@@ -84,14 +86,15 @@ test("App routing: refresh restores page and tab; tab and page switches push; ba
   s.c.employeeTaskFocus.value = ""; s.c.employeeTab.value = "duties"; await nextTick();
   s.c.openGroup("g1"); await nextTick();
   s.c.setPageTab("work"); await nextTick();
-  assert.deepEqual(s.history, ["push /employees/eb/duties", "push /groups/g1", "push /groups/g1/work"]);
+  assert.deepEqual(s.history, ["push /employees/eb/duties", "push /groups/g1"], "group side panels do not push");
+  assert.equal(s.location.pathname, "/groups/g1");
   s.location.href = "https://vega.test/employees/eb/duties";
   s.c.routeChanged(); await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([s.c.view.value, s.c.employeeTab.value], ["employee", "duties"]);
   s.location.href = "https://vega.test/groups/g1/work";
   s.c.routeChanged(); await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual([s.c.view.value, s.c.selectedGroup.value, s.c.pageSub.value], ["group", "g1", "work"]);
-  assert.equal(s.history.length, 3, "popstate does not add entries");
+  assert.deepEqual([s.c.view.value, s.c.selectedGroup.value, s.location.pathname], ["group", "g1", "/groups/g1"], "old /work link opens the group and normalizes");
+  assert.equal(s.history.length, 3, "popstate replace of the old panel path");
   const settings = await boot("https://vega.test/settings/scenes", { admin: true });
   assert.deepEqual([settings.c.view.value, settings.c.pageSub.value], ["settings", "scenes"]);
   settings.c.view.value = "resources"; await nextTick();

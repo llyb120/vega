@@ -13,9 +13,11 @@ import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 import PressMention from "./PressMention.vue";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
-const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number, tab: String });
-const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel", "read", "tab"]);
-const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), work = ref(false), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
+const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number });
+const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel", "read"]);
+// Work panel: side-by-side from 768px (GroupWork stops overlaying); drawers stay closed until opened.
+const roomy = () => typeof matchMedia === "function" && matchMedia("(min-width: 768px)").matches;
+const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), work = ref(roomy()), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
 const directory = ref([]), form = ref({ name: "", bulletin: "", users: [], employees: [] }), edit = ref({ name: "", bulletin: "" }), invite = ref(""), bring = ref("");
 const readonly = computed(() => props.user?.role === "viewer");
 const members = computed(() => groupMembers(group.value, props.user?.id));
@@ -134,18 +136,13 @@ async function loadWork() {
   try { const result = await props.api(`/groups/${id}/tasks`); if (props.groupId === id) workMembers.value = result.members; }
   finally { workLoading.value = false; }
 }
-function toggleWork() { work.value = !work.value; if (work.value) { panel.value = false; void run(loadWork); } }
+function toggleWork() { work.value = !work.value; if (work.value) panel.value = false; }
 watch(panel, (open) => { if (open) work.value = false; });
-watch(() => props.groupId, () => { readSeq = 0; group.value = null; messages.value = []; panel.value = false; work.value = false; workMembers.value = []; draft.value = ""; void run(() => load(true)); });
+watch([work, () => props.groupId], () => { if (work.value) void run(loadWork); }, { immediate: true });
+watch(() => props.groupId, () => { readSeq = 0; group.value = null; messages.value = []; panel.value = false; work.value = roomy(); workMembers.value = []; draft.value = ""; void run(() => load(true)); });
 watch(() => props.revision, () => { void run(() => load()); void run(loadWork); });
 watch(panel, (open) => { if (open && !directory.value.length) void loadDirectory(); });
 onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadDirectory(); });
-// The open side panel lives in the address (/groups/:id/work or /members) so refresh keeps it.
-watch(() => props.tab, (tab) => {
-  if ((tab === "work") !== work.value) toggleWork();
-  panel.value = tab === "members";
-}, { immediate: true });
-watch(() => work.value ? "work" : panel.value ? "members" : "", (tab) => { if (tab !== (props.tab || "")) emit("tab", tab); });
 </script>
 <template>
   <section class="group-workspace">

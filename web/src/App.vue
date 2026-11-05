@@ -1425,7 +1425,8 @@ onBeforeUnmount(() => {
 });
 // 路由: the address bar mirrors the open page and its tab (router.js); refresh, links and back/forward restore it.
 // User navigation pushes; restoring a route and falling back from unknown or forbidden ids replace.
-// Each page (each group) remembers its own tab for this visit, so returning to it lands on the same tab.
+// Each page remembers its own tab for this visit (settings section, debug session, …); group side panels do not.
+
 const pageTabs = ref({});
 const pageKey = computed(() => view.value === "group" ? "group:" + selectedGroup.value : view.value);
 const pageSub = computed(() => pageTabs.value[pageKey.value] || "");
@@ -1599,7 +1600,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
           <p v-if="executionUnavailable" class="execution-warning" role="status">所选客户端已离线或尚未选择，请选择在线客户端或切换到服务端；不会自动切换或重试操作。</p>
         </div>
       </template>
-      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" :tab="pageSub" @tab="setPageTab" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @read="unread.groupRead" />
+      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @read="unread.groupRead" />
       <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
       <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" :tab="pageSub" @tab="setPageTab" />
       <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" />
