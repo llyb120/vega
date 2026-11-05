@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { validateMcpServer } from "../shared/mcp-config";
+import { catalogContextModels, modelContext, serializeContextRules } from "../shared/context-rules";
 import { maskedConfig, mergeSecrets } from "../server/core/config";
 import { Vault } from "../server/core/vault";
 import { Store } from "../server/core/store";
@@ -17,7 +18,7 @@ function vaultFunction(name: string, scope: any) {
   return runInNewContext(`(${source})`, scope);
 }
 function settingsFunction(name: string, scope: any) {
-  const source = (["provider", "discover"].includes(name) ? providers : ["saveMcp", "addMcp"].includes(name) ? capabilities : settings).match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
+  const source = (["provider", "discover", "limitValue", "moveContextRule", "contextPreview"].includes(name) ? providers : ["saveMcp", "addMcp"].includes(name) ? capabilities : settings).match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
   assert(source, name);
   return runInNewContext(`(${source})`, scope);
 }
@@ -37,7 +38,8 @@ test("model discovery uses the draft key or retains the unchanged saved key in e
       preset: { value: "openai-compatible" }, apiType: { value: "openai-completions" },
       baseURL: { value: "https://provider.example/v1" }, source: { value: undefined },
       apiKey: { value: masked.options?.apiKey || masked.apiKey || "" },
-      modelMap: { value: {} }, options: { value: "{}" }, headers: { value: "{}" },
+      modelMap: { value: {} }, contextRules: { value: [] }, options: { value: "{}" }, headers: { value: "{}" },
+      catalogContextModels, serializeContextRules,
       copy: structuredClone, run: async (fn: any) => fn(), emit() {},
       props: { api: async (path: string, method: string, body: any) => {
         assert.equal(path, "/providers/discover", "discovery must not save the provider");
@@ -65,6 +67,39 @@ test("model discovery uses the draft key or retains the unchanged saved key in e
     }
     assert.deepEqual(stored, original, "discovery must leave the persisted config unchanged");
   }
+});
+
+test("provider rules serialize, reorder and preserve manual overrides without rewriting catalog limits", async () => {
+  const scope: any = {
+    draft: { value: { keep: true } }, id: { value: "p" }, name: { value: "Provider" },
+    preset: { value: "openai-compatible" }, apiType: { value: "openai-completions" },
+    baseURL: { value: "https://provider.example/v1" }, source: { value: undefined }, apiKey: { value: "__stored_secret__" },
+    options: { value: "{}" }, headers: { value: "{}" }, copy: structuredClone,
+    contextRules: { value: [{ keyword: " haiku ", context: "100k" }, { keyword: "claude", context: "200K" }] },
+    modelMap: { value: catalogContextModels({ alias: { name: "Claude Haiku", limit: { context: 400000, output: 32000 } } }) },
+    modelContext, serializeContextRules,
+  };
+  const provider = settingsFunction("provider", scope), preview = settingsFunction("contextPreview", scope);
+  let row = provider();
+  assert.deepEqual(row.contextRules, [{ keyword: "haiku", context: 100000 }, { keyword: "claude", context: 200000 }]);
+  assert.equal(row.models.alias.limit.context, 400000);
+  assert.equal(row.models.alias.contextSource, "catalog");
+  assert.match(preview("alias", row.models.alias), /100,000 tokens（规则：haiku）/);
+  settingsFunction("moveContextRule", scope)(1, -1);
+  assert.equal(scope.contextRules.value[0].keyword, "claude");
+  assert.match(preview("alias", row.models.alias), /200,000 tokens（规则：claude）/);
+  settingsFunction("limitValue", scope)("alias", "context", "64000");
+  row = provider();
+  assert.equal(row.models.alias.contextSource, undefined);
+  assert.equal(row.models.alias.limit.output, 32000);
+  assert.match(preview("alias", row.models.alias), /64,000 tokens（手动设置）/);
+  scope.modelMap.value.alias.contextSource = "catalog";
+  assert.match(preview("alias", scope.modelMap.value.alias), /200,000 tokens（规则：claude）/);
+  assert.equal(provider().models.alias.limit.context, 64000, "allowing rules keeps the old window as fallback");
+  scope.contextRules.value = [];
+  assert.equal(Object.hasOwn(provider(), "contextRules"), false);
+  scope.contextRules.value = [{ keyword: "haiku", context: "0" }];
+  assert.throws(provider, /上下文规则/);
 });
 
 test("each MCP JSON keeps its complete config and stored secrets", async () => {

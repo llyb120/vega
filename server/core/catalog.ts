@@ -7,6 +7,7 @@ import snapshot from "../../shared/devin-models.json";
 import type { Store } from "./store";
 import type { Config, Model } from "./config";
 import { modelEntries, resolveModel } from "./config";
+import { catalogContextModels, modelContext, validateContextRules } from "../../shared/context-rules";
 import { Subscriptions } from "./subscriptions";
 import {
   assert,
@@ -29,6 +30,7 @@ export class Catalog {
     public auth: Subscriptions,
   ) {}
   async provider(raw: Obj, config: Config) {
+    validateContextRules(raw.contextRules);
     const p = clone(raw),
       preset = presets.find((v) => v.id === p.preset);
     const source =
@@ -54,7 +56,7 @@ export class Catalog {
         api: subscription ? local.api : local.api,
         localAuth: local.localAuth,
         options,
-        models: { ...local.models, ...modelEntries(p.models) },
+        models: { ...catalogContextModels(local.models), ...modelEntries(p.models) },
       };
     }
     if (p.preset === "server-support") {
@@ -431,7 +433,7 @@ export class Catalog {
       !Object.keys(p.models || {}).length
     ) {
       dynamic = await this.models(p);
-      p.models = { ...dynamic.models, ...modelEntries(p.models) };
+      p.models = { ...catalogContextModels(dynamic.models), ...modelEntries(p.models) };
     }
     const effective = {
         ...config,
@@ -487,7 +489,7 @@ export class Catalog {
         const p = await this.provider(raw, config);
         let models = modelEntries(p.models);
         if (p.preset || !Object.keys(models).length) {
-          models = { ...(await this.models(p, force)).models, ...models };
+          models = { ...catalogContextModels((await this.models(p, force)).models), ...models };
         }
         for (const [key, m] of Object.entries(models)) {
           if (
@@ -506,7 +508,7 @@ export class Catalog {
               m.supportsImages ??
               m.modalities?.input?.includes("image") ??
               false,
-            context: m.limit?.context,
+            context: modelContext(p, key, m).context,
             output: m.limit?.output,
             provider: id,
             available: true,

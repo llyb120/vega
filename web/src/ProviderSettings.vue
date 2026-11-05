@@ -1,6 +1,7 @@
 <script setup vapor>
 import Icon from "./Icon.vue";
 import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
+import { catalogContextModels, modelContext, parseContextTokens, serializeContextRules, validateContextRules } from "../../shared/context-rules";
 const confirm = window.confirm.bind(window);
 const props = defineProps({ api: Function, config: Object, userId: String });
 const emit = defineEmits(["saved", "error", "notice"]);
@@ -24,7 +25,8 @@ const presets = ref([]),
   pasted = ref(""),
   loginError = ref(""),
   headers = ref("{}"),
-  options = ref("{}");
+  options = ref("{}"),
+  contextRules = ref([]);
 let pollTimer,
   disposed = false,
   polling = false;
@@ -111,6 +113,7 @@ function stopPolling() {
   clearTimeout(pollTimer);
 }
 function edit(key, raw) {
+  const rules = validateContextRules(raw?.contextRules);
   stopPolling();
   login.value = null;
   loginError.value = "";
@@ -128,6 +131,7 @@ function edit(key, raw) {
     "";
   apiKey.value = raw?.options?.apiKey || raw?.apiKey || "";
   modelMap.value = flatten(raw?.models || {});
+  contextRules.value = rules.map((rule) => ({ keyword: rule.keyword, context: String(rule.context) }));
   headers.value = JSON.stringify(
     raw?.options?.headers || raw?.headers || {},
     null,
@@ -156,6 +160,7 @@ function flatten(models, prefix = "") {
         "reasoning",
         "supportsImages",
         "contextWindow",
+        "contextSource",
       ].some((k) => k in v)
     )
       out[prefix + key] = copy(v);
@@ -189,6 +194,9 @@ function provider() {
       headers: JSON.parse(headers.value || "{}"),
     },
   };
+  const rules = serializeContextRules(contextRules.value);
+  if (rules.length) row.contextRules = rules;
+  else delete row.contextRules;
   if (!source.value) {
     row.api = apiType.value;
     row.options.baseURL = baseURL.value.trim();
@@ -228,7 +236,7 @@ async function discover() {
       id: id.value,
       provider: provider(),
     });
-    modelMap.value = { ...result.models, ...modelMap.value };
+    modelMap.value = { ...catalogContextModels(result.models), ...modelMap.value };
     emit("notice", `已获取 ${Object.keys(result.models).length} 个模型`);
   });
 }
@@ -271,7 +279,7 @@ function addModel() {
     ...modelMap.value,
     [key]: modelMap.value[key] || {
       name: key,
-      limit: { context: 200000, output: 32000 },
+      limit: { output: 32000 },
       modalities: { input: ["text"] },
     },
   };
@@ -281,6 +289,19 @@ function addModel() {
 function limitValue(key, field, value) {
   const m = modelMap.value[key];
   m.limit = { ...m.limit, [field]: Number(value) };
+  if (field === "context") delete m.contextSource;
+}
+function moveContextRule(index, delta) {
+  const rows = contextRules.value, next = index + delta;
+  if (next < 0 || next >= rows.length) return;
+  [rows[index], rows[next]] = [rows[next], rows[index]];
+}
+function contextPreview(key, model) {
+  try {
+    const value = modelContext({ contextRules: serializeContextRules(contextRules.value) }, key, model);
+    const source = value.source === "manual" ? "手动设置" : value.source === "rule" ? `规则：${value.keyword}` : "模型目录／默认";
+    return `${value.context.toLocaleString()} tokens（${source}）`;
+  } catch { return "请先完成上下文规则"; }
 }
 function imageValue(key, enabled) {
   modelMap.value[key].supportsImages = enabled;
@@ -486,6 +507,7 @@ onBeforeUnmount(() => {
                 <label>显示名称<input v-model="m.name" /></label>
                 <label>上下文长度<input :value="m.limit?.context || m.contextWindow || 200000" type="number" min="1024" @change="limitValue(key, 'context', $event.target.value)" /></label>
                 <label>输出上限<input :value="m.limit?.output || m.maxOutputTokens || 32000" type="number" min="32" @change="limitValue(key, 'output', $event.target.value)" /></label>
+                <div class="context-preview"><span class="hint">生效：{{ contextPreview(key, m) }}</span><button v-if="m.contextSource !== 'catalog' && (m.limit?.context || m.contextWindow)" type="button" class="sm ghost" :aria-label="'允许规则覆盖 ' + key" title="保留当前窗口为回退值，允许服务商规则覆盖；再次编辑窗口即恢复手动优先。" @click="m.contextSource = 'catalog'">允许规则覆盖</button></div>
                 <div class="model-flags"><label class="check"><input :checked="m.supportsImages || m.modalities?.input?.includes('image')" type="checkbox" @change="imageValue(key, $event.target.checked)" />支持图片</label><label class="check"><input v-model="m.reasoning" type="checkbox" />支持思考</label></div>
               </div>
             </div>
@@ -499,6 +521,23 @@ onBeforeUnmount(() => {
             <label>请求头<textarea v-model="headers" class="mono-input" rows="3" spellcheck="false"></textarea></label>
             <label>模型请求参数<textarea v-model="options" class="mono-input" rows="3" spellcheck="false"></textarea></label>
           </div>
+          <section class="context-rules" aria-label="模型上下文规则">
+            <h4>模型上下文规则</h4>
+            <p class="hint">模型 ID 或显示名称包含关键词时生效，不分大小写，从上到下第一条命中生效。手动上下文优先于规则，规则优先于模型目录／默认值。仅影响当前服务商的 Vega 上下文预算，不改变服务端上限。</p>
+            <div v-for="(rule, index) in contextRules" :key="index" class="context-rule">
+              <label>模型 ID 或名称包含<input v-model="rule.keyword" :aria-label="`上下文规则 ${index + 1} 关键词`" placeholder="如 haiku" /></label>
+              <label>上下文窗口<input v-model="rule.context" :aria-label="`上下文规则 ${index + 1} 窗口`" placeholder="如 100k 或 100000" :aria-invalid="!!rule.context && (!parseContextTokens(rule.context) || parseContextTokens(rule.context) < 1024)" /></label>
+              <div class="context-rule-footer">
+                <span class="hint">{{ parseContextTokens(rule.context) >= 1024 ? parseContextTokens(rule.context).toLocaleString() + ' tokens' : '请输入至少 1024 tokens 的整数或 k 单位' }}</span>
+                <div class="context-rule-actions">
+                  <button type="button" class="sm" :aria-label="`上移上下文规则 ${index + 1}`" :disabled="index === 0" @click="moveContextRule(index, -1)">上移</button>
+                  <button type="button" class="sm" :aria-label="`下移上下文规则 ${index + 1}`" :disabled="index === contextRules.length - 1" @click="moveContextRule(index, 1)">下移</button>
+                  <button type="button" class="sm" :aria-label="`删除上下文规则 ${index + 1}`" @click="contextRules.splice(index, 1)">删除</button>
+                </div>
+              </div>
+            </div>
+            <button type="button" class="sm" @click="contextRules.push({ keyword: '', context: '' })">添加规则</button>
+          </section>
         </details>
         <div class="form-footer">
           <button v-if="!creating" type="button" class="sm danger-text" :disabled="busy" @click="remove(selected)"><Icon name="trash" :size="14" />删除服务商</button>
@@ -547,6 +586,14 @@ onBeforeUnmount(() => {
 .advanced summary { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 13px; font-weight: 600; cursor: pointer; list-style: none; }
 .advanced summary::-webkit-details-marker { display: none; }
 .advanced .form-grid { margin-top: 10px; }
+.context-rules { display: grid; gap: 12px; min-width: 0; margin-top: 16px; }
+.context-rules h4, .context-rules p { margin: 0; }
+.context-rule { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; padding: 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); }
+.context-rule > label { display: grid; gap: 6px; min-width: 0; font-size: 12px; }
+.context-rule-footer { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.context-rule-actions { display: flex; gap: 6px; margin-left: auto; }
+.context-rules > button { justify-self: start; }
+.context-preview { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 0; }
 .form-footer { position: sticky; bottom: -40px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 -16px -16px; padding: 12px 16px; border-top: 1px solid var(--border); border-radius: 0 0 var(--r-lg) var(--r-lg); background: var(--surface); }
 .form-footer .danger-text { margin-right: auto; }
 @media (max-width: 1099px) {
@@ -558,6 +605,7 @@ onBeforeUnmount(() => {
   .provider-form { padding-left: 0; border-left: 0; }
 }
 @media (max-width: 767px) {
+  .context-rule { grid-template-columns: minmax(0, 1fr); }
   .model-edit { grid-template-columns: minmax(0, 1fr); padding-left: 6px; }
   .form-footer { margin: 0 -12px -12px; padding: 10px 12px; }
 }

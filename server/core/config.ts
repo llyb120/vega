@@ -1,6 +1,7 @@
 import type { Obj } from "./util";
 import { assert, expand, httpURL, object, clone } from "./util";
 import { validateMcpServer } from "../../shared/mcp-config";
+import { modelContext, validateContextRules } from "../../shared/context-rules";
 export type Config = {
   model: string;
   provider: Record<string, Obj>;
@@ -44,6 +45,7 @@ export function modelEntries(models: Obj, prefix = ""): Record<string, Obj> {
         "options",
         "variants",
         "contextWindow",
+        "contextSource",
         "supportsImages",
       ].some((k) => k in row)
     )
@@ -104,7 +106,7 @@ export function resolveModel(config: Config, selection = config.model): Model {
     baseURL = "https://chatgpt.com/backend-api/codex";
   if (p.localAuth === "claude-code") baseURL = "https://api.anthropic.com";
   httpURL(baseURL);
-  const contextWindow = m.limit?.context || m.contextWindow || 200000,
+  const contextWindow = modelContext(p, key, m).context,
     maxOutputTokens = m.limit?.output || m.maxOutputTokens || 32000;
   assert(
     Number.isSafeInteger(contextWindow) &&
@@ -146,6 +148,7 @@ export function resolveModel(config: Config, selection = config.model): Model {
   };
 }
 export function validateConfig(c: Config) {
+  for (const p of Object.values(c.provider || {})) validateContextRules(p.contextRules);
   if (c.model) resolveModel(c);
   assert(
     !c.contextMode || ["auto", "acp"].includes(c.contextMode),

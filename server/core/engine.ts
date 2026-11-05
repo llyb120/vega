@@ -4,6 +4,7 @@ import { Groups } from "./groups";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
 import { builtinCommand, expandBuiltin } from "./builtins";
 import { requireSceneModel, sceneModels, maskedConfig, mergeSecrets } from "./config";
+import { validateContextRules } from "../../shared/context-rules";
 
 import { employeeConfig, migrateEmployeeCapabilities } from "./employee-capabilities";
 import { credentialValues } from "./credentials";
@@ -275,6 +276,7 @@ export class Engine {
     const previous = await this.config();
     mergeSecrets(next, previous);
     assert(next.provider && typeof next.provider === "object", "provider required");
+    for (const p of Object.values(next.provider)) validateContextRules(p.contextRules);
     // Default model is retired: scene lists are the only model source.
     delete (next as Obj).model;
     next.scenes = {
