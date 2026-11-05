@@ -180,7 +180,7 @@ export class Catalog {
         };
     } else if (p.api === "devin") {
       let data: Obj = clone(snapshot);
-      version = "3000.11.205";
+      version = "3000.11.228";
       try {
         const binary = p.options.devinCli || "devin";
         const [catalog, v] = await Promise.all([

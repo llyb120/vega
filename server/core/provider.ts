@@ -479,7 +479,7 @@ export class Providers {
       return usableReply(await devinStream(
         model,
         body,
-        model.options.__devinVersion || "3000.11.205",
+        model.options.__devinVersion || "3000.11.228",
         signal,
         emit,
       ));
