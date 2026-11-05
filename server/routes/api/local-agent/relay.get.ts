@@ -1,15 +1,16 @@
 import { defineWebSocketHandler } from "h3";
 import { app } from "../../../core/application";
+import type { NetworkRelay } from "../../../core/network-relay";
 
 export default defineWebSocketHandler({
   async upgrade(request) {
-    try { await app().clientSockets.authorize(request); }
+    try { request.context.relayGrant = await app().clientSockets.authorize(request); }
     catch { return new Response("Unauthorized", { status: 401 }); }
   },
-  async open(peer) {
+  open(peer) {
     try {
-      const grant = await app().clientSockets.authorize(peer.request);
-      app().engine.relay.open(peer, grant, peer.request.headers.get("x-vega-relay") || "");
+      // crossws dispatches messages without awaiting open; authenticate before completing the upgrade.
+      app().engine.relay.open(peer, peer.context.relayGrant as Parameters<NetworkRelay["open"]>[1], peer.request.headers.get("x-vega-relay") || "");
     } catch { peer.close(1008, "Invalid relay connection"); }
   },
   message(peer, message) { app().engine.relay.message(peer, message.uint8Array()); },
