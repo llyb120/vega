@@ -679,7 +679,11 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     try {
       session = await this.store.session(key);
       const cloud = cloudFor(session);
-      if (cloud) session.cwd = await cloud.cwd(session.cwd);
+      if (cloud) {
+        // Communication sessions have no workspace execution binding; task sessions keep their original cwd.
+        const cwd = await cloud.cwd(session.employeeId && !session.taskId ? undefined : session.cwd);
+        if (session.cwd !== cwd) { session.cwd = cwd; await this.store.saveSession(session); }
+      }
       original = { model: session.model, scene: session.scene };
       let config = await this.config(session);
       if (session.employeeId && !session.taskId) {

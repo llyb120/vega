@@ -616,6 +616,18 @@ export class Employee {
       const creator = await this.store.one("SELECT id FROM web_users WHERE role='admin' ORDER BY createdAt,id LIMIT 1");
       if (creator) { state.ownerId = creator.id; await this.save(state); }
     }
+    const defaultCwd = !state.execution?.localAgent && (!state.cwd || state.cwd === process.cwd());
+    const savedDefaultCwd = state.executionCwds?.server === process.cwd();
+    if (state.ownerId && (defaultCwd || savedDefaultCwd)) {
+      const cloud = cloudFor({ ownerId: state.ownerId });
+      if (cloud) {
+        const cwd = await cloud.cwd();
+        // Only the old implicit server default changes; custom projects and task snapshots are not migrated.
+        if (defaultCwd) state.cwd = cwd;
+        if (savedDefaultCwd) state.executionCwds = { ...state.executionCwds, server: cwd };
+        await this.save(state);
+      }
+    }
     // Legacy availability fields no longer gate employees; only duty schedules determine when work is due.
     state.enabled = true;
     state.workStart = state.workEnd = "00:00";

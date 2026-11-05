@@ -11,7 +11,18 @@ import { Store } from "../server/core/store";
 import { Tools, shell } from "../server/core/tools";
 import { LocalAgents } from "../server/core/local-agent";
 import { encode, decode, frames, send } from "../shared/cloud-wire.mjs";
-import { validateOwner, tenantEnvironment } from "../docker/cloud-supervisor.mjs";
+import { validateOwner, tenantEnvironment, serviceEnvironment } from "../docker/cloud-supervisor.mjs";
+import { Engine } from "../server/core/engine";
+import { Catalog } from "../server/core/catalog";
+import { Subscriptions } from "../server/core/subscriptions";
+import { Chrome } from "../server/core/chrome";
+import { ChromeBridge } from "../server/core/chrome-bridge";
+import { resolveModel } from "../server/core/config";
+
+test("dropping the service UID also changes its HOME without losing configured provider settings", () => {
+  const env = serviceEnvironment({ HOME: "/root", USER: "root", LOGNAME: "root", VEGA_TOKEN: "service-only", DEVIN_CONFIG_HOME: "/data/devin" });
+  assert.deepEqual(env, { HOME: "/home/node", USER: "node", LOGNAME: "node", VEGA_TOKEN: "service-only", DEVIN_CONFIG_HOME: "/data/devin" });
+});
 
 test("cloud identities reject path/UID injection and do not inherit controller credentials", () => {
   for (const owner of ["", "../bob", "root/../bob", "a\0b", {}, 1000]) assert.throws(() => validateOwner(owner));
@@ -106,6 +117,55 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
   assert.equal(echoed, "MCP stdin roundtrip\n");
   assert(calls.some((request) => request.kind === "exec" && request.owner === "alice"));
   assert(calls.filter((request) => request.kind === "fs").every((request) => request.owner === "alice"));
+  await t.test("default employees and legacy communication sessions use private cloud cwd without retargeting tasks or clients", async (sub) => {
+    await store.run("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)", "alice", "alice", "unused-test-password", "admin", 0, 1, 0);
+    const config = { model: "fixture/model", provider: { fixture: { baseURL: "https://unused.test", models: { model: {} } } }, scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] } };
+    await store.put("config", config);
+    const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store)), new Chrome(store, new ChromeBridge(), ""));
+    engine.employee.closed = true;
+    sub.after(() => engine.close());
+    engine.catalog.resolve = async (_config, selection) => resolveModel(config, selection || config.model);
+    const initial = await engine.employee.profile();
+    assert.equal(initial.ownerId, "alice");
+    assert.equal(initial.cwd, ids.alice.cwd, "the built-in employee bypasses create(), but still needs a private default");
+    const freshJob = await engine.employee.execute("", { action: "add", kind: "todo", text: "use the private default" });
+    assert.equal(engine.employee.task(await engine.employee.state(), freshJob.value.id).cwd, ids.alice.cwd);
+    const job = await engine.employee.execute("", { action: "add", kind: "todo", text: "keep the original task binding", cwd: process.cwd() });
+    const chat = await engine.employee.chat("alice");
+    chat.cwd = process.cwd();
+    await store.saveSession(chat);
+    await store.append(chat.id, { role: "assistant", text: "keep this earlier reply" });
+    await engine.employee.update((state) => { state.cwd = process.cwd(); state.executionCwds = { server: process.cwd() }; });
+    const migrated = await engine.employee.profile();
+    assert.equal(migrated.cwd, ids.alice.cwd);
+    assert.equal(migrated.executionCwds?.server, ids.alice.cwd);
+    let prompt = "";
+    engine.providers.chat = async (_model, system) => { prompt = system; return { role: "assistant", text: "recovered" }; };
+    await engine.run(chat.id, { role: "user", text: "continue chatting" });
+    assert.equal((await store.session(chat.id)).cwd, ids.alice.cwd);
+    assert(prompt.includes(ids.alice.cwd.replaceAll("\\", "/")));
+    assert.equal((await store.lastMessage(chat.id, "assistant"))?.text, "recovered");
+    assert((await store.messages(chat.id)).some((message) => message.text === "keep this earlier reply"));
+    assert.equal(engine.employee.task(await engine.employee.state(), job.value.id).cwd, process.cwd());
+    await assert.rejects(store.newSession({ ownerId: "alice", employeeId: "default", taskId: job.value.id, cwd: process.cwd() }), /私有工作区/);
+    const created = await engine.employee.create({ name: "client-bound employee" }, "alice"), employee = await engine.employee.for(created.id);
+    employee.closed = true;
+    await employee.update((state) => {
+      state.cwd = "C:\\client-only";
+      state.execution = { ownerId: "alice", localAgent: true, clientId: "d".repeat(32) };
+      state.executionCwds = { server: process.cwd() };
+    });
+    const clientChat = await employee.chat("alice");
+    assert.equal(clientChat.cwd, ids.alice.cwd, "communication is server-side even when future tasks use a client");
+    assert(!clientChat.localAgent);
+    const client = await employee.profile();
+    assert.equal(client.cwd, "C:\\client-only");
+    assert.equal(client.execution?.localAgent, true);
+    assert.equal(client.executionCwds?.server, ids.alice.cwd);
+    const custom = join(process.cwd(), "custom-project");
+    await employee.update((state) => { state.execution = { ownerId: "alice", localAgent: false }; state.cwd = custom; state.executionCwds = { server: custom }; });
+    assert.equal((await employee.profile()).cwd, custom, "an explicitly selected legacy project is not silently migrated");
+  });
   assert.equal(await fs.readFile(protectedFile, "utf8"), "must not be read directly");
   for (const socket of sockets) socket.destroy();
   await new Promise<void>((yes) => server.close(() => yes()));

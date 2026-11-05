@@ -11,6 +11,10 @@ const ownerPattern = /^[a-zA-Z0-9_-]{1,100}$/;
 export function validateOwner(owner) {
   if (typeof owner !== "string" || !ownerPattern.test(owner)) throw Error("Cloud execution requires an authenticated owner");
 }
+export function serviceEnvironment(env = process.env) {
+  // setpriv changes UID/GID, not HOME; CLI discovery must use the service account's home.
+  return { ...env, HOME: "/home/node", USER: "node", LOGNAME: "node" };
+}
 export function tenantEnvironment(identity, extra = {}) {
   // In particular, never inherit the service's database, vault, provider or Kubernetes credentials.
   const env = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", HOME: identity.home, USER: identity.name,
@@ -191,7 +195,7 @@ async function main() {
   await supervisor.start();
   // The web service remains UID 1000. Only this fixed launcher retains identity-management privileges.
   const app = spawn("/usr/bin/setpriv", [...dropPrivileges({ uid: 1000 }), process.execPath, join(here, "start.mjs")], {
-    env: { ...process.env, VEGA_CLOUD_ISOLATION: "1", VEGA_CLOUD_SOCKET: supervisor.socket }, stdio: "inherit",
+    env: { ...serviceEnvironment(), VEGA_CLOUD_ISOLATION: "1", VEGA_CLOUD_SOCKET: supervisor.socket }, stdio: "inherit",
   });
   const stop = () => app.kill("SIGTERM");
   process.on("SIGTERM", stop); process.on("SIGINT", stop);

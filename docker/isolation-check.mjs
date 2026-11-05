@@ -4,7 +4,8 @@ import { mkdtemp, mkdir, chmod, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
-import { CloudSupervisor } from "./cloud-supervisor.mjs";
+import { spawnSync } from "node:child_process";
+import { CloudSupervisor, serviceEnvironment } from "./cloud-supervisor.mjs";
 import { cloudRequest, frames, send } from "../shared/cloud-wire.mjs";
 
 assert.equal(process.platform, "linux", "This check requires Linux kernel permissions");
@@ -38,6 +39,11 @@ function run(owner, command, args = [], cwd, env = {}, input) {
 }
 try {
   await supervisor.start();
+  const service = spawnSync("/usr/bin/setpriv", ["--reuid=1000", "--regid=1000", "--clear-groups", "--no-new-privs", "--", process.execPath, "-e",
+    "const fs=require('fs'),os=require('os'),path=require('path');console.log(os.homedir());console.log(process.getuid());try{fs.statSync(path.join(os.homedir(),'.config/devin/config.json'))}catch(e){if(e.code!=='ENOENT')throw e}",
+  ], { cwd: "/", env: serviceEnvironment({ HOME: "/root", USER: "root", LOGNAME: "root" }), encoding: "utf8", timeout: 10000 });
+  assert.equal(service.status, 0, service.error?.message || service.stderr);
+  assert.deepEqual(service.stdout.trim().split("\n"), ["/home/node", "1000"]);
   const a = await cloudRequest(socketPath, { kind: "ensure", owner: "check_a" });
   const b = await cloudRequest(socketPath, { kind: "ensure", owner: "check_b" });
   assert.notEqual(a.uid, b.uid);

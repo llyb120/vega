@@ -230,7 +230,7 @@ export class Store {
   }
   async newSession(input: Partial<Session> = {}) {
     const cloud = cloudFor(input);
-    const cwd = input.localAgent ? input.cwd! : cloud ? await cloud.cwd(input.cwd) : resolve(input.cwd || process.cwd());
+    const cwd = input.localAgent ? input.cwd! : cloud ? await cloud.cwd(input.employeeId && !input.taskId ? undefined : input.cwd) : resolve(input.cwd || process.cwd());
     assert(typeof cwd === "string" && cwd.length > 0, "cwd required");
     if (!input.localAgent && !cloud) assert((await stat(cwd)).isDirectory(), "cwd must be an existing directory");
     const s: Session = { ...input, id: id(), title: input.title || "新会话", cwd, createdAt: Date.now() };
