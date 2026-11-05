@@ -206,20 +206,28 @@ export class Catalog {
       }
       raw = (data.families || []).filter((f: Obj) => f.slug !== "fusion");
       for (const family of raw!) {
+        const bundled = snapshot.families.find((f) => f.slug === family.slug);
         for (const m of family.variants || [])
-          if (m.model_uid && m.model_uid !== "adaptive")
+          if (m.model_uid && m.model_uid !== "adaptive") {
+            const supportsImages =
+              m.supports_images ??
+              bundled?.variants?.find((v) => v.model_uid === m.model_uid)?.supports_images ??
+              bundled?.variants?.[0]?.supports_images ??
+              false;
             models[m.model_uid] = {
               name: m.label || m.model_uid,
               limit: {
                 context: m.max_context_tokens || 128000,
                 output: Math.min(128000, m.max_output_tokens || 128000),
               },
-              modalities: { input: ["text", "image"] },
+              // CLI models list 不含模态；快照 supports_images 来自 ACP cognition.ai/supportsImages。
+              modalities: { input: supportsImages ? ["text", "image"] : ["text"] },
               options: {
                 supportsReasoningEffort: false,
                 supportsThinkingToggle: false,
               },
             };
+          }
       }
       if (p.options.devinModel && p.options.devinModel !== "adaptive") {
         const uid = this.devinModel(raw!, p.options.devinModel);

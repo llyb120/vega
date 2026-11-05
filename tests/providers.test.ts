@@ -610,6 +610,23 @@ test("CodeBuddy and WorkBuddy identities remain separate, CLI env credentials an
   assert.equal(models.models.m.modalities.input[1], "image");
   assert.equal(models.models.m.variants.high.reasoningEffort, "high");
 });
+
+test("Devin bundled catalog preserves ACP image capabilities", async () => {
+  const s = await Store.open(":memory:");
+  cleanup.push(async () => await s.close());
+  const catalog = new Catalog(s, new Subscriptions(s, "")),
+    result = await catalog.models(
+      {
+        api: "devin",
+        options: { devinCli: "missing-devin-test-binary", devinModel: "adaptive" },
+      },
+      true,
+    );
+  assert.deepEqual(result.models["swe-2-flash-medium"].modalities.input, ["text"]);
+  assert.deepEqual(result.models["deepseek-v4-pro-high"].modalities.input, ["text"]);
+  assert.deepEqual(result.models["glm-5-3-flash-max"].modalities.input, ["text", "image"]);
+  assert.deepEqual(result.models["claude-opus-5-5-medium"].modalities.input, ["text", "image"]);
+});
 test("WorkBuddy original encrypted envelope decoder rejects key substitution", () => {
   const require = createRequire(import.meta.url),
     { decodeWorkBuddyToken } = require("../scripts/workbuddy-login.cjs");
