@@ -16,7 +16,7 @@ function preview() {
     setTimeout: (fn: () => void, ms: number) => { const id = ++timerId; timers.set(id, { fn, at: clock + ms }); return id; },
     clearTimeout: (id: number) => timers.delete(id),
     socket: { readyState: 1, bufferedAmount: 0, send: (raw: string) => sent.push(JSON.parse(raw)) }, WebSocket: { OPEN: 1 },
-    outbox: [], inflight: 0, sequence: 0, error: { value: "" }, remoteDrag: null, afterInput: 0,
+    outbox: [], inflight: 0, sequence: 0, error: { value: "" }, info: { value: "" }, remoteDrag: null, afterInput: 0,
   };
   state.remote = { get value() { return state.operating.value && state.liveState.value === "control"; } };
   const functions = source.slice(source.indexOf("function resetInput()"), source.indexOf("function disconnect()")) +
@@ -150,6 +150,26 @@ for (const touch of [false, true]) test(`second ${touch ? "touch" : "mouse"} dra
   assert.equal(sent[3].action.phase, "up");
   assert.equal(sent[3].dragSeq, sent[2].seq);
   assert.equal(state.error.value, "");
+});
+
+test("stale-frame rejection stays soft: notice only, keeps control, and requests a full frame resend", () => {
+  const { state, handlers, event, sent } = preview();
+  state.operating.value = true; state.liveState.value = "control";
+  handlers.pointerDown(event);
+  handlers.pointerMove({ ...event, clientX: 280, clientY: 170 });
+  assert.equal(sent.length, 1, "press is in flight before the soft rejection");
+  handlers.inputResult({ type: "input_result", seq: 1, status: "not_executed", reason: "画面已过期，请等待实时画面更新" });
+  assert.equal(state.error.value, "", "stale frames must not sticky-block with a hard error banner");
+  assert.match(state.info.value, /画面已过期/);
+  assert.equal(state.operating.value, true, "keep remote control so the user can retry after a fresh frame");
+  assert.equal(state.remoteDrag, null);
+  assert.equal(state.inputBusy.value, false);
+  assert(sent.some((m) => m.type === "frame_ack" && m.resend === true), "ask the server for a full next frame");
+  handlers.control({ action: "press", key: "Enter" });
+  handlers.inputResult({ type: "input_result", seq: 2, status: "not_executed", reason: "网页或视口已变化，请等待实时画面更新" });
+  assert.equal(state.error.value, "");
+  assert.match(state.info.value, /视口已变化/);
+  assert.equal(state.operating.value, true);
 });
 
 test("failed streamed input drops pending samples, releases control and never replays after a late acknowledgement", () => {

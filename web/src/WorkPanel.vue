@@ -12,6 +12,11 @@ async function run(task, action) {
   finally { busy.value = ""; }
 }
 const others = (list, attention) => list.filter((task) => !attention.includes(task));
+/** Panel cards stay scannable; full brief lives in the task/session detail. */
+function brief(text, max = 72) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  return value.length > max ? value.slice(0, max - 1) + "…" : value;
+}
 </script>
 <template>
   <aside class="work-panel" :class="{ overlay }" aria-label="工作面板">
@@ -20,8 +25,9 @@ const others = (list, attention) => list.filter((task) => !attention.includes(ta
       <section v-if="attention.length" class="panel-section">
         <h4><span class="dot warn" aria-hidden="true"></span>待你处理<span class="count warn">{{ attention.length }}</span></h4>
         <article v-for="task in attention" :key="task.id" class="attention-card" :aria-busy="busy === task.id">
-          <button type="button" class="task-title" @click="emit('open', task.id)">{{ task.text }}</button>
-          <p class="attention-text"><strong>{{ task.status === 'approval' ? '需要确认' : '需要补充' }}：</strong>{{ task.status === 'approval' ? task.approval : task.waiting }}</p>
+          <button type="button" class="task-title" :title="task.text" @click="emit('open', task.id)">{{ brief(task.text) }}</button>
+          <p class="attention-text" :title="task.status === 'approval' ? task.approval : task.waiting"><strong>{{ task.status === 'approval' ? '需要确认' : '需要补充' }}：</strong>{{ brief(task.status === 'approval' ? task.approval : task.waiting, 96) }}</p>
+          <button type="button" class="link detail" @click="emit('open', task.id)">查看详情</button>
           <div v-if="!readonly && task.status === 'approval'" class="actions"><button type="button" class="primary sm" :disabled="!!busy" @click="run(task, 'approve')"><Icon name="check" :size="14" />批准执行</button><button type="button" class="sm" :disabled="!!busy" @click="run(task, 'reject')">驳回</button></div>
           <form v-else-if="!readonly" class="answer" @submit.prevent="run(task, 'answer')"><textarea v-model="answers[task.id]" rows="2" maxlength="8000" required :aria-label="'回复：' + task.text" placeholder="补充信息后，牛马会继续原任务"></textarea><button class="primary sm" :disabled="!!busy || !answers[task.id]?.trim()">回复并继续</button></form>
         </article>
@@ -50,10 +56,11 @@ const others = (list, attention) => list.filter((task) => !attention.includes(ta
 .panel-section h4 { display: flex; align-items: center; gap: 8px; margin: 12px 4px 8px; color: var(--text-2); font-size: 12px; }
 .panel-section h4 .count { margin-left: auto; }
 .attention-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-bottom: 8px; padding: 10px 12px; border: 1px solid var(--warn-border); border-left: 3px solid var(--warn); border-radius: var(--r-md); background: var(--surface); }
-.task-title { display: block; height: auto; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--text); font-weight: 600; line-height: 1.45; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.task-title { display: -webkit-box; height: auto; min-height: 0; padding: 0; overflow: hidden; border: 0; background: transparent; color: var(--text); font-weight: 600; line-height: 1.45; text-align: left; white-space: normal; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .task-title:hover:not(:disabled) { background: transparent; color: var(--accent-text); }
-.attention-text { color: var(--text-2); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.attention-text { display: -webkit-box; overflow: hidden; color: var(--text-2); font-size: 12px; line-height: 1.55; white-space: normal; overflow-wrap: anywhere; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .attention-text strong { color: var(--warn); font-weight: 600; }
+.attention-card .detail { justify-self: start; margin: 0; padding: 0; font-size: 12px; }
 .answer { display: grid; gap: 6px; }
 .answer textarea { width: 100%; font-size: 12px; }
 .answer button { justify-self: end; }
