@@ -54,6 +54,25 @@ test("archived files are written per employee task or user session and read back
   } finally { await engine.close(); await store.close(); }
 });
 
+test("read resolves /api/files and /api/blobs URLs on the server even for local-agent sessions", async () => {
+  const { store, engine, a, tools } = await fixture();
+  try {
+    const work = await store.newSession({ cwd: process.cwd(), taskId: "t-url", employeeId: a.employeeId, localAgent: true, clientId: "client-1" });
+    const pixels = await sharp({ create: { width: 2, height: 2, channels: 3, background: "red" } }).webp().toBuffer();
+    const shot = await store.files.write(work, "shot.webp", pixels);
+    const url = store.files.url(shot);
+    const viaUrl = await (await tools(work)).read({ path: url });
+    assert.deepEqual(viaUrl.images, [{ mime: "image/webp", path: shot, url }]);
+    const viaHost = await (await tools(work)).read({ path: `https://vega.example${url}` });
+    assert.equal(viaHost.images![0].path, shot);
+    const blobId = await store.blob("image/webp", pixels);
+    await store.grantBlob(blobId, work.id);
+    const viaBlob = await (await tools(work)).read({ path: `/api/blobs/${blobId}` });
+    assert.equal(viaBlob.images![0].blobId, blobId);
+    await assert.rejects((await tools(work)).read({ path: "/api/files/employees/other/x.webp" }), /只能读取本牛马|Invalid file path/);
+  } finally { await engine.close(); await store.close(); }
+});
+
 test("files go with clear chat, task removal, reset and employee removal", async () => {
   const { store, engine, a, b } = await fixture();
   try {

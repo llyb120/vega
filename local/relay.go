@@ -114,8 +114,8 @@ func (a *Agent) configureRelay(connection *directConnection, saved ServerCredent
 	}
 	ctx, cancel := context.WithCancel(parent)
 	runner.relayCancel = cancel
-	runner.relayRules = append([]string{}, saved.Relay...)
-	rules := append([]string{}, saved.Relay...)
+	rules := saved.activeRelay()
+	runner.relayRules = append([]string{}, rules...)
 	slots := make(chan struct{}, 64)
 	runner.relay = func(session context.Context, request job) {
 		select {
@@ -247,7 +247,7 @@ func pumpRelay(ctx context.Context, remote net.Conn, ws *websocket.Conn) {
 	}
 }
 
-func (a *Agent) saveRelay(origin, userID, text string) error {
+func (a *Agent) saveRelay(origin, userID, text string, enabled bool) error {
 	rules, err := relayRules(text)
 	if err != nil {
 		return err
@@ -270,7 +270,9 @@ func (a *Agent) saveRelay(origin, userID, text string) error {
 		a.mu.Unlock()
 		return fmt.Errorf("账号尚未配对")
 	}
+	on := enabled
 	next.Servers[index].Relay = rules
+	next.Servers[index].RelayOn = &on
 	if err = a.saveConfig(next); err != nil {
 		a.mu.Unlock()
 		return fmt.Errorf("中继配置未保存：%w", err)

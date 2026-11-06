@@ -135,28 +135,94 @@ func (a *Agent) allowOrigin(origin string) bool {
 
 var pairingPage = template.Must(template.New("pairing").Parse(`<!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>牵牛星 本机连接授权</title><style>
-body{font:16px system-ui;background:#f5f6fa;color:#202431;margin:0;padding:24px}main{max-width:680px;margin:auto;background:white;padding:28px;border-radius:16px}button{font:inherit;padding:10px 18px;border:0;border-radius:8px;background:#5147dd;color:white;cursor:pointer}button:focus-visible,textarea:focus-visible{outline:3px solid #292177;outline-offset:3px}code{overflow-wrap:anywhere}form{padding:16px 0;border-top:1px solid #ddd}p{line-height:1.7}textarea{box-sizing:border-box;width:100%;font:14px monospace;padding:12px;margin:10px 0;border:1px solid #888;border-radius:8px}small{display:block;line-height:1.6;color:#555}
-</style><main><h1>牵牛星 本机连接授权</h1>
-<p>只允许你信任的 Vega 站点。允许后，该站点登录的账号可在本机读写文件、执行命令。无需配置 Key。</p>
-{{if .Approved}}<p role="status"><strong>站点权限已保存。</strong>请回到 Vega 网站查看登录验证和后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输，存在被窃听或篡改的风险。</p>{{end}}
-{{if .Revoked}}<p role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</p>{{end}}
-{{if .Saved}}<p role="status">本地配置已保存，将同步到已连接的后端；离线时请等待客户端重新连接。</p>{{end}}
-{{if .Unpaired}}<p role="status">指定账户的本地配对已移除，其他账户和站点授权不变。若该账户仍在 Vega 网页中登录，网页可能再次发起配对。</p>{{end}}
-{{range .Pending}}<form method="post"><p>请求连接的站点：<br><strong><code>{{.}}</code></strong></p><button name="origin" value="{{.}}">允许此站点</button></form>{{else}}<p>当前没有新的连接请求。请保持客户端运行，并登录 Vega 网站。</p>{{end}}
-{{if .Trusted}}<h2>已信任站点</h2>{{range .Trusted}}<form method="post"><code>{{.}}</code> <button name="remove" value="{{.}}">撤销授权</button></form>{{end}}{{end}}
-<h2>补充内容</h2><form method="post"><label for="supplement">本机项目目录等辅助提示</label>
-<small id="supplement-help">最多 8192 UTF-8 字节。同步到此客户端授权的站点，仅供绑定本机的会话参考。不要填写密码或密钥；清空后保存可移除。</small>
-<textarea id="supplement" name="supplement" rows="6" aria-describedby="supplement-help">{{.Supplement}}</textarea><button name="saveSupplement" value="1">保存补充内容</button></form>
-<h2>流量中继</h2><p>按配对账户授权内网域名，该账户的服务端牛马浏览器自动使用本机网络，不改变任务执行位置。</p>
-<small>每行填写一个精确域名或域名:端口，省略端口表示 80 和 443，最多 64 条域名端口规则。不支持通配符、IP、localhost 或 URL；留空保存关闭该账户的中继。请使用 HTTPS 站点保护隧道。网站内容会进入服务端浏览器，登录态不会从本机复制。</small>
-{{range .Accounts}}<form method="post"><p>所属服务器地址：<strong><code>{{.Origin}}</code></strong><br>账户 ID：<code>{{.UserID}}</code><br>连接状态：{{.Status}}</p>
-<input type="hidden" name="relayOrigin" value="{{.Origin}}"><input type="hidden" name="relayUser" value="{{.UserID}}">
-<label>允许中继的域名和端口<textarea name="relayRules" rows="5" placeholder="git.company.internal&#10;dev.company.internal:8080">{{.Rules}}</textarea></label>
-<small>命中域名但客户端离线、端口未授权或多个客户端配置冲突时拒绝连接，不回退公网。保存规则会断开受影响账户的现有浏览器网络连接，不自动重放请求。</small>
-<button name="saveRelay" value="1">保存此账户的中继配置</button>
-<details><summary>移除此账户配对</summary><p>仅移除服务器 <code>{{.Origin}}</code> 下账户 <code>{{.UserID}}</code> 的本地配对和中继配置，并断开其连接；不会删除服务端账户，不影响其他配对或站点授权。</p><small>移除后，该账户已配置的服务端中继域名仍会拒绝直连；若只是关闭中继，请改用清空规则后保存。网页仍登录此账户时可能再次配对。</small><button name="removeAccount" value="1" aria-label="确认移除 {{.Origin}} 下账户 {{.UserID}} 的配对">确认移除此账户配对</button></details></form>{{else}}<p>尚无配对账户。允许站点后，请回到 Vega 完成连接。</p>{{end}}
+<title>牵牛星 · 本机连接</title><style>
+:root{--bg:#eef0f7;--card:#fff;--ink:#1b1f2a;--muted:#5b6475;--line:#e3e6ef;--brand:#5147dd;--brand-ink:#fff;--ok:#0f7b4a;--ok-bg:#e8f7ef;--warn:#8a5a00;--warn-bg:#fff6e5;--danger:#b42318;--shadow:0 12px 40px rgba(33,37,71,.08)}
+*{box-sizing:border-box}body{margin:0;font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:radial-gradient(1200px 600px at 10% -10%,#dfe5ff 0%,transparent 55%),radial-gradient(900px 500px at 100% 0%,#f3e9ff 0%,transparent 50%),var(--bg)}
+main{max-width:720px;margin:28px auto;padding:0 16px 48px}
+.hero{display:flex;gap:16px;align-items:center;margin-bottom:18px}
+.badge{width:48px;height:48px;border-radius:14px;background:linear-gradient(145deg,#6a62f0,#5147dd);box-shadow:0 8px 20px rgba(81,71,221,.35);flex:none}
+.hero h1{margin:0;font-size:1.45rem;letter-spacing:-.02em}.hero p{margin:4px 0 0;color:var(--muted);font-size:.95rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px 22px 18px;box-shadow:var(--shadow);margin-bottom:16px}
+.card h2{margin:0 0 10px;font-size:1.05rem}
+.flash{border-radius:12px;padding:12px 14px;margin:0 0 14px}.flash.ok{background:var(--ok-bg);color:var(--ok)}.flash.warn{background:var(--warn-bg);color:var(--warn)}
+p{margin:0 0 12px}small{display:block;color:var(--muted);line-height:1.55;margin:0 0 10px}
+code{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f3f4fa;padding:1px 6px;border-radius:6px;overflow-wrap:anywhere}
+label{display:block;font-weight:600;margin:8px 0 6px}
+textarea{width:100%;font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:12px 14px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;resize:vertical;min-height:96px}
+textarea:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #292177;outline-offset:2px}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
+button{font:inherit;padding:10px 16px;border:0;border-radius:10px;background:var(--brand);color:var(--brand-ink);cursor:pointer;font-weight:600}
+button.secondary{background:#eef0f8;color:var(--ink)}button.danger{background:#fff1f0;color:var(--danger)}
+.site{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}.site:first-child{border-top:0;padding-top:0}
+.status{display:inline-flex;align-items:center;gap:6px;font-size:.85rem;font-weight:600;padding:4px 10px;border-radius:999px;background:#eef0f8;color:var(--muted)}
+.status.on{background:#e8f0ff;color:var(--brand)}.status.on::before,.status::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
+.account{border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0;background:#fafbff}
+.switch{display:flex;align-items:center;gap:10px;font-weight:600;margin:8px 0 12px;cursor:pointer;user-select:none}
+.switch input{appearance:none;width:44px;height:26px;border-radius:999px;background:#cfd5e6;position:relative;transition:.2s;flex:none;cursor:pointer}
+.switch input::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.2);transition:.2s}
+.switch input:checked{background:var(--brand)}.switch input:checked::after{left:21px}
+details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-weight:600}
+.empty{color:var(--muted);margin:0}
+</style>
+<main>
+  <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>只允许你信任的 Vega 站点；允许后，该站点登录的账号可在本机读写文件、执行命令。</p></div></div>
+
+  {{if .Approved}}<div class="flash ok" role="status"><strong>站点权限已保存。</strong>请回到 Vega 查看登录验证与后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输。</div>{{end}}
+  {{if .Revoked}}<div class="flash warn" role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</div>{{end}}
+  {{if .Saved}}<div class="flash ok" role="status">本地配置已保存，将同步到已连接的后端；离线时请等待客户端重新连接。</div>{{end}}
+  {{if .Unpaired}}<div class="flash warn" role="status">指定账户的本地配对已移除，其他账户和站点授权不变。若该账户仍在 Vega 网页中登录，网页可能再次发起配对。</div>{{end}}
+
+  <section class="card">
+    <h2>连接请求</h2>
+    {{range .Pending}}
+    <form method="post" class="site"><div>请求连接的站点<br><strong><code>{{.}}</code></strong></div><button name="origin" value="{{.}}">允许此站点</button></form>
+    {{else}}<p class="empty">当前没有新的连接请求。请保持客户端运行，并登录 Vega 网站。</p>{{end}}
+  </section>
+
+  {{if .Trusted}}
+  <section class="card">
+    <h2>已信任站点</h2>
+    {{range .Trusted}}
+    <form method="post" class="site"><code>{{.}}</code><button class="secondary" name="remove" value="{{.}}">撤销授权</button></form>
+    {{end}}
+  </section>
+  {{end}}
+
+  <section class="card">
+    <h2>补充内容</h2>
+    <form method="post">
+      <label for="supplement">本机项目目录等辅助提示</label>
+      <small id="supplement-help">最多 8192 UTF-8 字节。同步到此客户端授权的站点，仅供绑定本机的会话参考。不要填写密码或密钥；清空后保存可移除。</small>
+      <textarea id="supplement" name="supplement" rows="6" aria-describedby="supplement-help">{{.Supplement}}</textarea>
+      <div class="row"><button name="saveSupplement" value="1">保存补充内容</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>流量中继</h2>
+    <p>按配对账户授权内网域名，该账户的服务端牛马浏览器自动使用本机网络，不改变任务执行位置。</p>
+    <small>每行填写一个精确域名或域名:端口，省略端口表示 80 和 443，最多 64 条。不支持通配符、IP、localhost 或 URL。关闭开关可保留规则但停止中继。请使用 HTTPS 站点保护隧道。</small>
+    {{range .Accounts}}
+    <form method="post" class="account">
+      <p>所属服务器地址：<strong><code>{{.Origin}}</code></strong><br>账户 ID：<code>{{.UserID}}</code><br>
+        <span class="status{{if eq .Status "已连接"}} on{{end}}">{{.Status}}</span>
+      </p>
+      <input type="hidden" name="relayOrigin" value="{{.Origin}}">
+      <input type="hidden" name="relayUser" value="{{.UserID}}">
+      <label class="switch"><input type="checkbox" name="relayOn" value="1"{{if .Enabled}} checked{{end}}>启用流量中继</label>
+      <label>允许中继的域名和端口<textarea name="relayRules" rows="5" placeholder="git.company.internal&#10;dev.company.internal:8080">{{.Rules}}</textarea></label>
+      <small>命中域名但客户端离线、端口未授权或多个客户端配置冲突时拒绝连接，不回退公网。保存会断开受影响账户的现有浏览器网络连接，不自动重放请求。</small>
+      <div class="row"><button name="saveRelay" value="1">保存此账户的中继配置</button></div>
+      <details><summary>移除此账户配对</summary>
+        <p>仅移除服务器 <code>{{.Origin}}</code> 下账户 <code>{{.UserID}}</code> 的本地配对和中继配置，并断开其连接；不会删除服务端账户，不影响其他配对或站点授权。</p>
+        <small>移除后，该账户已配置的服务端中继域名仍会拒绝直连；若只是关闭中继，请关掉上方开关后保存。网页仍登录此账户时可能再次配对。</small>
+        <div class="row"><button class="danger" name="removeAccount" value="1" aria-label="确认移除 {{.Origin}} 下账户 {{.UserID}} 的配对">确认移除此账户配对</button></div>
+      </details>
+    </form>
+    {{else}}<p class="empty">尚无配对账户。允许站点后，请回到 Vega 完成连接。</p>{{end}}
+  </section>
 </main></html>`))
+
 
 func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -182,7 +248,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			if r.FormValue("saveSupplement") == "1" {
 				err = a.editSupplement(func(string) (string, bool, error) { return r.FormValue("supplement"), true, nil })
 			} else {
-				err = a.saveRelay(r.FormValue("relayOrigin"), r.FormValue("relayUser"), r.FormValue("relayRules"))
+				err = a.saveRelay(r.FormValue("relayOrigin"), r.FormValue("relayUser"), r.FormValue("relayRules"), r.FormValue("relayOn") == "1")
 			}
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -280,7 +346,10 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		pending = append(pending, origin)
 	}
 	trusted := append([]string{}, a.config.TrustedOrigins...)
-	type account struct{ Origin, UserID, Rules, Status string }
+	type account struct {
+		Origin, UserID, Rules, Status string
+		Enabled                      bool
+	}
 	accounts := []account{}
 	for _, saved := range a.config.Servers {
 		status := "未连接"
@@ -290,7 +359,8 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 				status = "已连接"
 			}
 		}
-		accounts = append(accounts, account{saved.Origin, saved.UserID, strings.Join(saved.Relay, "\n"), status})
+		enabled := (saved.RelayOn == nil && len(saved.Relay) > 0) || (saved.RelayOn != nil && *saved.RelayOn)
+		accounts = append(accounts, account{saved.Origin, saved.UserID, strings.Join(saved.Relay, "\n"), status, enabled})
 	}
 	supplement := a.config.Supplement
 	a.mu.Unlock()

@@ -23,10 +23,19 @@ import (
 const reconnectGrace = 60 * time.Second
 
 type ServerCredential struct {
-	Origin string   `json:"origin"`
-	UserID string   `json:"userId"`
-	Token  string   `json:"token"`
-	Relay  []string `json:"relay,omitempty"`
+	Origin  string   `json:"origin"`
+	UserID  string   `json:"userId"`
+	Token   string   `json:"token"`
+	Relay   []string `json:"relay,omitempty"`
+	RelayOn *bool    `json:"relayOn,omitempty"` // nil = legacy: on when Relay is non-empty
+}
+
+// activeRelay returns the rules that should be advertised and used right now.
+func (s ServerCredential) activeRelay() []string {
+	if s.RelayOn != nil && !*s.RelayOn {
+		return nil
+	}
+	return append([]string{}, s.Relay...)
 }
 type connectionStatus struct {
 	Code       string `json:"code"`
@@ -73,6 +82,7 @@ func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredentia
 			next.Servers = append(next.Servers, item)
 		} else {
 			saved.Relay = item.Relay
+			saved.RelayOn = item.RelayOn
 		}
 	}
 	if len(next.Servers) >= 8 {
