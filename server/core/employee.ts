@@ -98,8 +98,8 @@ const planUnresolved = (plan: Obj[] | undefined) =>
 const SETTLE_CHOICE =
   "请选择：1) 接受当前已有结论作为最终交付；2) 说明仍需继续的具体步骤。回复前不会自动恢复执行。";
 /** Model-authored reply text in a task session that complete() may cite as the deliverable body. */
-/** task_progress tellUser: key milestones only; at most once per 2 minutes and 12 times per task. */
-const TELL_USER_GAP_MS = 2 * 60_000, TELL_USER_MAX = 12;
+/** task_progress tellUser: key milestones only; at most 12 times per task (no time gap). */
+const TELL_USER_MAX = 12;
 const authored = (m: Message | undefined) => !!m && m.role === "assistant" && !!m.model && !m.error && !!String(m.text || "").trim();
 const preview = (m: Message) => {
   const text = String(m.text).trim().replace(/\s+/g, " ");
@@ -1218,11 +1218,11 @@ export class Employee {
                   };
                 }
                 if (a.tellUser !== true) return { ok: true, toldUser: false, next: "Continue the current step" };
-                // Key milestones only; progress is saved either way. No task card here—delivery attaches the task.
+                // Key milestones only; progress is saved either way. Ordinary progress has no task card;
+                // waiting/approval and final delivery attach the bound task (see complete()).
                 const told: number[] = t.toldUserAt || [];
                 const skipped = !s.chatSession && !t.group ? "没有沟通会话"
                   : told.length >= TELL_USER_MAX ? `本任务已告知 ${TELL_USER_MAX} 次，不再发送`
-                  : told.length && now - told.at(-1)! < TELL_USER_GAP_MS ? "距上次告知不足 2 分钟"
                   : "";
                 if (skipped) return { ok: true, toldUser: false, tellUserSkipped: skipped, next: "Progress saved; continue the current step" };
                 t.toldUserAt = [...told, now];

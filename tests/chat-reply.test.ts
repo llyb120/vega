@@ -55,7 +55,7 @@ test("a dispatch followed by a silent reply still shows the card once", async ()
   } finally { await engine.close(); await store.close(); }
 });
 
-test("task_progress tellUser: null means omitted; true posts a quoted milestone without a task card at most every 2 minutes and 12 times per task", async () => {
+test("task_progress tellUser: null means omitted; true posts a quoted milestone without a task card, no time gap, at most 12 times per task", async () => {
   const { store, engine, employee, chat } = await fixture();
   const ctx: any = { kind: "task", taskId: "x" };
   const schema = employeeTools(ctx).find((tool) => tool.name === "task_progress")!.parameters;
@@ -78,17 +78,40 @@ test("task_progress tellUser: null means omitted; true posts a quoted milestone 
     assert.equal(first.value.toldUser, true);
     const posted = (await store.messages(chat.id)).at(-1)!;
     assert.deepEqual([posted.role, posted.text, posted.progress, posted.tasks, posted.quote?.seq], ["assistant", "开始核对第二季度数据", true, undefined, 1]);
-    const early = await employee.execute(id, { action: "progress", text: "又一条", tellUser: true });
-    assert.equal(early.value.toldUser, false);
-    assert.match(early.value.tellUserSkipped, /2 分钟/);
-    assert.equal((await employee.state()).tasks[0].progress.at(-1).text, "又一条", "progress is saved even when not told");
-    for (let i = 0; i < 13; i++) {
-      await employee.update((state) => { state.tasks[0].toldUserAt = state.tasks[0].toldUserAt.map((at: number) => at - 3 * 60_000); });
+    const second = await employee.execute(id, { action: "progress", text: "又一条关键里程碑", tellUser: true });
+    assert.equal(second.value.toldUser, true, "no time gap between milestones");
+    assert.equal(await chatCount(), 2);
+    for (let i = 0; i < 11; i++) {
       await employee.execute(id, { action: "progress", text: "里程碑 " + i, tellUser: true });
     }
     assert.equal(await chatCount(), 12, "at most 12 milestones per task");
     const capped = await employee.execute(id, { action: "progress", text: "超出", tellUser: true });
     assert.equal(capped.value.toldUser, false);
     assert.match(capped.value.tellUserSkipped, /12 次/);
+    assert.equal((await employee.state()).tasks[0].progress.at(-1).text, "超出", "progress is saved even when not told");
   } finally { await engine.close(); await store.close(); }
+});
+
+test("waiting and approval chat deliveries keep the bound task card", async () => {
+  for (const scenario of [
+    { arguments: { action: "help", text: "请把短信验证码发我" }, status: "waiting" },
+    { arguments: { action: "ask", text: "是否批准删除？" }, status: "approval" },
+  ]) {
+    const { store, engine, employee, chat } = await fixture();
+    engine.providers.chat = async () => ({ role: "assistant", calls: [{ id: "stop", ...employeeCall(scenario.arguments) }] }) as any;
+    try {
+      const created = await employee.execute("", { action: "add", kind: "todo", text: "Login with code" });
+      await employee.update((state) => {
+              Object.assign(state.tasks[0], { status: "running", plan: [{ content: "login", status: "in_progress" }], chatSource: { session: chat.id, seq: 1 } });
+            });
+      employee.busy.set(created.value.id, { computer: false, session: "" });
+      await employee.run((await employee.state()).tasks[0]);
+      const job = (await employee.state()).tasks[0];
+      assert.equal(job.status, scenario.status);
+      const delivery = (await store.messages(chat.id)).filter((m) => m.delivery).at(-1)!;
+      assert.equal(delivery.delivery, true);
+      assert.deepEqual(delivery.tasks, [{ id: job.id, title: "Login with code", status: scenario.status }]);
+      assert.equal(delivery.progress, undefined);
+    } finally { await engine.close(); await store.close(); }
+  }
 });
