@@ -130,9 +130,23 @@ export class NetworkRelay {
     });
     if (socket.destroyed || this.closed) return;
     if (!selected) {
+      // Unmatched hosts dial from the server. Domain rules never match IP literals — employee
+      // browsers send hostnames via host-resolver-rules; an IP here means those rules cannot apply.
+      void this.store.objects<Record>("client-relay").then((rows) => {
+        const ruled = rows.some((r) => r.userId === userId && r.rules.length > 0);
+        console.warn("[Vega relay] No matching client rule; dialing from server", {
+          userId, host, port, addressType: isIP(host) ? "ip" : "hostname",
+          tip: isIP(host) && ruled
+            ? "SOCKS 目标是 IP，域名中继规则无法匹配；服务端浏览器应通过域名访问。若反代未转发 /api/local-agent/relay，中继隧道也会失败并表现为 SOCKS 错误。"
+            : ruled
+              ? "已配置中继规则但未命中此域名:端口；未匹配时不会走客户端。请在客户端「流量中继」填写精确域名（裸域名自动含 80/443），并确认反代转发 /api/local-agent/relay 与 X-Vega-Relay。"
+              : "未配置客户端中继规则；仅客户端可达的目标会失败。",
+        });
+      }).catch(() => {});
       const remote = connect({ host, port });
       remote.on("error", (error: NodeJS.ErrnoException) => {
         console.warn("[Vega relay] Direct connection failed", { userId, host, port, code: error.code });
+        if (!socket.destroyed) try { reply(socket, 4); } catch {}
         socket.destroy();
       });
       socket.once("close", () => remote.destroy());
@@ -145,7 +159,8 @@ export class NetworkRelay {
     const finish = (reason?: string) => {
       const flow = this.flows.get(id);
       if (!flow) return;
-      if (reason) console.warn("[Vega relay] Tunnel failed", { userId, clientId: flow.grant.clientId, id, host, port, stage: flow.ready ? "stream" : flow.peer ? "target_connect" : "websocket_upgrade", reason });
+      if (reason) console.warn("[Vega relay] Tunnel failed", { userId, clientId: flow.grant.clientId, id, host, port, stage: flow.ready ? "stream" : flow.peer ? "target_connect" : "websocket_upgrade", reason,
+        tip: flow.ready ? undefined : "客户端未在时限内就绪：检查本机客户端在线、目标是否在流量中继规则中、反代是否转发 /api/local-agent/relay 与 X-Vega-Relay，以及客户端日志中的 relay 失败原因。" });
       this.flows.delete(id);
       clearTimeout(flow.timer);
       if (flow.peer) { this.peers.delete(flow.peer.id); flow.peer.close(1000, "Relay closed"); }

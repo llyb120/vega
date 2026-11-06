@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,6 +133,7 @@ func (a *Agent) configureRelay(connection *directConnection, saved ServerCredent
 			Port int    `json:"port"`
 		}
 		if len(request.ID) != 36 || json.Unmarshal(request.Args, &target) != nil || !validRelayHost(target.Host) {
+			fmt.Fprintln(os.Stderr, "vega-local: relay ignored invalid target")
 			return
 		}
 		allowed := false
@@ -139,6 +141,7 @@ func (a *Agent) configureRelay(connection *directConnection, saved ServerCredent
 			allowed = allowed || rule == net.JoinHostPort(target.Host, strconv.Itoa(target.Port))
 		}
 		if !allowed {
+			fmt.Fprintf(os.Stderr, "vega-local: relay denied %s (not in saved rules)\n", net.JoinHostPort(target.Host, strconv.Itoa(target.Port)))
 			return
 		}
 		address, _ := url.Parse(saved.Origin + "/api/local-agent/relay")
@@ -154,6 +157,7 @@ func (a *Agent) configureRelay(connection *directConnection, saved ServerCredent
 			if response != nil {
 				_ = response.Body.Close()
 			}
+			fmt.Fprintf(os.Stderr, "vega-local: relay websocket %s failed: %v\n", address.String(), err)
 			return
 		}
 		defer ws.Close()
@@ -161,6 +165,7 @@ func (a *Agent) configureRelay(connection *directConnection, saved ServerCredent
 		defer closeWS()
 		remote, err := dialRelay(flow, target.Host, target.Port)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "vega-local: relay dial %s failed: %v\n", net.JoinHostPort(target.Host, strconv.Itoa(target.Port)), err)
 			return
 		}
 		defer remote.Close()
