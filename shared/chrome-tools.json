@@ -452,7 +452,7 @@
   },
   {
     "name": "chrome_act",
-    "description": "在已观察的标签上按顺序执行 1–16 个已确定的动作，然后附新观察（含 click、click_at、press、hover 时先等待加载和页面稳定，最长 settleMs）。click/hover/fill/scroll 用最新观察的 ref，upload 用 selector，type/press/wait 作用于当前焦点；hover 只把鼠标停在元素上，悬停才出现的 tooltip、菜单看随后的观察。click_at/move/drag/pointer/scroll_at 的 x/y 是 imageId 那张图的像素坐标，按该图的尺寸、缩放和裁剪区域换算成视口 CSS 像素后直接执行（imageId 只能是当前观察里的图，省略或未匹配时用当前观察的第一张图，当前观察无图时 x/y 按视口 CSS 像素）；不校验该图截取后页面是否滚动或变化，坐标请取自最新的视口图，页面可能已变时先 chrome_screenshot（capture.kind=viewport）再用它的 imageId。同一屏已知的动作合成一批，提交放最后；动作打开新标签时余下动作不执行，结果见 openedTabs。后续目标尚未出现、只能靠描述的多步流程用 chrome_run；只读数据用 chrome_evaluate。Canvas 表格可先定位再 press Ctrl+C，返回的 clipboard 是 TSV。",
+    "description": "在已观察的标签上按顺序执行 1–16 个已确定的动作，然后附新观察（含 click、click_at、press、hover 时先等待加载和页面稳定，最长 settleMs）。click/hover/fill/scroll 用最新观察的 ref，upload 用 selector，type/press/wait 作用于当前焦点；hover 只把鼠标停在元素上，悬停才出现的 tooltip、菜单看随后的观察。click_at/move/drag/pointer/scroll_at 的 x/y 是 imageId 那张图的像素坐标，按该图的尺寸、缩放和裁剪区域换算成视口 CSS 像素后直接执行（imageId 只能是当前观察里的图，省略或未匹配时用当前观察的第一张图，当前观察无图时 x/y 按视口 CSS 像素）；不校验该图截取后页面是否滚动或变化，坐标请取自最新的视口图，页面可能已变时先 chrome_screenshot（capture.kind=viewport）再用它的 imageId。同一屏已知的动作合成一批，提交放最后；动作打开新标签时余下动作不执行，结果见 openedTabs。后续目标尚未出现、只能靠描述的多步流程用 chrome_run；只读数据用 chrome_evaluate。Canvas 表格可先定位再 press Ctrl+C，返回的 clipboard 是 TSV。 滑块/拼图/旋转等视觉验证码用 pointer 自行边看边拖，短信/邮箱验证码才问用户。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -852,33 +852,31 @@
                       "move",
                       "up"
                     ],
-                    "description": "分段拖拽：down 按下并保持；move 在按住时拖到新坐标（可多次，中间可再观察验证码）；up 松开。验证码滑块等一次松手就刷新时必须用这组动作，不要用一次性 drag。"
+                    "description": "分段拖拽：down 按下并保持；move 按住拖到新坐标（可多次，中间看回执截图再 nudge）；up 松开。滑块/拼图/旋转验证码必须用这组，不要用一次性 drag。按缺口或旋转量估距离，一次 move 往往要上百像素，不要只挪几十像素；对正后再 up。up 可省略 x/y，在当前按住位置松开（验证码刷新导致旧坐标越界时请省略）。"
                   },
                   "x": {
                     "type": "number",
                     "minimum": 0,
-                    "description": "图片像素横坐标"
+                    "description": "图片像素横坐标；phase=up 时可省略，表示在按住点松开"
                   },
                   "y": {
                     "type": "number",
                     "minimum": 0,
-                    "description": "图片像素纵坐标"
+                    "description": "图片像素纵坐标；phase=up 时可省略，表示在按住点松开"
                   },
                   "durationMs": {
                     "type": "integer",
                     "minimum": 80,
                     "maximum": 1500,
-                    "description": "move/up 时这一段的拖动时长 80–1500 毫秒，默认 160"
+                    "description": "move/up 时这一段的拖动时长 80–1500 毫秒，默认 320"
                   }
                 },
                 "required": [
                   "action",
-                  "phase",
-                  "x",
-                  "y"
+                  "phase"
                 ],
                 "additionalProperties": false,
-                "description": "按住后分段拖动：跨多次 chrome_act 保持按下，根据每次观察再 nudge，最后 up 松开"
+                "description": "按住后分段拖动：跨多次 chrome_act 保持按下，根据每次观察大幅度 nudge，最后 up 松开。视觉验证码先自己拖，不要未尝试就请用户代拖。"
               },
               {
                 "type": "object",

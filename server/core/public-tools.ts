@@ -228,7 +228,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       "请用户审批一项需要先确认或尚未授权的不可逆操作（支付、删除、对外发送、提交审批等）：request 写清是什么操作。任务挂起并立即结束本轮；批准后在原会话继续获批事项，驳回则任务取消。常规开发分支的提交和普通推送不需要审批；缺信息用 task_ask_user。必须单独调用。",
       { request: str("要审批的具体操作，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["request"]));
     out.push(tool("task_ask_user",
-      "向交代人要只有他能提供的信息，或必须他处理的阻碍（如验证码、访问码、2FA）：question 写清需要什么。任务挂起并立即结束本轮，回答后在原会话继续。能自己查到的不要问，低风险细节自行决定；要批准操作用 task_request_approval。必须单独调用。",
+      "向交代人要只有他能提供的信息，或必须他处理的阻碍（短信/邮箱验证码、访问码、2FA/OTP 等）：question 写清需要什么。滑块/拼图/旋转等视觉验证码先用 chrome_act pointer 自行拖，连续失败后再问，不要一上来就让用户代拖。任务挂起并立即结束本轮，回答后在原会话继续。能自己查到的不要问，低风险细节自行决定；要批准操作用 task_request_approval。必须单独调用。",
       { question: str("要对方补充或处理的内容，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["question"]));
     out.push(tool("task_wait",
       "已提交的外部作业（构建、发布、导出等）要较久才出结果时挂起当前任务：checkpoint 写作业编号或链接、已做的操作、当前状态、检查方式与超时处理（不含凭据）；resumeAt 和 delayMinutes 二选一。立即结束本轮并释放执行名额，到时在原会话续做，只检查原作业，不要重新提交或循环等待。没有外部作业、只是把本任务改到以后做用 task_reschedule。必须单独调用。",

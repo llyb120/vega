@@ -1065,31 +1065,41 @@ export class Chrome {
     }
     if (["click_at", "move", "drag", "pointer", "scroll_at"].includes(kind)) {
       const image = this.coordinateImage(o, top.imageId);
+      const inImage = (x: number, y: number) =>
+        Number.isFinite(x) &&
+        Number.isFinite(y) &&
+        x >= 0 &&
+        y >= 0 &&
+        x < image.pixelWidth &&
+        y < image.pixelHeight;
       const map = (x: number, y: number) => {
-        assert(
-          Number.isFinite(x) &&
-            Number.isFinite(y) &&
-            x >= 0 &&
-            y >= 0 &&
-            x < image.pixelWidth &&
-            y < image.pixelHeight,
-          "Coordinates outside image or viewport",
-        );
+        assert(inImage(x, y), "Coordinates outside image or viewport");
         return {
           x: image.x + (x * image.width) / image.pixelWidth,
           y: image.y + (y * image.height) / image.pixelHeight,
         };
       };
-      const xy = map(a.x, a.y);
-      const p = await this.evaluate(
-        tag,
-        o.frames[0],
-        `__novaWebview.coordinate(${xy.x},${xy.y},${o.fullPage})`,
-      );
-      changed();
       const holding = this.holds.has(tag);
       if (holding && kind !== "pointer")
         assert(false, "已有分段拖拽未松开，请先 pointer.up / pointer.move，不要穿插其他坐标动作");
+      // Captcha UIs often refresh between pointer segments; up may omit coords or reuse stale pixels — release at hold.
+      const releaseAtHold =
+        kind === "pointer" &&
+        a.phase === "up" &&
+        holding &&
+        (a.x === undefined || a.y === undefined || !inImage(a.x, a.y));
+      let p: { x: number; y: number; hoverTarget?: any; editable?: any; identity?: any };
+      if (releaseAtHold) {
+        p = { ...this.holds.get(tag)! };
+      } else {
+        const xy = map(a.x, a.y);
+        p = await this.evaluate(
+          tag,
+          o.frames[0],
+          `__novaWebview.coordinate(${xy.x},${xy.y},${o.fullPage})`,
+        );
+        changed();
+      }
       // pointer move/up glides from the held point; skip a teleporting mouseMoved that would jump the slider.
       const skipHoverMove = kind === "pointer" && a.phase !== "down";
       if (!skipHoverMove) {
@@ -1157,7 +1167,8 @@ export class Chrome {
         // Segmented hold-drag: down keeps the button held across chrome_act calls so captchas can be nudged after each observation.
         assert(!o.fullPage, "pointer requires viewport screenshot");
         const hold = this.holds.get(tag);
-        const duration = a.duration_ms ?? 160;
+        // Slightly slower default than one-shot drag — captcha handlers need time between segments.
+        const duration = a.duration_ms ?? 320;
         if (a.phase === "down") {
           assert(!hold, "已在按住拖拽中，请先 pointer.up 或 pointer.move");
           await this.cdp(tag, "Input.dispatchMouseEvent", {
@@ -1177,7 +1188,7 @@ export class Chrome {
           this.holds.set(tag, { x: last.x, y: last.y });
         } else {
           assert(hold, "尚未 pointer.down，无法松开");
-          if (hold.x !== p.x || hold.y !== p.y) {
+          if (!releaseAtHold && (hold.x !== p.x || hold.y !== p.y)) {
             assert(duration >= 80 && duration <= 1500, "Drag duration 80–1500ms");
             const last = await this.glide(tag, hold, p, duration, signal, true);
             hold.x = last.x; hold.y = last.y;
