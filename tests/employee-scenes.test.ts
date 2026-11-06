@@ -301,17 +301,156 @@ test("lightweight candidate failures stay within the lightweight list instead of
   } finally { await engine.close(); await store.close(); }
 });
 
-test("a scene covered by the current preferred model does not expose a redundant switch just because it has a different backup", async () => {
+const chromeNames = (definitions: { name: string }[]) => definitions.filter(tool => tool.name.startsWith("chrome_")).map(tool => tool.name);
+const sceneEnum = (definitions: any[]): string[] => definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum || [];
+
+test("a scene covered by the current preferred model stays reachable: switch_scene is offered and the switch really happens in the same session", async () => {
   const { store, engine, add, segment } = await fixture();
   const config = await engine.config(); config.scenes!.coding = ["p/light", "p/code"]; await store.put("config", config);
-  let requests = 0;
-  engine.providers.chat = async (model, _system, _messages, definitions) => {
+  let phase = 0;
+  engine.providers.chat = async (model, _system, messages, definitions) => {
     assert.equal(model.selection, "p/light");
-    const switching = definitions.find(tool => tool.name === "switch_scene");
-    assert(!switching?.parameters.properties.scene.enum.includes("coding"), "preferred identical model already covers coding");
-    // computer may still be offered for same-session browser work
-    return requests++ === 0 ? verified() : completed();
+    if (phase++ === 0) {
+      assert(sceneEnum(definitions).includes("coding"), "preferred identical model must not hide the coding capability transition");
+      return call("code", "switch_scene", { scene: "coding", message: "需要改文件" });
+    }
+    if (phase === 2) {
+      const outcome = messages.findLast(message => message.role === "tool" && message.name === "switch_scene")!;
+      assert(!outcome.error, outcome.text);
+      assert(sceneEnum(definitions).includes("lightweight") && !sceneEnum(definitions).includes("coding"), "now in coding, can return");
+      return verified();
+    }
+    return completed();
   };
-  try { assert.equal((await segment(await add("按已覆盖场景完成工作"))).status, "done"); }
-  finally { await engine.close(); await store.close(); }
+  try {
+    const job = await segment(await add("按已覆盖场景完成工作"));
+    assert.equal(job.status, "done");
+    assert.equal((await store.session(job.workSession)).scene, "coding");
+    assert.equal((await store.session(job.workSession)).model, "p/light");
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("attached log scenario: lightweight task whose model is shared with computer switches in the same session and gets chrome tools", async () => {
+  const { store, engine, employee, add, segment } = await fixture();
+  // One image-capable model serves lightweight and computer, as in the reported deployment.
+  const config = await engine.config(); config.scenes!.lightweight = ["p/vision"]; config.scenes!.computer = ["p/vision"]; await store.put("config", config);
+  const selected: string[] = []; let phase = 0, work = "";
+  engine.providers.chat = async (model, system, messages, definitions) => {
+    selected.push(model.selection);
+    assert.equal(model.selection, "p/vision");
+    const names = definitions.map(tool => tool.name);
+    assert(!names.includes("task_relay_computer"), "relay is never exposed");
+    if (phase++ === 0) {
+      assert.deepEqual(chromeNames(definitions), [], "lightweight starts without chrome tools");
+      assert(sceneEnum(definitions).includes("computer"), "shared model must not hide switch_scene(computer)");
+      assert(names.includes("task_progress") && names.includes("task_complete"));
+      return call("browser", "switch_scene", { scene: "computer", message: "在服务端浏览器打开百度并核实" });
+    }
+    if (phase === 2) {
+      const outcome = messages.findLast(message => message.role === "tool" && message.name === "switch_scene")!;
+      assert(!outcome.error, "switch_scene executes instead of reporting the model already covers the scene");
+      assert(!outcome.text!.includes("continue without switching"));
+      assert(JSON.parse(outcome.text!).scene === "computer");
+      assert(messages.some(message => message.role === "user" && message.text?.includes("在服务端浏览器打开百度首页")), "task text stays in history");
+      assert(chromeNames(definitions).includes("chrome_navigate") && chromeNames(definitions).includes("chrome_connection"), "chrome tools exposed after the transition");
+      assert(names.includes("task_progress") && names.includes("task_complete"), "main task progress/complete stay usable");
+      assert(!names.includes("write") && !names.includes("edit"), "computer scene keeps its restricted file tools");
+      assert(sceneEnum(definitions).includes("lightweight") && !sceneEnum(definitions).includes("computer"), "return path exists, no self-switch");
+      assert(!system.includes("[电脑场景未配置]"));
+      work = (await store.sessions())[0].id;
+      return verified();
+    }
+    assert(phase <= 3, "task_complete must succeed from the computer scene instead of looping");
+    return completed();
+  };
+  try {
+    const job = await segment(await add("在服务端浏览器打开百度首页"));
+    assert.equal(job.status, "done");
+    assert.equal(job.workSession, work, "task keeps its original work session");
+    assert.equal((await store.sessions()).length, 1, "no relay/new browser session");
+    const session = await store.session(job.workSession);
+    assert.equal(session.scene, "computer");
+    assert.equal(session.model, "p/vision");
+    assert.equal(session.taskId, job.id);
+    assert.notEqual(job.side, "computer", "task is not flipped to the isolated computer side");
+    assert.equal(session.relayComputer, undefined);
+    assert.deepEqual(selected, ["p/vision", "p/vision", "p/vision"]);
+    assert.equal((await employee.state()).runs.length, 1, "one continuous run");
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("lightweight and computer on different models: switch changes model and exposes chrome tools in the same session", async () => {
+  const { store, engine, add, segment } = await fixture();
+  let phase = 0;
+  engine.providers.chat = async (model, _system, _messages, definitions) => {
+    if (phase++ === 0) {
+      assert.equal(model.selection, "p/light");
+      assert.deepEqual(chromeNames(definitions), []);
+      return call("browser", "switch_scene", { scene: "computer", message: "打开网页核实" });
+    }
+    assert(phase <= 3, "task_complete must succeed from the computer scene instead of looping");
+    assert.equal(model.selection, "p/vision");
+    assert(chromeNames(definitions).includes("chrome_navigate"));
+    assert(definitions.some(tool => tool.name === "task_complete"), "main task can deliver from the computer scene");
+    return phase === 2 ? verified() : completed();
+  };
+  try {
+    const job = await segment(await add("打开网页核实"));
+    assert.equal(job.status, "done");
+    assert.equal((await store.sessions()).length, 1);
+    assert.equal((await store.session(job.workSession)).scene, "computer");
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("computer scene without a model: not offered, accurate setup diagnosis instead of an extension-reconnect request, direct call fails clearly", async () => {
+  const { store, engine, add, segment } = await fixture();
+  const config = await engine.config(); config.scenes!.computer = []; await store.put("config", config);
+  let phase = 0;
+  engine.providers.chat = async (model, system, messages, definitions) => {
+    assert.equal(model.selection, "p/light");
+    assert(!sceneEnum(definitions).includes("computer"));
+    assert.deepEqual(chromeNames(definitions), []);
+    assert.match(system, /\[电脑场景未配置\].*computer 场景未配置模型.*不是浏览器扩展连接问题/s);
+    if (phase++ === 0) return call("browser", "switch_scene", { scene: "computer", message: "强行切换" });
+    const outcome = messages.findLast(message => message.role === "tool" && message.name === "switch_scene")!;
+    assert(outcome.error);
+    assert.match(outcome.text!, /场景「computer」未配置模型/);
+    assert.doesNotMatch(outcome.text!, /请重连|重新连接扩展/);
+    return phase === 2 ? verified() : completed();
+  };
+  try {
+    const job = await segment(await add("打开网页核实"));
+    assert.equal((await store.session(job.workSession)).scene, "lightweight", "failed switch changes nothing");
+    assert.equal((await store.sessions()).length, 1);
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("one model for every scene: lightweight to coding to computer all execute in one session with matching tool sets", async () => {
+  const { store, engine, add, segment } = await fixture();
+  const config = await engine.config(); config.scenes = { lightweight: ["p/vision"], coding: ["p/vision"], computer: ["p/vision"] }; await store.put("config", config);
+  let phase = 0;
+  engine.providers.chat = async (model, _system, _messages, definitions) => {
+    assert.equal(model.selection, "p/vision");
+    const names = definitions.map(tool => tool.name);
+    if (phase++ === 0) {
+      assert.deepEqual(sceneEnum(definitions).sort(), ["coding", "computer"]);
+      return call("code", "switch_scene", { scene: "coding", message: "改代码" });
+    }
+    if (phase === 2) {
+      assert(names.includes("write") && chromeNames(definitions).length === 0);
+      assert.deepEqual(sceneEnum(definitions).sort(), ["computer", "lightweight"]);
+      return call("browser", "switch_scene", { scene: "computer", message: "浏览器验证" });
+    }
+    if (phase === 3) {
+      assert(!names.includes("write") && chromeNames(definitions).length > 0);
+      return verified();
+    }
+    return completed();
+  };
+  try {
+    const job = await segment(await add("改代码并在浏览器验证", "coding"));
+    assert.equal(job.status, "done");
+    assert.equal((await store.sessions()).length, 1);
+    assert.equal((await store.session(job.workSession)).scene, "computer");
+  } finally { await engine.close(); await store.close(); }
 });

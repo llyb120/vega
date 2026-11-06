@@ -1032,11 +1032,11 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             );
             const returning = mainTask && !a.resume ? frames.findLastIndex(frame => frame.scene === a.scene) : -1;
             const ids = sceneModels(config, a.scene);
+            assert(ids?.length, `场景「${a.scene}」未配置模型，无法切入；请在设置里为该场景选择模型（${a.scene === "computer" ? "需支持图片，" : ""}与其他场景共用同一模型也可以）。这不是浏览器扩展连接问题。`);
             assert(
-              ids?.length &&
-                a.scene !== session.scene &&
+              a.scene !== session.scene &&
                 (mainTask || !frames.some((f) => f.scene === a.scene)),
-              "Scene not configured or already in execution stack",
+              "Already in this scene or it is already in the execution stack",
             );
             let target: Model | undefined,
               lastError = "No available scene candidate";
@@ -1058,21 +1058,6 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             if (mainTask && session.employeeId && a.scene === "coding" && !await (await this.employeeFor(session)).claimWorkspace(session, true)) {
               await this.outcome(key, call, { value: { status: "queued", reason: "工作区写入占用，原任务已保存，释放后自动续做；本步未执行。" }, error: true, stop: true }, emit, redact);
               return;
-            }
-            if (target.selection === model.selection) {
-              await this.outcome(
-                                key,
-                                call,
-                                {
-                                  value: {
-                                    scene: session.scene,
-                                    next: "Current model already covers target scene; continue without switching",
-                                  },
-                                },
-                                emit,
-                                redact,
-                              );
-              continue;
             }
             let handoff = a.message;
             if (returning >= 0) {
