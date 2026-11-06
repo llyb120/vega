@@ -9,7 +9,7 @@ import type { CloudRuntime } from "./cloud";
 
 type StartFailure = { count: number; error: string; at: number; retryAt: number };
 
-// One persistent profile and private, authenticated bridge per employee.
+// One persistent Chromium + profile per owner (user_*). An owner's employees share it so tabs/logins stay in that user's profile only.
 export class EmployeeBrowsers {
   entries = new Map<string, { chrome: Chrome; browser: HeadlessBrowser; cloud?: CloudRuntime; profile?: string; starting?: Promise<Chrome>; stopping?: boolean; probedAt?: number; failure?: StartFailure }>();
   static PROBE_TTL_MS = 3000;
@@ -19,7 +19,7 @@ export class EmployeeBrowsers {
   removed = new Set<string>();
   constructor(public store: Store, public pageScript: string, private networkProxy?: (id: string) => Promise<string | undefined>, private isolation?: (id: string) => Promise<CloudRuntime | undefined>) {}
   profile(id: string) {
-    assert(/^(default|e[a-zA-Z0-9_-]+|user_[a-zA-Z0-9_-]+)$/.test(id), "Invalid employee browser ID");
+    assert(/^(default|e[a-zA-Z0-9_-]+|user_[a-zA-Z0-9_-]+)$/.test(id), "Invalid browser profile ID");
     return join(dirname(resolve(process.env.VEGA_DB || "vega.db")), "employee-browsers", id);
   }
   peek(id: string) { return this.entries.get(id)?.chrome; }

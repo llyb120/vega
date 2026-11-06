@@ -411,7 +411,7 @@ export class Engine {
     try {
       await beforeRemove();
       for (const session of sessions) await this.releaseSession(session.id);
-      await this.browsers.remove(key);
+      // Browser profile is per owner; deleting one employee must not wipe siblings' shared Chromium.
       await this.store.transaction(async () => {
                 for (const session of sessions) {
                   await this.store.run("DELETE FROM sessions WHERE id=?", session.id);
@@ -491,10 +491,22 @@ export class Engine {
     }
     return this.employee;
   }
+  /** Private server browser key: one Chromium profile per owner, shared by that owner's employees. */
+  browserProfileKey(ownerId: string) {
+    assert(ownerId, "浏览器需要归属用户");
+    return "user_" + ownerId;
+  }
+  async browserOwnerId(session: Session) {
+    if (session.ownerId) return session.ownerId;
+    if (session.employeeId || session.taskId) return (await (await this.employeeFor(session)).state()).ownerId;
+    return "";
+  }
   async chromeFor(session: Session, signal?: AbortSignal) {
     if (session.localAgent) return this.localBrowsers.get(session, signal);
-    if (!session.employeeId && !session.taskId) return cloudFor(session) ? this.browsers.get("user_" + session.ownerId) : this.chrome;
-    return this.browsers.get((await this.employeeFor(session)).employeeId);
+    const ownerId = await this.browserOwnerId(session);
+    // Employee/task work and cloud sessions use the owner's shared private profile.
+    if (session.employeeId || session.taskId || cloudFor(session)) return this.browsers.get(this.browserProfileKey(ownerId));
+    return this.chrome;
   }
   async compact(tools: Tools, model: Model, system: string, force = false) {
     const ctx = tools.context;
@@ -1198,7 +1210,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
           await this.store.saveSession(session);
         }
-        const browser = session?.localAgent ? this.localBrowsers.peek(key) : session?.employeeId ? this.browsers.peek(session.employeeId) : this.chrome;
+        const browser = session?.localAgent ? this.localBrowsers.peek(key) : session?.ownerId && (session.employeeId || session.taskId || cloudFor(session)) ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : session?.employeeId ? undefined : this.chrome;
         await browser?.experiences.finish(key, !error);
       } catch (cleanupError: any) {
         error ||= new Error(String(redact.value(cleanupError?.message || cleanupError)));

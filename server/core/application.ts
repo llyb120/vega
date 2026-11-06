@@ -68,12 +68,15 @@ export async function employeeLive(employeeId?: string) {
   const application = app();
   if (!employeeId) return application.browserLive;
   const employee = await application.engine.employee.for(employeeId);
-  let live = application.employeeLives.get(employeeId);
+  const ownerId = (await employee.state()).ownerId;
+  const profileKey = application.engine.browserProfileKey(ownerId);
+  // One live session per owner profile; employees of the same user share it.
+  let live = application.employeeLives.get(profileKey);
   if (!live) {
-    const chrome = application.engine.browsers.peek(employeeId);
+    const chrome = application.engine.browsers.peek(profileKey);
     if (!chrome) throw Error("牛马浏览器尚未启动");
     live = new BrowserLive(chrome, application.auth, async (principal) => await employee.manageable(principal.user));
-    application.employeeLives.set(employeeId, live);
+    application.employeeLives.set(profileKey, live);
   }
   return live;
 }

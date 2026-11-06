@@ -349,7 +349,7 @@ export class Tools {
     assert(entry, "Vault entry not found for this task");
     const task = this.session.taskId ? (await this.engine.employeeFor(this.session)).task(await (await this.engine.employeeFor(this.session)).state(), this.session.taskId).text
       : (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "";
-    const browser = this.session.localAgent ? this.engine.localBrowsers.peek(this.session.id) : this.session.employeeId ? this.engine.browsers.peek(this.session.employeeId) : this.cloud ? this.engine.browsers.peek("user_" + this.session.ownerId) : this.engine.chrome;
+    const browser = this.session.localAgent ? this.engine.localBrowsers.peek(this.session.id) : this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud) ? this.engine.browsers.peek(this.engine.browserProfileKey(this.session.ownerId)) : this.engine.chrome;
     const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
     const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
     const pages = (observation?.pages || []).filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
@@ -564,12 +564,13 @@ export class Tools {
     return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? await taskLink(result.value.id) : undefined };
   }
   private async chrome(a: Obj): Promise<Outcome> {
-    const employeeId = !this.session.localAgent && (this.session.employeeId || this.session.taskId) ? (await this.engine.employeeFor(this.session)).employeeId : this.cloud ? "user_" + this.session.ownerId : "";
+    const profileKey = !this.session.localAgent && this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud)
+      ? this.engine.browserProfileKey(this.session.ownerId) : "";
     let browser: Awaited<ReturnType<Engine["chromeFor"]>>;
     try { browser = await this.engine.chromeFor(this.session, this.signal); }
     catch (error) {
       // chrome_connection reports why the private browser cannot start instead of failing opaquely.
-      const failure = employeeId && a.operation === "status" ? this.engine.browsers.failure(employeeId) : undefined;
+      const failure = profileKey && a.operation === "status" ? this.engine.browsers.failure(profileKey) : undefined;
       if (!failure) throw error;
       return { value: { connected: false, privateBrowser: "start_failed", ...failure } };
     }
