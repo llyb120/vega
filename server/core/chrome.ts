@@ -47,6 +47,8 @@ export class Chrome {
     return gate;
   }
   observations = new Map<string, Observation>();
+  /** Held left-button drag across chrome_act calls (captcha sliders, etc.). */
+  holds = new Map<string, { x: number; y: number }>();
   cancelled = new Map<string, AbortController>();
   experiences: Experiences;
   workspaceFile = workspaceFile;
@@ -742,6 +744,34 @@ export class Chrome {
     const site = vaultSite(url);
     assert(origins.every((allowed) => allowed.has(site)), "凭据尚未针对当前页面核对或已切换认证页面，已阻止这次凭据写入；请先观察实际页面（含 SSO / 子框架）再重新 vault_get 核对使用条件，无需补网站配置，不要跨系统试用账号。");
   }
+
+  async releaseHold(tag: string) {
+    const hold = this.holds.get(tag);
+    if (!hold) return;
+    this.holds.delete(tag);
+    await this.cdp(tag, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: hold.x,
+      y: hold.y,
+      button: "left",
+      clickCount: 1,
+    }).catch(() => {});
+  }
+  private async glide(tag: string, from: { x: number; y: number }, to: { x: number; y: number }, duration: number, signal: AbortSignal, held: boolean) {
+    const steps = Math.max(5, Math.min(24, Math.floor(duration / 16)));
+    let last = from;
+    for (let i = 1; i <= steps; i++) {
+      signal.throwIfAborted();
+      last = { x: from.x + ((to.x - from.x) * i) / steps, y: from.y + ((to.y - from.y) * i) / steps };
+      await this.cdp(tag, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        ...last,
+        ...(held ? { button: "left", buttons: 1 } : {}),
+      });
+      await sleep(duration / steps, signal);
+    }
+    return last;
+  }
   private coordinateImage(o: Observation, imageId?: string) {
     const image = o.images.find((i) => i.imageId === imageId) || o.images[0];
     assert(!image?.readOnlyImage, "Expanded screenshots are read-only");
@@ -1033,7 +1063,7 @@ export class Chrome {
       }
       return;
     }
-    if (["click_at", "move", "drag", "scroll_at"].includes(kind)) {
+    if (["click_at", "move", "drag", "pointer", "scroll_at"].includes(kind)) {
       const image = this.coordinateImage(o, top.imageId);
       const map = (x: number, y: number) => {
         assert(
@@ -1057,17 +1087,25 @@ export class Chrome {
         `__novaWebview.coordinate(${xy.x},${xy.y},${o.fullPage})`,
       );
       changed();
-      await this.cdp(tag, "Input.dispatchMouseEvent", {
-        type: "mouseMoved",
-        x: p.x,
-        y: p.y,
-      });
-      if (p.hoverTarget) {
-        await this.evaluate(
-          tag,
-          o.frames[0],
-          `__novaWebview.verifyPoint(${JSON.stringify(p.hoverTarget.ref)},${p.x},${p.y},${JSON.stringify(p.hoverTarget.rect)})`,
-        );
+      const holding = this.holds.has(tag);
+      if (holding && kind !== "pointer")
+        assert(false, "已有分段拖拽未松开，请先 pointer.up / pointer.move，不要穿插其他坐标动作");
+      // pointer move/up glides from the held point; skip a teleporting mouseMoved that would jump the slider.
+      const skipHoverMove = kind === "pointer" && a.phase !== "down";
+      if (!skipHoverMove) {
+        await this.cdp(tag, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: p.x,
+          y: p.y,
+          ...(holding ? { button: "left", buttons: 1 } : {}),
+        });
+        if (p.hoverTarget && !holding) {
+          await this.evaluate(
+            tag,
+            o.frames[0],
+            `__novaWebview.verifyPoint(${JSON.stringify(p.hoverTarget.ref)},${p.x},${p.y},${JSON.stringify(p.hoverTarget.rect)})`,
+          );
+        }
       }
       if (kind === "click_at") {
         await this.mouse(tag, p, a.button || "left", a.click_count || 1);
@@ -1088,10 +1126,10 @@ export class Chrome {
         });
       } else if (kind === "drag") {
         assert(!o.fullPage, "Drag requires viewport screenshot");
-        const end = map(a.to_x, a.to_y),
-          duration = a.duration_ms ?? 160;
+        assert(!this.holds.has(tag), "已有分段拖拽未松开，请先 pointer.up 或继续 pointer.move");
+        const end = await this.evaluate(tag, o.frames[0], `__novaWebview.coordinate(${map(a.to_x, a.to_y).x},${map(a.to_x, a.to_y).y},${o.fullPage})`);
+        const duration = a.duration_ms ?? 160;
         assert(duration >= 80 && duration <= 1500, "Drag duration 80–1500ms");
-        const steps = Math.max(5, Math.min(24, Math.floor(duration / 16)));
         let last = p;
         try {
           await this.cdp(tag, "Input.dispatchMouseEvent", {
@@ -1104,26 +1142,51 @@ export class Chrome {
           });
           // Let drag handlers initialize and settle before releasing.
           await sleep(120, signal);
-          for (let i = 1; i <= steps; i++) {
-            signal.throwIfAborted();
-            last = {
-              x: p.x + ((end.x - p.x) * i) / steps,
-              y: p.y + ((end.y - p.y) * i) / steps,
-            };
-            await this.cdp(tag, "Input.dispatchMouseEvent", {
-              type: "mouseMoved",
-              ...last,
-              button: "left",
-              buttons: 1,
-            });
-            await sleep(duration / steps, signal);
-          }
+          last = await this.glide(tag, p, end, duration, signal, true);
           await sleep(120, signal);
         } finally {
           await this.cdp(tag, "Input.dispatchMouseEvent", {
             type: "mouseReleased",
             x: last.x,
             y: last.y,
+            button: "left",
+            clickCount: 1,
+          });
+        }
+      } else if (kind === "pointer") {
+        // Segmented hold-drag: down keeps the button held across chrome_act calls so captchas can be nudged after each observation.
+        assert(!o.fullPage, "pointer requires viewport screenshot");
+        const hold = this.holds.get(tag);
+        const duration = a.duration_ms ?? 160;
+        if (a.phase === "down") {
+          assert(!hold, "已在按住拖拽中，请先 pointer.up 或 pointer.move");
+          await this.cdp(tag, "Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            x: p.x,
+            y: p.y,
+            button: "left",
+            buttons: 1,
+            clickCount: 1,
+          });
+          await sleep(80, signal);
+          this.holds.set(tag, { x: p.x, y: p.y });
+        } else if (a.phase === "move") {
+          assert(hold, "尚未 pointer.down，无法分段拖动");
+          assert(duration >= 80 && duration <= 1500, "Drag duration 80–1500ms");
+          const last = await this.glide(tag, hold, p, duration, signal, true);
+          this.holds.set(tag, { x: last.x, y: last.y });
+        } else {
+          assert(hold, "尚未 pointer.down，无法松开");
+          if (hold.x !== p.x || hold.y !== p.y) {
+            assert(duration >= 80 && duration <= 1500, "Drag duration 80–1500ms");
+            const last = await this.glide(tag, hold, p, duration, signal, true);
+            hold.x = last.x; hold.y = last.y;
+          }
+          this.holds.delete(tag);
+          await this.cdp(tag, "Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            x: hold.x,
+            y: hold.y,
             button: "left",
             clickCount: 1,
           });
@@ -1261,9 +1324,11 @@ export class Chrome {
         signal,
       );
       tag = result.tabTag || tag;
-      if (["close_tab", "goto", "back", "forward", "reload"].includes(op))
+      if (["close_tab", "goto", "back", "forward", "reload"].includes(op)) {
+        await this.releaseHold(tag);
         for (const [key, observation] of this.observations)
           if (observation.tabTag === tag) this.observations.delete(key);
+      }
       if (op === "close_tab") return result;
       if (a.observe === "none") return result;
       if (tag) {

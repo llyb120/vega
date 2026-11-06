@@ -20,6 +20,7 @@ export function normalizeAction(raw: Obj) {
       "click_at",
       "move",
       "drag",
+      "pointer",
       "scroll_at",
     ].includes(a.action),
     "Unknown Chrome action",
@@ -37,10 +38,11 @@ export function normalizeAction(raw: Obj) {
       click_at: ["x", "y", "button", "click_count"],
       move: ["x", "y"],
       drag: ["x", "y", "to_x", "to_y", "duration_ms"],
+      pointer: ["phase", "x", "y", "duration_ms"],
       scroll_at: ["x", "y", "delta", "delta_x"],
     };
   if (
-    ["press", "wait", "type", "move", "click_at", "drag", "scroll_at"].includes(
+    ["press", "wait", "type", "move", "click_at", "drag", "pointer", "scroll_at"].includes(
       kind,
     )
   ) {
@@ -98,10 +100,12 @@ export function normalizeAction(raw: Obj) {
           (Number.isInteger(a.delta_x) && Math.abs(a.delta_x) <= 1200)),
       "Scroll exceeds1200 pixels",
     );
-  if (["click_at", "move", "drag", "scroll_at"].includes(kind))
+  if (["click_at", "move", "drag", "pointer", "scroll_at"].includes(kind))
     for (const key of kind === "drag" ? ["x", "y", "to_x", "to_y"] : ["x", "y"])
       assert(Number.isFinite(a[key]) && a[key] >= 0, "Invalid coordinates");
-  if (kind === "drag" && a.duration_ms !== undefined)
+  if (kind === "pointer")
+    assert(["down", "move", "up"].includes(a.phase), "pointer.phase must be down, move or up");
+  if ((kind === "drag" || kind === "pointer") && a.duration_ms !== undefined)
     assert(
       Number.isInteger(a.duration_ms) &&
         a.duration_ms >= 80 &&
