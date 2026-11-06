@@ -272,7 +272,10 @@ type localJob struct {
 }
 
 // Results larger than this go over HTTP so a big file read never holds the socket (and its heartbeat) for seconds.
-const inlineResultLimit = 256 << 10
+// Keep aligned with the server's CLIENT_SOCKET_LIMIT (1 MiB): viewport screenshots often land between
+// 256 KiB and 1 MiB; forcing those through HTTP made "连接仍正常" browser timeouts common when the
+// reverse proxy rejected the body or the uplink was slow, even though the WebSocket was fine.
+const inlineResultLimit = 1 << 20
 
 type jobRunner struct {
 	running      int
@@ -369,14 +372,38 @@ func (runner *jobRunner) deliver(id string, task *localJob) {
 	}
 	upload, data := runner.upload, task.result
 	go func() {
-		if upload(runner.ctx, data) != nil {
-			return // kept; the next reconnect delivers it again
-		}
+		err := upload(runner.ctx, data)
 		runner.mu.Lock()
 		defer runner.mu.Unlock()
-		if runner.tasks[id] == task {
-			delete(runner.tasks, id)
+		if runner.tasks[id] != task {
+			return
 		}
+		if err != nil {
+			// Upload failed while the control socket may still be healthy. Keeping the result only
+			// for a future reconnect leaves the server waiting out the browser timeout with
+			// "连接仍正常". Settle on the WebSocket when possible; payloads above the socket limit
+			// must become a small error (rewriting the full body would close the connection).
+			fmt.Fprintln(os.Stderr, "vega-local result upload failed:", err)
+			if runner.conn == nil {
+				return // retain for resume
+			}
+			payload := data
+			if len(data) > inlineResultLimit {
+				payload, _ = json.Marshal(map[string]any{
+					"type": "result",
+					"id":   id,
+					"result": map[string]any{
+						"error": "Large result upload failed (" + err.Error() + "); check reverse-proxy client_max_body_size (≥48m for /api/local-agent/result), Authorization forwarding, and that the client Origin matches the site URL (HTTP≠HTTPS redirect). Connection stayed up; do not replay until you inspect the page.",
+					},
+				})
+			}
+			runner.writeRaw(payload)
+			if !runner.resumable {
+				delete(runner.tasks, id)
+			}
+			return
+		}
+		delete(runner.tasks, id)
 	}()
 }
 func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {

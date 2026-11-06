@@ -34,6 +34,28 @@ async function fixture(t: TestContext) {
   return { store, engine, session, calls };
 }
 
+test("local sessions never create a SOCKS proxy or send NetworkRelay jobs", async (t) => {
+  const { engine, session, calls } = await fixture(t);
+  const relayJobs: any[] = [];
+  const proxyCalls: string[] = [];
+  engine.relay.proxy = async (userId: string) => {
+    proxyCalls.push(userId);
+    throw Error("local sessions must not open SOCKS");
+  };
+  const agent = engine.localAgents.active("alice", client.clientId)!;
+  agent.transport = {
+    send(value: any) { if (value?.type === "relay") relayJobs.push(value); },
+    close() {},
+  } as any;
+  await engine.chromeFor(session);
+  const tools = await Tools.create(engine, session, { model: "", provider: {} }, new AbortController().signal, () => {});
+  await tools.execute({ id: "tabs", ...chromeCall({ operation: "tabs" }) }, {} as any);
+  assert.equal(proxyCalls.length, 0, "local Chrome must not open the owner's SOCKS listener");
+  assert.deepEqual(relayJobs, [], "local Chrome must not enqueue NetworkRelay tunnel jobs");
+  assert(calls.some((c) => c.operation === "acquire"), "ops go through the local-agent browser bridge");
+  assert(!calls.some((c) => c.operation === "relay"));
+});
+
 test("local Chrome tools and employee tasks use only their selected native browser and local uploads", async (t) => {
   const { engine, store, session, calls } = await fixture(t);
   const tools = await Tools.create(engine, session, { model: "", provider: {} }, new AbortController().signal, () => {});
