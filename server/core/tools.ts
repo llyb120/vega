@@ -202,7 +202,7 @@ export class Tools {
         ),
         schema(
           "bash",
-          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; employee main tasks must hand webpage work to their computer session with task_relay_computer. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
+          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; employee main tasks must switch_scene(scene=computer) (or task_relay_computer only when isolation is required) before webpage work. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
           { command: string, timeout: positive },
           ["command"],
         ),
@@ -214,7 +214,7 @@ export class Tools {
         ),
         schema(
           "switch_scene",
-          "Switch within SAME session/shared history. Call alone. coding for development; computer for Chrome. Employee main tasks may use lightweight for subsequent non-coding work and upgrade again if needed. resume only for concrete caller work, not repeating a summary. Employee browser operations MUST use task_relay_computer instead.",
+          "Switch within SAME session/shared history. Call alone. coding for development; computer for Chrome (preferred over task_relay_computer — no new session). Employee main tasks may use lightweight/coding/computer and return; system auto-folds unrelated context (decompress/recall/search_context still restore details). resume only for concrete caller work, not repeating a summary. task_relay_computer only when you truly need an isolated computer session.",
           {
             scene: {
               type: "string",
@@ -264,10 +264,13 @@ export class Tools {
       )
         defs.push(...structuredClone(CHROME_TOOL_DEFINITIONS));
     }
-    const mainTask = !!this.session.taskId && this.session.scene !== "computer";
-    const scenes = (mainTask ? ["lightweight", "coding"] : ["coding", "computer"]).filter((scene) => {
+    const isolatedComputer = !!this.session.taskId && this.session.scene === "computer" && !!this.session.relayComputer;
+    const mainTask = !!this.session.taskId && !isolatedComputer;
+    const scenes = (mainTask
+      ? (this.session.scene === "computer" ? ["lightweight", "coding"] : ["lightweight", "coding", "computer"])
+      : ["coding", "computer"]).filter((scene) => {
       const ids = sceneModels(this.config, scene);
-      return scene !== this.session.scene && (mainTask || !this.sceneStack.includes(scene)) && ids?.length && ids[0] !== this.session.model && (!this.session.taskId || scene !== "computer");
+      return scene !== this.session.scene && (mainTask || !this.sceneStack.includes(scene)) && ids?.length && ids[0] !== this.session.model;
     });
     const switching = defs.find((t) => t.name === "switch_scene");
     if (switching) {
@@ -331,8 +334,11 @@ export class Tools {
     }
     if (this.session.employeeId && !this.session.taskId)
       return defs.filter((def) => EMPLOYEE_TOOLS.has(def.name) || VAULT_TOOLS.has(def.name) || ["read", "compress", "decompress", "recall", "search_context", "context_budget", "acp_status"].includes(def.name));
-    if (this.session.taskId && this.session.scene === "computer")
-      return defs.filter((def) => !["write", "edit", "change_working_directory", "mcp", "switch_scene"].includes(def.name));
+    if (this.session.taskId && this.session.scene === "computer") {
+      const strip = ["write", "edit", "change_working_directory", "mcp"];
+      if (this.session.relayComputer) strip.push("switch_scene");
+      return defs.filter((def) => !strip.includes(def.name));
+    }
     return defs;
   }
   private agent() {

@@ -945,7 +945,86 @@ export class Context {
     if (name === "recall") return await this.recall(args);
     return await this.status();
   }
+  /**
+   * On switch_scene: fold finished spans that are foreign to the destination scene so the
+   * model does not drag chrome screenshots into coding (or coding dumps into computer).
+   * Originals stay in SQLite; decompress / recall / search_context restore them.
+   */
+  async sceneFold(fromScene: string, toScene: string) {
+    if (!fromScene || !toScene || fromScene === toScene) return { status: "noop" as const };
+    const foldBrowser = toScene !== "computer" && (fromScene === "computer" || toScene === "coding" || toScene === "lightweight");
+    const foldCoding = toScene === "computer" && fromScene !== "computer";
+    if (!foldBrowser && !foldCoding) return { status: "noop" as const };
+    const rows = await this.messages(),
+      live = await this.live(rows),
+      limit = await this.protectedStart(rows),
+      covered = (n: number) => live.some((b) => b.start <= n && n <= b.end);
+    const isChrome = (m: Message) =>
+      (m.role === "tool" && !!m.name?.startsWith("chrome_")) ||
+      !!m.calls?.some((c) => c.name.startsWith("chrome_")) ||
+      (!!m.images?.length && m.role === "tool");
+    const isCodingHeavy = (m: Message) =>
+      (m.role === "tool" && ["bash", "write", "edit", "read"].includes(m.name || "")) ||
+      !!m.calls?.some((c) => ["bash", "write", "edit"].includes(c.name));
+    const match = foldBrowser ? isChrome : isCodingHeavy;
+    const topic = foldBrowser ? `folded-browser-for-${toScene}` : `folded-coding-for-${toScene}`;
+    // Gather finished units that contain matching messages and sit outside the protected tail.
+    const picks: { start: number; end: number }[] = [];
+    for (const u of units(rows).filter((u) => u.end < limit && !u.open)) {
+      if (covered(u.start) || covered(u.end)) continue;
+      const span = rows.filter((m) => m.seq! >= u.start && m.seq! <= u.end);
+      if (!span.some(match)) continue;
+      // Prefer units that are mostly foreign content (avoid folding the user's latest ask).
+      const foreign = span.filter(match).length;
+      if (foreign < 1) continue;
+      picks.push({ start: u.start, end: u.end });
+    }
+    if (!picks.length) {
+      // Still drop old images when leaving computer — cheap win without a fold.
+      if (foldBrowser && await this.trimOldImages()) return { status: "applied" as const, trimmedImages: true };
+      return { status: "noop" as const };
+    }
+    // Merge adjacent picks into one span for a denser mechanical fold.
+    picks.sort((a, b) => a.start - b.start);
+    let start = picks[0].start, end = picks[0].end;
+    for (const p of picks.slice(1)) {
+      if (p.start <= end + 1) end = Math.max(end, p.end);
+      else break; // keep first contiguous run only (protected-tail rules already limit size)
+    }
+    if (!this.closed(rows, start, end)) return { status: "noop" as const };
+    const span = rows.filter((m) => m.seq! >= start && m.seq! <= end);
+    const lines = [
+      `(Scene fold: ${fromScene} → ${toScene}; mechanical outline, not proof of success. decompress / recall / search_context for originals.)`,
+    ];
+    for (const m of span) {
+      if (m.role === "assistant" && m.text) lines.push("- assistant: " + short(m.text, 160));
+      for (const c of m.calls || [])
+        lines.push("- called " + c.name + " " + short(JSON.stringify(c.arguments), 100));
+      if (m.role === "tool")
+        lines.push("- " + (m.name || "tool") + (m.error ? " failed: " : ": ") + short(m.text || "", 120));
+    }
+    const s = await this.state();
+    const fold: Fold = {
+      id: await this.nextID(s),
+      start,
+      end,
+      summary: lines.slice(0, 60).join("\n"),
+      topic,
+      active: true,
+      children: [],
+      tier: 1,
+      mechanical: true,
+      hash: hash(span),
+      at: Date.now(),
+    };
+    if (estimate(this.block(fold, rows)) >= estimate(await this.view(span)) * 0.95)
+      return { status: "noop" as const, reason: "fold not smaller" };
+    await this.commit(fold, [], s);
+    if (foldBrowser) await this.trimOldImages();
+    return { status: "applied" as const, block: fold.id, topic, start, end };
+  }
   async stage() {
+
     const rows = await this.messages(),
       turns: Obj[] = [];
     for (const row of rows) {
