@@ -370,7 +370,22 @@ func (runner *jobRunner) deliver(id string, task *localJob) {
 	upload, data := runner.upload, task.result
 	go func() {
 		if upload(runner.ctx, data) != nil {
-			return // kept; the next reconnect delivers it again
+			// Upload failed while the socket may still be healthy. Keeping the result only for a
+			// future reconnect leaves the server waiting out the browser timeout with "连接仍正常".
+			// Fall back to the WebSocket so the job settles; if the socket is gone, retain for resume.
+			runner.mu.Lock()
+			defer runner.mu.Unlock()
+			if runner.tasks[id] != task {
+				return
+			}
+			if runner.conn != nil {
+				runner.writeRaw(data)
+				if !runner.resumable {
+					delete(runner.tasks, id)
+				}
+				return
+			}
+			return
 		}
 		runner.mu.Lock()
 		defer runner.mu.Unlock()

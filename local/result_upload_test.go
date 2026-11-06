@@ -150,3 +150,65 @@ func TestLargeResultUploadsOverHTTPWithoutBlockingHeartbeat(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+func TestLargeResultFallsBackToSocketWhenUploadFails(t *testing.T) {
+	clientID, token := strings.Repeat("c", 32), strings.Repeat("t", 43)
+	inline := make(chan map[string]any, 8)
+	accepted := make(chan *backendPeer, 2)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/local-agent/result", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upload broken", 503)
+	})
+	mux.HandleFunc("/api/local-agent/socket", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var hello struct{ Type, ClientID, Instance string }
+		if conn.ReadJSON(&hello) != nil || hello.Type != "hello" {
+			return
+		}
+		peer := &backendPeer{conn: conn}
+		_ = peer.send(map[string]any{"type": "ready", "userId": "alice", "clientId": clientID, "resume": true})
+		accepted <- peer
+		for {
+			var value map[string]any
+			if conn.ReadJSON(&value) != nil {
+				return
+			}
+			if value["type"] == "ping" {
+				_ = peer.send(map[string]string{"type": "pong"})
+			} else {
+				inline <- value
+			}
+		}
+	})
+	backend := httptest.NewServer(mux)
+	defer backend.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{}), context: ctx}
+	connection := agent.startConnection(ServerCredential{Origin: backend.URL, UserID: "alice"}, token)
+	if connection == nil {
+		t.Fatal("connection did not start")
+	}
+	peer := receive(t, accepted)
+	dir := t.TempDir()
+	content := strings.Repeat("v", 300<<10) // > inlineResultLimit once wrapped as a result
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	id := "01234567-0123-0123-0123-0123456789cc"
+	if err := peer.send(map[string]any{"id": id, "op": "file", "args": map[string]string{"op": "read", "cwd": dir, "path": "big.txt"}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-inline:
+		if got["id"] != id {
+			t.Fatalf("expected socket fallback for %s, got %v", id, got["id"])
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("failed upload did not fall back to the WebSocket; server would time out while the link stays healthy")
+	}
+}
