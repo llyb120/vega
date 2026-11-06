@@ -343,11 +343,11 @@ export class Groups {
     for (const session of old) { await this.dropSession(session); await this.engine.releaseSession(session); }
     return divider;
   }
-  /** A member's turn ended: its reply goes into the group (empty turns that started tasks still show them). */
+  /** A member's turn ended: its reply goes into the group (empty text is skipped). */
   async replied(session: Session, employeeId: string, text: string, tasks: NonNullable<Message["tasks"]>, hop: number, failed = false) {
     const group = session.groupId ? await this.get(session.groupId) : undefined;
     if (!group || !group.employees.some((e) => e.id === employeeId)) return;
-    const said = String(text || "").trim() || (tasks.length ? "已安排任务。" : "");
+    const said = String(text || "").trim();
     if (!said) return;
     const author = await this.author(employeeId);
     const saved = await this.append(group, { role: "assistant", text: said, author, hop, tasks: tasks.length ? tasks : undefined, error: failed || undefined });

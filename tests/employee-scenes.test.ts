@@ -43,7 +43,7 @@ test("employee chat receives low-risk defaults without losing explicit device co
     assert(system.includes(EMPLOYEE_DECISION_RULES));
     assert.match(system, /派单和交接保留用户原话与明确约束/);
     assert.match(system, /历史记忆、旧计划、参考命令与验证方法不是本次必须照搬的硬条件/);
-    assert.match(system, /当前可用的是服务端浏览器，就直接task_relay_computer打开并核实/);
+    assert.match(system, /当前可用的是服务端浏览器，就直接 switch_scene\(scene=computer\) 打开并核实/);
     assert.match(system, /不先问是否接受服务端，也不冒称已在用户电脑打开/);
     assert.match(system, /用户明确要求“在我的电脑上”.*不能用另一端结果代替/);
     assert.match(system, /不得擅自切换任务绑定、迁移文件或凭据/);
@@ -57,33 +57,35 @@ test("employee chat receives low-risk defaults without losing explicit device co
   } finally { await engine.close(); await store.close(); }
 });
 
-test("even a coding-profile task starts lightweight, upgrades in the same work session and retains coding after browser handoff", async () => {
+test("even a coding-profile task starts lightweight, upgrades then switches to computer in the same work session", async () => {
   const { store, engine, employee, add, segment } = await fixture();
   const selected: string[] = [];
   let phase = 0;
   engine.providers.chat = async (model, system, messages, definitions) => {
     selected.push(model.selection);
     assert(system.includes("新主任务统一先用轻量模型") && system.includes("普通信息查询不因使用read或bash而升级"));
-    assert(system.includes(EMPLOYEE_DECISION_RULES), "decision guidance survives initial work, scene changes, browser handoff and resumption");
+    assert(system.includes(EMPLOYEE_DECISION_RULES), "decision guidance survives initial work, scene changes and resumption");
     assert(messages.some(message => message.role === "user" && message.text?.includes("仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user")));
     assert.match(system, /task_ask_user 仅用于缺少无法自行查得的必要信息/);
     if (phase++ === 0) {
       assert.equal(model.selection, "p/light");
       assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("coding"));
-      return call("code", "switch_scene", { scene: "coding", message: "实现功能并验证，再交接浏览器" });
+      return call("code", "switch_scene", { scene: "coding", message: "实现功能并验证，再切入浏览器" });
     }
     if (phase === 2) {
       assert.equal(model.selection, "p/code");
       assert(messages.some(message => message.text?.includes("实现功能并在浏览器验证")));
-      return call("browser", "employee", { action: "relay", scene: "computer", text: "只在浏览器验证已实现的功能" });
+      assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("computer"));
+      return call("browser", "switch_scene", { scene: "computer", message: "只在浏览器验证已实现的功能" });
     }
     if (phase === 3) {
       assert.equal(model.selection, "p/vision");
       assert(definitions.some(tool => tool.name === "bash"));
-      assert(!definitions.some(tool => ["write", "edit", "switch_scene"].includes(tool.name)));
-      return { role: "assistant", text: "浏览器已验证。" };
+      assert(!definitions.some(tool => ["write", "edit"].includes(tool.name)));
+      assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("coding"), "main task computer keeps switch_scene to return");
+      return call("back", "switch_scene", { scene: "coding", message: "浏览器已验证，回到编码收尾" });
     }
-    assert.equal(model.selection, "p/code", "returning from the browser must not reset an upgraded task to lightweight");
+    assert.equal(model.selection, "p/code", "returning from computer must not reset an upgraded task to lightweight");
     return phase === 4 ? verified() : completed();
   };
   try {
@@ -91,15 +93,12 @@ test("even a coding-profile task starts lightweight, upgrades in the same work s
     job = await segment(job);
     const work = job.workSession;
     assert.equal((await store.session(work)).scene, "coding");
-    assert.equal(job.side, "computer");
-    job = await segment(job);
-    assert.equal(job.side, "work");
-    job = await segment(job);
+    assert.notEqual(job.side, "computer", "same-session computer does not flip task.side to computer");
     assert.equal(job.status, "done");
     assert.equal(job.workSession, work);
-    assert.equal((await store.sessions()).length, 2);
+    assert.equal((await store.sessions()).length, 1, "no isolated computer session");
     assert.deepEqual(selected, ["p/light", "p/code", "p/vision", "p/code", "p/code"]);
-    assert.deepEqual((await employee.state()).runs.map(run => run.scene), ["lightweight", "computer", "coding"], "run records reflect their actual starting scenes");
+    assert.deepEqual((await employee.state()).runs.map(run => run.scene), ["lightweight"], "one continuous work session run");
 
     let requests = 0;
     engine.providers.chat = async model => {
@@ -249,7 +248,7 @@ test("ordinary manual sessions and isolated computer task sessions cannot use th
   try {
     for (const computer of [false, true]) {
       const task = computer ? await add("browser-only work") : undefined;
-      const session = await store.newSession({ scene: computer ? "computer" : "coding", model: computer ? "p/vision" : "p/code", ...(task ? { taskId: task.id, employeeId: employee.employeeId } : {}) });
+      const session = await store.newSession({ scene: computer ? "computer" : "coding", model: computer ? "p/vision" : "p/code", ...(task ? { taskId: task.id, employeeId: employee.employeeId, relayComputer: true } : {}) });
       let requests = 0;
       engine.providers.chat = async (model, _system, messages, definitions) => {
         assert.equal(model.selection, computer ? "p/vision" : "p/code");
@@ -308,7 +307,9 @@ test("a scene covered by the current preferred model does not expose a redundant
   let requests = 0;
   engine.providers.chat = async (model, _system, _messages, definitions) => {
     assert.equal(model.selection, "p/light");
-    assert(!definitions.some(tool => tool.name === "switch_scene"), "Nova treats the preferred identical model as already covering coding");
+    const switching = definitions.find(tool => tool.name === "switch_scene");
+    assert(!switching?.parameters.properties.scene.enum.includes("coding"), "preferred identical model already covers coding");
+    // computer may still be offered for same-session browser work
     return requests++ === 0 ? verified() : completed();
   };
   try { assert.equal((await segment(await add("按已覆盖场景完成工作"))).status, "done"); }

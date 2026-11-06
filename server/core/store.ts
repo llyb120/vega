@@ -72,6 +72,8 @@ export type Session = {
   fireRole?: "work" | "judge";
   /** A group chat's own session (no employee), or a member employee's session inside that group. */
   groupId?: string;
+  /** Isolated computer session created by task_relay_computer (cannot switch_scene back). */
+  relayComputer?: boolean;
   createdAt: number;
 };
 /** Schema version kept in settings; a database of another version is refused (no migrations). */

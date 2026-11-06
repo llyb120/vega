@@ -143,7 +143,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       status: str("任务过滤：all（默认）全部、active 未收尾、ended 已收尾（完成、失败、停止、取消、封存）", { enum: ["all", "active", "ended"] }),
       memoryQuery: str("只影响返回的相关记忆：按这个关键词挑最相关的 30 条；省略为不按关键词", { maxLength: 2000 }) }));
   out.push(tool("employee_task_create",
-    "给当前牛马派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复一两句说明并调用本工具，勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。反复、定时或按条件做的事用 employee_duty_create" +
+    "给当前牛马派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。反复、定时或按条件做的事用 employee_duty_create" +
       (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : ctx.group ? "。群聊里只给按群公告归你的工作派单；归其他牛马的不要派单，在回复里 @它 交出。" : "。"),
     { instructions: instructions("任务目标、范围、约束和交付标准，保留用户原话；不写工具名或动作名"),
       dedupeKey: str("业务唯一标识，≤200 字；同 key 已有任务（含已收尾）时直接返回原任务。用户明确要求重做已完成的事时用新 key（如原 key 加 :v2）", { minLength: 1, maxLength: 200 }),
@@ -219,7 +219,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
           content: str("步骤描述，1–500 字", { minLength: 1, maxLength: 500 }),
           status: str("", { enum: ["pending", "in_progress", "completed", "failed", "blocked", "cancelled"] }),
         }, ["content", "status"]) },
-        tellUser: { type: "boolean", description: "true 时把 message 发到沟通会话给用户看（普通进度纯文字、不挂任务卡片；task_ask_user / task_request_approval 阻塞求助与最终交付会挂绑定任务卡片）。只发用户关心的关键信息：阶段切换、影响结论的发现、明显阻塞或延误——像简报一样一两句，不要流水账或每步工具结果。每个任务最多 12 次，超出不发送（toldUser=false，进度仍保存）。省略为 false" } },
+        tellUser: { type: "boolean", description: "true 时把 message 发到沟通会话（纯文字、不挂任务卡）。写成跟人同步进度的自然短句，例如「百度搜「你好」的结果页出来了」，不要「已派单/阶段完成」这类公文腔，也不要流水账或每步工具结果。task_ask_user / task_request_approval 与最终交付另走通知并挂任务卡。每个任务最多 12 次，超出不发送（toldUser=false，进度仍保存）。省略为 false" } },
       ["message"]));
     out.push(tool("task_reschedule",
       "把当前任务整体改到以后再继续（例如用户要求晚点或明天再处理、要等的时间点还没到）：runAt 或 delayMinutes 二选一。任务转为延后并立即结束本轮，到时在原会话续做。只改本任务自己；在等已提交的外部作业结果、需要记下恢复点时用 task_wait；给所属动态职责安排下次用 employee_duty_manage。",
@@ -236,7 +236,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       ["checkpoint"]));
     if (!ctx.computer) {
       out.push(tool("task_relay_computer",
-        "把需要操作网页或电脑的工作交给本任务唯一的电脑会话：handoff 写清要做的操作、授权与约束、已完成和已尝试的操作、页面/文件/作业位置、交付类型和完成标准，不写凭据。立即结束本轮；电脑会话做完后结果自动交回本会话。写代码用 switch_scene，不要交接。必须单独调用。",
+        "把网页工作交给本任务隔离的电脑会话（会新开会话，较慢）：一般优先用同会话 switch_scene(scene=computer)。仅在需要与主会话完全隔离时用本工具；handoff 写清操作、授权、已完成项、页面位置与完成标准，不写凭据。立即结束本轮；电脑会话做完后结果交回。必须单独调用。",
         { handoff: str("交接内容，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["handoff"]));
       out.push(tool("task_complete",
         "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求（若只剩末步仍为 in_progress，系统会在交付时自动收尾）。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 可省略（系统选用最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接，没有单独正文传 []。成功后立即结束本轮。必须单独调用。",

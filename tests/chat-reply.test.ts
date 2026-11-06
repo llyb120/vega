@@ -19,29 +19,29 @@ async function fixture() {
   return { store, engine, employee, chat };
 }
 
-test("a dispatch adds no separate announce; the card rides on the next text", async () => {
+test("a dispatch is ordinary chat: no announce line and no task card", async () => {
   const { store, engine, chat } = await fixture();
   const visibleAtEnd: string[][] = [];
   engine.events.on("event", async (event) => {
     if (event.session === chat.id && event.type === "message_end") visibleAtEnd.push(employeeChatMessages(await store.messages(chat.id)).map((m: any) => m.text));
   });
   const replies = [
-    { role: "assistant", text: "收到，我去查接口。", calls: [{ id: "assign", ...employeeCall({ action: "add", kind: "todo", text: "Investigate endpoint" }) }] },
+    { role: "assistant", text: "我去查接口。", calls: [{ id: "assign", ...employeeCall({ action: "add", kind: "todo", text: "Investigate endpoint" }) }] },
     { role: "assistant", text: "查到了告诉你。" },
   ];
   let calls = 0;
   engine.providers.chat = async () => replies[calls++] as any;
   try {
     await engine.run(chat.id, { role: "user", text: "查一下接口地址" });
-    assert.deepEqual(visibleAtEnd[0], ["查一下接口地址", "收到，我去查接口。"], "the first sentence is visible before the tool even runs");
+    assert.deepEqual(visibleAtEnd[0], ["查一下接口地址", "我去查接口。"], "the first sentence is visible before the tool even runs");
     const shown = employeeChatMessages(await store.messages(chat.id));
-    assert.deepEqual(shown.map((m: any) => m.text), ["查一下接口地址", "收到，我去查接口。", "查到了告诉你。"]);
-    assert.ok(!shown.some((m: any) => /^已安排任务 /.test(m.text)), "no system-made announce bubble");
-    assert.deepEqual(shown.map((m: any) => m.tasks?.length || 0), [0, 0, 1], "the card sits on the reply after dispatch");
+    assert.deepEqual(shown.map((m: any) => m.text), ["查一下接口地址", "我去查接口。", "查到了告诉你。"]);
+    assert.ok(!shown.some((m: any) => /已安排|已派单/.test(m.text || "")), "no dispatch announce");
+    assert.ok(shown.every((m: any) => !(m.tasks?.length)), "dispatch does not hang a task card");
   } finally { await engine.close(); await store.close(); }
 });
 
-test("a dispatch followed by a silent reply still shows the card once", async () => {
+test("a silent reply after dispatch invents neither 已安排 nor a task card", async () => {
   const { store, engine, chat } = await fixture();
   let calls = 0;
   engine.providers.chat = async () => (calls++ === 0
@@ -49,9 +49,9 @@ test("a dispatch followed by a silent reply still shows the card once", async ()
     : { role: "assistant", text: "" }) as any;
   try {
     await engine.run(chat.id, { role: "user", text: "查一下" });
-    const withCard = employeeChatMessages(await store.messages(chat.id)).filter((m: any) => m.tasks?.length);
-    assert.equal(withCard.length, 1);
-    assert.equal(withCard[0].text, "已安排。");
+    const shown = employeeChatMessages(await store.messages(chat.id));
+    assert.ok(!shown.some((m: any) => /已安排|已派单/.test(m.text || "")));
+    assert.ok(!shown.some((m: any) => m.tasks?.length));
   } finally { await engine.close(); await store.close(); }
 });
 
