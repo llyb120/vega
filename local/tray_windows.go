@@ -14,13 +14,15 @@ import (
 //go:embed icon.ico
 var iconData []byte
 
+//go:embed icon-connected.ico
+var iconConnectedData []byte
+
 func systrayRun(configure, onQuit func()) {
 	systray.Run(func() {
-		systray.SetIcon(iconData)
 		systray.SetTitle("牵牛星")
 		trayState.Lock()
 		trayState.ready = true
-		systray.SetTooltip(connectionTooltip(trayState.connected))
+		applyTrayAppearance(trayState.connected)
 		trayState.Unlock()
 		mConfigure := systray.AddMenuItem("连接授权", "管理站点授权、补充内容和流量中继")
 		mQuit := systray.AddMenuItem("退出", "Stop local agent")
@@ -51,11 +53,20 @@ func connectionTooltip(connected bool) string {
 	return "牵牛星 · 未连接"
 }
 
+func applyTrayAppearance(connected bool) {
+	if connected {
+		systray.SetIcon(iconConnectedData)
+	} else {
+		systray.SetIcon(iconData)
+	}
+	systray.SetTooltip(connectionTooltip(connected))
+}
+
 func setState(connected bool) {
 	trayState.Lock()
 	defer trayState.Unlock()
 	trayState.connected = connected
 	if trayState.ready {
-		systray.SetTooltip(connectionTooltip(connected))
+		applyTrayAppearance(connected)
 	}
 }

@@ -58,7 +58,7 @@ func TestConnectionPageSavesAccountRelayAndSupplement(t *testing.T) {
 		a.configure(w, r)
 		return w
 	}
-	form := url.Values{"saveRelay": {"1"}, "relayOrigin": {origin}, "relayUser": {"alice"}, "relayRules": {"git.internal\napi.internal:8080"}}
+	form := url.Values{"saveRelay": {"1"}, "relayOrigin": {origin}, "relayUser": {"alice"}, "relayRules": {"git.internal\napi.internal:8080"}, "relayOn": {"1"}}
 	if w := post(form, "https://evil.test"); w.Code != 403 {
 		t.Fatal(w.Code)
 	}
@@ -67,6 +67,9 @@ func TestConnectionPageSavesAccountRelayAndSupplement(t *testing.T) {
 	}
 	if len(a.config.Servers[0].Relay) != 3 || len(a.config.Servers[1].Relay) != 0 || a.config.Servers[0].Token != "secret-a" {
 		t.Fatal("account isolation or credentials changed")
+	}
+	if a.config.Servers[0].RelayOn == nil || !*a.config.Servers[0].RelayOn {
+		t.Fatal("relay switch should be on after saving rules with relayOn")
 	}
 	data, _ := os.ReadFile(a.configPath)
 	var saved Config
@@ -84,7 +87,7 @@ func TestConnectionPageSavesAccountRelayAndSupplement(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	a.configure(w, httptest.NewRequest("GET", "http://"+localAddress+"/config/test", nil))
-	for _, text := range []string{"补充内容", "流量中继", "git.internal:443", "alice", "bob", "&lt;/textarea&gt;"} {
+	for _, text := range []string{"补充内容", "流量中继", "启用流量中继", "git.internal:443", "alice", "bob", "&lt;/textarea&gt;"} {
 		if !strings.Contains(w.Body.String(), text) {
 			t.Errorf("missing %s", text)
 		}
@@ -104,9 +107,21 @@ func TestConnectionPageSavesAccountRelayAndSupplement(t *testing.T) {
 	if w := post(supplement, "http://"+localAddress); w.Code != 303 || a.config.Supplement != "" {
 		t.Fatal("supplement not cleared")
 	}
+	form.Set("relayRules", "git.internal\napi.internal:8080")
+	form.Del("relayOn")
+	if w := post(form, "http://"+localAddress); w.Code != 303 {
+		t.Fatal(w.Body.String())
+	}
+	if len(a.config.Servers[0].Relay) != 3 || a.config.Servers[0].RelayOn == nil || *a.config.Servers[0].RelayOn {
+		t.Fatal("relay switch off should keep rules but disable")
+	}
+	if len(a.config.Servers[0].activeRelay()) != 0 {
+		t.Fatal("activeRelay should be empty when switch is off")
+	}
 	form.Set("relayRules", "")
+	form.Set("relayOn", "1")
 	if w := post(form, "http://"+localAddress); w.Code != 303 || len(a.config.Servers[0].Relay) != 0 {
-		t.Fatal("relay not disabled")
+		t.Fatal("empty rules not saved")
 	}
 }
 
@@ -182,5 +197,26 @@ func TestRelayPumpStreamsBinaryBothWaysWithAcknowledgements(t *testing.T) {
 	case <-done:
 	case <-ctx.Done():
 		t.Fatal("relay did not close")
+	}
+}
+
+func TestActiveRelayRespectsSwitch(t *testing.T) {
+	off := false
+	on := true
+	withRules := ServerCredential{Relay: []string{"git.internal:443"}}
+	if len(withRules.activeRelay()) != 1 {
+		t.Fatal("legacy credentials with rules stay enabled")
+	}
+	withRules.RelayOn = &off
+	if len(withRules.activeRelay()) != 0 {
+		t.Fatal("switch off must disable without clearing rules")
+	}
+	withRules.RelayOn = &on
+	if len(withRules.activeRelay()) != 1 {
+		t.Fatal("switch on should re-enable saved rules")
+	}
+	empty := ServerCredential{RelayOn: &on}
+	if len(empty.activeRelay()) != 0 {
+		t.Fatal("enabled switch with empty rules stays inactive")
 	}
 }

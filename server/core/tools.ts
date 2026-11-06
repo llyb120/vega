@@ -675,6 +675,16 @@ export class Tools {
         return { value: { skill: skill.name, content: "[技能详情仅供本轮内部执行，不写入共享记录]" }, secret: JSON.stringify({ path: a.path, content: result.value.text }) };
       return result;
     }
+    // History and Markdown often show web archive URLs; resolve them on the server even when the session runs on a local agent.
+    {
+      const absolute = /^https?:\/\/[^/?#]+(\/api\/(?:files|blobs)\/[^?#]*)/i.exec(a.path);
+      if (absolute) a = { ...a, path: absolute[1] };
+    }
+    if (a.path.startsWith("/api/blobs/")) {
+      const id = decodeURIComponent(a.path.slice("/api/blobs/".length).split("/")[0] || "");
+      assert(id && !id.includes("..") && !id.includes("\\"), "Invalid blob URL");
+      return this.read({ ...a, path: `sqlite:blob/${id}` }, true);
+    }
     if (a.path.startsWith("sqlite:")) {
       const match = /^sqlite:blob\/(.+)$/.exec(a.path);
       assert(match, "Invalid SQLite archive path");
@@ -690,6 +700,9 @@ export class Tools {
       };
     }
     const files = this.engine.store.files;
+    if (a.path.startsWith("/api/files/")) {
+      a = { ...a, path: files.fromUrl(a.path.slice("/api/files/".length).split("/").filter(Boolean)) };
+    }
     let attachment: string | undefined;
     if (files.own(a.path)) {
       // Archived screenshots, DOM records and tool results: only this employee's (or user's) own, on the server.
