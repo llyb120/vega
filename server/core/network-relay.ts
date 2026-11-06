@@ -9,7 +9,7 @@ const FRAME = 32 << 10;
 type Grant = { userId: string; clientId: string; hash: string };
 type Record = Grant & { rules: string[] };
 type TunnelPeer = Pick<Peer, "id" | "send" | "close">;
-type Flow = { grant: Grant; transport: Agent["transport"]; socket: Socket; peer?: TunnelPeer; ready: boolean; sending: boolean; incoming: boolean; timer: ReturnType<typeof setTimeout>; finish: () => void };
+type Flow = { grant: Grant; transport: Agent["transport"]; socket: Socket; peer?: TunnelPeer; ready: boolean; sending: boolean; incoming: boolean; timer: ReturnType<typeof setTimeout>; finish: (reason?: string) => void };
 
 export function relayRules(value: unknown): string[] {
   assert(Array.isArray(value) && value.length <= 64, "最多配置 64 条中继规则");
@@ -108,7 +108,10 @@ export class NetworkRelay {
           sockets.add(socket);
           socket.on("error", () => {}).once("close", () => sockets.delete(socket));
           socket.setTimeout(15000, () => socket.destroy());
-          void this.accept(userId, socket).catch(() => { if (!socket.destroyed) { reply(socket, 1); socket.end(); } });
+          void this.accept(userId, socket).catch((error) => {
+            console.warn("[Vega relay] SOCKS rejected", { userId, reason: error instanceof Error ? error.message : "Unknown proxy error" });
+            if (!socket.destroyed) { reply(socket, 1); socket.end(); }
+          });
         });
         await new Promise<void>((yes, no) => { server.once("error", no); server.listen(0, "127.0.0.1", () => { server.off("error", no); yes(); }); });
         server.on("error", () => { for (const socket of sockets) socket.destroy(); });
@@ -121,11 +124,17 @@ export class NetworkRelay {
     return `socks5://127.0.0.1:${(await starting).port}`;
   }
   private async accept(userId: string, socket: Socket) {
-    const { host, port } = await destination(socket), selected = await this.route(userId, host, port);
+    const { host, port } = await destination(socket);
+    const selected = await this.route(userId, host, port).catch((error) => {
+      throw Error(`${host}:${port}: ${error instanceof Error ? error.message : "Route rejected"}`);
+    });
     if (socket.destroyed || this.closed) return;
     if (!selected) {
       const remote = connect({ host, port });
-      remote.on("error", () => socket.destroy());
+      remote.on("error", (error: NodeJS.ErrnoException) => {
+        console.warn("[Vega relay] Direct connection failed", { userId, host, port, code: error.code });
+        socket.destroy();
+      });
       socket.once("close", () => remote.destroy());
       remote.once("close", () => socket.destroy());
       remote.once("connect", () => { reply(socket); socket.setTimeout(300000); socket.pipe(remote).pipe(socket); });
@@ -133,19 +142,20 @@ export class NetworkRelay {
     }
     assert(this.flows.size < 512 && [...this.flows.values()].filter((f) => f.grant.userId === userId && f.grant.clientId === selected.record.clientId).length < 64, "Too many relay connections");
     const id = randomUUID();
-    const finish = () => {
+    const finish = (reason?: string) => {
       const flow = this.flows.get(id);
       if (!flow) return;
+      if (reason) console.warn("[Vega relay] Tunnel failed", { userId, clientId: flow.grant.clientId, id, host, port, stage: flow.ready ? "stream" : flow.peer ? "target_connect" : "websocket_upgrade", reason });
       this.flows.delete(id);
       clearTimeout(flow.timer);
       if (flow.peer) { this.peers.delete(flow.peer.id); flow.peer.close(1000, "Relay closed"); }
       socket.destroy();
     };
-    const flow: Flow = { grant: selected.record, transport: selected.agent.transport, socket, ready: false, sending: false, incoming: false, timer: setTimeout(finish, 15000), finish };
+    const flow: Flow = { grant: selected.record, transport: selected.agent.transport, socket, ready: false, sending: false, incoming: false, timer: setTimeout(() => finish("Client readiness timed out"), 15000), finish };
     this.flows.set(id, flow);
-    socket.once("close", finish);
+    socket.once("close", () => finish(flow.ready ? undefined : "SOCKS connection closed before client readiness"));
     try { selected.agent.transport!.send({ type: "relay", id, args: { host, port } }); }
-    catch { finish(); }
+    catch { finish("Control channel send failed"); }
   }
   open(peer: TunnelPeer, grant: Grant, id: string) {
     const flow = this.flows.get(id), agent = this.hub.active(grant.userId, grant.clientId);
@@ -181,7 +191,7 @@ export class NetworkRelay {
           else try { peer.send(Buffer.from([1])); } catch { flow.finish(); }
         });
       }
-    } catch { flow.finish(); }
+    } catch { flow.finish("Invalid tunnel frame"); }
   }
   private send(flow: Flow) {
     if (flow.sending || flow.socket.destroyed || !flow.ready) return;
@@ -191,10 +201,13 @@ export class NetworkRelay {
     if (!data) return;
     // shortcut: one bounded frame in flight per direction; add a credit window if WAN throughput requires it.
     flow.sending = true;
-    flow.timer = setTimeout(flow.finish, 30000);
-    try { flow.peer!.send(Buffer.concat([Buffer.from([0]), data])); } catch { flow.finish(); }
+    flow.timer = setTimeout(() => flow.finish("Acknowledgement timed out"), 30000);
+    try { flow.peer!.send(Buffer.concat([Buffer.from([0]), data])); } catch { flow.finish("Tunnel send failed"); }
   }
-  closePeer(id: string) { this.flows.get(this.peers.get(id) || "")?.finish(); }
+  closePeer(id: string) {
+    const flow = this.flows.get(this.peers.get(id) || "");
+    flow?.finish(flow.ready ? undefined : "Client tunnel closed before target connection was ready");
+  }
   async close() {
     this.closed = true;
     for (const flow of this.flows.values()) flow.finish();

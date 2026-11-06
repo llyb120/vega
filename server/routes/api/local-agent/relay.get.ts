@@ -11,7 +11,10 @@ export default defineWebSocketHandler({
     try {
       // crossws dispatches messages without awaiting open; authenticate before completing the upgrade.
       app().engine.relay.open(peer, peer.context.relayGrant as Parameters<NetworkRelay["open"]>[1], peer.request.headers.get("x-vega-relay") || "");
-    } catch { peer.close(1008, "Invalid relay connection"); }
+    } catch {
+      console.warn("[Vega relay] Tunnel rejected: missing, expired or mismatched flow/device grant");
+      peer.close(1008, "Invalid relay connection");
+    }
   },
   message(peer, message) { app().engine.relay.message(peer, message.uint8Array()); },
   close(peer) { app().engine.relay.closePeer(peer.id); },

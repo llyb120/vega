@@ -118,6 +118,40 @@ test("SOCKS routes binary streams through one authenticated device tunnel with b
   assert.throws(() => f.relay.open(peer, grant, command.id));
 });
 
+test("relay rejection logs the destination and reason without device credentials", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {}), f = await fixture(t);
+  await f.relay.configure(grant, ["git.internal:443"]);
+  const socket = await socks(await f.relay.proxy("alice"), "git.internal", 80, t);
+  assert.equal((await read(socket, 10))[1], 1);
+  const calls = warn.mock.calls.map(call => call.arguments);
+  assert(calls.some(([label, details]) => label === "[Vega relay] SOCKS rejected" && details.userId === "alice" && /git\.internal:80:.*端口/.test(details.reason)));
+  assert(!JSON.stringify(calls).includes(grant.hash));
+});
+
+test("a tunnel closing before readiness logs its stage once without replay", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {}), f = await fixture(t);
+  await f.relay.configure(grant, ["git.internal:443"]);
+  let opened!: (id: string) => void;
+  const opening = new Promise<string>(resolve => { opened = resolve; });
+  let commands = 0;
+  f.onCommand((job) => {
+    commands++;
+    f.relay.open({ id: job.id, send() {}, close() {} }, grant, job.id);
+    opened(job.id);
+  });
+  const socket = await socks(await f.relay.proxy("alice"), "git.internal", 443, t);
+  const peerId = await opening, closed = once(socket, "close");
+  f.relay.closePeer(peerId);
+  f.relay.closePeer(peerId);
+  await closed;
+  assert.equal(commands, 1);
+  const calls = warn.mock.calls.map(call => call.arguments);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][1].stage, "target_connect");
+  assert.equal(calls[0][1].host, "git.internal");
+  assert(!JSON.stringify(calls).includes(grant.hash));
+});
+
 test("saving a changed policy flushes pooled sockets; invalid rules preserve the policy", async (t) => {
   const f = await fixture(t);
   await f.relay.configure(grant, ["git.internal:443"]);

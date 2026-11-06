@@ -56,8 +56,9 @@ export class ClientSockets {
     assert(grant, "Client credential invalid or revoked");
     return grant;
   }
-  async open(socket: Socket) {
-    const grant = await this.authorize(socket.request);
+  async open(socket: Socket, grant?: Grant) {
+    // The upgrade hook supplies its verified grant so an immediate hello cannot outrun registration.
+    grant ||= await this.authorize(socket.request);
     assert(this.connections.size < 128, "Too many native client connections");
     this.connections.set(socket.id, { socket, grant, lastAt: Date.now() });
   }
