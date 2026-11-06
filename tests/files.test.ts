@@ -81,8 +81,11 @@ test("files go with clear chat, task removal, reset and employee removal", async
 });
 
 test("delivery Markdown shows archived screenshots by their url and never a path outside the files route", async () => {
-  const { renderInline } = await import("../web/src/markdown.js");
+  const { renderInline, renderMarkdown, filesArchiveBase } = await import("../web/src/markdown.js");
   assert.match(renderInline("![登录成功](/api/files/employees/e1/t1/snap-0.webp)"), /<img src="\/api\/files\/employees\/e1\/t1\/snap-0\.webp" alt="登录成功"/);
+  assert.match(renderInline("见图 /api/files/employees/e1/t1/snap-0.webp。"), /<img src="\/api\/files\/employees\/e1\/t1\/snap-0\.webp"/);
+  const shot = "59dbfad813894d67afaf57644b977910-0.webp";
+  assert.match(renderMarkdown(`留底（${shot}）`, { archiveBase: filesArchiveBase("e1", "t1") }).html, new RegExp(`src="/api/files/employees/e1/t1/${shot}"`));
   for (const bad of ["/api/files/../vega.db.webp", "/api/files/employees/./x.webp", "/api/files/a/b.json"])
     assert.doesNotMatch(renderInline(`![x](${bad})`), /<img/);
 });
