@@ -96,7 +96,7 @@ export class Engine {
   events = new EventEmitter();
   active = new Map<
     string,
-    { control: AbortController; steer: Message[]; context?: Context }
+    { control: AbortController; steer: Message[]; context?: Context; modelWait?: AbortController }
   >();
   private chatSubmissions = new Map<string, { message: Message; done: Promise<void> }>();
   redactors = new Map<string, Redactor>();
@@ -347,6 +347,9 @@ export class Engine {
     assert(run, "Session not running");
     assert(run.steer.length < 16, "Steer queue full");
     run.steer.push({ ...m, role: "user" });
+    // Interrupt a waiting model request so the new guidance applies on the next turn.
+    // Tool batches keep running to completion: modelWait is only set around providers.chat.
+    run.modelWait?.abort(Error("Steered by user"));
   }
   async submitChat(session: string, message: Message) {
     const send = async () => {
@@ -818,30 +821,42 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
         }
 
+        // Steer that arrived during compact/prep: inject before starting another model wait.
+        if (state.steer.length) continue;
         let reply: Message | undefined;
         let outputRecovery: Model | undefined,
           outputRecovered = false,
           emptyRecovered = false;
+        let steered = false;
         for (let attempt = 0; attempt <= 5; attempt++) {
           emit("message_start", {
             model: model.selection,
             scene: session.scene,
             attempt,
           });
+          const modelWait = new AbortController();
+          state.modelWait = modelWait;
           try {
+            const waitSignal = outputRecovery || emptyRecovered
+              ? AbortSignal.any([control.signal, modelWait.signal, AbortSignal.timeout(120000)])
+              : AbortSignal.any([control.signal, modelWait.signal]);
             reply = await this.providers.chat(
               outputRecovery || model,
               emptyRecovered ? system + "\n[运行提示：上一段生成未返回正文或工具调用，不能算完成。根据原始授权继续：回复用户，或调用尚未执行且必要的工具；已执行的操作以历史工具结果为准，不得重放。]" : system,
               view,
               await tools.definitions(model),
-              outputRecovery || emptyRecovered
-                ? AbortSignal.any([control.signal, AbortSignal.timeout(120000)])
-                : control.signal,
+              waitSignal,
               emit,
               key,
             );
             break;
           } catch (e: any) {
+            if (modelWait.signal.aborted && !control.signal.aborted && state.steer.length) {
+              // Drop the interrupted generation; the outer loop drains steer and retries.
+              steered = true;
+              this.providers.reset(key);
+              break;
+            }
             control.signal.throwIfAborted();
             if (e.kind === "empty" && !emptyRecovered) {
               emptyRecovered = true;
@@ -928,8 +943,11 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               fallback: true,
             });
             attempt = -1;
+          } finally {
+            if (state.modelWait === modelWait) state.modelWait = undefined;
           }
         }
+        if (steered) continue;
         assert(reply, "Provider retry exhausted");
         await tools.context.recordUsage(view, reply.usage || {});
         // Chat shows every text right away: new task cards ride once on the first text written after they were created
@@ -1115,7 +1133,9 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
                           });
           }
         }
-        if (stop) return;
+        // User already steered during this tool batch: keep the same run so the next
+        // model request sees it immediately, instead of ending and hoping a relaunch wins the race.
+        if (stop && !state.steer.length) return;
       }
     } catch (e: any) {
       const raw = e instanceof Error ? e : new Error(String(e));
@@ -1153,10 +1173,26 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         throw error;
       } finally {
         if (session?.employeeId && session.taskId) (await this.employeeFor(session)).releaseWorkspace(session.taskId);
+        // Steer can arrive on any await above (close/release/save). Persist it before
+        // active.delete, then continue the same session so the API success is not a lie.
+        const continued: Message[] = [];
+        while (state.steer.length) {
+          for (const m of state.steer.splice(0)) {
+            try {
+              await this.store.append(key, redactMessage(m, redact));
+              emit("steer", m);
+              continued.push(m);
+            } catch { /* best effort — still try remaining steers */ }
+          }
+        }
         signal?.removeEventListener("abort", abort);
         this.active.delete(key);
         this.redactors.delete(key);
         emit("done", { error: !!error });
+        if (continued.length && !this.closing) {
+          // History already holds the steered messages; a fresh run picks them up as context.
+          void this.run(key).catch(() => {});
+        }
         // A member turn that ended without a final reply (a tool stopped it) still reports what it did; either way
         // the group's "typing" state changes.
         if (session?.groupId && session.employeeId && !session.taskId) {
