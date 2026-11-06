@@ -100,6 +100,10 @@ export class LocalAgents {
     agent.supplement = a.supplement || "";
     const recovering = agent.reconnecting, previous = agent.transport;
     if (transport) agent.transport = transport;
+    // Ping/result refresh calls connect() without a transport. That must not clear a suspended
+    // recovery: otherwise reconnecting=false with transport=undefined and every send() fails with
+    // LocalAgentUnavailable while the UI can still list the device during the grace window.
+    if (agent.reconnecting && !agent.transport) return { ok: true };
     agent.reconnecting = false;
     clearTimeout(agent.heartbeat);
     agent.onlineUntil = Date.now() + CLIENT_HEARTBEAT_TIMEOUT;
@@ -141,8 +145,10 @@ export class LocalAgents {
     const id = randomUUID();
     return new Promise<Obj>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined, sent = false, settled = false, recovered = false;
-      // Browser ops may wait up to 30s for a suspended Nova worker to take them, then run up to 10s.
-      let remaining = op === "exec" ? (args.timeout + 15) * 1000 : op === "browser" ? 50000 : 30000, deadline = 0;
+      // Browser: Nova pickup ≤30s + CDP budget ≤10s, plus margin for slow pages (Tapd etc.).
+      // A too-tight budget used to fire this timer while the socket was healthy, suspend the client
+      // as if the link dropped, then surface LocalAgentUnavailable — even when the page later loaded.
+      let remaining = op === "exec" ? (args.timeout + 15) * 1000 : op === "browser" ? 120000 : 30000, deadline = 0;
       const finish = (error?: Error, value?: Obj) => {
         if (settled) return;
         settled = true;
@@ -157,12 +163,18 @@ export class LocalAgents {
         finish(error);
       };
       const abort = () => cancel(signal.reason);
+      const timedOut = () => new LocalAgentUnavailable(op === "browser"
+        ? "客户端浏览器操作超时。连接仍正常，本步未确认完成；请检查页面实际状态后回复「继续」重试该步骤，不会自动改用其他客户端或服务端浏览器。"
+        : "客户端操作超时。连接仍正常，本步未确认完成；请回复「继续」重试，不会自动切换执行位置。");
       const resume = () => {
         if (settled || agent.reconnecting || timer) return;
         deadline = Date.now() + remaining;
         timer = setTimeout(() => {
-          // Recover a lost response once without ever resending its operation.
-          if (!recovered && agent.transport) this.suspend(agent.userId, agent.instance);
+          // Live socket + slow op: time out the job only. Do NOT suspend — that closes a healthy
+          // client and turns a timeout into the misleading "未能自动恢复" pause (see session dumps
+          // where chrome_navigate/inspect fail ~60s later while chrome_tabs still works).
+          if (!recovered && agent.transport && !agent.reconnecting) cancel(timedOut());
+          else if (!recovered && agent.transport) this.suspend(agent.userId, agent.instance);
           else cancel(new LocalAgentUnavailable());
         }, remaining);
         if (sent) return;

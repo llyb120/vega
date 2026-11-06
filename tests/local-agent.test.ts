@@ -151,3 +151,58 @@ test("local file reads resolve on the client rather than statting server paths",
   assert.equal((await store.fork(session.id)).localAgent, true);
   hub.close(); await store.close();
 });
+
+test("ping-style connect without transport cannot clear a suspended recovery", async (t) => {
+  const events: any[] = [], hub = new LocalAgents();
+  t.after(() => hub.close());
+  hub.connect("alice", details, wire(events));
+  const agent = hub.active("alice", details.clientId)!;
+  hub.suspend("alice", details.instance);
+  assert.equal(agent.reconnecting, true);
+  assert.equal(agent.transport, undefined);
+  hub.connect("alice", details); // ping-style refresh, no transport
+  assert.equal(agent.reconnecting, true, "must stay suspended until a socket transport returns");
+  assert.equal(agent.transport, undefined);
+  const waiting = hub.request(agent, "file", { op: "read" }, idle());
+  assert.equal(events.length, 0, "must not send while suspended");
+  assert.equal(agent.pending.size, 1);
+  hub.connect("alice", details, wire(events, details.instance, (job) => queueMicrotask(() => hub.result("alice", { id: job.id, instance: details.instance, result: { content: "ok" } }))));
+  assert.equal(agent.reconnecting, false);
+  assert.deepEqual(await waiting, { content: "ok" });
+  assert.equal(events.length, 1);
+});
+
+test("a healthy ping still refreshes the heartbeat without replacing transport", async (t) => {
+  const events: any[] = [], hub = new LocalAgents();
+  t.after(() => hub.close());
+  const transport = wire(events);
+  hub.connect("alice", details, transport);
+  const agent = hub.active("alice", details.clientId)!;
+  const until = agent.onlineUntil;
+  await new Promise((r) => setTimeout(r, 5));
+  hub.connect("alice", details);
+  assert.equal(agent.transport, transport);
+  assert.equal(agent.reconnecting, false);
+  assert(agent.onlineUntil >= until, "heartbeat deadline moves forward");
+  const pending = hub.request(agent, "file", { op: "read" }, idle());
+  hub.result("alice", { id: events[0].data.id, instance: details.instance, result: { ok: true } });
+  assert.deepEqual(await pending, { ok: true });
+});
+
+test("a live-socket browser timeout does not suspend the client or claim reconnect failure", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000 });
+  const events: any[] = [], hub = new LocalAgents();
+  t.after(() => hub.close());
+  const transport = wire(events);
+  hub.connect("alice", details, transport);
+  const agent = hub.active("alice", details.clientId)!;
+  clearTimeout(agent.heartbeat);
+  agent.onlineUntil = Date.now() + 86_400_000;
+  const pending = hub.request(agent, "browser", { operation: "navigate", args: { url: "https://tapd.example/story" } }, idle());
+  assert.equal(events[0].data.op, "browser");
+  t.mock.timers.tick(120_000);
+  await assert.rejects(pending, /浏览器操作超时.*连接仍正常/);
+  assert.equal(agent.reconnecting, false, "healthy timeout must not enter reconnect recovery");
+  assert.equal(agent.transport, transport, "control channel stays bound");
+  assert.equal(events.some((e) => e.data.op === "cancel"), true);
+});

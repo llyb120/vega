@@ -310,27 +310,21 @@ test("a failed result acknowledgement recovers other pending work rather than fa
   assert.deepEqual(await running, { recovered: true });
 });
 
-test("a lost response gets one recovery probe before an uncertain result pauses", async (t) => {
+test("a live-socket response timeout cancels the job without pretending the client disconnected", async (t) => {
   const f = await fixture(t), paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"] });
   const first = f.peer(paired.deviceToken, "first");
   await f.sockets.open(first); await f.sockets.message(first, JSON.stringify({ type: "hello", ...details, resume: true }));
   const agent = f.hub.active(f.login.principal.user.id, details.clientId)!;
-  const pending = f.hub.request(agent, "file", {}, new AbortController().signal), job = first.messages.at(-1);
-  const rejected = assert.rejects(pending, LocalAgentUnavailable);
+  const pending = f.hub.request(agent, "file", {}, new AbortController().signal);
+  const rejected = assert.rejects(pending, /操作超时.*连接仍正常/);
   t.mock.timers.tick(25000);
   await f.sockets.message(first, JSON.stringify({ type: "ping" }));
   t.mock.timers.tick(5000);
-  assert.equal(agent.reconnecting, true, "a response timeout first attempts recovery, even with recent heartbeats");
-  assert.equal(agent.pending.size, 1);
-  const second = f.peer(paired.deviceToken, "second");
-  await f.sockets.open(second); await f.sockets.message(second, JSON.stringify({ type: "hello", ...details, resume: true }));
-  await Promise.resolve();
-  assert.deepEqual(second.messages[0].pending, [job.id]);
-  t.mock.timers.tick(10000);
   await rejected;
-  assert.equal(agent.reconnecting, false, "a failed probe must not start an endless recovery loop");
-  assert.deepEqual(second.messages.map((m) => m.type || m.op), ["ready", "cancel"]);
+  assert.equal(agent.reconnecting, false, "a healthy timeout must not tear down the control channel");
+  assert.equal(!!agent.transport, true);
+  assert.equal(first.messages.some((m) => m.op === "cancel"), true);
 });
 
 test("missed heartbeats allow recovery, and only a sustained outage rejects pending work", async (t) => {
