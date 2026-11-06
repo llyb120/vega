@@ -200,7 +200,7 @@ test("a live-socket browser timeout does not suspend the client or claim reconne
   agent.onlineUntil = Date.now() + 86_400_000;
   const pending = hub.request(agent, "browser", { operation: "navigate", args: { url: "https://tapd.example/story" } }, idle());
   assert.equal(events[0].data.op, "browser");
-  t.mock.timers.tick(180_000);
+  t.mock.timers.tick(120_000);
   await assert.rejects(pending, /浏览器操作超时.*连接仍正常/);
   assert.equal(agent.reconnecting, false, "healthy timeout must not enter reconnect recovery");
   assert.equal(agent.transport, transport, "control channel stays bound");
