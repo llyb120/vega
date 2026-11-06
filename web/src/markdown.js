@@ -4,6 +4,26 @@ const escape = (value) =>
   String(value).replace(/[&<>"]/g, (c) => ESCAPES[c]);
 
 const TOKEN = new RegExp(MARK + "(\\d+)" + MARK, "g");
+/** Chrome screenshot basename: <32-hex>[-n].webp or live-<tag>-n.webp */
+const SCREENSHOT_NAME = /^(?:[a-f\d]{32}(?:-\d+)?|live-[\w-]+)\.(?:webp|png|jpe?g)$/i;
+/** Delimiters around a standalone archive URL / screenshot name in report prose. */
+const BEFORE = "(^|[\\s：:，、,（【])";
+const AFTER = "(?=$|[\\s，。；！？、）】]|[.,;!?](?=\\s|$))";
+
+/** Task/session files directory as a web prefix, e.g. /api/files/employees/<id>/<taskId> */
+export function filesArchiveBase(employeeId, taskId) {
+  if (!employeeId || !taskId) return;
+  return `/api/files/employees/${encodeURIComponent(String(employeeId))}/${encodeURIComponent(String(taskId))}`;
+}
+
+/** Absolute or relative disk path under the files tree → /api/files/… */
+function archivePathURL(value) {
+  const normalized = String(value || "").replace(/\\/g, "/");
+  const match = normalized.match(/(?:^|\/)((?:employees|users|views)\/(?:[\w.-]+\/)+[\w.-]+\.(?:webp|png|jpe?g))$/i);
+  if (!match || /(^|\/)\.\.?(\/|$)/.test(match[1])) return;
+  return "/api/files/" + match[1].split("/").map(encodeURIComponent).join("/");
+}
+
 function imageURL(value) {
   // Prefer strict 32-hex archive ids (bare blob-… or prefixed); keep prefixed non-hex ids for fixtures/legacy.
   const hex = /^(?:\/api\/blobs\/|sqlite:blob\/)?(blob-[a-f\d]{32})$/i.exec(value);
@@ -12,6 +32,13 @@ function imageURL(value) {
   if (archived) return "/api/blobs/" + archived[1];
   // Archived Chrome screenshots (images[].url of a chrome result).
   if (/^\/api\/files\/(?:[\w.%-]+\/)*[\w.%-]+\.(?:webp|png|jpe?g)$/i.test(value) && !/(^|\/)\.\.?(\/|$)/.test(value.slice(11))) return value;
+  const fromPath = archivePathURL(value);
+  if (fromPath) return fromPath;
+  // Bare Chrome screenshot filename when the page knows the task/session files directory.
+  if (archiveBase && SCREENSHOT_NAME.test(value)) {
+    const base = String(archiveBase).replace(/\/+$/, "");
+    if (/^\/api\/files\/(?:[\w.%-]+\/)+[\w.%-]+$/i.test(base)) return `${base}/${encodeURIComponent(value)}`;
+  }
   if (/^data:image\/(?:png|jpeg|gif|webp|bmp|avif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value))
     return value;
   if (!/^https?:\/\//i.test(value) || /[\u0000-\u001f\u007f\\]/.test(value)) return;
@@ -26,13 +53,17 @@ function imageURL(value) {
  * user and per group). Employees the reader can open become links; `link: false` (users, other people's employees in
  * a group) renders a highlighted mention only.
  */
-let mentionPattern, mentionIds;
+let mentionPattern, mentionIds, archiveBase;
 function useMentions(people) {
   const named = (people || []).filter((p) => p?.id && String(p.name || "").trim());
   mentionIds = new Map(named.map((p) => [String(p.name).trim(), { id: String(p.id), link: p.link !== false }]));
   const names = [...mentionIds.keys()].sort((a, b) => b.length - a.length).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   // Longest name first, so "@测试牛马处理" finds 测试牛马; "@" right after a letter or digit (an email) does not count.
   mentionPattern = names.length ? new RegExp(`(^|[^\\p{L}\\p{N}_])@(${names.join("|")})`, "gu") : undefined;
+}
+
+function imgTag(url, alt = "存档图片") {
+  return `<img src="${escape(url)}" alt="${escape(alt)}" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
 }
 
 export function renderInline(text) {
@@ -53,10 +84,21 @@ export function renderInline(text) {
         return protect(`<img src="${escape(url)}" alt="${escape(alt)}"${title === undefined ? "" : ` title="${escape(title)}"`} loading="lazy" decoding="async" referrerpolicy="no-referrer">`, alt);
       },
     )
-    // Older task reports printed archive URLs instead of Markdown images.
+    // Older task reports printed archive URLs / Chrome screenshot names instead of Markdown images.
     .replace(
-      /(^|[\s：:])((?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32})(?=$|[\s，。；！？、]|[.,;!?](?=\s|$))/gi,
-      (_, prefix, url) => prefix + protect(`<img src="${escape(imageURL(url))}" alt="存档图片" loading="lazy" decoding="async" referrerpolicy="no-referrer">`, url),
+      new RegExp(
+        `${BEFORE}(` +
+          `(?:\\/api\\/blobs\\/|sqlite:blob\\/)?blob-[a-f\\d]{32}` +
+          `|\\/api\\/files\\/(?:[\\w.%-]+\\/)*[\\w.%-]+\\.(?:webp|png|jpe?g)` +
+          `|(?:[A-Za-z]:)?(?:\\/[\\w.-]+)+\\/(?:employees|users|views)\\/(?:[\\w.-]+\\/)+[\\w.-]+\\.(?:webp|png|jpe?g)` +
+          (archiveBase ? `|(?:[a-f\\d]{32}(?:-\\d+)?|live-[\\w-]+)\\.(?:webp|png|jpe?g)` : "") +
+        `)${AFTER}`,
+        "gi",
+      ),
+      (match, prefix, url) => {
+        const src = imageURL(url);
+        return src ? prefix + protect(imgTag(src), url) : match;
+      },
     )
     .replace(mentionPattern || /(?!)()()/gu, (match, prefix, name) => {
       const { id, link } = mentionIds.get(name);
@@ -95,7 +137,8 @@ function tableRow(line) {
 // upgrade to a full parser if richer message formatting is required.
 export function renderMarkdown(text, options = {}) {
   useMentions(options.mentions);
-  try { return renderBlocks(text); } finally { useMentions(); }
+  archiveBase = options.archiveBase || undefined;
+  try { return renderBlocks(text); } finally { useMentions(); archiveBase = undefined; }
 }
 function renderBlocks(text) {
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n"),

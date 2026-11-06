@@ -5,7 +5,8 @@ import MessageText from "./MessageText.vue";
 import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
 import { exportResult, exportTitleOf } from "./export-result.js";
-const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function });
+import { filesArchiveBase } from "./markdown.js";
+const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function, employeeId: String });
 const emit = defineEmits(["inspect", "back"]);
 const busy = ref(false), answer = ref(""), exportOpen = ref(false), exportError = ref(""), settleSelected = ref([]), settling = ref(false);
 const suggestions = computed(() => props.task.memorySuggestions || []);
@@ -33,11 +34,12 @@ const resumable = computed(() => ["failed", "stopped", "cancelled"].includes(pro
 const progress = computed(() => planProgress(props.task.plan));
 const stepIcon = { completed: "check", in_progress: "play", blocked: "alert" };
 const exportMarkdown = computed(() => String(props.task.result || props.task.completion || props.task.summary || "").trim());
+const archiveBase = computed(() => filesArchiveBase(props.employeeId, props.task?.id));
 const canExport = computed(() => !!exportMarkdown.value);
 async function runExport(format) {
   exportError.value = "";
   try {
-    await exportResult(format, { title: exportTitleOf(props.task.text), request: props.task.text, markdown: exportMarkdown.value });
+    await exportResult(format, { title: exportTitleOf(props.task.text), request: props.task.text, markdown: exportMarkdown.value, archiveBase: archiveBase.value });
     exportOpen.value = false;
   } catch (error) {
     exportError.value = error?.message || String(error);
@@ -78,8 +80,8 @@ async function run(action) {
 
     <section v-if="task.progress?.length" class="detail-section">
       <h3>最新进展</h3>
-      <MessageText class="progress-latest" :text="task.progress.at(-1).text" />
-      <details v-if="task.progress.length > 1" class="progress-history"><summary>全部进展（{{ task.progress.length }}）</summary><ol><li v-for="(item, i) in task.progress" :key="i"><MessageText :text="item.text" /></li></ol></details>
+      <MessageText class="progress-latest" :text="task.progress.at(-1).text" :archive-base="archiveBase" />
+      <details v-if="task.progress.length > 1" class="progress-history"><summary>全部进展（{{ task.progress.length }}）</summary><ol><li v-for="(item, i) in task.progress" :key="i"><MessageText :text="item.text" :archive-base="archiveBase" /></li></ol></details>
     </section>
 
     <section v-if="progress" class="detail-section">
@@ -104,7 +106,7 @@ async function run(action) {
         </div>
       </div>
       <p v-if="exportError" class="export-error" role="alert">{{ exportError }}</p>
-      <div class="result-box" :class="{ failed: task.status === 'failed' }"><MessageText :text="task.result" /></div>
+      <div class="result-box" :class="{ failed: task.status === 'failed' }"><MessageText :text="task.result" :archive-base="archiveBase" /></div>
     </section>
 
     <section v-if="!readonly && task.status === 'done' && suggestions.length && saveMemory" class="detail-section settle">

@@ -1662,6 +1662,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
           <EmployeeTasks
             v-if="employeeTab === 'tasks'"
             :key="selectedEmployee"
+            :employee-id="selectedEmployee"
             :active="activeTasks"
             :attention="attentionTasks"
             :history="historyTasks"

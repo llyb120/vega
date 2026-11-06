@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderMarkdown, renderInline } from "../web/src/markdown.js";
-import { toolCaption,
+import { renderMarkdown, renderInline, filesArchiveBase } from "../web/src/markdown.js";
+import { 
+  toolCaption,
+  master,
   formatDuration,
   formatTokens,
   groupTurns,
@@ -313,4 +315,37 @@ test("inline code is protected from formatting and plain digits survive", () => 
   );
   assert.equal(renderInline(""), "");
   assert.equal(renderMarkdown(null).html, "");
+});
+
+test("Chrome screenshot file URLs, disk paths and bare names render inline in employee reports", () => {
+  const first = "59dbfad813894d67afaf57644b977910-0.webp";
+  const second = "62d6c3d4bc2d4c15a7af3f14ef08a560-0.webp";
+  const third = "dcaa2f6aeb464eaa984ef9384e24d4eb-0.webp";
+  const filesUrl = `/api/files/employees/e1/t1/${first}`;
+  const disk = `/tmp/vega-files-abc/employees/e1/t1/${second}`;
+  const base = filesArchiveBase("e1", "t1");
+  assert.equal(base, "/api/files/employees/e1/t1");
+
+  // Full /api/files URL and absolute archive path need no task context.
+  assert.match(renderInline(`证据：${filesUrl}。`), /<img src="\/api\/files\/employees\/e1\/t1\/59dbfad813894d67afaf57644b977910-0\.webp"/);
+  assert.match(renderInline(`证据：${disk}。`), /<img src="\/api\/files\/employees\/e1\/t1\/62d6c3d4bc2d4c15a7af3f14ef08a560-0\.webp"/);
+
+  // Reports often wrap bare Chrome filenames in Chinese parentheses / enumeration commas.
+  const report = `已截图留底（${first}、${second}）；评论截图 ${third}，复查无回复。`;
+  const { html } = renderMarkdown(report, { archiveBase: base });
+  assert.equal((html.match(/<img /g) || []).length, 3);
+  assert(html.includes(`src="/api/files/employees/e1/t1/${first}"`));
+  assert(html.includes(`src="/api/files/employees/e1/t1/${second}"`));
+  assert(html.includes(`src="/api/files/employees/e1/t1/${third}"`));
+  assert(html.includes("已截图留底（") && html.includes("）；评论截图"));
+  assert.equal((renderMarkdown(`![证据](${first})`, { archiveBase: base }).html.match(/<img /g) || []).length, 1);
+  assert.equal((renderMarkdown(`留底（${first}）`).html.match(/<img /g) || []).length, 0, "bare names need the task files directory");
+  assert(!renderInline(`\`${first}\``).includes("<img"), "inline code stays literal");
+  for (const bad of ["photo.webp", "not-a-shot.png", first + ".txt", "prefix" + first])
+    assert.equal((renderMarkdown(bad, { archiveBase: base }).html.match(/<img /g) || []).length, 0, bad);
+});
+
+test("Chinese parentheses still expand bare blob archive ids", () => {
+  const bare = "blob-" + "c".repeat(32);
+  assert.match(renderInline(`留底（${bare}）`), new RegExp(`src="/api/blobs/${bare}"`));
 });

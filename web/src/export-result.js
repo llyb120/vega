@@ -72,8 +72,8 @@ function base64(bytes) {
  * The exported file is opened elsewhere (file://, mail, another browser) where the strict session cookie is not
  * sent, so linked archive images would break; the map holds a data: URI, or null when the image is unavailable.
  */
-export async function fetchArchivedImages(markdown, fetcher = fetch) {
-  const { html } = renderMarkdown(markdown || "");
+export async function fetchArchivedImages(markdown, fetcher = fetch, archiveBase) {
+  const { html } = renderMarkdown(markdown || "", { archiveBase });
   const paths = new Set([...html.matchAll(ARCHIVED_IMG)].map((m) => m[1].replace(/&amp;/g, "&")));
   const images = new Map();
   await Promise.all([...paths].map(async (path) => {
@@ -104,8 +104,8 @@ export function exportTitleOf(text, fallback = "任务结果") {
 }
 
 // Exports are static: collapsed code folds open (print would hide them) and archived images are inlined or absolute.
-function exportBody(markdown, images, base) {
-  const html = renderMarkdown(markdown || "").html.replace(/<details class="code-fold">/g, '<details class="code-fold" open>');
+function exportBody(markdown, images, base, archiveBase) {
+  const html = renderMarkdown(markdown || "", { archiveBase }).html.replace(/<details class="code-fold">/g, '<details class="code-fold" open>');
   return images ? inlineArchivedImages(html, images, base) : absoluteBlobSrc(html, base);
 }
 
@@ -113,14 +113,14 @@ function exportBody(markdown, images, base) {
  * title: a short heading; request: the task's original request (Markdown), shown as a quoted block under it;
  * images: from fetchArchivedImages, to embed archived images; without it they stay absolute links to this server.
  */
-export function buildResultHtmlDocument({ title, request, markdown, origin, images } = {}) {
+export function buildResultHtmlDocument({ title, request, markdown, origin, images, archiveBase } = {}) {
   const base = origin || (typeof location !== "undefined" ? location.origin : "");
   const heading = escapeXml(title || "任务结果");
   const asked = String(request || "").trim()
-    ? `<section class="request markdown-body"><div class="request-label">原始要求</div>${exportBody(request, images, base)}</section>`
+    ? `<section class="request markdown-body"><div class="request-label">原始要求</div>${exportBody(request, images, base, archiveBase)}</section>`
     : "";
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>${heading}</title><style>${PRINT_CSS}</style></head>` +
-    `<body><h1 class="doc-title">${heading}</h1>${asked}<main class="markdown-body">${exportBody(markdown, images, base)}</main></body></html>`;
+    `<body><h1 class="doc-title">${heading}</h1>${asked}<main class="markdown-body">${exportBody(markdown, images, base, archiveBase)}</main></body></html>`;
 }
 
 function downloadBlob(blob, filename) {
@@ -135,14 +135,14 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export async function downloadHtml({ title, request, markdown, filename } = {}) {
-  const doc = buildResultHtmlDocument({ title, request, markdown, images: await fetchArchivedImages(`${request || ""}\n\n${markdown || ""}`) });
+export async function downloadHtml({ title, request, markdown, filename, archiveBase } = {}) {
+  const doc = buildResultHtmlDocument({ title, request, markdown, archiveBase, images: await fetchArchivedImages(`${request || ""}\n\n${markdown || ""}`, fetch, archiveBase) });
   downloadBlob(new Blob([doc], { type: "text/html;charset=utf-8" }), (filename || exportBasename(title)) + ".html");
 }
 
-export async function printPdf({ title, request, markdown } = {}) {
+export async function printPdf({ title, request, markdown, archiveBase } = {}) {
   // Embedded images are already decoded when print runs; lazy archive links in a hidden frame may never load.
-  const doc = buildResultHtmlDocument({ title, request, markdown, images: await fetchArchivedImages(`${request || ""}\n\n${markdown || ""}`) });
+  const doc = buildResultHtmlDocument({ title, request, markdown, archiveBase, images: await fetchArchivedImages(`${request || ""}\n\n${markdown || ""}`, fetch, archiveBase) });
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
   Object.assign(frame.style, { position: "fixed", right: "0", bottom: "0", width: "0", height: "0", border: "0" });
@@ -286,8 +286,10 @@ function htmlToDocxParagraphs(markdown) {
           : /^\/api\/(?:blobs|files)\//.test(url) ? origin + url : url;
         return `${alt || "图片"}（${src}）`;
       })
-      .replace(/(^|[\s：:])((?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32})(?=$|[\s，。；！？、])/gi, (_, prefix, id) => {
-        const src = `${origin}/api/blobs/${id.replace(/^(?:\/api\/blobs\/|sqlite:blob\/)/, "")}`;
+      .replace(/(^|[\s：:，、,（【])((?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32}|\/api\/files\/(?:[\w.%-]+\/)*[\w.%-]+\.(?:webp|png|jpe?g))(?=$|[\s，。；！？、）】]|[.,;!?](?=\s|$))/gi, (_, prefix, id) => {
+        const src = /^(?:\/api\/blobs\/|sqlite:blob\/)?blob-/i.test(id)
+          ? `${origin}/api/blobs/${id.replace(/^(?:\/api\/blobs\/|sqlite:blob\/)/, "")}`
+          : origin + id;
         return `${prefix}${src}`;
       });
     paras.push(`<w:p><w:r><w:t xml:space="preserve">${escapeXml(withLinks)}</w:t></w:r></w:p>`);
@@ -323,10 +325,10 @@ export function downloadDocx({ title, request, markdown, filename } = {}) {
 }
 
 /** HTML and PDF fetch archived images first, so this returns a promise for every format. */
-export async function exportResult(format, { title, request, markdown } = {}) {
+export async function exportResult(format, { title, request, markdown, archiveBase } = {}) {
   const filename = exportBasename(title);
-  if (format === "html") return downloadHtml({ title, request, markdown, filename });
-  if (format === "pdf") return printPdf({ title, request, markdown });
+  if (format === "html") return downloadHtml({ title, request, markdown, filename, archiveBase });
+  if (format === "pdf") return printPdf({ title, request, markdown, archiveBase });
   if (format === "docx") return downloadDocx({ title, request, markdown, filename });
   if (format === "xlsx") return downloadXlsx({ title, markdown, filename });
   throw Error("不支持的导出格式");
