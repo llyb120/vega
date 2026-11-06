@@ -686,7 +686,7 @@ test("workspace leases distinguish execution devices and release transient comma
   } finally { employee.close(); await store.close(); }
 });
 
-test("employee browser copies bind only their authenticated private bridge; profiles and experience namespaces are separate", async () => {
+test("employee browser copies bind only their authenticated private bridge; profile path ids stay isolated at the store layer", async () => {
   const source = await readFile("extensions/nova-chrome/worker.js", "utf8");
   const worker = privateWorker(source, { port: 54321, token: "private-token" });
   assert.match(worker, /connect\("http:\/\/127\.0\.0\.1:54321"\)/);

@@ -208,6 +208,7 @@ export default defineEventHandler(async (event) => {
         check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认删除牛马及其任务、会话和浏览器登录数据");
         check(!employee.busy.size && !(state.chatSession && engine.active.has(state.chatSession)), 409, "牛马仍在执行，请先停止任务和当前对话，再删除牛马");
         await engine.removeEmployee(employee.employeeId, async () => {
+          // Shared owner browser stays; only drop a live keyed by this employee if any legacy entry exists.
           const live = app().employeeLives.get(employee.employeeId);
           if (live) { await live.close(); app().employeeLives.delete(employee.employeeId); }
         });
@@ -257,14 +258,15 @@ export default defineEventHandler(async (event) => {
       }
       if (path[2] === "chrome") {
         check(await employee.manageable(user), 403, "只有牛马管理者可以查看和控制浏览器登录环境");
+        const profileKey = engine.browserProfileKey(state.ownerId);
         if (method === "POST" && a.operation === "close") {
           check(!employee.busy.size, 409, "Stop browser tasks first");
-          const live = app().employeeLives.get(employee.employeeId);
-          if (live) { await live.close(); app().employeeLives.delete(employee.employeeId); }
-          await engine.browsers.stop(employee.employeeId);
+          const live = app().employeeLives.get(profileKey);
+          if (live) { await live.close(); app().employeeLives.delete(profileKey); }
+          await engine.browsers.stop(profileKey);
           return { ok: true };
         }
-        const browser = await engine.browsers.get(employee.employeeId);
+        const browser = await engine.browsers.get(profileKey);
         check(!employee.deleting, 409, "牛马正在删除，请稍候");
         if (path[3] === "tabs" && method === "GET") return browserTabs(browser);
         if (path[3] === "live" && method === "POST") return (await employeeLive(employee.employeeId)).ticket(who, a.tabTag);
@@ -565,7 +567,7 @@ export default defineEventHandler(async (event) => {
     }
     if (path[0] === "chrome") {
       const cloud = cloudFor({ ownerId: user.id });
-      const browser = cloud ? await engine.browsers.get("user_" + user.id) : engine.chrome;
+      const browser = cloud ? await engine.browsers.get(engine.browserProfileKey(user.id)) : engine.chrome;
       if (path.length === 2 && path[1] === "tabs" && method === "GET")
         return browserTabs(browser);
       if (path.length === 2 && path[1] === "screenshot" && method === "POST") {
@@ -589,7 +591,7 @@ export default defineEventHandler(async (event) => {
       if (path[1] === "tool")
         return browser.execute("browser-view:" + user.id, cloud ? await cloud.cwd(a.cwd) : a.cwd || process.cwd(), a);
       if (a.operation === "close") {
-        if (cloud) await engine.browsers.stop("user_" + user.id);
+        if (cloud) await engine.browsers.stop(engine.browserProfileKey(user.id));
         else browser.bridge.close();
         return { ok: true };
       }
