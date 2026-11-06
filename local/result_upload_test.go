@@ -189,13 +189,13 @@ func TestLargeResultFallsBackToSocketWhenUploadFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{}), context: ctx}
-	connection := agent.startConnection(ServerCredential{Origin: backend.URL, UserID: "alice"}, token)
-	if connection == nil {
+	if agent.startConnection(ServerCredential{Origin: backend.URL, UserID: "alice"}, token) == nil {
 		t.Fatal("connection did not start")
 	}
 	peer := receive(t, accepted)
 	dir := t.TempDir()
-	content := strings.Repeat("v", 300<<10) // > inlineResultLimit once wrapped as a result
+	// >1 MiB raw so the marshaled result exceeds inlineResultLimit and must attempt HTTP upload.
+	content := strings.Repeat("v", 2<<20)
 	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -206,9 +206,14 @@ func TestLargeResultFallsBackToSocketWhenUploadFails(t *testing.T) {
 	select {
 	case got := <-inline:
 		if got["id"] != id {
-			t.Fatalf("expected socket fallback for %s, got %v", id, got["id"])
+			t.Fatalf("expected socket settlement for %s, got %v", id, got["id"])
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("failed upload did not fall back to the WebSocket; server would time out while the link stays healthy")
+		result, _ := got["result"].(map[string]any)
+		errText, _ := result["error"].(string)
+		if errText == "" || !strings.Contains(errText, "upload failed") {
+			t.Fatalf("oversize failed uploads must settle with a small error, not the full body: %v", got["result"])
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("failed upload did not settle on the WebSocket; server would time out while the link stays healthy")
 	}
 }

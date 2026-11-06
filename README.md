@@ -66,6 +66,8 @@ MySQL 需要 **8.0.19 及以上**（不支持 MariaDB），数据库须事先创
 
 - WebSocket读超时不低于75秒（nginx `proxy_read_timeout 120s; proxy_send_timeout 120s;`），且不要缓冲WebSocket；
 - `client_max_body_size 90m`（聊天附件上限）以上，`/api/local-agent/result`的请求体可达48MB；
+- 客户端 Origin 必须与实际上传 URL 同方案同主机（`http`≠`https`）：客户端**不跟随**跨站/升格重定向；若网站强制 HTTPS，配对 Origin 也须是 `https://…`，否则大结果上传会得到 301/302 并在「连接仍正常」下表现为浏览器操作超时；
+- 反代须原样转发 `Authorization` 与 `X-Vega-Instance`；不要给该 POST 加浏览器 Origin（原生客户端鉴权要求无 Origin、无 query）；
 - 服务端已对超过2KB、且浏览器接受gzip的JSON接口响应做gzip（会话历史一般压缩到1/3以下，1200条的历史约2.0MB→0.6MB），反代无需再压缩`/api`；若反代也开启gzip，已带`Content-Encoding`的响应会被跳过；
 - 每个账号最多同时保持12个实时事件连接（多开标签页/设备合计），超出的新连接收到4429并在30秒后重试；无响应的僵尸连接会在下一次心跳时被清理。
 

@@ -145,10 +145,10 @@ export class LocalAgents {
     const id = randomUUID();
     return new Promise<Obj>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined, sent = false, settled = false, recovered = false;
-      // Browser: Nova pickup ≤30s + CDP budget ≤10s, plus margin for slow pages (Tapd etc.).
+      // Browser: Nova pickup ≤30s + CDP budget ≤10s, plus margin for slow pages and occasional large-result HTTP upload (Tapd etc.).
       // A too-tight budget used to fire this timer while the socket was healthy, suspend the client
       // as if the link dropped, then surface LocalAgentUnavailable — even when the page later loaded.
-      let remaining = op === "exec" ? (args.timeout + 15) * 1000 : op === "browser" ? 120000 : 30000, deadline = 0;
+      let remaining = op === "exec" ? (args.timeout + 15) * 1000 : op === "browser" ? 180000 : 30000, deadline = 0;
       const finish = (error?: Error, value?: Obj) => {
         if (settled) return;
         settled = true;
