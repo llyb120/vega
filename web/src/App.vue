@@ -552,6 +552,8 @@ function openEventSocket(url, generation) {
       return;
     }
     if (value.type === "error") {
+      // Protocol noise (e.g. unknown frames on an older server) is not actionable for the user.
+      if (/只接收订阅与心跳/.test(value.reason || "")) return;
       error.value = value.reason;
       return;
     }

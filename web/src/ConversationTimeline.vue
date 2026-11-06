@@ -5,7 +5,7 @@ import UserMessage from "./UserMessage.vue";
 import TurnProcess from "./TurnProcess.vue";
 import ToolSteps from "./ToolSteps.vue";
 import FileCard from "./FileCard.vue";
-import { conversationTurns } from "./conversation";
+import { conversationTurns, toolCaption } from "./conversation";
 const props = defineProps({
   messages: { type: Array, default: () => [] },
   running: Boolean,
@@ -31,7 +31,7 @@ const turns = computed((previous) => conversationTurns(props.messages, { running
         <article v-else :class="['message', entry.message.role, { continuation: entry.continuation }]">
           <MessageText v-if="entry.message.text" :text="entry.message.displayText || entry.message.text" :streaming="entry.message.streaming" />
           <img v-for="(image, n) in entry.message.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="助手附图" />
-          <div v-if="entry.message.calls?.length && turn.process[i + 1]?.kind !== 'process'" class="calls"><span v-for="call in entry.message.calls" :key="call.id">↳ {{ call.name }}</span></div>
+          <div v-if="entry.message.calls?.length && turn.process[i + 1]?.kind !== 'process'" class="calls"><span v-for="call in entry.message.calls" :key="call.id" :title="toolCaption(call)">↳ {{ toolCaption(call) }}</span></div>
         </article>
       </template>
     </TurnProcess>

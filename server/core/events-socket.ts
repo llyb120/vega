@@ -173,8 +173,8 @@ export class EventsSocket {
       assert(raw.length <= 8192, "消息过大");
       const value = JSON.parse(raw);
       if (value?.type === "ping") return session.send({ type: "pong", epoch: this.epoch, seq: this.seq });
-      assert(value?.type === "subscribe", "实时通道只接收订阅与心跳");
-      session.subscribe(value.sessions);
+      if (value?.type === "subscribe") return session.subscribe(value.sessions);
+      // Unknown client frames are ignored: this channel is subscribe/heartbeat only.
     } catch (e: any) {
       session.send({ type: "error", reason: e.message });
     }

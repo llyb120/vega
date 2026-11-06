@@ -49,8 +49,10 @@ test("events WebSocket authenticates one-use tickets, filters events and only ac
   await settle();
   assert(!first.sent.some((v) => v.type === "private"));
   assert(first.sent.some((v) => v.type === "public" && v.seq > 0));
+  const beforeNoise = first.sent.length;
   f.hub.message(first.peer as any, JSON.stringify({ type: "request", id: "00000001", method: "POST", path: "/sessions" }));
-  assert.match(first.sent.at(-1).reason, /只接收订阅/);
+  assert.equal(first.sent.length, beforeNoise, "unknown client frames are ignored without an error toast");
+  assert(!first.sent.some((v) => /只接收订阅/.test(v.reason || "")));
   f.auth.events.emit("logout", "other-hash");
   assert.equal(f.hub.sessions.size, 0);
   assert(first.sent.some((v) => v.type === "closed" && v.code === 4401));

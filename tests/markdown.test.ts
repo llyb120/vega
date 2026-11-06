@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { renderMarkdown, renderInline, filesArchiveBase } from "../web/src/markdown.js";
-import {
+import { 
+  toolCaption,
+  master,
   formatDuration,
   formatTokens,
   groupTurns,
@@ -114,6 +116,21 @@ test("unconfirmed tool calls remain in their process group rather than blank ass
   assert.equal(completed.length, 1);
   assert(!completed[0].items.some((item: any) => item.pending));
   assert.equal(processSummary(completed[0].items), "读取文件 ×1、修改文件 ×1");
+});
+
+test("tool captions surface bash commands and key args instead of bare tool names", () => {
+  assert.equal(toolCaption({ name: "bash", arguments: { command: "git branch -a" } }), "git branch -a");
+  assert.equal(toolCaption({ name: "bash", arguments: { command: "echo one\necho two" } }), "echo one");
+  assert.equal(toolCaption({ name: "bash" }), "bash");
+  assert.equal(toolCaption({ name: "read", arguments: { path: "src/App.vue" } }), "read · src/App.vue");
+  assert.match(toolCaption({ name: "bash", arguments: { command: "x".repeat(200) } }), /…$/);
+  const messages = [
+    { role: "assistant", seq: 1, calls: [{ id: "c1", name: "bash", arguments: { command: "rg SourcesConfig" } }] },
+    { role: "tool", seq: 2, callId: "c1", name: "bash", text: "hit" },
+  ];
+  const items = timelineOf(messages)[0].items;
+  assert.equal(items[0].arguments.command, "rg SourcesConfig");
+  assert.deepEqual(processLiveLines(items), ["已完成 · rg SourcesConfig"]);
 });
 
 test("process folds use Nova summaries, live previews and measured turn usage", () => {
