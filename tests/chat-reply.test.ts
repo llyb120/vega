@@ -19,7 +19,7 @@ async function fixture() {
   return { store, engine, employee, chat };
 }
 
-test("text written alongside a task dispatch reaches the chat at once; the new task card rides once on the next text", async () => {
+test("text written alongside a task dispatch reaches the chat at once; create success announces the card immediately", async () => {
   const { store, engine, chat } = await fixture();
   const visibleAtEnd: string[][] = [];
   engine.events.on("event", async (event) => {
@@ -27,7 +27,7 @@ test("text written alongside a task dispatch reaches the chat at once; the new t
   });
   const replies = [
     { role: "assistant", text: "收到，我安排一条只读调查。", calls: [{ id: "assign", ...employeeCall({ action: "add", kind: "todo", text: "Investigate endpoint" }) }] },
-    { role: "assistant", text: "已安排，有结果第一时间告诉你。", calls: [{ id: "status", name: "employee_status", arguments: {} }] },
+    { role: "assistant", text: "有结果第一时间告诉你。", calls: [{ id: "status", name: "employee_status", arguments: {} }] },
     { role: "assistant", text: "另外记下了你的偏好。" },
   ];
   let calls = 0;
@@ -36,12 +36,16 @@ test("text written alongside a task dispatch reaches the chat at once; the new t
     await engine.run(chat.id, { role: "user", text: "查一下接口地址" });
     assert.deepEqual(visibleAtEnd[0], ["查一下接口地址", "收到，我安排一条只读调查。"], "the first sentence is visible before the tool even runs");
     const shown = employeeChatMessages(await store.messages(chat.id));
-    assert.deepEqual(shown.map((m: any) => m.text), ["查一下接口地址", "收到，我安排一条只读调查。", "已安排，有结果第一时间告诉你。", "另外记下了你的偏好。"]);
-    assert.deepEqual(shown.map((m: any) => m.tasks?.length || 0), [0, 0, 1, 0], "the card is attached once, to the first text after the task exists");
+    assert.equal(shown.length, 5);
+    assert.deepEqual(shown.map((m: any) => m.text).slice(0, 2), ["查一下接口地址", "收到，我安排一条只读调查。"]);
+    assert.match(shown[2].text, /^已安排任务 /);
+    assert.match(shown[2].text, /Investigate endpoint/);
+    assert.deepEqual(shown.map((m: any) => m.tasks?.length || 0), [0, 0, 1, 0, 0], "the card is attached once, on the immediate announce after create");
+    assert.deepEqual(shown.slice(3).map((m: any) => m.text), ["有结果第一时间告诉你。", "另外记下了你的偏好。"]);
   } finally { await engine.close(); await store.close(); }
 });
 
-test("a dispatch without any following text still puts the card on the final reply", async () => {
+test("a dispatch without any following text still announces the card right after create", async () => {
   const { store, engine, chat } = await fixture();
   let calls = 0;
   engine.providers.chat = async () => (calls++ === 0
@@ -49,7 +53,9 @@ test("a dispatch without any following text still puts the card on the final rep
     : { role: "assistant", text: "" }) as any;
   try {
     await engine.run(chat.id, { role: "user", text: "查一下" });
-    assert.equal((await store.messages(chat.id)).at(-1)?.tasks?.length, 1);
+    const withCard = (await store.messages(chat.id)).filter((m) => m.tasks?.length);
+    assert.equal(withCard.length, 1);
+    assert.match(withCard[0].text || "", /^已安排任务 /);
   } finally { await engine.close(); await store.close(); }
 });
 

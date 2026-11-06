@@ -48,7 +48,7 @@ test("chat stop aborts both execution sessions and confirms termination without 
     engine.active.set(unrelated.id, { control: other, steer: [] });
     const definition = (await tools.definitions({} as any)).find((tool) => tool.name === "employee_task_manage")!;
     assert(JSON.stringify(definition.parameters).includes('"stop"'));
-    assert(EMPLOYEE_CHAT_RULES.includes("不能用resume") && definition.description.includes("executionStopped"));
+    assert(EMPLOYEE_CHAT_RULES.includes("不能用resume") && EMPLOYEE_CHAT_RULES.includes("直接用employee_task_create") && definition.description.includes("executionStopped"));
     const result = await stop();
     assert(controls.every((control) => control.signal.aborted));
     assert.equal(other.signal.aborted, false);
