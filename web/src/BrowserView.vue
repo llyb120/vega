@@ -114,6 +114,10 @@ function loadedImage() {
   if (!screenshot.value || socket?.readyState !== WebSocket.OPEN) return;
   imageReady.value = true;
   shownFrame = screenshot.value;
+  if (/画面已过期|网页或视口已变化/.test(error.value) || /画面已过期|网页或视口已变化|请等待实时画面/.test(info.value)) {
+    error.value = "";
+    info.value = "";
+  }
   socket.send(
     JSON.stringify({ type: "frame_ack", frameId: screenshot.value.frameId }),
   );
@@ -435,7 +439,16 @@ function inputResult(value) {
     inflight = 0;
   }
   if (value.status !== "executed") {
+    const soft = /画面已过期|网页或视口已变化/.test(value.reason || "");
     resetInput();
+    if (soft) {
+      // Transient freshness: keep control, soft notice, force a full next frame so the user can retry.
+      error.value = "";
+      info.value = value.reason || "请等待实时画面更新";
+      if (socket?.readyState === WebSocket.OPEN)
+        socket.send(JSON.stringify({ type: "frame_ack", frameId: shownFrame?.frameId || 0, resend: true }));
+      return;
+    }
     error.value = (value.status === "needs_review" ? "结果不确定，不要重复提交：" : "未执行：") + (value.reason || "请核对网页");
     if (stream || drag) releaseControl();
     return;

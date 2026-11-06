@@ -158,6 +158,15 @@ test("employee task creation never asks users to choose the initial model", () =
   assert(scenes.includes("沟通与任务起步") && scenes.includes("实际进入编码工作时才升级"));
 });
 
+test("work panel attention cards summarize long briefs and leave full detail to the opened task", () => {
+  const panel = readFileSync("web/src/WorkPanel.vue", "utf8");
+  assert(panel.includes("function brief(") && panel.includes("brief(task.text)"), "titles must be summarized");
+  assert(panel.includes("brief(task.status === 'approval' ? task.approval : task.waiting"), "approval/waiting bodies must be summarized");
+  assert(panel.includes('查看详情') && panel.includes("emit('open', task.id)"), "users open the task for the full brief");
+  assert(panel.includes("-webkit-line-clamp: 2") && panel.includes("-webkit-line-clamp: 3"), "CSS clamps keep cards scannable");
+  assert(!panel.match(/attention-text[^}]*white-space:\s*pre-wrap/), "pre-wrap would expand the whole brief in the panel");
+});
+
 test("ordinary users have no history/session dispatch navigation and task approvals have explicit reject and approve actions", () => {
   const sidebar = readFileSync("web/src/AppSidebar.vue", "utf8");
   const nav = sidebar.slice(sidebar.indexOf('aria-label="主导航"'), sidebar.indexOf("</nav>"));

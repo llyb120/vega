@@ -537,8 +537,8 @@ test("a held touch can start from its displayed frame after stream repaints with
   f.state.stamp = "changed during hold";
   assert.equal((await input("down")).status, "not_executed");
   f.state.stamp = "viewport";
-  starting.at = Date.now() - 4000;
-  assert.equal((await input("down")).status, "not_executed", "the original three-second freshness limit still applies");
+  starting.at = Date.now() - 11000;
+  assert.equal((await input("down")).status, "not_executed", "the input freshness window still applies");
   assert.equal(f.calls.filter(c => c.params?.type === "mousePressed").length, presses);
   for (let i = 0; i < 40; i++) {
     session.pendingFrame = { ...starting, id: 1000 + i, at: Date.now() };
@@ -547,6 +547,18 @@ test("a held touch can start from its displayed frame after stream repaints with
   assert.equal(session.acknowledged.size, 32, "frame metadata retention stays bounded");
   assert(!session.acknowledged.has(frame.frameId));
 });
+test("live input still accepts an acknowledged frame within the ten-second freshness window", async () => {
+  const f = await fixture(), s = await f.open();
+  const frame = await s.wait("frame");
+  await s.message({ type: "mode", mode: "control" });
+  await s.wait("mode", m => m.mode === "control");
+  const session = f.hub.sessions.get(s.socket.id)!;
+  const held = session.acknowledged.get(frame.frameId)!;
+  held.at = Date.now() - 8000;
+  await s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "press", key: "Enter" } });
+  assert.equal((await s.wait("input_result", m => m.seq === 1)).status, "executed");
+});
+
 test("live drag retains its accepted frame across scroll, expiry and acknowledgement eviction", async () => {
   const f = await fixture(), s = await f.open();
   const frame = await s.wait("frame");
@@ -560,7 +572,7 @@ test("live drag retains its accepted frame across scroll, expiry and acknowledge
   };
   assert.equal((await input("down")).status, "executed");
   const accepted = session.acknowledged.get(frame.frameId)!;
-  accepted.at = Date.now() - 4000;
+  accepted.at = Date.now() - 11000;
   session.acknowledged.clear();
   f.state.stamp = "scrolled while dragging";
   assert.equal((await input("move")).status, "executed");

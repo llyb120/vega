@@ -25,6 +25,8 @@ const stateExpression =
 // An unchanged screen is sent as a tiny "same" frame (fresh state, no image), and a page that has been still
 // for a while with no input is sampled at 2 fps instead of 10.
 const ACTIVE_MS = 100, IDLE_MS = 500, IDLE_AFTER = 2000;
+// Keep acknowledged frames long enough for local-agent CDP + WS + decode latency; page stamp still guards real changes.
+const FRAME_HOLD_MS = 10000;
 export class BrowserLive {
   tickets = new Map<string, Ticket>();
   sessions = new Map<string, LiveSession>();
@@ -331,9 +333,9 @@ class LiveSession {
       if (this.pendingFrame && this.pendingFrame.id === message.frameId) {
         this.presented = this.pendingFrame;
         this.acknowledged.set(this.presented.id, this.presented);
-        // Keep starting frames through a touch hold, within the existing three-second input window.
+        // Keep starting frames through a touch hold, within the input freshness window.
         for (const [id, frame] of this.acknowledged)
-          if (this.acknowledged.size > 32 || Date.now() - frame.at > 3000)
+          if (this.acknowledged.size > 32 || Date.now() - frame.at > FRAME_HOLD_MS)
             this.acknowledged.delete(id);
         this.pendingFrame = undefined;
       }
@@ -480,7 +482,7 @@ class LiveSession {
       assert(
         frame &&
           frame.id === message.frameId &&
-          (drag || Date.now() - frame.at < 3000),
+          (drag || Date.now() - frame.at < FRAME_HOLD_MS),
         "画面已过期，请等待实时画面更新",
       );
       const state = await this.pageState();
