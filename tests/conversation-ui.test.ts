@@ -138,6 +138,23 @@ test("message_end shows the persisted message (text with tool calls) once, while
   assert.equal(state.running.value, true, "typing dots stay for the rest of the turn");
 });
 
+
+test("remote user message appears when the user event arrives (cross-tab / cross-device)", async () => {
+  const remote = { seq: 2, role: "user", text: "我在另一台设备说的" };
+  const api = async (path: string) => path.includes("after=")
+    ? { session: { id: "s" }, messages: [remote], running: true }
+    : { session: { id: "s" }, messages: [{ seq: 1, role: "user", text: "earlier" }], running: false };
+  const state = mount(api);
+  await state.refresh();
+  assert.deepEqual(texts(state), ["earlier"]);
+  state.handleEvent({ type: "started" });
+  state.handleEvent({ type: "user" });
+  await tick(40);
+  await nextTick();
+  assert.deepEqual(texts(state), ["earlier", "我在另一台设备说的"], "user event refreshes history before the reply");
+  assert.equal(state.running.value, true, "typing dots stay while the turn continues");
+});
+
 test("a reply appears when the persisted message is merged", async () => {
   const state = mount(async () => ({ session: { id: "s" }, messages: [{ seq: 1, role: "assistant", text: "已核对" }], running: true }));
   state.handleEvent({ type: "started" });

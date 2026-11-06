@@ -1032,6 +1032,8 @@ function handleEvent(event) {
   if (view.value === "debug" && ["started", "message_end", "tool_end", "done", "employee_changed"].includes(event.type)) debugRevision.value++;
   if (event.session && event.session === employee.value.chatSession) {
     employeeEvent.value = event;
+    // Belt-and-suspenders: a shared `event` ref can collapse under batched watchers; revision always refreshes.
+    if (["user", "steer"].includes(event.type)) employeeSessionVersion.value++;
     unread.onEvent(event);
     return;
   }
@@ -1093,7 +1095,7 @@ function handleEvent(event) {
   }
   if (event.taskId) {
     if (
-      ["started", "message_end", "compacted", "error", "done"].includes(
+      ["started", "message_end", "compacted", "error", "done", "user", "steer"].includes(
         event.type,
       )
     ) {
@@ -1163,6 +1165,15 @@ function handleEvent(event) {
     case "scene":
       toast(`当前场景：${event.data.scene} · ${event.data.model || ""}`);
       break;
+    case "user":
+    case "steer": {
+      // Another tab/device persisted the user's message: pull it in before the reply streams.
+      const follow = nearBottom();
+      background(refreshCurrentSoon().then(() => {
+        if (follow && selectedNow(event.session)) return scrollBottom();
+      }));
+      break;
+    }
     case "message_end":
     case "compacted": {
       // The streamed text stays until the stored message replaces it, unless a new message started meanwhile.

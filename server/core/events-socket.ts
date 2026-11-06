@@ -31,7 +31,8 @@ export function publicEvent(e: Obj): Obj | undefined {
   if (e.type === "tool_progress") return;
   if (e.type === "tool_end")
     return { ...e, data: { call: { id: e.data?.call?.id, name: e.data?.call?.name }, outcome: { error: !!e.data?.outcome?.error } } };
-  if (e.type === "message_end") {
+  // Lifecycle signals only: the page fetches the persisted message over HTTP (same as message_end).
+  if (e.type === "message_end" || e.type === "user" || e.type === "steer") {
     const { data, ...rest } = e;
     return rest;
   }

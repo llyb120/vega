@@ -79,6 +79,17 @@ test("token streams go only to subscribers while lifecycle events reach every pe
     assert.equal(page.sent.find((v) => v.type === "message_end").data, undefined);
     assert(!page.sent.some((v) => v.type === "tool_progress"));
   }
+  emit(f, { type: "user", session: "s1", data: { role: "user", text: "from phone", seq: 9 } });
+  emit(f, { type: "steer", session: "s1", data: { role: "user", text: "steer in", seq: 10 } });
+  await sleep(20);
+  for (const page of [watching, elsewhere]) {
+    const user = page.sent.find((v) => v.type === "user");
+    const steer = page.sent.find((v) => v.type === "steer");
+    assert.ok(user, "user lifecycle reaches every permitted page");
+    assert.equal(user.data, undefined, "user payload is fetched over HTTP");
+    assert.ok(steer);
+    assert.equal(steer.data, undefined);
+  }
   // Re-subscribing moves the stream without reconnecting.
   f.hub.message(elsewhere.peer as any, JSON.stringify({ type: "subscribe", sessions: ["s1"] }));
   f.hub.message(watching.peer as any, JSON.stringify({ type: "subscribe", sessions: [] }));
