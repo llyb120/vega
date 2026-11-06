@@ -235,9 +235,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       { checkpoint: str("恢复点，1–8000 字", { minLength: 1, maxLength: 8000 }), resumeAt: beijing("续做时间"), delayMinutes: int("多少分钟后续做，1–10080", { minimum: 1, maximum: 10080 }) },
       ["checkpoint"]));
     if (!ctx.computer) {
-      out.push(tool("task_relay_computer",
-        "把网页工作交给本任务隔离的电脑会话（会新开会话，较慢）：一般优先用同会话 switch_scene(scene=computer)。仅在需要与主会话完全隔离时用本工具；handoff 写清操作、授权、已完成项、页面位置与完成标准，不写凭据。立即结束本轮；电脑会话做完后结果交回。必须单独调用。",
-        { handoff: str("交接内容，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["handoff"]));
+      // Browser work uses same-session switch_scene(scene=computer); isolated task_relay_computer is retired.
       out.push(tool("task_complete",
         "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求（若只剩末步仍为 in_progress，系统会在交付时自动收尾）。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 可省略（系统选用最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接，没有单独正文传 []。成功后立即结束本轮。必须单独调用。",
         { evidence: str("实际结果与验证证据，1–8000 字", { minLength: 1, maxLength: 8000 }),

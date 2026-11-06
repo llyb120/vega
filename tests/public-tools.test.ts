@@ -110,8 +110,7 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["task_request_approval", { request: "pay" }, { action: "ask", text: "pay" }, task],
     ["task_ask_user", { question: "code?" }, { action: "help", text: "code?" }, task],
     ["task_wait", { checkpoint: "job 1", delayMinutes: 5 }, { action: "defer", text: "job 1", nextCheckInMinutes: 5 }, task],
-    ["task_relay_computer", { handoff: "open page" }, { action: "relay", scene: "computer", text: "open page" }, task],
-    ["task_complete", { evidence: "ok", deliverableRefs: [] }, { action: "complete", text: "ok", deliverableRef: [] }, task],
+        ["task_complete", { evidence: "ok", deliverableRefs: [] }, { action: "complete", text: "ok", deliverableRef: [] }, task],
     ["memory_propose", { claim: "c", memoryKind: "convention" }, { action: "memory_propose", claim: "c", memoryKind: "convention" }, chat],
     ["memory_propose", { claim: "c", pinned: true, memoryKind: null }, { action: "memory_propose", claim: "c", pinned: true }, chat],
     ["memory_manage", { request: { command: "feedback", memoryId: "a", signal: "correction", claim: "new" } }, { action: "memory_resolve", resolveAction: "feedback", id: "a", signal: "correction", claim: "new" }, chat],
@@ -151,7 +150,7 @@ test("branch errors name the field and the chosen branch's structure", () => {
   assert.throws(() => map("employee_duty_create", { instructions: "x", trigger: { kind: "daily", times: ["9:00"] } }), /times/);
   assert.throws(() => map("employee_duty_create", { instructions: "x", trigger: { kind: "interval", everyMinutes: 30, times: ["09:00"] } }), /不接受字段 times/);
   assert.throws(() => map("employee_task_create", { instructions: "x", profile: "computer" }), /profile/);
-  assert.throws(() => map("employee_task_create", { instructions: "x", profile: "电脑" }), /profile/, "computer work goes through task_relay_computer, as before");
+  assert.throws(() => map("employee_task_create", { instructions: "x", profile: "电脑" }), /profile/, "computer work uses switch_scene, not a task profile");
   assert.throws(() => map("employee_task_manage", { taskId: "t1", request: { command: "update" } }), /至少要改一项/);
   assert.throws(() => map("employee_duty_manage", { dutyId: "d1", request: { command: "update", note: null } }), /至少要改一项/);
   assert.throws(() => map("employee_task_manage", { taskId: "t1", request: { command: "update", runAt: "2030-01-01 09:00", delayMinutes: 5 } }), /恰好填一个/);
@@ -201,9 +200,9 @@ test("visible tools and branches follow session, scene and permission like the o
   assert(!names({ kind: "chat", member: true }).includes("memory_propose"), "group guest has no memory tools");
   assert(!/update|set_instructions|set_profile|reschedule|cancel/.test(commands({ kind: "chat", member: true }, "employee_task_manage")));
   const main = names({ kind: "task", dutyCommands: [] });
-  assert.deepEqual(main, ["employee_status", "employee_task_create", "memory_manage", "memory_propose", "memory_search", "task_ask_user", "task_complete", "task_progress", "task_relay_computer", "task_request_approval", "task_reschedule", "task_wait", "vault_get", "vault_list"]);
+  assert.deepEqual(main, ["employee_status", "employee_task_create", "memory_manage", "memory_propose", "memory_search", "task_ask_user", "task_complete", "task_progress", "task_request_approval", "task_reschedule", "task_wait", "vault_get", "vault_list"]);
   const computer = names({ kind: "task", computer: true, dutyCommands: [] });
-  assert(!computer.includes("task_relay_computer") && !computer.includes("task_complete"));
+  assert(!computer.includes("task_relay_computer") && !computer.includes("task_complete") && !main.includes("task_relay_computer"));
   assert.equal(commands({ kind: "task", dutyCommands: ["disable"] }, "employee_duty_manage"), '"enum":["disable"]', "fixed duty: a task may only disable its own duty");
   assert(commands({ kind: "task", dutyCommands: ["schedule_next", "disable"] }, "employee_duty_manage").includes("schedule_next"));
   for (const name of ["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete"]) assert(STANDALONE_TOOLS.has(name));
