@@ -100,11 +100,17 @@ export function normalizeAction(raw: Obj) {
           (Number.isInteger(a.delta_x) && Math.abs(a.delta_x) <= 1200)),
       "Scroll exceeds1200 pixels",
     );
-  if (["click_at", "move", "drag", "pointer", "scroll_at"].includes(kind))
-    for (const key of kind === "drag" ? ["x", "y", "to_x", "to_y"] : ["x", "y"])
-      assert(Number.isFinite(a[key]) && a[key] >= 0, "Invalid coordinates");
   if (kind === "pointer")
     assert(["down", "move", "up"].includes(a.phase), "pointer.phase must be down, move or up");
+  if (["click_at", "move", "drag", "pointer", "scroll_at"].includes(kind)) {
+    // pointer.up may omit x/y to release at the held point (captcha UIs often refresh between segments).
+    const keys =
+      kind === "drag" ? ["x", "y", "to_x", "to_y"]
+      : kind === "pointer" && a.phase === "up" && a.x === undefined && a.y === undefined ? []
+      : ["x", "y"];
+    for (const key of keys)
+      assert(Number.isFinite(a[key]) && a[key] >= 0, "Invalid coordinates");
+  }
   if ((kind === "drag" || kind === "pointer") && a.duration_ms !== undefined)
     assert(
       Number.isInteger(a.duration_ms) &&
