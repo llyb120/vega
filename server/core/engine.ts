@@ -96,7 +96,7 @@ export class Engine {
   events = new EventEmitter();
   active = new Map<
     string,
-    { control: AbortController; steer: Message[]; context?: Context; modelWait?: AbortController }
+    { control: AbortController; steer: Message[]; context?: Context }
   >();
   private chatSubmissions = new Map<string, { message: Message; done: Promise<void> }>();
   redactors = new Map<string, Redactor>();
@@ -347,9 +347,6 @@ export class Engine {
     assert(run, "Session not running");
     assert(run.steer.length < 16, "Steer queue full");
     run.steer.push({ ...m, role: "user" });
-    // Interrupt a waiting model request so the new guidance applies on the next turn.
-    // Tool batches keep running to completion: modelWait is only set around providers.chat.
-    run.modelWait?.abort(Error("Steered by user"));
   }
   async submitChat(session: string, message: Message) {
     const send = async () => {
@@ -821,42 +818,32 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
         }
 
-        // Steer that arrived during compact/prep: inject before starting another model wait.
+        // Steer that arrived during compact/prep: inject before the next model request.
         if (state.steer.length) continue;
         let reply: Message | undefined;
         let outputRecovery: Model | undefined,
           outputRecovered = false,
           emptyRecovered = false;
-        let steered = false;
         for (let attempt = 0; attempt <= 5; attempt++) {
           emit("message_start", {
             model: model.selection,
             scene: session.scene,
             attempt,
           });
-          const modelWait = new AbortController();
-          state.modelWait = modelWait;
           try {
-            const waitSignal = outputRecovery || emptyRecovered
-              ? AbortSignal.any([control.signal, modelWait.signal, AbortSignal.timeout(120000)])
-              : AbortSignal.any([control.signal, modelWait.signal]);
             reply = await this.providers.chat(
               outputRecovery || model,
               emptyRecovered ? system + "\n[运行提示：上一段生成未返回正文或工具调用，不能算完成。根据原始授权继续：回复用户，或调用尚未执行且必要的工具；已执行的操作以历史工具结果为准，不得重放。]" : system,
               view,
               await tools.definitions(model),
-              waitSignal,
+              outputRecovery || emptyRecovered
+                ? AbortSignal.any([control.signal, AbortSignal.timeout(120000)])
+                : control.signal,
               emit,
               key,
             );
             break;
           } catch (e: any) {
-            if (modelWait.signal.aborted && !control.signal.aborted && state.steer.length) {
-              // Drop the interrupted generation; the outer loop drains steer and retries.
-              steered = true;
-              this.providers.reset(key);
-              break;
-            }
             control.signal.throwIfAborted();
             if (e.kind === "empty" && !emptyRecovered) {
               emptyRecovered = true;
@@ -943,11 +930,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               fallback: true,
             });
             attempt = -1;
-          } finally {
-            if (state.modelWait === modelWait) state.modelWait = undefined;
           }
         }
-        if (steered) continue;
         assert(reply, "Provider retry exhausted");
         await tools.context.recordUsage(view, reply.usage || {});
         // Chat shows every text right away: new task cards ride once on the first text written after they were created

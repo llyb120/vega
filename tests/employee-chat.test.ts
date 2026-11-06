@@ -120,21 +120,16 @@ test("steer that arrives during run teardown is persisted and the session contin
   } finally { finish(); await engine.close(); await store.close(); }
 });
 
-test("steer during model wait aborts that request and the next turn sees the new message", async () => {
+test("steer during an in-flight model call waits for it to finish then injects before the next request", async () => {
   const { store, engine, chat } = await fixture();
-  let calls = 0;
+  let calls = 0, finish!: () => void;
+  const gate = new Promise<void>((resolve) => finish = resolve);
   const seen: string[] = [];
-  engine.providers.chat = async (_model, _system, messages, _tools, signal) => {
+  engine.providers.chat = async (_model, _system, messages) => {
     calls++;
     const latest = [...messages].reverse().find((message: any) => message.role === "user");
     seen.push(latest?.text || "");
-    if (calls === 1) {
-      await new Promise<void>((_resolve, reject) => {
-        const fail = () => reject(Object.assign(Error("aborted"), { name: "AbortError" }));
-        if (signal?.aborted) return fail();
-        signal.addEventListener("abort", fail, { once: true });
-      });
-    }
+    if (calls === 1) await gate;
     return { role: "assistant", text: `ack:${latest?.text || ""}` };
   };
   const done = new Promise<void>((resolve) => engine.events.on("event", (event) => {
@@ -143,14 +138,20 @@ test("steer during model wait aborts that request and the next turn sees the new
   try {
     await engine.submitChat(chat.id, { role: "user", actorId: "owner", text: "alpha", clientMessageId: "alpha-id", clientMessageHash: "alpha-hash" });
     await until(() => calls === 1);
-    assert.ok(engine.active.get(chat.id)?.modelWait, "model wait is interruptible while the provider is pending");
     await engine.submitChat(chat.id, { role: "user", actorId: "owner", text: "beta", clientMessageId: "beta-id", clientMessageHash: "beta-hash" });
+    assert.equal(engine.active.get(chat.id)!.steer.length, 1, "in-flight model call is not aborted; steer stays queued");
+    assert.equal(calls, 1, "provider is not interrupted mid-request");
+    finish();
     await done;
-    assert.deepEqual(seen, ["alpha", "beta"], "aborted generation is dropped; the steered message drives the next request");
+    assert.deepEqual(seen, ["alpha", "beta"], "after the current model call finishes, steer is injected for the next request");
     assert.equal(calls, 2);
     assert.equal((await store.messages(chat.id)).filter((message) => message.role === "user").map((message) => message.text).join(","), "alpha,beta");
-    assert.equal((await store.messages(chat.id)).filter((message) => message.role === "assistant").map((message) => message.text).join(","), "ack:beta");
-  } finally { await engine.close(); await store.close(); }
+    assert.deepEqual(
+      (await store.messages(chat.id)).filter((message) => message.role === "assistant").map((message) => message.text),
+      ["ack:alpha", "ack:beta"],
+      "the in-flight reply is kept; the steered follow-up gets its own turn",
+    );
+  } finally { finish(); await engine.close(); await store.close(); }
 });
 
 test("employee chat shows every text the employee wrote at once, including text alongside tool calls; thinking, tool results and empty tool-only messages stay hidden", () => {
