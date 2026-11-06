@@ -239,10 +239,10 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         "把需要操作网页或电脑的工作交给本任务唯一的电脑会话：handoff 写清要做的操作、授权与约束、已完成和已尝试的操作、页面/文件/作业位置、交付类型和完成标准，不写凭据。立即结束本轮；电脑会话做完后结果自动交回本会话。写代码用 switch_scene，不要交接。必须单独调用。",
         { handoff: str("交接内容，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["handoff"]));
       out.push(tool("task_complete",
-        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 填交付正文所在的你自己的回复消息编号（工具回执的 textRef 就是当条回复的编号），可多条按顺序拼接，没有单独正文传 []。成功后立即结束本轮；校验不通过或有新补充时返回原因，按提示处理后再交付。必须单独调用。",
+        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 填你自己写过的正文回复编号（assistant 消息 seq）。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接，没有单独正文传 []。成功后立即结束本轮。必须单独调用。",
         { evidence: str("实际结果与验证证据，1–8000 字", { minLength: 1, maxLength: 8000 }),
           summary: str("交付摘要，1–400 字", { minLength: 1, maxLength: 400 }),
-          deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "交付正文的消息编号；没有单独正文传 []" } },
+          deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "正文 assistant 消息编号（用回执 textRef 的值，不是回执自身序号）；无单独正文传 []" } },
         ["evidence", "deliverableRefs"]));
     }
   }

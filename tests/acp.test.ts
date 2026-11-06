@@ -295,3 +295,32 @@ test("new user turns preserve native reasoning prefixes and usage anchors in ACP
     } finally { await store.close(); }
   }
 });
+test("recall by positions returns recent assistant bodies that are still in the live window", async () => {
+  const store = await Store.open(":memory:"),
+    session = await store.newSession(),
+    ctx = await Context.open(store, session.id);
+  try {
+    await store.append(session.id, { role: "user", text: "写测试方案" });
+    const body = "# 方案\n" + "用例步骤。\n".repeat(40);
+    const assistant = await store.append(session.id, {
+      role: "assistant",
+      model: "m",
+      text: body,
+      calls: [{ id: "p", name: "task_progress", arguments: { message: "ok", plan: [] } }],
+    });
+    await store.append(session.id, {
+      role: "tool",
+      callId: "p",
+      name: "task_progress",
+      text: JSON.stringify({ ok: true, textRef: assistant.seq }),
+    });
+    await ctx.configure(200000, 32000, 100, "p/m");
+    assert.deepEqual((await ctx.state()).truncated, []);
+    assert.deepEqual(await ctx.folds(), []);
+    const recalled = await ctx.recall({ positions: [assistant.seq!] });
+    assert.ok(recalled.messages.some((m) => m.seq === assistant.seq), "explicit positions must not return empty for live messages");
+    assert.match(recalled.messages.find((m) => m.seq === assistant.seq)!.text!, /方案/);
+  } finally {
+    await store.close();
+  }
+});
