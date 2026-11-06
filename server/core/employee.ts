@@ -11,7 +11,7 @@ import { resolve, posix, win32 } from "node:path";
 import { realpath } from "node:fs/promises";
 import { assert, id, clone, clip, sleep, type Obj } from "./util";
 import { Vault, VAULT_USAGE } from "./vault";
-import { requireSceneModel } from "./config";
+import { requireSceneModel, schedulerLimits } from "./config";
 import { loadRows, baseRecord, saveRows } from "./employee-rows";
 import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
@@ -374,6 +374,8 @@ export class Employee {
   writers = new Map<string, { taskId: string; hold: boolean }>();
   members = new Map<string, Employee>();
   membersLoaded = false;
+  /** Employee ids to tick first on the next drain (fresh dispatches). */
+  priority = new Set<string>();
   wakeAt = Infinity;
   draining = false;
   rerun = false;
@@ -409,6 +411,13 @@ export class Employee {
       root.membersLoaded = true;
     }
     return [...(await this.store.get("employee:default-deleted", false) ? [] : [root]), ...root.members.values()];
+  }
+  /** In-memory running count across the process (avoids reloading every employee to sum busy). */
+  busyTotal() {
+    const root = this.root || this;
+    let n = root.busy.size;
+    for (const member of root.members.values()) n += member.busy.size;
+    return n;
   }
   async for(key = "default"): Promise<Employee> {
     const member = (await this.all()).find((e) => e.employeeId === key);
@@ -560,16 +569,27 @@ export class Employee {
     if (this.draining) { this.rerun = true; return; }
     this.draining = true;
     try {
-      const employees = await this.all(), start = this.cursor++ % employees.length;
-      for (let index = 0; index < employees.length; index++) {
+      const employees = await this.all();
+      if (!employees.length || this.closed) return;
+      const byId = new Map(employees.map((employee) => [employee.employeeId, employee]));
+      const preferredIds = [...this.priority].filter((id) => byId.has(id));
+      this.priority.clear();
+      const tickOne = async (employee: Employee) => {
         if (this.closed) return;
-        const employee = employees[(start + index) % employees.length];
         try { await employee.tick(); }
         catch (e: any) {
           employee.runtime.emit("employee_error", { employeeId: employee.employeeId, message: e.message });
           this.wake(Date.now() + 60000);
         }
-      }
+      };
+      // Fresh dispatches: tick that employee first so it does not wait behind a full-site sweep.
+      if (preferredIds.length) await Promise.all(preferredIds.map((id) => tickOne(byId.get(id)!)));
+      if (this.closed) return;
+      const start = this.cursor++ % employees.length;
+      const ordered = Array.from({ length: employees.length }, (_, index) => employees[(start + index) % employees.length])
+        .filter((employee) => !preferredIds.includes(employee.employeeId));
+      // Remaining employees in parallel; shared DB writer + in-memory busy keep slot claims coherent.
+      await Promise.all(ordered.map((employee) => tickOne(employee)));
     } finally {
       this.draining = false;
       if (this.rerun) { this.rerun = false; this.schedule(); }
@@ -623,9 +643,9 @@ export class Employee {
     t.nextCheckAt = now + 30000 * 2 ** (recovery.attempts - 1);
     t.checkpoint ||= "恢复原任务：检查错误与外部状态，诊断、最小修复并验证；不重复发送/提交，不扩大授权。";
   }
-  /** The employee record with its tasks and runs (rows, see employee-rows.ts). */
-  async state(): Promise<EmployeeState> {
-    return (await loadRows(this.store, this.employeeId, await this.profile())) as EmployeeState;
+  /** The employee record with its tasks and runs (rows, see employee-rows.ts). Pass runs:false for a tasks-only probe that must not be saved. */
+  async state(opts?: { runs?: boolean }): Promise<EmployeeState> {
+    return (await loadRows(this.store, this.employeeId, await this.profile(), opts)) as EmployeeState;
   }
   /** The employee record without its tasks and runs, for callers that need neither. */
   async profile(): Promise<EmployeeProfile> {
@@ -747,7 +767,10 @@ export class Employee {
   }
   schedule() {
     if (this.closed) return;
-    this.wake(Date.now());
+    const root = this.root || this;
+    // Prefer this employee on the next drain so a new dispatch starts without scanning everyone first.
+    root.priority.add(this.employeeId);
+    root.wake(Date.now());
   }
   task(s: EmployeeState, key: string) {
     const t = s.tasks.find((t) => t.id === key);
@@ -1565,7 +1588,8 @@ export class Employee {
   }
   async tick(now = Date.now()) {
     if (this.closed || this.deleting || this.deleted || this.resetting) return;
-    const initial = await this.state();
+    // Tasks-only probe: decide whether desktop presence is needed without loading run history.
+    const initial = await this.state({ runs: false });
     let desk: Presence | undefined;
     if (
       (initial.desktopAskAfter || 0) <= now &&
@@ -1591,6 +1615,7 @@ export class Employee {
     const jobs: Task[] = [];
     let next = Infinity,
       changed = false;
+    const limits = schedulerLimits(await this.runtime.config());
     // One transaction: the snapshot this pass judges (orphans, due duties, slots) is the one it saves.
     try {
       await this.store.transaction(async () => {
@@ -1624,9 +1649,10 @@ export class Employee {
             if (d.eventAt > now) next = Math.min(next, d.eventAt);
           }
         }
-        const employees = await (this.root || this).all();
-        let slots = 3 - employees.reduce((count, employee) => count + employee.busy.size, 0);
-        const writers = (this.root || this).writers;
+        const root = this.root || this;
+        let globalSlots = limits.global - root.busyTotal();
+        let localSlots = limits.perEmployee - this.busy.size;
+        const writers = root.writers;
         for (const t of s.tasks) {
           if (this.busy.has(t.id) || !["queued", "deferred", "recovering"].includes(t.status))
             continue;
@@ -1634,7 +1660,7 @@ export class Employee {
             next = Math.min(next, t.nextCheckAt);
             continue;
           }
-          if (slots <= 0) continue;
+          if (globalSlots <= 0 || localSlots <= 0) continue;
           if (this.runtime.isRunning(t.side === "computer" ? t.computerSession : t.workSession)) { next = Math.min(next, now + 1000); continue; }
           const computer = t.side === "computer" || t.profile === "computer";
           if (!computer && t.workspaceWait && writers.has(t.workspaceWait.key) && writers.get(t.workspaceWait.key)!.taskId !== t.id) continue;
@@ -1670,7 +1696,8 @@ export class Employee {
             t.side = "computer";
           }
           this.busy.set(t.id, { computer, session: "" });
-          slots--;
+          globalSlots--;
+          localSlots--;
           if (!computer && t.workspaceWait) {
             writers.set(t.workspaceWait.key, { taskId: t.id, hold: !!t.workspaceWait.hold });
             delete t.workspaceWait;
