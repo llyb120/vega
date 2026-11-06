@@ -219,7 +219,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
           content: str("步骤描述，1–500 字", { minLength: 1, maxLength: 500 }),
           status: str("", { enum: ["pending", "in_progress", "completed", "failed", "blocked", "cancelled"] }),
         }, ["content", "status"]) },
-        tellUser: { type: "boolean", description: "true 时把 message 同时作为进度消息发到牛马沟通会话给用户看（关联本任务）；只用于用户关心的里程碑：关键阶段开始、影响结论的发现、明显延误。每个任务至少间隔 10 分钟、最多 5 次，超出时不发送（返回 toldUser=false，进度照常保存）。省略为 false" } },
+        tellUser: { type: "boolean", description: "true 时把 message 发到沟通会话给用户看（普通进度纯文字、不挂任务卡片；task_ask_user / task_request_approval 阻塞求助与最终交付会挂绑定任务卡片）。只发用户关心的关键信息：阶段切换、影响结论的发现、明显阻塞或延误——像简报一样一两句，不要流水账或每步工具结果。每个任务最多 12 次，超出不发送（toldUser=false，进度仍保存）。省略为 false" } },
       ["message"]));
     out.push(tool("task_reschedule",
       "把当前任务整体改到以后再继续（例如用户要求晚点或明天再处理、要等的时间点还没到）：runAt 或 delayMinutes 二选一。任务转为延后并立即结束本轮，到时在原会话续做。只改本任务自己；在等已提交的外部作业结果、需要记下恢复点时用 task_wait；给所属动态职责安排下次用 employee_duty_manage。",
