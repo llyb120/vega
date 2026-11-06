@@ -169,7 +169,7 @@
   },
   {
     "baseURL": "",
-    "modelsDev": false,
+    "modelsDev": true,
     "name": "OpenAI 兼容",
     "id": "openai-compatible"
   }

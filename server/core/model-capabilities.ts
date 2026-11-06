@@ -15,7 +15,11 @@ const BUILTIN_BY_ID = new Map(
   ),
 );
 
-/** Fill missing catalog fields from the built-in id table. Gateway values always win. */
+/**
+ * Fill missing catalog fields from the built-in id table.
+ * Priority (already applied before this runs): gateway /models fields > models.dev
+ * (via convertCatalog's catalogModel lookup). This table is the last resort only.
+ */
 export function enrichBuiltinModelCapabilities(models: Obj): Obj {
   for (const [id, model] of Object.entries(models) as [string, Obj][]) {
     const bare = id.split("/").at(-1)?.toLowerCase();
