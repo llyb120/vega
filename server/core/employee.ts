@@ -98,8 +98,8 @@ const planUnresolved = (plan: Obj[] | undefined) =>
 const SETTLE_CHOICE =
   "请选择：1) 接受当前已有结论作为最终交付；2) 说明仍需继续的具体步骤。回复前不会自动恢复执行。";
 /** Model-authored reply text in a task session that complete() may cite as the deliverable body. */
-/** task_progress tellUser: milestones reach the employee chat at most once per 10 minutes and 5 times per task. */
-const TELL_USER_GAP_MS = 10 * 60_000, TELL_USER_MAX = 5;
+/** task_progress tellUser: key milestones only; at most once per 2 minutes and 12 times per task. */
+const TELL_USER_GAP_MS = 2 * 60_000, TELL_USER_MAX = 12;
 const authored = (m: Message | undefined) => !!m && m.role === "assistant" && !!m.model && !m.error && !!String(m.text || "").trim();
 const preview = (m: Message) => {
   const text = String(m.text).trim().replace(/\s+/g, " ");
@@ -1218,16 +1218,16 @@ export class Employee {
                   };
                 }
                 if (a.tellUser !== true) return { ok: true, toldUser: false, next: "Continue the current step" };
-                // Milestones reach the employee chat at most once per 10 minutes and 5 times per task; the progress is saved either way.
+                // Key milestones only; progress is saved either way. No task card here—delivery attaches the task.
                 const told: number[] = t.toldUserAt || [];
                 const skipped = !s.chatSession && !t.group ? "没有沟通会话"
                   : told.length >= TELL_USER_MAX ? `本任务已告知 ${TELL_USER_MAX} 次，不再发送`
-                  : told.length && now - told.at(-1)! < TELL_USER_GAP_MS ? "距上次告知不足 10 分钟"
+                  : told.length && now - told.at(-1)! < TELL_USER_GAP_MS ? "距上次告知不足 2 分钟"
                   : "";
                 if (skipped) return { ok: true, toldUser: false, tellUserSkipped: skipped, next: "Progress saved; continue the current step" };
                 t.toldUserAt = [...told, now];
                 const quote = !t.group && t.chatSource?.session === s.chatSession && await this.store.message(s.chatSession!, t.chatSource.seq) ? await this.store.quote(s.chatSession!, t.chatSource.seq) : undefined;
-                pendingTell = { session: s.chatSession || "", message: { role: "assistant", text: content, quote, progress: true, tasks: [{ id: t.id, title: t.text.slice(0, 80), status: t.status }] }, group: t.group };
+                pendingTell = { session: s.chatSession || "", message: { role: "assistant", text: content, quote, progress: true }, group: t.group };
                 return { ok: true, toldUser: true, next: "Continue the current step" };
               }
               if (action === "ask") {

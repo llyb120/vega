@@ -55,7 +55,7 @@ test("a dispatch followed by a silent reply still shows the card once", async ()
   } finally { await engine.close(); await store.close(); }
 });
 
-test("task_progress tellUser: null means omitted; true posts a quoted milestone to the chat at most every 10 minutes and 5 times per task", async () => {
+test("task_progress tellUser: null means omitted; true posts a quoted milestone without a task card at most every 2 minutes and 12 times per task", async () => {
   const { store, engine, employee, chat } = await fixture();
   const ctx: any = { kind: "task", taskId: "x" };
   const schema = employeeTools(ctx).find((tool) => tool.name === "task_progress")!.parameters;
@@ -77,18 +77,18 @@ test("task_progress tellUser: null means omitted; true posts a quoted milestone 
     const first = await employee.execute(id, { action: "progress", text: "开始核对第二季度数据", tellUser: true });
     assert.equal(first.value.toldUser, true);
     const posted = (await store.messages(chat.id)).at(-1)!;
-    assert.deepEqual([posted.role, posted.text, posted.progress, posted.tasks?.[0].id, posted.quote?.seq], ["assistant", "开始核对第二季度数据", true, id, 1]);
+    assert.deepEqual([posted.role, posted.text, posted.progress, posted.tasks, posted.quote?.seq], ["assistant", "开始核对第二季度数据", true, undefined, 1]);
     const early = await employee.execute(id, { action: "progress", text: "又一条", tellUser: true });
     assert.equal(early.value.toldUser, false);
-    assert.match(early.value.tellUserSkipped, /10 分钟/);
+    assert.match(early.value.tellUserSkipped, /2 分钟/);
     assert.equal((await employee.state()).tasks[0].progress.at(-1).text, "又一条", "progress is saved even when not told");
-    for (let i = 0; i < 6; i++) {
-      await employee.update((state) => { state.tasks[0].toldUserAt = state.tasks[0].toldUserAt.map((at: number) => at - 11 * 60_000); });
+    for (let i = 0; i < 13; i++) {
+      await employee.update((state) => { state.tasks[0].toldUserAt = state.tasks[0].toldUserAt.map((at: number) => at - 3 * 60_000); });
       await employee.execute(id, { action: "progress", text: "里程碑 " + i, tellUser: true });
     }
-    assert.equal(await chatCount(), 5, "at most 5 milestones per task");
+    assert.equal(await chatCount(), 12, "at most 12 milestones per task");
     const capped = await employee.execute(id, { action: "progress", text: "超出", tellUser: true });
     assert.equal(capped.value.toldUser, false);
-    assert.match(capped.value.tellUserSkipped, /5 次/);
+    assert.match(capped.value.tellUserSkipped, /12 次/);
   } finally { await engine.close(); await store.close(); }
 });
