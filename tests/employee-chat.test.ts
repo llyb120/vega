@@ -80,6 +80,80 @@ test("queued chat retries are deduplicated without inserting the next actor's in
   } finally { finish(); await engine.close(); await store.close(); }
 });
 
+test("steer that arrives during run teardown is persisted and the session continues", async () => {
+  const { store, engine, chat } = await fixture();
+  let calls = 0, finish!: () => void;
+  const gate = new Promise<void>((resolve) => finish = resolve);
+  engine.providers.chat = async (_model, _system, messages) => {
+    calls++;
+    if (calls === 1) await gate;
+    const latest = [...messages].reverse().find((message: any) => message.role === "user");
+    return { role: "assistant", text: latest?.text === "late steer" ? "saw late steer" : "first reply" };
+  };
+  let injected = false;
+  const release = engine.localBrowsers.release.bind(engine.localBrowsers);
+  engine.localBrowsers.release = async (key: string, remove?: boolean) => {
+    if (!injected && key === chat.id && engine.active.has(chat.id) && !engine.active.get(chat.id)!.steer.length) {
+      injected = true;
+      engine.steer(chat.id, { role: "user", actorId: "owner", text: "late steer", clientMessageId: "late-steer-id", clientMessageHash: "late-steer-hash" });
+    }
+    return release(key, remove);
+  };
+  const done = new Promise<void>((resolve) => {
+    let count = 0;
+    engine.events.on("event", (event) => {
+      if (event.type === "done" && event.session === chat.id && ++count >= 2) resolve();
+    });
+  });
+  try {
+    await engine.submitChat(chat.id, { role: "user", actorId: "owner", text: "first", clientMessageId: "first-id", clientMessageHash: "first-hash" });
+    await until(() => calls === 1);
+    finish();
+    await done;
+    assert.equal(calls, 2, "teardown steer relaunches the same session for a second model turn");
+    const users = (await store.messages(chat.id)).filter((message) => message.role === "user");
+    assert.equal(users.length, 2);
+    assert.equal(users[1].text, "late steer");
+    assert.equal(users[1].clientMessageId, "late-steer-id");
+    const assistant = (await store.messages(chat.id)).filter((message) => message.role === "assistant");
+    assert.ok(assistant.some((message) => message.text === "saw late steer"));
+  } finally { finish(); await engine.close(); await store.close(); }
+});
+
+test("steer during an in-flight model call waits for it to finish then injects before the next request", async () => {
+  const { store, engine, chat } = await fixture();
+  let calls = 0, finish!: () => void;
+  const gate = new Promise<void>((resolve) => finish = resolve);
+  const seen: string[] = [];
+  engine.providers.chat = async (_model, _system, messages) => {
+    calls++;
+    const latest = [...messages].reverse().find((message: any) => message.role === "user");
+    seen.push(latest?.text || "");
+    if (calls === 1) await gate;
+    return { role: "assistant", text: `ack:${latest?.text || ""}` };
+  };
+  const done = new Promise<void>((resolve) => engine.events.on("event", (event) => {
+    if (event.type === "done" && event.session === chat.id) resolve();
+  }));
+  try {
+    await engine.submitChat(chat.id, { role: "user", actorId: "owner", text: "alpha", clientMessageId: "alpha-id", clientMessageHash: "alpha-hash" });
+    await until(() => calls === 1);
+    await engine.submitChat(chat.id, { role: "user", actorId: "owner", text: "beta", clientMessageId: "beta-id", clientMessageHash: "beta-hash" });
+    assert.equal(engine.active.get(chat.id)!.steer.length, 1, "in-flight model call is not aborted; steer stays queued");
+    assert.equal(calls, 1, "provider is not interrupted mid-request");
+    finish();
+    await done;
+    assert.deepEqual(seen, ["alpha", "beta"], "after the current model call finishes, steer is injected for the next request");
+    assert.equal(calls, 2);
+    assert.equal((await store.messages(chat.id)).filter((message) => message.role === "user").map((message) => message.text).join(","), "alpha,beta");
+    assert.deepEqual(
+      (await store.messages(chat.id)).filter((message) => message.role === "assistant").map((message) => message.text),
+      ["ack:alpha", "ack:beta"],
+      "the in-flight reply is kept; the steered follow-up gets its own turn",
+    );
+  } finally { finish(); await engine.close(); await store.close(); }
+});
+
 test("employee chat shows every text the employee wrote at once, including text alongside tool calls; thinking, tool results and empty tool-only messages stay hidden", () => {
   const messages = [
     { seq: 1, role: "user", text: "work" },

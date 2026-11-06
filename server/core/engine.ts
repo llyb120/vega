@@ -818,6 +818,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
         }
 
+        // Steer that arrived during compact/prep: inject before the next model request.
+        if (state.steer.length) continue;
         let reply: Message | undefined;
         let outputRecovery: Model | undefined,
           outputRecovered = false,
@@ -1115,7 +1117,9 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
                           });
           }
         }
-        if (stop) return;
+        // User already steered during this tool batch: keep the same run so the next
+        // model request sees it immediately, instead of ending and hoping a relaunch wins the race.
+        if (stop && !state.steer.length) return;
       }
     } catch (e: any) {
       const raw = e instanceof Error ? e : new Error(String(e));
@@ -1153,10 +1157,26 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         throw error;
       } finally {
         if (session?.employeeId && session.taskId) (await this.employeeFor(session)).releaseWorkspace(session.taskId);
+        // Steer can arrive on any await above (close/release/save). Persist it before
+        // active.delete, then continue the same session so the API success is not a lie.
+        const continued: Message[] = [];
+        while (state.steer.length) {
+          for (const m of state.steer.splice(0)) {
+            try {
+              await this.store.append(key, redactMessage(m, redact));
+              emit("steer", m);
+              continued.push(m);
+            } catch { /* best effort — still try remaining steers */ }
+          }
+        }
         signal?.removeEventListener("abort", abort);
         this.active.delete(key);
         this.redactors.delete(key);
         emit("done", { error: !!error });
+        if (continued.length && !this.closing) {
+          // History already holds the steered messages; a fresh run picks them up as context.
+          void this.run(key).catch(() => {});
+        }
         // A member turn that ended without a final reply (a tool stopped it) still reports what it did; either way
         // the group's "typing" state changes.
         if (session?.groupId && session.employeeId && !session.taskId) {
