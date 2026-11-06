@@ -123,10 +123,18 @@ const candidateList = (messages: readonly Message[]) => {
 };
 /** Resolve complete.deliverableRef: undefined = not declared, [] = no separate body, else cited messages in order.
  *  Tool-result seqs with textRef are remapped to that assistant body (models often confuse receipt # with textRef). */
-export const resolveDeliverable = (messages: readonly Message[], ref: unknown): { declared: boolean; refs: number[]; texts: string[]; error?: string; later: Message[]; remapped?: string[] } => {
+/** Prefer the newest substantial authored body when the model omits deliverableRefs. */
+const latestBody = (candidates: Message[], minChars = 80) =>
+  [...candidates].reverse().find((m) => [...String(m.text).trim()].length >= minChars);
+export const resolveDeliverable = (messages: readonly Message[], ref: unknown): { declared: boolean; refs: number[]; texts: string[]; error?: string; later: Message[]; remapped?: string[]; auto?: boolean; upgraded?: boolean } => {
   const { candidates, list } = candidateList(messages);
   const retry = `请用合法正文编号立即再调 task_complete（例如 deliverableRefs:[${candidates.at(-1)?.seq ?? "…"}]）；不要改用 task_progress 重贴同一交付。本任务可引用：${list}`;
-  if (ref === undefined || ref === null || ref === "") return { declared: false, refs: [], texts: [], later: [], error: `task_complete 需要声明交付正文：用 deliverableRefs 引用本任务里你写过的正文消息编号（可多条，按顺序拼接；正文无需复制进 evidence），没有单独正文（如纯执行验证）传 deliverableRefs=[]。${retry}` };
+  // Omitted refs: auto-pick the latest substantial body, or [] when there is none (pure evidence delivery).
+  if (ref === undefined || ref === null || ref === "") {
+    const latest = latestBody(candidates);
+    if (!latest) return { declared: false, refs: [], texts: [], later: [], auto: true };
+    return { declared: false, refs: [latest.seq!], texts: [String(latest.text).trim()], later: [], auto: true };
+  }
   const raw = Array.isArray(ref) ? ref : [ref];
   const requested: number[] = [];
   for (const item of raw) {
@@ -134,6 +142,8 @@ export const resolveDeliverable = (messages: readonly Message[], ref: unknown): 
     if (!Number.isSafeInteger(n) || n <= 0) return { declared: true, refs: [], texts: [], later: [], error: `deliverableRefs 只能是消息编号，如 [21]；收到 ${JSON.stringify(item)}。${retry}` };
     if (!requested.includes(n)) requested.push(n);
   }
+  // Explicit [] means no separate body — do not auto-pick or upgrade.
+  if (!requested.length) return { declared: true, refs: [], texts: [], later: [] };
   const bySeq = new Map(messages.map((m) => [m.seq, m]));
   const refs: number[] = [];
   const remapped: string[] = [];
@@ -160,7 +170,12 @@ export const resolveDeliverable = (messages: readonly Message[], ref: unknown): 
   }
   const last = Math.max(0, ...refs);
   const later = candidates.filter((m) => m.seq! > last && [...String(m.text).trim()].length >= 300);
-  return { declared: true, refs, texts: refs.map((n) => String(bySeq.get(n)!.text).trim()), later, remapped: remapped.length ? remapped : undefined };
+  // Citing an older body while a longer newer one exists usually means the model just rewrote it; use the newest.
+  if (later.length) {
+    const newest = later[later.length - 1]!;
+    return { declared: true, refs: [newest.seq!], texts: [String(newest.text).trim()], later: [], upgraded: true, remapped: remapped.length ? remapped : undefined };
+  }
+  return { declared: true, refs, texts: refs.map((n) => String(bySeq.get(n)!.text).trim()), later: [], remapped: remapped.length ? remapped : undefined };
 };
 const wantsSettle = (t: Task) =>
   !!(t.settlePreferred || (typeof t.recovery?.reason === "string" && t.recovery.reason.includes("未验证交付")));
@@ -640,8 +655,20 @@ export class Employee {
       return;
     }
     t.status = "recovering";
-    t.nextCheckAt = now + 30000 * 2 ** (recovery.attempts - 1);
+    // First recovery resumes immediately; later attempts back off 30s, 60s, 120s…
+    t.nextCheckAt = recovery.attempts <= 1 ? now : now + 30000 * 2 ** (recovery.attempts - 2);
     t.checkpoint ||= "恢复原任务：检查错误与外部状态，诊断、最小修复并验证；不重复发送/提交，不扩大授权。";
+  }
+  /** Soft nudge instead of recover: model wrote a delivery-looking reply but forgot task_complete. */
+  private canSettleNudge(t: Task, result: string) {
+    if ((t.settleNudges || 0) >= 2) return false;
+    if ([...String(result || "")].length < 80) return false;
+    if (!t.plan?.length) return false;
+    const pending = planUnresolved(t.plan);
+    if (!pending.length) return true;
+    if (pending.length !== 1) return false;
+    const index = Number(pending[0].split(":")[0]) - 1;
+    return t.plan[index]?.status === "in_progress" && index === t.plan.length - 1;
   }
   /** The employee record with its tasks and runs (rows, see employee-rows.ts). Pass runs:false for a tasks-only probe that must not be saved. */
   async state(opts?: { runs?: boolean }): Promise<EmployeeState> {
@@ -1057,6 +1084,15 @@ export class Employee {
                 t.supplementPending = false;
                 return { ok: false, supplement: t.answer, next: "Apply the user's latest supplement, update and verify the plan before completing." };
               }
+              // Delivery itself is the last step: auto-complete a lone trailing in_progress plan step.
+              if (content && t.plan?.length && (t.planRevision || 0) === (t.revision || 0)) {
+                const open = t.plan
+                  .map((step: Obj, index: number) => ({ step, index }))
+                  .filter(({ step }) => !PLAN_SETTLED.has(step.status));
+                if (open.length === 1 && open[0].step.status === "in_progress" && open[0].index === t.plan.length - 1) {
+                  open[0].step.status = "completed";
+                }
+              }
               const pending = planUnresolved(t.plan);
               const settleHint = pending.length
                 ? "若用户已要求按现有结果收尾/交付，用task_progress将不再需要的步骤标为cancelled（并在evidence/summary写明未覆盖项）后再task_complete；不要把未验证步骤假标completed。"
@@ -1082,21 +1118,13 @@ export class Employee {
                 };
                 assert(false, "尚未交付：" + cited.error);
               }
-              const signature = cited.refs.join(",") + "|" + cited.later.map((m) => m.seq).join(",");
-              if (cited.later.length && t.deliverableWarned !== signature) {
-                t.deliverableWarned = signature;
-                t.deliverableNeeded = {
-                  at: now,
-                  suggested: cited.later.map((m) => m.seq!),
-                  reason: "newer body after cited refs",
-                };
-                return { ok: false, error: `尚未交付：引用的正文之后你还写过较长正文 ${cited.later.map(preview).join("；")}。若它是更新版本，改为引用它（或一并引用）；确认原引用无误则原样再次 task_complete。不要改用 task_progress 重贴正文。` };
-              }
               t.summary = a.summary?.trim() || "";
               t.completion = content;
               t.deliverableRefs = cited.refs;
               t.deliverable = cited.texts.join("\n\n");
               delete t.deliverableNeeded;
+              delete t.deliverableWarned;
+              delete t.settleNudges;
 
               const candidates = extractMemoryCandidates({
                 summary: t.summary,
@@ -1824,7 +1852,7 @@ export class Employee {
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用task_progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。task_request_approval/task_ask_user/task_wait/task_relay_computer后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。验证码/访问码/2FA 属于必须 task_ask_user 的用户阻碍，不得自行认定无法获取后降级。task_relay_computer交接须继承当前交付类型与完成标准，不得擅自改成另一种目标。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后用 chrome_connection 检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。浏览器/扩展连续失败≥2 次（非验证码场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码使用switch_scene（主会话共享历史），Chrome必须用task_relay_computer交给独立computer会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时用deliverableRefs引用这些正文的消息编号（牛马工具回执的textRef即本条回复编号；不确定时task_complete会列出候选），系统按引用原文连同summary交付，不必复制进evidence；无单独正文传deliverableRefs=[]；evidence写完整验证证据，summary写面向用户的2–4条重点结论（400字内）：交付结果、重要变化、未验证/风险及需用户处理事项，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
+      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用task_progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。task_request_approval/task_ask_user/task_wait/task_relay_computer后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。验证码/访问码/2FA 属于必须 task_ask_user 的用户阻碍，不得自行认定无法获取后降级。task_relay_computer交接须继承当前交付类型与完成标准，不得擅自改成另一种目标。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后用 chrome_connection 检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。浏览器/扩展连续失败≥2 次（非验证码场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码使用switch_scene（主会话共享历史），Chrome必须用task_relay_computer交给独立computer会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统会选用最新较长正文；明确无单独正文传deliverableRefs=[]；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       // Attachments the work session has not been given yet.
       const given = new Set(rowsBefore.flatMap((m) => [...(m.images || []), ...(m.files || [])].map((x: { blobId?: string }) => x.blobId)));
@@ -1870,10 +1898,18 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                     t.result = result;
                     t.settlePreferred = false;
                     delete t.deliverableNeeded;
+                    delete t.settleNudges;
                   } else if (t.settlePreferred) {
                     t.status = "waiting";
                     t.nextCheckAt = 0;
                     t.waiting = "任务尚未正式交付。" + SETTLE_CHOICE;
+                  } else if (!computer && this.canSettleNudge(t, result)) {
+                    // Same-cycle correct: re-queue immediately with a nudge instead of waiting on recover backoff.
+                    t.settleNudges = (t.settleNudges || 0) + 1;
+                    t.status = "queued";
+                    t.nextCheckAt = Date.now();
+                    t.answer = (t.answer ? t.answer + "\n" : "") +
+                      "你已写出交付说明但未调用 task_complete。请立刻调用 task_complete 收口：deliverableRefs 可省略（系统会选用最新较长正文），不要重写正文；若计划只剩末步 in_progress，交付时会自动收尾。";
                   } else {
                     this.recover(t, "执行轮已结束但未验证交付。上次结果：" + result);
                   }
