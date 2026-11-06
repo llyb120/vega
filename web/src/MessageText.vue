@@ -2,11 +2,11 @@
 import { computed, inject, onBeforeUnmount } from "vue";
 import { renderMarkdown } from "./markdown";
 import { useStreamingText } from "./streaming-text.js";
-const props = defineProps({ text: String, streaming: Boolean });
+const props = defineProps({ text: String, streaming: Boolean, archiveBase: String });
 const text = useStreamingText(() => props.text || "", () => props.streaming, 120, onBeforeUnmount);
 // @名称 of people the reader knows are highlighted; employees the reader can open become links.
 const mentions = inject("mentions", null);
-const rendered = computed(() => renderMarkdown(text.value, { mentions: mentions?.people.value }));
+const rendered = computed(() => renderMarkdown(text.value, { mentions: mentions?.people.value, archiveBase: props.archiveBase }));
 async function copy(event) {
   const mention = event.target.closest?.("a.mention[data-employee]");
   if (mention && mentions && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) {

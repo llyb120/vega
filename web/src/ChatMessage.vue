@@ -10,6 +10,7 @@ import { taskLabel, taskTone, shortTime } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
 import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
+import { filesArchiveBase } from "./markdown.js";
 const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author", "mention"]);
 // In a group, long-pressing an employee's avatar @mentions it in the composer (mentionAuthor); a tap still opens it.
@@ -32,12 +33,13 @@ const exportMarkdown = computed(() => {
   if (!task) return "";
   return String(task.result || task.completion || "").trim();
 });
+const archiveBase = computed(() => filesArchiveBase(props.employeeId, linkedTask.value?.id || props.message.tasks?.[0]?.id));
 const canExport = computed(() => props.message.delivery && !!exportMarkdown.value);
 const exportTitle = computed(() => exportTitleOf(linkedTask.value?.text || props.message.tasks?.[0]?.title));
 async function runExport(format) {
   exportError.value = "";
   try {
-    await exportResult(format, { title: exportTitle.value, request: linkedTask.value?.text, markdown: exportMarkdown.value });
+    await exportResult(format, { title: exportTitle.value, request: linkedTask.value?.text, markdown: exportMarkdown.value, archiveBase: archiveBase.value });
     exportOpen.value = false;
   } catch (error) {
     exportError.value = error?.message || String(error);
@@ -61,7 +63,7 @@ async function runExport(format) {
       <div class="chat-bubble" :class="{ failed: message.error }" :role="message.error ? 'alert' : undefined">
         <button v-if="message.quote" type="button" class="chat-quote" :aria-label="'跳转到引用的消息：' + message.quote.text" @click="emit('jump', message.quote.seq)"><strong>{{ message.quote.role === 'user' ? '我' : name }}</strong><span>{{ message.quote.text }}</span></button>
         <UserMessage v-if="message.role === 'user' && message.text" :text="message.displayText || message.text" />
-        <MessageText v-else-if="message.text" :text="message.displayText || message.text" :streaming="message.streaming" />
+        <MessageText v-else-if="message.text" :text="message.displayText || message.text" :streaming="message.streaming" :archive-base="archiveBase" />
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
         <FileCard v-for="(file, index) in message.files || []" :key="'f' + index" :file="file" />
       </div>
