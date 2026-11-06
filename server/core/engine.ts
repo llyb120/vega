@@ -4,7 +4,7 @@ import { Fire } from "./fire";
 import { Groups } from "./groups";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
 import { builtinCommand, expandBuiltin } from "./builtins";
-import { requireSceneModel, sceneModels, maskedConfig, mergeSecrets } from "./config";
+import { requireSceneModel, sceneModels, maskedConfig, mergeSecrets, schedulerLimits, DEFAULT_GLOBAL_SLOTS, DEFAULT_PER_EMPLOYEE_SLOTS } from "./config";
 import { validateContextRules } from "../../shared/context-rules";
 
 import { employeeConfig, migrateEmployeeCapabilities } from "./employee-capabilities";
@@ -312,6 +312,21 @@ export class Engine {
       !next.contextMode || ["auto", "acp"].includes(next.contextMode),
       "Invalid contextMode",
     );
+    if (next.scheduler !== undefined) {
+      assert(next.scheduler && typeof next.scheduler === "object" && !Array.isArray(next.scheduler), "Invalid scheduler");
+      const raw = next.scheduler;
+      for (const key of ["globalSlots", "perEmployeeSlots"] as const) {
+        if (raw[key] === undefined) continue;
+        assert(Number.isInteger(raw[key]) && (raw[key] as number) >= 1 && (raw[key] as number) <= 64, "scheduler." + key + " must be an integer from 1 to 64");
+      }
+      next.scheduler = {
+        globalSlots: raw.globalSlots ?? previous.scheduler?.globalSlots ?? DEFAULT_GLOBAL_SLOTS,
+        perEmployeeSlots: raw.perEmployeeSlots ?? previous.scheduler?.perEmployeeSlots ?? DEFAULT_PER_EMPLOYEE_SLOTS,
+      };
+      // Normalize through the same clamp used at runtime.
+      const limits = schedulerLimits(next);
+      next.scheduler = { globalSlots: limits.global, perEmployeeSlots: limits.perEmployee };
+    }
 
     await this.store.put("config", next);
     this.emit({ type: "config_changed" });

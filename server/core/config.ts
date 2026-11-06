@@ -2,6 +2,12 @@ import type { Obj } from "./util";
 import { assert, expand, httpURL, object, clone } from "./util";
 import { validateMcpServer } from "../../shared/mcp-config";
 import { modelContext, validateContextRules } from "../../shared/context-rules";
+export type SchedulerConfig = {
+  /** Site-wide max concurrently running employee tasks. Default 3. */
+  globalSlots?: number;
+  /** Per-employee max concurrently running tasks. Default 3. */
+  perEmployeeSlots?: number;
+};
 export type Config = {
   model: string;
   provider: Record<string, Obj>;
@@ -13,7 +19,21 @@ export type Config = {
   employeeId?: string;
   skillsDirectory?: string;
   ponytail?: string;
+  scheduler?: SchedulerConfig;
 };
+export const DEFAULT_GLOBAL_SLOTS = 3;
+export const DEFAULT_PER_EMPLOYEE_SLOTS = 3;
+/** Clamp scheduler slot settings; invalid values fall back to defaults. */
+export function schedulerLimits(config: { scheduler?: SchedulerConfig } | null | undefined) {
+  const clamp = (value: unknown, fallback: number) => {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 1 && n <= 64 ? n : fallback;
+  };
+  return {
+    global: clamp(config?.scheduler?.globalSlots, DEFAULT_GLOBAL_SLOTS),
+    perEmployee: clamp(config?.scheduler?.perEmployeeSlots, DEFAULT_PER_EMPLOYEE_SLOTS),
+  };
+}
 export type Model = {
   selection: string;
   provider: string;

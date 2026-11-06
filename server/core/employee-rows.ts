@@ -10,9 +10,17 @@ import type { Obj } from "./util";
 const ROWS = Symbol("employee rows");
 type Rows = { tasks: Map<string, string>; runs: Map<number, string>; runIds: WeakMap<Obj, number> };
 
-export async function loadRows(store: Store, employee: string, state: Obj) {
+export async function loadRows(store: Store, employee: string, state: Obj, opts?: { runs?: boolean }) {
+  const includeRuns = opts?.runs !== false;
+  const tasks = await store.employeeTasks(employee);
+  const runs = includeRuns ? await store.employeeRuns(employee) : [];
+  // Probe loads (runs: false) must not attach ROWS: saving them would wipe run history.
+  if (!includeRuns) {
+    state.tasks = tasks.map((row) => JSON.parse(row.data));
+    state.runs = [];
+    return state;
+  }
   const rows: Rows = { tasks: new Map(), runs: new Map(), runIds: new WeakMap() };
-  const [tasks, runs] = await Promise.all([store.employeeTasks(employee), store.employeeRuns(employee)]);
   state.tasks = tasks.map((row) => { rows.tasks.set(row.id, row.data); return JSON.parse(row.data); });
   state.runs = runs.map((row) => {
     const run = JSON.parse(row.data);

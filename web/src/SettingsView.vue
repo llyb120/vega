@@ -2,6 +2,7 @@
 import { ref, watch } from "vue";
 import ProviderSettings from "./ProviderSettings.vue";
 import SceneSettings from "./SceneSettings.vue";
+import SchedulerSettings from "./SchedulerSettings.vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
 const props = defineProps({
@@ -12,7 +13,7 @@ const props = defineProps({
   tab: String,
 });
 const emit = defineEmits(["saved", "error", "notice", "tab"]);
-const sections = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"]];
+const sections = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"], ["scheduler", "任务调度", "tasks", "全站与单牛马并发上限"]];
 // The open section lives in the address (/settings/scenes) so refresh keeps it.
 const section = ref("providers");
 watch(() => props.tab, (tab) => { section.value = sections.some(([id]) => id === tab) ? tab : "providers"; }, { immediate: true });
@@ -29,6 +30,7 @@ watch(section, (id) => { if (id !== (props.tab || "providers")) emit("tab", id =
     <div class="settings-content">
       <div :hidden="section !== 'providers'"><ProviderSettings :api="api" :config="config" :user-id="userId" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
       <div :hidden="section !== 'scenes'"><SceneSettings :api="api" :config="config" :models="models" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
+      <div :hidden="section !== 'scheduler'"><SchedulerSettings :api="api" :config="config" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
     </div>
   </div>
 </template>
