@@ -1,0 +1,328 @@
+{
+  "codex-auto-review": {
+    "limit": { "context": 200000, "output": 64000 },
+    "reasoning": true,
+    "variants": {
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "low"
+    }
+  },
+  "gpt-5.3-codex-spark": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-5.5": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-5.6-luna": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-5.6-sol": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-5.6-terra": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-6-astra": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-6-luna": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-6-sol": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-6.1-sol": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-6.1-terra": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-image-2": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "gpt-image-2-2k": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "gpt-image-2-4k": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "gpt-image-2.5-flare": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "gpt-image-2.5-flare-2k": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "gpt-image-2.5-flare-4k": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "gpt-image-2.5-sunburst": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "gpt-image-2.5-sunburst-2k": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "gpt-image-2.5-sunburst-4k": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "gpt-live": {
+    "limit": { "context": 200000, "output": 64000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-live-1": {
+    "limit": { "context": 200000, "output": 64000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "gpt-live-1-mini": {
+    "limit": { "context": 128000, "output": 32000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "low"
+    }
+  },
+  "gpt-reserve": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "grok-4.5": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "grok-4.6": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "grok-4.7": {
+    "limit": { "context": 200000, "output": 128000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "medium"
+    }
+  },
+  "grok-4.7-build-fast": {
+    "limit": { "context": 200000, "output": 64000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "low"
+    }
+  },
+  "grok-4.7-fast": {
+    "limit": { "context": 200000, "output": 64000 },
+    "reasoning": true,
+    "variants": {
+      "high": { "reasoningEffort": "high" },
+      "medium": { "reasoningEffort": "medium" },
+      "low": { "reasoningEffort": "low" }
+    },
+    "options": {
+      "supportsReasoningEffort": true,
+      "reasoningEffort": "low"
+    }
+  },
+  "grok-imagine-image": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "grok-imagine-image-quality": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false,
+    "modalities": { "input": ["text", "image"] }
+  },
+  "grok-imagine-video": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false
+  },
+  "grok-imagine-video-1.5": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false
+  },
+  "grok-imagine-video-1.5-preview": {
+    "limit": { "context": 32000, "output": 8192 },
+    "reasoning": false
+  }
+}

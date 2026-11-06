@@ -1,4 +1,61 @@
+import builtinModelCapabilities from "../../shared/builtin-model-capabilities.json";
 import { assert, object, type Obj } from "./util";
+
+type BuiltinModelCapability = {
+  limit?: { context?: number; output?: number };
+  reasoning?: boolean;
+  modalities?: { input?: string[] };
+  variants?: Record<string, { reasoningEffort?: string }>;
+  options?: Record<string, unknown>;
+};
+
+const BUILTIN_BY_ID = new Map(
+  Object.entries(builtinModelCapabilities as Record<string, BuiltinModelCapability>).map(
+    ([id, caps]) => [id.toLowerCase(), caps],
+  ),
+);
+
+/** Fill missing catalog fields from the built-in id table. Gateway values always win. */
+export function enrichBuiltinModelCapabilities(models: Obj): Obj {
+  for (const [id, model] of Object.entries(models) as [string, Obj][]) {
+    const bare = id.split("/").at(-1)?.toLowerCase();
+    if (!bare) continue;
+    const builtin = BUILTIN_BY_ID.get(bare);
+    if (!builtin) continue;
+
+    if (builtin.limit) {
+      const limit = { ...(model.limit || {}) };
+      if (limit.context == null && builtin.limit.context != null)
+        limit.context = builtin.limit.context;
+      if (limit.output == null && builtin.limit.output != null)
+        limit.output = builtin.limit.output;
+      if (Object.keys(limit).length) model.limit = limit;
+    }
+
+    if (model.reasoning == null && builtin.reasoning != null)
+      model.reasoning = builtin.reasoning;
+
+    if (!model.modalities && builtin.modalities)
+      model.modalities = structuredClone(builtin.modalities);
+
+    if (!model.variants && builtin.variants && Object.keys(builtin.variants).length)
+      model.variants = structuredClone(builtin.variants);
+
+    if (builtin.options)
+      model.options = { ...builtin.options, ...(model.options || {}) };
+
+    if (
+      model.reasoning &&
+      model.variants &&
+      Object.keys(model.variants).length &&
+      model.options?.supportsReasoningEffort == null
+    ) {
+      model.options = { ...model.options, supportsReasoningEffort: true };
+    }
+  }
+  return models;
+}
+
 function npmAPI(npm: string) {
   return npm.includes("google")
     ? undefined
@@ -250,5 +307,5 @@ export function convertCatalog(
       if (!m.limit?.[key] && base.limit?.[key])
         m.limit = { ...m.limit, [key]: base.limit[key] };
   }
-  return out;
+  return enrichBuiltinModelCapabilities(out);
 }
