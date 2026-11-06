@@ -137,13 +137,13 @@ export function employeeTools(ctx: ToolContext): Tool[] {
   const out: Tool[] = [];
   const task = ctx.kind === "task";
   out.push(tool("employee_status",
-    "查看当前牛马总览：现在时间（北京时间）、职责、任务摘要（每条 id、status、dedupeKey、所属 dutyId、内容和结果节选、创建/计划/结束时间，最近 50 条，taskCount 是匹配总数）、最近运行、相关记忆和待确认记忆、可用场景。续做、停止或修改任务和职责前用它核对 taskId 和 dutyId；要看某条任务的完整内容、计划、进度和结果时传 taskId（只返回这一条）。派单不必先查重：带 dedupeKey 的 employee_task_create 会自动去重。查记忆细节用 memory_search。",
+    "查看当前牛马总览：现在时间（北京时间）、职责、任务摘要（每条 id、status、dedupeKey、所属 dutyId、内容和结果节选、创建/计划/结束时间，最近 50 条，taskCount 是匹配总数）、最近运行、相关记忆和待确认记忆、可用场景。沟通会话系统提示已含活跃任务摘要，新派单不必先调本工具。续做、停止或修改前用它核对 taskId/dutyId，或要看某条完整内容、计划、进度和结果时传 taskId。派单不必先查重：带 dedupeKey 的 employee_task_create 会自动去重。查记忆细节用 memory_search。",
     { taskId: str("只看这条任务的完整记录（任务 ID）；省略返回总览", { minLength: 1 }),
       dedupeKey: str("只列这个 dedupeKey 的任务", { minLength: 1, maxLength: 200 }),
       status: str("任务过滤：all（默认）全部、active 未收尾、ended 已收尾（完成、失败、停止、取消、封存）", { enum: ["all", "active", "ended"] }),
       memoryQuery: str("只影响返回的相关记忆：按这个关键词挑最相关的 30 条；省略为不按关键词", { maxLength: 2000 }) }));
   out.push(tool("employee_task_create",
-    "给当前牛马派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。反复、定时或按条件做的事用 employee_duty_create" +
+    "给当前牛马派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复写清已安排并调用本工具。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。反复、定时或按条件做的事用 employee_duty_create" +
       (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : ctx.group ? "。群聊里只给按群公告归你的工作派单；归其他牛马的不要派单，在回复里 @它 交出。" : "。"),
     { instructions: instructions("任务目标、范围、约束和交付标准，保留用户原话；不写工具名或动作名"),
       dedupeKey: str("业务唯一标识，≤200 字；同 key 已有任务（含已收尾）时直接返回原任务。用户明确要求重做已完成的事时用新 key（如原 key 加 :v2）", { minLength: 1, maxLength: 200 }),
