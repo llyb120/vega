@@ -862,15 +862,17 @@ export class Context {
     const rows = await this.messages(),
       folds = await this.folds(),
       truncated = (await this.state()).truncated,
+      // Explicit positions always resolve (models re-read recent deliverable bodies);
+      // query still only searches folded/truncated material that left the live window.
       selected = rows.filter(
         (m) =>
-          (folds.some((f) => m.seq! >= f.start && m.seq! <= f.end) ||
+          positions.has(m.seq) ||
+          ((folds.some((f) => m.seq! >= f.start && m.seq! <= f.end) ||
             truncated.includes(m.seq!)) &&
-          (positions.has(m.seq) ||
-            (query &&
-              JSON.stringify({ ...m, images: [] })
-                .toLowerCase()
-                .includes(query))),
+            !!query &&
+            JSON.stringify({ ...m, images: [] })
+              .toLowerCase()
+              .includes(query)),
       );
     const chosen = new Set<number>();
     for (const m of selected) {

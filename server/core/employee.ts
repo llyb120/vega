@@ -106,24 +106,61 @@ const preview = (m: Message) => {
   const chars = [...text];
   return `#${m.seq}（${chars.length}字）${chars.slice(0, 60).join("")}${chars.length > 60 ? "…" : ""}`;
 };
-/** Resolve complete.deliverableRef: undefined = not declared, [] = no separate body, else cited messages in order. */
-export const resolveDeliverable = (messages: readonly Message[], ref: unknown): { declared: boolean; refs: number[]; texts: string[]; error?: string; later: Message[] } => {
+/** Tool receipts may carry textRef pointing at the assistant reply that made the call. */
+const toolTextRef = (m: Message | undefined): number | undefined => {
+  if (!m || m.role !== "tool") return;
+  try {
+    const parsed = JSON.parse(String(m.text || ""));
+    const n = Number(parsed?.textRef);
+    return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+  } catch {
+    return;
+  }
+};
+const candidateList = (messages: readonly Message[]) => {
   const candidates = messages.filter(authored);
-  const list = candidates.slice(-8).map(preview).join("；") || "无";
-  if (ref === undefined || ref === null || ref === "") return { declared: false, refs: [], texts: [], later: [], error: `task_complete 需要声明交付正文：用 deliverableRefs 引用本任务里你写过的正文消息编号（可多条，按顺序拼接；正文无需复制进 evidence），没有单独正文（如纯执行验证）传 deliverableRefs=[]。本任务可引用：${list}` };
+  return { candidates, list: candidates.slice(-8).map(preview).join("；") || "无" };
+};
+/** Resolve complete.deliverableRef: undefined = not declared, [] = no separate body, else cited messages in order.
+ *  Tool-result seqs with textRef are remapped to that assistant body (models often confuse receipt # with textRef). */
+export const resolveDeliverable = (messages: readonly Message[], ref: unknown): { declared: boolean; refs: number[]; texts: string[]; error?: string; later: Message[]; remapped?: string[] } => {
+  const { candidates, list } = candidateList(messages);
+  const retry = `请用合法正文编号立即再调 task_complete（例如 deliverableRefs:[${candidates.at(-1)?.seq ?? "…"}]）；不要改用 task_progress 重贴同一交付。本任务可引用：${list}`;
+  if (ref === undefined || ref === null || ref === "") return { declared: false, refs: [], texts: [], later: [], error: `task_complete 需要声明交付正文：用 deliverableRefs 引用本任务里你写过的正文消息编号（可多条，按顺序拼接；正文无需复制进 evidence），没有单独正文（如纯执行验证）传 deliverableRefs=[]。${retry}` };
   const raw = Array.isArray(ref) ? ref : [ref];
-  const refs: number[] = [];
+  const requested: number[] = [];
   for (const item of raw) {
     const n = typeof item === "number" ? item : Number(String(item).trim().replace(/^#/, ""));
-    if (!Number.isSafeInteger(n) || n <= 0) return { declared: true, refs: [], texts: [], later: [], error: `deliverableRefs 只能是消息编号，如 [21]；收到 ${JSON.stringify(item)}。本任务可引用：${list}` };
-    if (!refs.includes(n)) refs.push(n);
+    if (!Number.isSafeInteger(n) || n <= 0) return { declared: true, refs: [], texts: [], later: [], error: `deliverableRefs 只能是消息编号，如 [21]；收到 ${JSON.stringify(item)}。${retry}` };
+    if (!requested.includes(n)) requested.push(n);
   }
   const bySeq = new Map(messages.map((m) => [m.seq, m]));
-  const bad = refs.filter((n) => !authored(bySeq.get(n)));
-  if (bad.length) return { declared: true, refs, texts: [], later: [], error: `deliverableRefs ${bad.map((n) => "#" + n).join("、")} 不是本任务里你写的正文（工具结果、调度器消息、空回复不能引用）。本任务可引用：${list}` };
+  const refs: number[] = [];
+  const remapped: string[] = [];
+  const bad: number[] = [];
+  for (const n of requested) {
+    if (authored(bySeq.get(n))) {
+      if (!refs.includes(n)) refs.push(n);
+      continue;
+    }
+    const via = toolTextRef(bySeq.get(n));
+    if (via && authored(bySeq.get(via))) {
+      if (!refs.includes(via)) refs.push(via);
+      remapped.push(`#${n}→#${via}`);
+      continue;
+    }
+    bad.push(n);
+  }
+  if (bad.length) {
+    const hints = bad.map((n) => {
+      const via = toolTextRef(bySeq.get(n));
+      return via ? `#${n} 是工具回执，其 textRef=${via} 才是正文编号` : `#${n} 不是正文（工具结果/调度器/空回复不能引用）`;
+    });
+    return { declared: true, refs: requested, texts: [], later: [], remapped, error: `deliverableRefs ${hints.join("；")}。${retry}` };
+  }
   const last = Math.max(0, ...refs);
   const later = candidates.filter((m) => m.seq! > last && [...String(m.text).trim()].length >= 300);
-  return { declared: true, refs, texts: refs.map((n) => String(bySeq.get(n)!.text).trim()), later };
+  return { declared: true, refs, texts: refs.map((n) => String(bySeq.get(n)!.text).trim()), later, remapped: remapped.length ? remapped : undefined };
 };
 const wantsSettle = (t: Task) =>
   !!(t.settlePreferred || (typeof t.recovery?.reason === "string" && t.recovery.reason.includes("未验证交付")));
@@ -1012,17 +1049,31 @@ export class Employee {
                   `Delivery summary requires 1–400 characters; received ${length} (type: ${typeof a.summary}). 尚未交付：summary须为非空、非全空白的字符串，中英文、标点、空格与换行均计数。请先填写或精简summary（建议100–200字符），只保留结果、重要限制与需用户处理事项；完整证据放evidence，不要原样重试或直接截断。`,
                 );
               }
-              const cited = resolveDeliverable(t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [], a.deliverableRef);
-              assert(!cited.error, "尚未交付：" + cited.error);
+              const sessionRows = t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [];
+              const cited = resolveDeliverable(sessionRows, a.deliverableRef);
+              if (cited.error) {
+                t.deliverableNeeded = {
+                  at: now,
+                  suggested: candidateList(sessionRows).candidates.slice(-8).map((m) => m.seq!),
+                  reason: cited.error,
+                };
+                assert(false, "尚未交付：" + cited.error);
+              }
               const signature = cited.refs.join(",") + "|" + cited.later.map((m) => m.seq).join(",");
               if (cited.later.length && t.deliverableWarned !== signature) {
                 t.deliverableWarned = signature;
-                return { ok: false, error: `尚未交付：引用的正文之后你还写过较长正文 ${cited.later.map(preview).join("；")}。若它是更新版本，改为引用它（或一并引用）；确认原引用无误则原样再次 task_complete。` };
+                t.deliverableNeeded = {
+                  at: now,
+                  suggested: cited.later.map((m) => m.seq!),
+                  reason: "newer body after cited refs",
+                };
+                return { ok: false, error: `尚未交付：引用的正文之后你还写过较长正文 ${cited.later.map(preview).join("；")}。若它是更新版本，改为引用它（或一并引用）；确认原引用无误则原样再次 task_complete。不要改用 task_progress 重贴正文。` };
               }
               t.summary = a.summary?.trim() || "";
               t.completion = content;
               t.deliverableRefs = cited.refs;
               t.deliverable = cited.texts.join("\n\n");
+              delete t.deliverableNeeded;
 
               const candidates = extractMemoryCandidates({
                 summary: t.summary,
@@ -1104,6 +1155,17 @@ export class Employee {
                 t.progress ??= [];
                 t.progress.push({ at: now, text: content });
                 t.progress = t.progress.slice(-50);
+                // After a failed task_complete (bad deliverableRefs), block no-progress progress loops.
+                if (t.deliverableNeeded && !planUnresolved(t.plan).length && t.plan?.length) {
+                  const rows = t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [];
+                  const { list } = candidateList(rows);
+                  const refs = (Array.isArray(t.deliverableNeeded.suggested) ? t.deliverableNeeded.suggested : [])
+                    .filter((n: unknown): n is number => Number.isSafeInteger(n));
+                  return {
+                    ok: false,
+                    error: `请用 task_complete 收口，deliverableRefs:[${refs.join(",") || "…"}]（正文消息编号，不要填工具回执序号；回执 textRef 才是正文）。禁止无新进展地重复 task_progress。可引用：${list}`,
+                  };
+                }
                 if (a.tellUser !== true) return { ok: true, toldUser: false, next: "Continue the current step" };
                 // Milestones reach the employee chat at most once per 10 minutes and 5 times per task; the progress is saved either way.
                 const told: number[] = t.toldUserAt || [];
@@ -1780,6 +1842,7 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                     result = t.deliverable ? t.deliverable + "\n\n---\n\n**验证证据**\n\n" + t.completion : t.completion;
                     t.result = result;
                     t.settlePreferred = false;
+                    delete t.deliverableNeeded;
                   } else if (t.settlePreferred) {
                     t.status = "waiting";
                     t.nextCheckAt = 0;
