@@ -182,7 +182,7 @@ test("task delivery quotes its originating chat message, carries a task link and
     let job = (await employee.state()).tasks[0];
     assert.equal(job.chatSource.session, chat.id);
     assert.equal(job.chatSource.seq, 1);
-    assert.equal((await store.messages(chat.id)).at(-1)?.tasks?.[0].id, job.id);
+    assert.equal((await store.messages(chat.id)).find((m) => m.tasks?.length)?.tasks?.[0].id, job.id);
     const full = "Full verified evidence\n" + "Trace details that belong to the task record.\n".repeat(60);
     employee.runtime.run = async () => {
       await employee.execute(job.id, { action: "progress", text: "verified endpoint", plan: [{ content: "verify endpoint", status: "completed" }] });
@@ -566,8 +566,8 @@ test("complete delivers the cited deliverable body verbatim instead of only the 
       const reply = await store.append(session, { role: "assistant", model: "fixture/model", text: body, calls: [{ id: "p", name: "employee", arguments: {} }] });
       const progressed = await employee.execute(job.id, { action: "progress", text: "清单已写完", plan: [{ content: "写清单", status: "completed" }] });
       assert.equal(progressed.value.textRef, reply.seq, "tool receipts expose the reply number to cite");
-      await assert.rejects(employee.execute(job.id, { action: "complete", text: "证据", summary: "交付25条用例。" }), /deliverableRef[\s\S]*#\d+（/);
-      await employee.execute(job.id, { action: "complete", deliverableRef: [reply.seq], text: "证据：已读需求单。", summary: "交付25条用例。" });
+      // Omitted deliverableRefs now auto-pick the latest substantial body.
+      await employee.execute(job.id, { action: "complete", text: "证据：已读需求单。", summary: "交付25条用例。" });
     };
     await employee.update((state) => { state.tasks[0].status = "running"; });
     employee.busy.set(job.id, { computer: false, session: "" });

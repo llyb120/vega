@@ -15,11 +15,20 @@ const session: any[] = [
   { seq: 7, role: "assistant", model: "m", text: "", calls: [{ id: "c", ...employeeCall({ action: "complete" }) }] },
 ];
 
-test("complete must declare the deliverable and gets candidates when it does not", () => {
+test("omitted deliverableRefs auto-picks the latest substantial authored body", () => {
   const r = resolveDeliverable(session, undefined);
-  assert.match(r.error!, /deliverableRef/);
-  assert.match(r.error!, /#4（/);
-  assert.doesNotMatch(r.error!, /#6/, "scheduler notes are not candidates");
+  assert.equal(r.error, undefined, r.error);
+  assert.equal(r.auto, true);
+  assert.deepEqual(r.refs, [4]);
+  assert.deepEqual(r.texts, [body.trim()]);
+});
+
+test("omitted refs with no substantial body become an empty citation", () => {
+  const short = session.filter((m) => m.seq !== 4);
+  const r = resolveDeliverable(short, undefined);
+  assert.equal(r.error, undefined);
+  assert.deepEqual(r.refs, []);
+  assert.equal(r.auto, true);
 });
 
 test("cited replies are returned verbatim in the cited order", () => {
@@ -46,12 +55,20 @@ test("error hints say to retry task_complete with legal refs, not progress", () 
   assert.match(r.error!, /不要改用 task_progress/);
 });
 
-test("a longer reply written after the cited one is surfaced as a possible newer version", () => {
+test("a longer reply written after the cited one auto-upgrades to that newer body", () => {
   const later = [...session, { seq: 8, role: "assistant", model: "m", text: body + "TC-26 新增。" }];
-  assert.deepEqual(resolveDeliverable(later, [4]).later.map((m) => m.seq), [8]);
-  assert.deepEqual(resolveDeliverable(later, [8]).later, []);
-  // Remapped tool receipt still sees the later body
-  assert.deepEqual(resolveDeliverable(later, [5]).later.map((m) => m.seq), [8]);
+  const upgraded = resolveDeliverable(later, [4]);
+  assert.equal(upgraded.upgraded, true);
+  assert.deepEqual(upgraded.refs, [8]);
+  assert.deepEqual(upgraded.later, []);
+  assert.deepEqual(resolveDeliverable(later, [8]).refs, [8]);
+  // Remapped tool receipt also upgrades past the older body
+  assert.deepEqual(resolveDeliverable(later, [5]).refs, [8]);
+});
+
+test("explicit empty deliverableRefs stay empty even when bodies exist", () => {
+  assert.deepEqual(resolveDeliverable(session, []).refs, []);
+  assert.equal(resolveDeliverable(session, []).auto, undefined);
 });
 
 test("memory claim limit fits path-heavy environment facts", () => {
