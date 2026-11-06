@@ -120,7 +120,8 @@ export class Tools {
     return {
       kind: "task",
       taskId: this.session.taskId,
-      computer: this.session.scene === "computer",
+      // Only the isolated relay session lacks task_complete; a main task that switched to computer in its own session still delivers.
+      computer: this.session.scene === "computer" && !!this.session.relayComputer,
       dutyCommands: duty ? (dynamic ? ["schedule_next", "disable"] : ["disable"]) : [],
     };
   }
@@ -131,6 +132,8 @@ export class Tools {
     if ([...names].some((n) => CHROME_TOOLS.has(n))) parts.push(CHROME_RULES);
     if (names.has("vault_get")) parts.push("[密码本] " + VAULT_USAGE);
     if (ctx.kind === "task") parts.push(EMPLOYEE_TASK_RULES);
+    if (ctx.kind === "task" && this.session.scene !== "computer" && !sceneModels(this.config, "computer").length)
+      parts.push("[电脑场景未配置] 设置里没有为 computer 场景选择模型，所以本会话无法进入电脑场景、没有 chrome_* 工具。需要网页/浏览器操作时，用 task_ask_user 如实说明“computer 场景未配置模型（需选择支持图片的模型，可与其他场景共用同一个）”，请用户到设置里补上；这不是浏览器扩展连接问题，不要让用户重连扩展，也不要用 bash 或脚本绕行。");
     if (ctx.kind === "normal" && names.has("employee_status")) parts.push(NORMAL_SESSION_EMPLOYEE_RULES);
     if (ctx.kind === "chat") parts.push(ctx.member ? GUEST_RULES : OWNER_RULES);
     return parts.length ? "\n" + parts.join("\n") : "";
@@ -270,7 +273,7 @@ export class Tools {
       ? (this.session.scene === "computer" ? ["lightweight", "coding"] : ["lightweight", "coding", "computer"])
       : ["coding", "computer"]).filter((scene) => {
       const ids = sceneModels(this.config, scene);
-      return scene !== this.session.scene && (mainTask || !this.sceneStack.includes(scene)) && ids?.length && ids[0] !== this.session.model;
+      return scene !== this.session.scene && (mainTask || !this.sceneStack.includes(scene)) && ids?.length;
     });
     const switching = defs.find((t) => t.name === "switch_scene");
     if (switching) {
