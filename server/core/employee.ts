@@ -318,7 +318,7 @@ export type EmployeeRuntime = {
   run: (session: string, text: string, signal?: AbortSignal, input?: Message["taskInput"], attach?: Pick<Message, "images" | "files">) => Promise<void>;
   cancel: (session: string) => void;
   isRunning: (session: string) => boolean;
-  emit: (type: string, data?: any) => void;
+  emit: (type: string, data?: any, session?: string) => void;
   config: () => Obj | Promise<Obj>;
   isolated?: boolean;
   presence?: () => Promise<Presence>;
@@ -489,6 +489,8 @@ export class Employee {
     if (!(group && await this.runtime.groups?.post(group, this.employeeId, message, wake))) {
       if (!chatSession) return;
       await this.store.append(chatSession, message);
+      // Session-scoped signal so other open chats refresh without waiting for employee_changed.
+      this.runtime.emit(message.role === "user" ? "user" : "message_end", undefined, chatSession);
     }
     this.runtime.emit("employee_changed", { employeeId: this.employeeId });
   }
@@ -1266,11 +1268,13 @@ export class Employee {
           message.role === "user" && (message.displayText || message.text) === trimmed
         );
     if (existing) return existing;
-    return await this.store.append(chatSession, {
+    const saved = await this.store.append(chatSession, {
           role: "user",
           text: trimmed,
           quote: await this.store.quote(chatSession, delivery.seq),
         });
+    this.runtime.emit("user", undefined, chatSession);
+    return saved;
   }
   async latestShot(t: Task) {
     const m = await this.store.lastMessage(t.side === "computer" ? t.computerSession : t.workSession, "images");

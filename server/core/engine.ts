@@ -243,7 +243,7 @@ export class Engine {
       run: (s, text, signal, taskInput, attach) => this.run(s, { role: "user", text, taskInput, images: attach?.images?.length ? attach.images : undefined, files: attach?.files?.length ? attach.files : undefined }, undefined, signal),
       cancel: (s) => this.cancel(s),
       isRunning: (s) => this.active.has(s),
-      emit: (type, data) => this.emit({ type, data }),
+      emit: (type, data, session?) => this.emit({ type, data, session }),
       config: () => this.config(),
       isolated: true,
       groups: {
@@ -267,7 +267,7 @@ export class Engine {
       (session, message) => this.run(session, message),
       (session) =>
         this.active.get(session)?.control.abort(Error("Fire paused")),
-      (type, data) => this.emit({ type, data }),
+      (type, data, session?) => this.emit({ type, data, session }),
     );
   }
   async config(session?: Session): Promise<Config> {

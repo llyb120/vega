@@ -82,6 +82,19 @@ test("events are not held up by refreshes, and refreshes coalesce", async () => 
   assert.equal(s.context.live.value, "next", "a finished refresh does not wipe text from a message that started after it");
 });
 
+
+test("user and steer events refresh the selected session so another tab's message appears before the reply", async () => {
+  const s = mount();
+  s.handleEvent({ type: "user", session: "s1" });
+  assert.equal(s.calls.filter((c) => c === "refreshCurrent").length, 1, "user triggers a history refresh");
+  for (const p of s.pending.splice(0)) p.resolve();
+  await tick(); await tick();
+  s.handleEvent({ type: "steer", session: "s1" });
+  assert.equal(s.calls.filter((c) => c === "refreshCurrent").length, 2, "steer also refreshes");
+  s.handleEvent({ type: "user", session: "other" });
+  assert.equal(s.calls.filter((c) => c === "refreshCurrent").length, 2, "other sessions do not refresh this transcript");
+});
+
 test("events for another session or the employee chat never touch the live transcript", () => {
   const s = mount();
   s.handleEvent({ type: "text_delta", session: "other", data: "x" });
