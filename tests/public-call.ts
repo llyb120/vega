@@ -60,6 +60,7 @@ const action = (v: Obj): Obj => {
     case "wait": return defined({ action: "wait", milliseconds: v.ms });
     case "click_at": return defined({ action: "click_at", x: v.x, y: v.y, button: v.button, clickCount: v.click_count });
     case "drag": return defined({ action: "drag", fromX: v.x, fromY: v.y, toX: v.to_x, toY: v.to_y, durationMs: v.duration_ms });
+    case "pointer": return defined({ action: "pointer", phase: v.phase, x: v.x, y: v.y, durationMs: v.duration_ms });
     case "scroll_at": return defined({ action: "scroll_at", x: v.x, y: v.y, deltaY: v.delta, deltaX: v.delta_x });
     default: return v;
   }

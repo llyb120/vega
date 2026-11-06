@@ -53,11 +53,11 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["chrome_act", { tabTag: "C1", actions: [
       { action: "click", ref: "e1", clickCount: 2 }, { action: "fill", ref: "e2", value: "" }, { action: "type", text: "hi" }, { action: "press", key: "Enter" },
       { action: "scroll", deltaY: 0, deltaX: 40 }, { action: "wait", milliseconds: 0 }, { action: "upload", selector: "#f", files: ["a.png"] },
-      { action: "click_at", x: 0, y: 0 }, { action: "move", x: 1, y: 2 }, { action: "drag", fromX: 1, fromY: 2, toX: 3, toY: 4, durationMs: 100 }, { action: "scroll_at", x: 5, y: 6, deltaY: -100 },
+      { action: "click_at", x: 0, y: 0 }, { action: "move", x: 1, y: 2 }, { action: "drag", fromX: 1, fromY: 2, toX: 3, toY: 4, durationMs: 100 }, { action: "pointer", phase: "down", x: 7, y: 8 }, { action: "pointer", phase: "move", x: 9, y: 10, durationMs: 100 }, { action: "scroll_at", x: 5, y: 6, deltaY: -100 },
     ], settleMs: 0 }, { operation: "act", tabTag: "C1", settleMs: 0, actions: [
       { action: "click", ref: "e1", click_count: 2 }, { action: "fill", ref: "e2", text: "" }, { action: "type", text: "hi" }, { action: "press", key: "Enter" },
       { action: "scroll", delta: 0, delta_x: 40 }, { action: "wait", ms: 0 }, { action: "upload", selector: "#f", files: ["a.png"] },
-      { action: "click_at", x: 0, y: 0 }, { action: "move", x: 1, y: 2 }, { action: "drag", x: 1, y: 2, to_x: 3, to_y: 4, duration_ms: 100 }, { action: "scroll_at", x: 5, y: 6, delta: -100 },
+      { action: "click_at", x: 0, y: 0 }, { action: "move", x: 1, y: 2 }, { action: "drag", x: 1, y: 2, to_x: 3, to_y: 4, duration_ms: 100 }, { action: "pointer", phase: "down", x: 7, y: 8 }, { action: "pointer", phase: "move", x: 9, y: 10, duration_ms: 100 }, { action: "scroll_at", x: 5, y: 6, delta: -100 },
     ] }],
     ["chrome_evaluate", { tabTag: "C1", expression: "1", observe: false }, { operation: "evaluate", tabTag: "C1", expression: "1", feedback: "none" }],
     ["chrome_evaluate", { tabTag: "C1", expression: "1" }, { operation: "evaluate", tabTag: "C1", expression: "1" }],

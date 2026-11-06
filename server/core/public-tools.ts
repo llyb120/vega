@@ -453,6 +453,7 @@ function chromeAction(v: Obj): Obj {
     case "click_at": return defined({ action: "click_at", x: v.x, y: v.y, button: v.button, click_count: v.clickCount });
     case "move": return { action: "move", x: v.x, y: v.y };
     case "drag": return defined({ action: "drag", x: v.fromX, y: v.fromY, to_x: v.toX, to_y: v.toY, duration_ms: v.durationMs });
+    case "pointer": return defined({ action: "pointer", phase: v.phase, x: v.x, y: v.y, duration_ms: v.durationMs });
     default: return defined({ action: "scroll_at", x: v.x, y: v.y, delta: v.deltaY, delta_x: v.deltaX });
   }
 }
