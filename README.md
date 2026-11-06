@@ -60,7 +60,7 @@ MySQL 需要 **8.0.19 及以上**（不支持 MariaDB），数据库须事先创
 
 ### HTTPS与反向代理
 
-网站和客户端均支持HTTP/WS与HTTPS/WSS；公网建议使用HTTPS。`VEGA_PUBLIC_URL`设置为实际访问的HTTP(S) origin（如`http://vega.example.com:8080`或`https://vega.example.com`，不带路径），服务按该origin检查请求，仅HTTPS使用Secure Cookie。**HTTP下登录信息、设备凭据与命令明文传输，存在被窃听或篡改的风险。** 不要信任任意客户端传入的Forwarded头。反代保留Host，为`/api/events`、`/api/chrome/live`、`/api/local-agent/socket`转发WebSocket Upgrade/Connection，设备连接还需保留Authorization头。直接本地HTTP开发可不设置此变量。
+网站和客户端均支持HTTP/WS与HTTPS/WSS；公网建议使用HTTPS。`VEGA_PUBLIC_URL`设置为实际访问的HTTP(S) origin（如`http://vega.example.com:8080`或`https://vega.example.com`，不带路径），服务按该origin检查请求，仅HTTPS使用Secure Cookie。**HTTP下登录信息、设备凭据与命令明文传输，存在被窃听或篡改的风险。** 不要信任任意客户端传入的Forwarded头。反代保留Host，为`/api/events`、`/api/chrome/live`、`/api/local-agent/socket`、`/api/local-agent/relay`转发WebSocket Upgrade/Connection；设备连接还需保留Authorization头，流量中继隧道还须转发`X-Vega-Relay`。直接本地HTTP开发可不设置此变量。
 
 **实时通道与超时**：网页的所有API都走普通HTTP，`/api/events`只推送事件，不再转发API请求。服务端每20秒发送一次心跳并做协议级ping，网页75秒收不到任何消息才重连；重连带上次的事件序号，2分钟/5000条以内的断线只补发漏掉的事件，不整页刷新。牵牛星客户端每5秒心跳，大于256KB的结果改为`POST /api/local-agent/result`上传（同样需要保留Authorization头，并允许最大48MB请求体）。反代请据此设置：
 
@@ -177,7 +177,7 @@ WS连接先通过带CSRF校验的POST取得15秒有效、一次性且绑定当�
 
 **无头模式**：设置 `VEGA_BROWSER_MODE=isolated` 后，服务启动一个私有无头 Chrome（与 Docker 同一套扩展协议、独立 profile 目录 `<数据库目录>/chromium`），不占宿主桌面。Linux/Windows/macOS 都支持；Windows 上通过 `VEGA_CHROME_PATH` 指定 chrome.exe，未设置时自动探测常见安装路径。无头实例可多 tab 并行截图和输入；cookie/登录态持久在私有 profile，不与用户日常浏览器共享。Docker 模式同样使用此变量，行为一致。
 
-远程部署仍只需现有网站端口。反向代理须为`/api/events`、`/api/chrome/live`及`/api/local-agent/socket`转发WebSocket的HTTP/1.1 Upgrade/Connection并保留Host，设备连接还须保留Authorization；公网建议配置正确的`VEGA_PUBLIC_URL`并使用HTTPS/WSS，**不要暴露Chrome调试端口或回环扩展端口**。意外断线且没有进行中的操作时自动重连（最多3次），页面切回前台也会自动重连；可能已执行的操作仍要求人工核对，不自动补发上次操作。画面不变时只发送不含图片的确认帧，静止约2秒后采样降为每秒2帧。
+远程部署仍只需现有网站端口。反向代理须为`/api/events`、`/api/chrome/live`、`/api/local-agent/socket`及`/api/local-agent/relay`转发WebSocket的HTTP/1.1 Upgrade/Connection并保留Host；设备连接还须保留Authorization，中继隧道还须转发`X-Vega-Relay`；公网建议配置正确的`VEGA_PUBLIC_URL`并使用HTTPS/WSS，**不要暴露Chrome调试端口或回环扩展端口**。意外断线且没有进行中的操作时自动重连（最多3次），页面切回前台也会自动重连；可能已执行的操作仍要求人工核对，不自动补发上次操作。画面不变时只发送不含图片的确认帧，静止约2秒后采样降为每秒2帧。
 
 ### MCP 和技能
 

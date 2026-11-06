@@ -165,3 +165,59 @@ test("saving a changed policy flushes pooled sockets; invalid rules preserve the
   await closed;
   assert(!f.relay.inUse(grant.clientId));
 });
+
+test("without a matching domain rule SOCKS dials from the server and logs why relay did not apply", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {}), f = await fixture(t);
+  await f.relay.configure(grant, ["git.internal:443"]);
+  const server = createServer((s) => { s.write("ok"); s.end(); });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => server.close());
+  const port = (server.address() as any).port;
+  const socket = await socks(await f.relay.proxy("alice"), "localhost", port, t);
+  assert.equal((await read(socket, 10))[1], 0);
+  socket.write("ping");
+  assert.equal((await read(socket, 2)).toString(), "ok");
+  const calls = warn.mock.calls.map(call => call.arguments);
+  assert(calls.some(([label, details]) => label === "[Vega relay] No matching client rule; dialing from server" && details.userId === "alice" && details.host === "localhost" && details.port === port && /未命中/.test(String(details.tip))), JSON.stringify(calls));
+});
+
+test("SOCKS CONNECT to an IP never matches domain relay rules and logs the IP tip", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {}), f = await fixture(t);
+  await f.relay.configure(grant, ["git.internal:443"]);
+  let routed: any;
+  f.onCommand((job) => { routed = job; });
+  const server = createServer((s) => { s.write("ip"); s.end(); });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => server.close());
+  const port = (server.address() as any).port;
+  // Craft an IPv4 ATYP CONNECT instead of a domain name.
+  const proxy = await f.relay.proxy("alice");
+  const socket = connect(Number(new URL(proxy).port), "127.0.0.1");
+  socket.on("error", () => {});
+  t.after(() => socket.destroy());
+  await once(socket, "connect");
+  socket.write(Buffer.from([5, 1, 0]));
+  assert.deepEqual(await read(socket, 2), Buffer.from([5, 0]));
+  const request = Buffer.from([5, 1, 0, 1, 127, 0, 0, 1, 0, 0]);
+  request.writeUInt16BE(port, 8);
+  socket.write(request);
+  assert.equal((await read(socket, 10))[1], 0);
+  assert.equal(routed, undefined, "domain rules must not claim IP CONNECT");
+  const calls = warn.mock.calls.map(call => call.arguments);
+  assert(calls.some(([label, details]) => label === "[Vega relay] No matching client rule; dialing from server" && details.addressType === "ip" && /IP/.test(String(details.tip))), JSON.stringify(calls));
+});
+
+test("matched domain rules still send the client a relay job with the hostname", async (t) => {
+  const f = await fixture(t);
+  await f.relay.configure(grant, ["databrain-test.intlgame.com:443"]);
+  let command: any;
+  f.onCommand((job) => {
+    command = job;
+    const peer = { id: job.id, send() {}, close() {} };
+    f.relay.open(peer, grant, job.id);
+    f.relay.message(peer, Buffer.from([2]));
+  });
+  const socket = await socks(await f.relay.proxy("alice"), "databrain-test.intlgame.com", 443, t);
+  assert.equal((await read(socket, 10))[1], 0);
+  assert.deepEqual(command.args, { host: "databrain-test.intlgame.com", port: 443 });
+});
