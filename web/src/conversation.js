@@ -39,7 +39,13 @@ export function continuesPrevious(previous, message) {
 export function timelineOf(messages) {
   const groups = [];
   const completedCalls = new Set(messages.filter((message) => message.role === "tool").map((message) => message.callId));
+  const callById = new Map();
+  for (const message of messages)
+    for (const call of message.calls || [])
+      if (call?.id) callById.set(call.id, call);
   let previousRole = "";
+  const withArgs = (item, call) =>
+    call?.arguments != null && item.arguments == null ? { ...item, arguments: call.arguments } : item;
   const addProcess = (item) => {
     const last = groups.at(-1);
     if (last?.kind === "process") last.items.push(item);
@@ -51,7 +57,7 @@ export function timelineOf(messages) {
       });
   };
   for (const m of messages) {
-    if (m.role === "tool") addProcess(m);
+    if (m.role === "tool") addProcess(withArgs(m, callById.get(m.callId)));
     else {
       if (m.thinking?.trim())
         addProcess({ ...m, role: "thought", text: m.thinking, thinking: undefined });
@@ -64,7 +70,8 @@ export function timelineOf(messages) {
         });
       }
       for (const call of m.calls || [])
-        if (!completedCalls.has(call.id)) addProcess({ role: "tool", id: call.id, name: call.name, pending: true });
+        if (!completedCalls.has(call.id))
+          addProcess({ role: "tool", id: call.id, name: call.name, arguments: call.arguments, pending: true });
     }
     previousRole = m.role;
   }
@@ -125,6 +132,38 @@ export function toolKind(name = "") {
   return "tool";
 }
 
+const DETAIL_KEYS = {
+  execute: ["command", "cmd"],
+  read: ["path", "file", "target"],
+  edit: ["path", "file"],
+  delete: ["path", "file"],
+  search: ["pattern", "query", "glob", "path"],
+  fetch: ["url", "uri", "href"],
+  tool: ["command", "path", "query", "url", "prompt"],
+};
+
+/** One-line label for a tool row: bash shows the command, others show name · key arg. */
+export function toolCaption(item, limit = 120) {
+  const name = String(item?.name || "工具").replace(/\s+/g, " ").trim() || "工具";
+  const args = item?.arguments;
+  const kind = toolKind(name);
+  let detail = "";
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    for (const key of DETAIL_KEYS[kind] || DETAIL_KEYS.tool) {
+      const value = args[key];
+      if (typeof value === "string" && value.trim()) {
+        detail = value.trim();
+        break;
+      }
+    }
+  }
+  detail = detail.split(/\r?\n/, 1)[0].replace(/\s+/g, " ").trim();
+  if (detail.length > limit) detail = detail.slice(0, Math.max(0, limit - 1)) + "…";
+  if (!detail) return name;
+  if (kind === "execute") return detail;
+  return `${name} · ${detail}`;
+}
+
 const ACTION_LABEL = {
   read: "读取文件",
   edit: "修改文件",
@@ -158,7 +197,7 @@ export function processLiveLines(items, wrap = (text) => text.split("\n")) {
       : "";
     const text = item.role === "thought"
       ? item.text?.trimEnd() || "思考中…"
-      : `${status} · ${String(item.name || "工具").replace(/\s+/g, " ").trim()}`;
+      : `${status} · ${toolCaption(item)}`;
     lines = [...wrap(text).filter((line) => line.trim()).slice(-(2 - lines.length)), ...lines];
   }
   return lines;

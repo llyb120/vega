@@ -1,6 +1,6 @@
 <script setup vapor>
 import { computed, ref } from "vue";
-import { processLiveLines, processSummary, toolKind } from "./conversation";
+import { processLiveLines, processSummary, toolCaption, toolKind } from "./conversation";
 const props = defineProps({
   items: { type: Array, default: () => [] },
   active: { type: Array, default: () => [] },
@@ -16,6 +16,7 @@ const lines = computed(() => processLiveLines(allItems.value));
 const hasBody = (item) => !!(item.text || item.images?.length);
 const icons = { read: "⌕", edit: "±", delete: "−", search: "⌕", execute: "$", think: "●", fetch: "↗", tool: "⚙" };
 const icon = (item) => icons[toolKind(item.name)];
+const caption = (item) => toolCaption(item);
 </script>
 <template>
   <section class="tool-steps" :class="{ open: expanded }">
@@ -45,14 +46,14 @@ const icon = (item) => icons[toolKind(item.name)];
         </details>
         <div v-else-if="m.active || m.pending" class="tool-step" :class="{ active: m.active }">
           <span class="step-icon" aria-hidden="true">{{ icon(m) }}</span>
-          <span class="step-name">{{ m.name }}</span>
+          <span class="step-name" :title="caption(m)">{{ caption(m) }}</span>
           <span v-if="m.active" class="spinner" role="status" aria-label="进行中"></span>
           <span v-else class="hint">结果未确认</span>
         </div>
         <details v-else class="tool-step" :class="{ failed: m.error }">
           <summary>
             <span class="step-icon" aria-hidden="true">{{ icon(m) }}</span>
-            <span class="step-name">{{ m.name }}</span>
+            <span class="step-name" :title="caption(m)">{{ caption(m) }}</span>
             <span v-if="m.error" class="step-failed" role="img" aria-label="失败"></span>
             <span v-if="hasBody(m)" class="step-chevron" aria-hidden="true">▸</span>
           </summary>
