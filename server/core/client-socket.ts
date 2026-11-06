@@ -122,6 +122,9 @@ export class ClientSockets {
       } else {
         assert(value.type === "result", "Client may only send heartbeats and job results");
         this.hub.result(grant.userId, { id: value.id, result: value.result, instance: connection.details.instance });
+        // Results also prove the control channel is alive; refresh the agent heartbeat so a burst of
+        // results without an interleaved ping cannot expire the LocalAgents timer and suspend the client.
+        if (!connection.updating) this.hub.connect(grant.userId, connection.details);
         accepted = true;
         if (connection.details.resume) socket.send(JSON.stringify({ type: "ack", id: value.id }));
       }

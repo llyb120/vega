@@ -5,7 +5,7 @@ import {
 } from "node:crypto";
 import type { Store } from "./store";
 import { assert, id, type Obj } from "./util";
-export const VAULT_USAGE = "先 vault_list 查看类型、名称与使用条件，再结合用户任务、当前系统/页面和登录方式选择唯一适用的条目；vault_get 的 purpose 必须说明本次用途及为什么符合 condition。网页填写前先观察实际登录页，取用时自动结合当前页面核对；缺少页面上下文时先观察再重新 vault_get，不要要求用户补网站配置。网站名/URL 只是可选上下文，不是必填配置；没有网站名也可根据明确的使用条件判断。不能因为用户名相同、都属腾讯或发生跳转就复用其他系统凭据；DataBrain 邮箱登录、OA 与合作伙伴认证要分别判断。不取用条件不符的条目，可以重新核对列表选择明确适用者；仍无匹配或无法确定时才询问，不能靠实际登录轮流试账号。历史里的 [credential redacted]、[redacted]、__stored_secret__ 都不是真实凭据，续做或换会话需重新 vault_get，不能填入页面。凭据只用于当前授权操作，不写进回复、记忆或备注。SSH 私钥条目不给原文：vault_get 在当前执行位置写好本轮临时私钥文件并返回 GIT_SSH_COMMAND，直接用它跑 git，不要读取或复制私钥文件。";
+export const VAULT_USAGE = "先 vault_list 查看类型、名称与使用条件，再结合用户任务、当前系统/页面和登录方式选择唯一适用的条目；vault_get 的 purpose 必须说明本次用途及为什么符合 condition。网页填写前先观察实际登录页，取用时自动结合当前页面核对；缺少页面上下文时先观察再重新 vault_get，不要要求用户补网站配置。网站名/URL 只是可选上下文，不是必填配置；没有网站名也可根据明确的使用条件判断。不能因为用户名相同、都属腾讯或发生跳转就复用其他系统凭据；DataBrain 邮箱登录、OA 与合作伙伴认证要分别判断。不取用条件不符的条目，可以重新核对列表选择明确适用者；仍无匹配或无法确定时才询问，不能靠实际登录轮流试账号。历史里的 [credential redacted]、[redacted]、__stored_secret__ 都不是真实凭据，续做或换会话需重新 vault_get，不能填入页面。有适用密码本条目时优先 vault_get；若用户本轮已明文给出账号/密码/令牌并用于当前授权登录，可直接填表，不必先入库。凭据只用于当前授权操作，不写进回复、记忆或备注，未要求保存时不要写入密码本。SSH 私钥条目不给原文：vault_get 在当前执行位置写好本轮临时私钥文件并返回 GIT_SSH_COMMAND，直接用它跑 git，不要读取或复制私钥文件。";
 /** Entry types: a label for the model and the editor; ssh_key alone changes how vault_get hands the secret out. */
 export const VAULT_TYPES: Record<string, string> = { login: "账号密码", token: "API 密钥/令牌", ssh_key: "SSH 私钥", general: "万能" };
 export const vaultType = (type: unknown) => (typeof type === "string" && VAULT_TYPES[type] ? type : "general");
