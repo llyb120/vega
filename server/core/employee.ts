@@ -504,7 +504,8 @@ export class Employee {
       avatar = available[Math.floor(Math.random() * available.length)];
     }
     const cloud = cloudFor({ ownerId });
-    const cwd = cloud ? await cloud.cwd(a.cwd) : a.cwd || process.cwd();
+    // 云模式下新建的牛马没有历史文件，一律落在用户私有工作区，不采用客户端/页面传来的目录。
+    const cwd = cloud ? await cloud.cwd() : a.cwd || process.cwd();
     const key = id("e"), employee = new Employee(this.store, this.vaults, this.runtime, key, this.root || this);
     const s = await this.store.transaction(async () => {
       await assertNameFree(this, a.name, { id: key, ownerId });

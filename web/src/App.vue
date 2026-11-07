@@ -1443,7 +1443,6 @@ async function saveEmployeeSettings() {
       action: "settings",
       name: employee.value.name,
       instruction: employee.value.instruction,
-      cwd: employee.value.cwd,
     });
     toast("牛马设置已保存");
     const updated = await api(`/employees/${id}`);

@@ -128,6 +128,8 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
     const initial = await engine.employee.profile();
     assert.equal(initial.ownerId, "alice");
     assert.equal(initial.cwd, ids.alice.cwd, "the built-in employee bypasses create(), but still needs a private default");
+    const adopted = await engine.employee.create({ name: "外部目录新建", cwd: process.cwd() }, "alice");
+    assert.equal(adopted.cwd, ids.alice.cwd, "a new employee ignores any external cwd and starts in the private workspace");
     const freshJob = await engine.employee.execute("", { action: "add", kind: "todo", text: "use the private default" });
     assert.equal(engine.employee.task(await engine.employee.state(), freshJob.value.id).cwd, ids.alice.cwd);
     const job = await engine.employee.execute("", { action: "add", kind: "todo", text: "keep the original task binding", cwd: process.cwd() });
