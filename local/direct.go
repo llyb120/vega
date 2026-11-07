@@ -105,6 +105,27 @@ func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredentia
 	a.config = next
 	return saved, nil
 }
+
+// removeCredential 删掉一个已被后端拒绝的配对凭据；TrustedOrigins 不变，网页可再次配对。
+func (a *Agent) removeCredential(origin, userID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	next := a.config
+	next.Servers = nil
+	for _, item := range a.config.Servers {
+		if item.Origin != origin || item.UserID != userID {
+			next.Servers = append(next.Servers, item)
+		}
+	}
+	if len(next.Servers) == len(a.config.Servers) {
+		return
+	}
+	if err := a.saveConfig(next); err == nil {
+		a.config = next
+		a.clientLog("已移除被后端拒绝的配对凭据 %s %s", origin, userID)
+	}
+}
+
 func (a *Agent) startConnections(ctx context.Context) {
 	a.mu.Lock()
 	a.context = ctx
@@ -226,6 +247,10 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 			}
 		}
 		a.connectionStatus(connection, status)
+		if response != nil && (response.StatusCode == 401 || response.StatusCode == 403) {
+			// deviceToken 已被服务端撤销：留着它只会每次启动都撞同一个 403，清掉让网页的下一次配对写入新凭据。
+			a.removeCredential(saved.Origin, saved.UserID)
+		}
 		return response == nil || (response.StatusCode != 401 && response.StatusCode != 403), false
 	}
 	defer conn.Close()

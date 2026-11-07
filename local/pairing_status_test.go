@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,6 +92,46 @@ func TestPairingReportsSanitizedLoginAndBackendFailures(t *testing.T) {
 		})
 	}
 }
+func TestRevokedCredentialIsDroppedSoSiteCanPairAgain(t *testing.T) {
+	clientID, token := strings.Repeat("c", 32), strings.Repeat("s", 43)
+	protected, err := protectToken(token)
+	if err != nil {
+		t.Skipf("token protection unavailable on this platform: %v", err)
+	}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/local-agent/socket" {
+			http.Error(w, "revoked", http.StatusForbidden)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(backend.Close)
+	path := filepath.Join(t.TempDir(), "config.json")
+	agent := &Agent{configPath: path, pinnedOrigin: backend.URL, config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}, Servers: []ServerCredential{{Origin: backend.URL, UserID: "alice", Token: protected}}}, connections: make(map[*websocket.Conn]struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent.startConnections(ctx)
+	// 等后端先回一次 403，removeCredential 才有机会跑；轮询而不是睡固定时间。
+	for i := 0; i < 100; i++ {
+		agent.mu.Lock()
+		servers := len(agent.config.Servers)
+		agent.mu.Unlock()
+		if servers == 0 {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("config not rewritten: %v", err)
+			}
+			var stored Config
+			if json.Unmarshal(data, &stored) != nil || len(stored.Servers) != 0 {
+				t.Fatalf("revoked credential still on disk: %s", data)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("revoked credential kept in config after backend_http 403")
+}
+
 func TestPairingDoesNotClaimConnectedBeforeNativeReady(t *testing.T) {
 	hello := make(chan struct{}, 1)
 	release := make(chan struct{})
