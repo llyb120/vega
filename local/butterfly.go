@@ -60,6 +60,7 @@ func butterflyNotify(kind, text string) {
 	butterflyState.notice = notice
 	butterflyState.Unlock()
 	butterflyTrayNotice(notice)
+	butterflyChipState(kind)
 	if previous == nil || previous.Kind != kind || previous.Text != text || time.Since(previous.At) > 30*time.Second {
 		if !butterflyQuiet {
 			butterflyShowNotice(notice)
@@ -77,6 +78,7 @@ func butterflyClear() {
 		return
 	}
 	butterflyTrayNotice(nil)
+	butterflyChipState("")
 	if !butterflyQuiet {
 		butterflyHideNotice()
 	}

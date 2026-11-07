@@ -113,6 +113,7 @@ func main() {
 	needsPairing := len(a.config.Servers) == 0
 	a.startConnections(ctx)
 	setSiteLabel(a.siteLabel())
+	butterflyChipStart()
 	if needsPairing {
 		go func() {
 			time.Sleep(1 * time.Second)
