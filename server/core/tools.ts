@@ -68,6 +68,7 @@ const schema = (
 const string = { type: "string" },
   integer = { type: "integer" },
   positive = { type: "integer", minimum: 1 };
+const CLIENT_TOOLS = new Set(["bash", "read", "write", "edit", "change_working_directory"]);
 export class Tools {
 
   setupAccess?: "provider";
@@ -382,13 +383,17 @@ export class Tools {
     };
   }
   async execute(call: Call, model: Model): Promise<Outcome> {
+    let done: (() => void) | undefined;
     try {
+      // Client-side work is tracked so a handoff can quiesce it and record anything still in flight as unverified.
+      if (this.session.localAgent && (CLIENT_TOOLS.has(call.name) || (CHROME_TOOLS.has(call.name) && this.engine.localBrowser(this.session))))
+        done = await this.engine.handoffs.admit(this.session.id, call.name);
       return await this.executeInner(call, model);
     } catch (error) {
       if (error instanceof LocalAgentUnavailable && !this.signal.aborted)
         return { value: { status: "needs_review", reason: error.message }, error: true, stop: true, pause: error.message };
       throw error;
-    }
+    } finally { done?.(); }
   }
   private async executeInner(call: Call, model: Model): Promise<Outcome> {
     this.signal.throwIfAborted();

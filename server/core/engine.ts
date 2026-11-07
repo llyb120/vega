@@ -20,6 +20,7 @@ import { keyDir } from "./key-files";
 import { resolve } from "node:path";
 import type { Store, Session, Message, Call } from "./store";
 import { LOCAL_BROWSER_REASONS } from "./store";
+import { Handoffs } from "./handoff";
 import type { Config, Model } from "./config";
 import type { Chrome } from "./chrome";
 import { Catalog } from "./catalog";
@@ -28,7 +29,7 @@ import { Tools, type Outcome } from "./tools";
 import { Context, estimate, ACP_GUIDE } from "./context";
 import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, followUpOpen, followUpSummary, type EmployeeRuntime } from "./employee";
 import { EmployeeBrowsers } from "./employee-browsers";
-import { NetworkRelay } from "./network-relay";
+import { NetworkRelay, previewOrigin } from "./network-relay";
 import { LocalBrowsers } from "./local-browsers";
 import { Vault } from "./vault";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
@@ -106,6 +107,7 @@ export class Engine {
   browsers: EmployeeBrowsers;
   relay: NetworkRelay;
   localBrowsers: LocalBrowsers;
+  handoffs = new Handoffs(this);
   vault: Vault;
   /** Group chats: users and their employees working together (groups.ts). */
   groups: Groups;
@@ -388,6 +390,7 @@ export class Engine {
   }
   async close() {
     this.closing = true;
+    this.handoffs.close();
     this.localAgents.close();
     await this.fire.close();
     this.employee.close();
@@ -520,6 +523,10 @@ export class Engine {
     if (this.localBrowser(session)) return this.localBrowsers.peek(session.id);
     if (this.privateBrowser(session)) return session.ownerId ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : undefined;
     return session.employeeId ? undefined : this.chrome;
+  }
+  async previewPrompt(session: Session) {
+    const previews = await this.relay.previews(session.id);
+    return previews.length ? `\n[稳定预览地址] ${previews.map((preview) => `${previewOrigin(preview)}（当前后端：${preview.backend.kind === "client" ? "客户端中继 " + preview.backend.host + ":" + preview.backend.port : "云端服务"}）`).join("；")}。浏览器访问开发服务用这个地址，不写 localhost 或中继域名；后端在本机与云端之间切换时地址不变。` : "";
   }
   async setBrowserLocation(key: string, location: unknown, reason: unknown) {
     assert(location === "local" || location === "cloud", "浏览器位置只能是 local 或 cloud");
@@ -834,7 +841,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const memories = employeeState ? formatMemoriesForPrompt(recallMemory(employeeState, memoryQuery, Date.now(), false) as any) : "";
         const taskIndex = employeeState ? "\n当前任务索引（内容已节选；完整内容、进度和结果用employee_status传taskId查看）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: [...task.text].slice(0, 120).join(""), status: task.status, ...(task.key ? { dedupeKey: task.key } : {}) }))) : "";
         let system =
-          stable + memories + taskIndex + "\n" + (await sessionPrompt(session, config, this.store, session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : ""));
+          stable + memories + taskIndex + "\n" + (await sessionPrompt(session, config, this.store, session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : "")) + (await this.previewPrompt(session));
         // Scene model edited while this run is in progress: switch on the next provider request.
         const latest = await this.config(session), primary = sceneModels(latest, session.scene!)[0];
         const seen = scenePrimaries.get(session.scene!);
@@ -1221,7 +1228,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         if (continued.length && !this.closing) {
           // History already holds the steered messages; a fresh run picks them up as context.
           void this.run(key).catch(() => {});
-        }
+        } else if (!this.closing) void this.handoffs.boundary(key).catch(() => {});
         // A member turn that ended without a final reply (a tool stopped it) still reports what it did; either way
         // the group's "typing" state changes.
         if (session?.groupId && session.employeeId && !session.taskId) {

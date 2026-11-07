@@ -219,6 +219,12 @@ export default defineEventHandler(async (event) => {
         check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认清空该牛马的全部会话和任务");
         return await engine.resetEmployee(employee.employeeId);
       }
+      if (path[2] === "tasks" && path[4] === "workspace" && path.length === 5 && method === "POST") {
+        check(await employee.manageable(user), 403, "只有牛马管理者可以交接任务执行位置");
+        const task = state.tasks.find((item) => item.id === path[3]);
+        check(!!task?.workSession, 404, "任务尚未开始，没有执行会话");
+        return await engine.handoffs.control(task!.workSession, a);
+      }
       if (path[2] === "chat" && path[3] === "clear" && method === "POST") {
         check(await employee.manageable(user), 403, "只有牛马管理者可以清空聊天记录");
         check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认清空该牛马的聊天记录");
@@ -371,6 +377,8 @@ export default defineEventHandler(async (event) => {
         return await engine.switchExecution(key, a.localAgent, a.clientId, user.id);
       if (path[2] === "browser" && method === "POST")
         return await engine.setBrowserLocation(key, a.location, a.reason);
+      if (path[2] === "workspace" && method === "POST")
+        return await engine.handoffs.control(key, a);
       if (path[2] === "stage" && method === "POST")
         return await store.stage(key, a.inheritModel === true);
       if (path[2] === "cancel" && method === "POST") {
