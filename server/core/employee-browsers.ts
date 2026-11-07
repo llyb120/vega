@@ -1,11 +1,13 @@
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
-import { rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import type { Store } from "./store";
 import { Chrome } from "./chrome";
 import { ChromeBridge } from "./chrome-bridge";
 import { HeadlessBrowser } from "./headless";
 import { assert, sleep, workspaceFile } from "./util";
-import type { CloudRuntime } from "./cloud";
+import { cloudEnabled, type CloudRuntime } from "./cloud";
+import { BRIDGE_MAX_BYTES } from "./file-bridge";
 
 type StartFailure = { count: number; error: string; at: number; retryAt: number };
 
@@ -60,6 +62,8 @@ export class EmployeeBrowsers {
         try {
           current.cloud = await this.isolation?.(id);
           current.profile = current.cloud ? join((await current.cloud.identity()).home, "browsers", id) : this.profile(id);
+          // Only the cloud workspace uses this. A client workspace is staged via stageForBrowser from client bytes;
+          // resolving the client's cwd here would read a same-named directory on the server.
           if (current.cloud) current.chrome.workspaceFile = (cwd, file) => workspaceFile(cwd, file, current.cloud!.fs);
           await current.chrome.bridge.start();
           await current.browser.start(process.env.VEGA_DB || "vega.db", {
@@ -119,6 +123,29 @@ export class EmployeeBrowsers {
       await (cloud?.fs || { rm }).rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       this.entries.delete(id);
     } catch (error) { this.removed.delete(id); throw error; }
+  }
+  /** Directories a cloud-browser download may be read from. Client cwd is intentionally not one of them. */
+  downloadRoots(id: string) {
+    const entry = this.entries.get(id);
+    const profile = entry?.browser.dir || entry?.profile || this.profile(id);
+    return [profile, join(profile, "downloads"), join(profile, "bridge-inbox")];
+  }
+  /**
+   * Materialise client bytes where this owner's cloud browser can read them.
+   * The destination is under the browser profile (or the isolation tmp), never the session cwd.
+   */
+  async stageForBrowser(id: string, name: string, data: Buffer) {
+    assert(Buffer.isBuffer(data) && data.length > 0 && data.length <= BRIDGE_MAX_BYTES, "暂存文件为空或超过 32MiB");
+    const entry = this.entries.get(id);
+    if (cloudEnabled() && !entry?.cloud) throw Error("云端隔离浏览器尚未就绪，不会把文件写到服务器上的同名工作目录");
+    const safe = (name.split(/[/\\]/).pop() || "file").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || "file";
+    const fs = entry?.cloud?.fs || { mkdir, writeFile };
+    const root = entry?.cloud ? join((await entry.cloud.identity()).tmp, "vega-bridge") : join(entry?.browser.dir || this.profile(id), "bridge-inbox");
+    const dir = join(root, randomUUID());
+    await fs.mkdir(dir, { recursive: true });
+    const file = join(dir, safe);
+    await fs.writeFile(file, data);
+    return file;
   }
   async close() {
     this.closed = true;

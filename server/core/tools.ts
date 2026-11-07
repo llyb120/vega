@@ -28,7 +28,8 @@ import { isDeepStrictEqual } from "node:util";
 import { sceneModels, maskedConfig, mergeSecrets } from "./config";
 import { omitPlaceholders } from "./tool-args";
 import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type Internal, type ToolContext } from "./public-tools";
-import type { Session, Call, Message } from "./store";
+import { peekBrowser, usesLocalBrowser, type Session, type Call, type Message } from "./store";
+import { clientFileOps, importClientFile, needsClientFileBridge } from "./file-bridge";
 import type { Engine } from "./engine";
 import { CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
 import { prepareDutyInput } from "./duty-condition";
@@ -68,6 +69,7 @@ const schema = (
 const string = { type: "string" },
   integer = { type: "integer" },
   positive = { type: "integer", minimum: 1 };
+const CLIENT_TOOLS = new Set(["bash", "read", "write", "edit", "change_working_directory"]);
 export class Tools {
 
   setupAccess?: "provider";
@@ -342,6 +344,18 @@ export class Tools {
     }
     return defs;
   }
+  /** Bytes come from the bound client; they are staged under the cloud browser profile, never read from session.cwd on the server. */
+  private async clientFileSource() {
+    const agent = this.agent();
+    if (!agent?.transport || agent.reconnecting) throw new LocalAgentUnavailable("客户端离线，无法从本机工作区取文件，不会改读服务器上的同名路径");
+    const ownerId = this.session.ownerId || await this.engine.browserOwnerId(this.session);
+    const profile = this.engine.browserProfileKey(ownerId);
+    const ops = clientFileOps(this.engine.localAgents, agent, this.signal);
+    return async (cwd: string, input: string) => {
+      const file = await importClientFile(ops, cwd, input);
+      return await this.engine.browsers.stageForBrowser(profile, file.relativePath, file.data);
+    };
+  }
   private agent() {
     if (!this.session.localAgent) return;
     if (!this.session.clientId) throw new LocalAgentUnavailable("此历史会话尚未绑定客户端，请在输入框旁选择执行客户端后继续；不会自动选择设备或重试操作。");
@@ -356,7 +370,7 @@ export class Tools {
     assert(entry, "Vault entry not found for this task");
     const task = this.session.taskId ? (await this.engine.employeeFor(this.session)).task(await (await this.engine.employeeFor(this.session)).state(), this.session.taskId).text
       : (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "";
-    const browser = this.session.localAgent ? this.engine.localBrowsers.peek(this.session.id) : this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud) ? this.engine.browsers.peek(this.engine.browserProfileKey(this.session.ownerId)) : this.engine.chrome;
+    const browser = peekBrowser(this.engine, this.session, true);
     const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
     const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
     const pages = (observation?.pages || []).filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
@@ -382,12 +396,19 @@ export class Tools {
     };
   }
   async execute(call: Call, model: Model): Promise<Outcome> {
+    let done: (() => void) | undefined;
     try {
+      // Client-side work is tracked so a handoff can quiesce it and record anything still in flight as unverified.
+      if (this.session.localAgent && (CLIENT_TOOLS.has(call.name) || (CHROME_TOOLS.has(call.name) && usesLocalBrowser(this.session))))
+        done = await this.engine.handoffs?.admit(this.session.id, call.name);
       return await this.executeInner(call, model);
     } catch (error) {
       if (error instanceof LocalAgentUnavailable && !this.signal.aborted)
         return { value: { status: "needs_review", reason: error.message }, error: true, stop: true, pause: error.message };
       throw error;
+    } finally {
+      done?.();
+      if (this.session.localAgent && ["write", "edit", "bash"].includes(call.name)) this.engine.handoffs?.scheduleCheckpoint(this.session.id);
     }
   }
   private async executeInner(call: Call, model: Model): Promise<Outcome> {
@@ -581,7 +602,7 @@ export class Tools {
   }
   private async chrome(a: Obj): Promise<Outcome> {
     this.assertBrowserScene();
-    const profileKey = !this.session.localAgent && this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud)
+    const profileKey = !usesLocalBrowser(this.session) && this.session.ownerId && (this.session.employeeId || this.session.taskId || this.session.localAgent || this.cloud)
       ? this.engine.browserProfileKey(this.session.ownerId) : "";
     let browser: Awaited<ReturnType<Engine["chromeFor"]>>;
     try { browser = await this.engine.chromeFor(this.session, this.signal); }
@@ -591,12 +612,14 @@ export class Tools {
       if (!failure) throw error;
       return { value: { connected: false, privateBrowser: "start_failed", ...failure } };
     }
+    const bridge = needsClientFileBridge(this.session) ? await this.clientFileSource() : undefined;
     const result = await browser.execute(
       this.session.id,
       this.session.cwd,
       a,
       this.signal,
       this.credentials,
+      bridge,
     );
     this.browserTab = result.tabTag || a.tabTag || this.browserTab;
     const images: Outcome["images"] = [];

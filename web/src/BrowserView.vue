@@ -931,7 +931,7 @@ onBeforeUnmount(() => {
             />
           </div>
           <figcaption>
-            <span :class="['dot', remote ? 'info pulse' : 'ok']" aria-hidden="true"></span>实时画面 · {{ new Date(screenshot.capturedAt).toLocaleTimeString() }}{{ remote ? ' · 操作模式' : ' · 查看模式' }}<span class="caption-tip" :style="{ visibility: operating ? 'hidden' : 'visible' }"> · 双指缩放、单指拖动；鼠标滚轮缩放</span>
+            <span :class="['dot', remote ? 'info pulse' : 'ok']" aria-hidden="true"></span>实时画面 · {{ new Date(screenshot.capturedAt).toLocaleTimeString() }}{{ remote ? ' · 操作模式' : ' · 查看模式' }}<span class="caption-tip" :style="{ visibility: operating ? 'hidden' : 'visible' }"> · 双指缩放、单指拖动；鼠标滚轮缩放 · 这是云端浏览器，不是你电脑上的日常浏览器</span>
           </figcaption>
         </figure>
         <div v-else-if="!status?.connected && !error" class="browser-placeholder">

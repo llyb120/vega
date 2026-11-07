@@ -23,6 +23,7 @@ import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
 import DebugSessions from "./DebugSessions.vue";
 import BrowserView from "./BrowserView.vue";
+import WorkspaceHandoff from "./WorkspaceHandoff.vue";
 import Accounts from "./Accounts.vue";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 import { useUnread } from "./unread.js";
@@ -190,6 +191,7 @@ const sessions = ref([]),
   sessionLoading = ref(false),
   folds = ref([]),
   running = ref({}),
+  handoffRevision = ref(0),
   composer = ref({ text: "", attachments: [] }),
   draft = computed({
     get: () => composer.value.text,
@@ -1029,6 +1031,7 @@ function resetLive() {
 }
 /** Event handlers never wait for the network: refreshes are coalesced and run in the background. */
 function handleEvent(event) {
+  if (event.type === "handoff_changed") { handoffRevision.value++; return; }
   if (view.value === "debug" && ["started", "message_end", "tool_end", "done", "employee_changed"].includes(event.type)) debugRevision.value++;
   if (event.session && event.session === employee.value.chatSession) {
     employeeEvent.value = event;
@@ -1574,6 +1577,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
           <button v-if="canExecute" class="primary sm" @click="openEmployee()"><Icon name="users" :size="15" /><span class="hide-mobile">交给牛马</span></button>
         </PageHeader>
         <div v-if="localPairing && localPairing.code !== 'connected'" class="banner notice" role="status"><span>{{ localPairingText }}</span><button type="button" class="sm" @click="retryLocalPairing">重新检测</button></div>
+        <WorkspaceHandoff v-if="current && !current.employeeId" :api="api" :session-id="current.id" :readonly="!canWriteCurrent" :revision="handoffRevision" />
         <div ref="transcript" :key="current?.id ?? 'none'" class="transcript" aria-live="polite">
           <div v-if="sessionLoading" class="context-note">正在加载会话…</div>
           <div v-if="!sessionLoading && !messages.length && !live" class="welcome">
@@ -1617,7 +1621,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @read="unread.groupRead" />
       <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
       <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" :tab="pageSub" @tab="setPageTab" />
-      <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" />
+      <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" :handoff-revision="handoffRevision" @back="openEmployee()" />
       <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
         <template v-if="(creatingEmployee || !employees.length)">
           <PageHeader :title="canExecute ? '创建新牛马' : '数字牛马'" :subtitle="canExecute ? '取个名字，交代工作方向，就可以开始了。' : ''" :back="employees.length ? '返回' : ''" @back="creatingEmployee = false" />
@@ -1682,6 +1686,8 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             :readonly="!canExecute"
             :act="employeeTaskAction"
             :save-memory="saveMemory"
+            :api="api"
+            :handoff-revision="handoffRevision"
             @filter="employeeTaskFilter = $event"
             @select="employeeTaskFocus = $event"
             @inspect="openEmployee($event)"
