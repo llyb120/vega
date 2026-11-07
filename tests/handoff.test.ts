@@ -152,6 +152,21 @@ test("browser state is only migrated for authorised sites and only from a local 
   assert.equal(record.browser, undefined, "默认云端浏览器不需要迁移登录态");
 });
 
+test("a task on the local client with a cloud browser takes the local login state along, but only for authorised sites", async () => {
+  const w = world();
+  const handoffs = new TaskHandoffs(w.deps);
+  const session: any = { id: "s1", taskId: "t1", employeeId: "e1", localAgent: true, localBrowser: false, ownerId: "u1" };
+  assert.equal(await handoffs.ensureBrowserState(session), undefined, "未配置授权站点时不动本机登录态");
+  await handoffs.configure("e1", { sites: ["https://a.test"] });
+  await assert.rejects(handoffs.ensureBrowserState(session), /浏览器不可用/);
+  // 用本机浏览器、或在服务端执行时，不需要搬运登录态。
+  assert.equal(await handoffs.ensureBrowserState({ ...session, localBrowser: true }), undefined);
+  assert.equal(await handoffs.ensureBrowserState({ ...session, localAgent: false }), undefined);
+  // 已经搬过的任务不重复搬。
+  w.state.tasks[0].browserSyncedAt = Date.now();
+  assert.equal(await handoffs.ensureBrowserState(session), undefined);
+});
+
 test("cloud preparation is explicit and bounded", async () => {
   const w = world();
   const handoffs = new TaskHandoffs(w.deps);

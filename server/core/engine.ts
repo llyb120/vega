@@ -203,8 +203,9 @@ export class Engine {
   }
 
   /** 只选“客户端优先 / 服务端优先”；具体哪台客户端由当前生效的客户端决定，不再逐个选择设备。 */
-  async switchEmployeeExecution(key: string, prefer: unknown, userId: string) {
+  async switchEmployeeExecution(key: string, prefer: unknown, userId: string, browserPlace?: unknown) {
     assert(prefer === "client" || prefer === "cloud", "执行位置只有「客户端优先」或「服务端优先」");
+    assert(browserPlace === undefined || browserPlace === "follow" || browserPlace === "cloud", "浏览器位置只有「跟随执行位置」或「云端」");
     const employee = await this.employee.for(key), state = await employee.state({ runs: false }), lock = "employee:" + key;
     assert(!this.executionSwitches.has(lock) && !employee.deleting && !this.closing, "执行位置正在切换或牛马正在删除");
     this.executionSwitches.add(lock);
@@ -212,10 +213,10 @@ export class Engine {
       const ownerId = state.ownerId || userId;
       const clientOnline = prefer === "client" ? !!this.localAgents.active(ownerId) : undefined;
       await employee.update((next) => {
-        next.execution = { prefer: prefer as "client" | "cloud" };
+        next.execution = { prefer: prefer as "client" | "cloud", browserPlace: browserPlace === "cloud" ? "cloud" : "follow" };
         return next.execution;
       });
-      return { execution: { prefer }, clientOnline };
+      return { execution: { prefer, browserPlace: browserPlace === "cloud" ? "cloud" : "follow" }, clientOnline };
     } finally { this.executionSwitches.delete(lock); }
   }
   /**

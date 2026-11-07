@@ -21,10 +21,12 @@ const emit = defineEmits(["tab", "delete", "execution", "handoff", "toggle-work"
 const menu = ref(null), place = ref(null);
 const icons = { chat: "chat", tasks: "tasks", browser: "globe", duties: "repeat", memories: "memory", capabilities: "zap", vault: "key", settings: "settings" };
 const prefer = computed(() => props.employee?.execution?.prefer === "client" ? "client" : "cloud");
+const browserPlace = computed(() => props.employee?.execution?.browserPlace === "cloud" ? "cloud" : "follow");
 const clients = computed(() => props.employee?.executionClients || []);
 const location = computed(() => prefer.value === "client" ? (clients.value.find((client) => client.active)?.name || "客户端优先") : "服务端优先");
 function close(target) { if (target.value) target.value.open = false; }
-function choose(value) { close(place); emit("execution", value); }
+function choose(value) { close(place); emit("execution", value, browserPlace.value); }
+function chooseBrowser(value) { close(place); emit("execution", prefer.value, value); }
 function toggleAuto() { close(place); emit("handoff", { auto: !props.employee?.handoffPolicy?.auto }); }
 </script>
 <template>
@@ -49,6 +51,7 @@ function toggleAuto() { close(place); emit("handoff", { auto: !props.employee?.h
           <p class="popover-title">新任务执行位置</p>
           <button type="button" role="menuitemradio" :aria-checked="prefer === 'cloud'" :disabled="busy" @click="choose('cloud')"><Icon name="server" :size="16" /><span>服务端优先<small>在 Vega 服务端执行</small></span><Icon v-if="prefer === 'cloud'" name="check" :size="16" class="check" /></button>
           <button type="button" role="menuitemradio" :aria-checked="prefer === 'client'" :disabled="busy" @click="choose('client')"><Icon name="laptop" :size="16" /><span>客户端优先<small>{{ clients.find((client) => client.active)?.name ? '在开着客户端的机器上执行 · ' + clients.find((client) => client.active).name : '当前没有在线客户端，新任务先在服务端执行' }}</small></span><Icon v-if="prefer === 'client'" name="check" :size="16" class="check" /></button>
+          <button v-if="prefer === 'client'" type="button" role="menuitemcheckbox" :aria-checked="browserPlace === 'cloud'" :disabled="busy" @click="chooseBrowser(browserPlace === 'cloud' ? 'follow' : 'cloud')"><Icon name="globe" :size="16" /><span>用云端浏览器<small>{{ browserPlace === 'cloud' ? '任务在本机执行；云端浏览器访问本地服务走流量中继' : '默认跟随执行位置：在本机执行时用本机浏览器' }}</small></span><Icon v-if="browserPlace === 'cloud'" name="check" :size="16" class="check" /></button>
           <button type="button" role="menuitemcheckbox" :aria-checked="!!employee.handoffPolicy?.auto" :disabled="busy" @click="toggleAuto"><Icon name="refresh" :size="16" /><span>离线自动接管<small>客户端断开超过重连宽限后，任务改在云端继续</small></span><Icon v-if="employee.handoffPolicy?.auto" name="check" :size="16" class="check" /></button>
           <p class="popover-hint">{{ busy ? '正在切换…' : '只影响之后的新任务；具体哪台机器由当前生效的客户端决定。' }}</p>
         </div>

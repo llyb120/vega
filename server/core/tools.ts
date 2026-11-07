@@ -594,6 +594,11 @@ export class Tools {
   }
   private async chrome(a: Obj): Promise<Outcome> {
     this.assertBrowserScene();
+    // 任务在本机执行、浏览器在云端时，先把本机在授权站点上的登录态同步过去（失败不阻断，留给任务自己处理）。
+    if (this.session.taskId && !this.session.localBrowser && this.session.localAgent) {
+      try { await this.engine.handoffs.ensureBrowserState(this.session); }
+      catch (error: any) { console.warn("[Vega] browser login state sync skipped", { session: this.session.id, reason: String(error?.message || error).slice(0, 200) }); }
+    }
     const profileKey = !this.session.localAgent && this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud)
       ? this.engine.browserProfileKey(this.session.ownerId) : "";
     let browser: Awaited<ReturnType<Engine["chromeFor"]>>;

@@ -18,10 +18,18 @@ import { cloudFor } from "./cloud";
 
 export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
 /** 员工级策略：只能在“客户端优先 / 服务端优先”之间选；具体哪台机器由当前生效的客户端决定。 */
-export type ExecutionPolicy = { prefer: "client" | "cloud" };
+export type ExecutionPolicy = {
+  prefer: "client" | "cloud";
+  /** 浏览器位置：follow = 跟随执行位置（客户端优先时用本机浏览器）；cloud = 始终用云端浏览器（访问本地服务走流量中继）。 */
+  browserPlace?: "follow" | "cloud";
+};
 /** 旧数据存的是具体设备，统一映射成优先策略。 */
-export const executionPolicy = (value: any): ExecutionPolicy =>
-  value?.prefer === "client" || value?.prefer === "cloud" ? { prefer: value.prefer } : { prefer: value?.localAgent ? "client" : "cloud" };
+export const executionPolicy = (value: any): ExecutionPolicy => {
+  if (value?.prefer === "client" || value?.prefer === "cloud")
+    return { prefer: value.prefer, browserPlace: value.browserPlace === "cloud" ? "cloud" : "follow" };
+  // 旧数据：localAgent 表示在客户端，localBrowser 表示那时用本机浏览器。
+  return { prefer: value?.localAgent ? "client" : "cloud", browserPlace: value?.localBrowser ? "follow" : "cloud" };
+};
 export type Owner = { token: string; name: string };
 export type Task = Obj & {
   id: string;
@@ -771,9 +779,13 @@ export class Employee {
   private bindExecution(state: EmployeeState): { execution: Execution; cwd?: string; note?: string } {
     const prefer = state.execution?.prefer || "cloud";
     const client = prefer === "client" ? this.runtime.client?.(state.ownerId) : undefined;
-    if (client) return { execution: { localAgent: true, ...client, ownerId: state.ownerId }, cwd: client.cwd };
+    if (client) {
+      // 浏览器默认跟着优先走（在本机执行就用本机浏览器）；显式选云端时浏览器走云端，访问本地服务靠流量中继。
+      const localBrowser = state.execution?.browserPlace !== "cloud";
+      return { execution: { localAgent: true, localBrowser, ...client, ownerId: state.ownerId }, cwd: client.cwd };
+    }
     return {
-      execution: { localAgent: false, ownerId: state.ownerId },
+      execution: { localAgent: false, localBrowser: false, ownerId: state.ownerId },
       note: prefer === "client" ? "客户端优先，但当前没有在线的客户端，先在服务端执行；客户端上线后可「接回本机」。" : undefined,
     };
   }

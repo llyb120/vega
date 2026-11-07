@@ -56,6 +56,8 @@ export type HandoffRecord = {
   /** The cloud workspace the task continues in. */
   cloudCwd?: string;
   base: HandoffFile[];
+  /** 交接前任务自己是否用本机浏览器，接回本机时恢复。 */
+  taskBrowser?: boolean;
   /** 登录态密文（vault 加密）：不进入模型上下文、日志或经验库。 */
   browser?: string;
   browserNote?: string;
@@ -219,6 +221,7 @@ export class TaskHandoffs {
         localCwd: record.where === "local" ? task.cwd : record.localCwd,
         cloudCwd,
         base: files,
+        taskBrowser: task.execution?.localBrowser === true ? true : record.taskBrowser,
         note: notes.join("；"),
         error: undefined,
         conflicts: record.conflicts || [],
@@ -283,7 +286,7 @@ export class TaskHandoffs {
         ].filter(Boolean).join("；"),
         error: undefined,
       };
-      await this.switch(employee, taskId, next, { localAgent: true, clientId: agent.clientId, cwd, clientName: agent.name, localPlatform: agent.platform, localBrowser: !!record!.browser });
+      await this.switch(employee, taskId, next, { localAgent: true, clientId: agent.clientId, cwd, clientName: agent.name, localPlatform: agent.platform, localBrowser: record!.taskBrowser === true });
       if (next.browser && next.browserSites?.length) {
         try {
           const fresh = employee.task(await employee.state({ runs: false }), taskId);
@@ -338,6 +341,37 @@ export class TaskHandoffs {
         });
       }
     }
+  }
+
+  /**
+   * 客户端执行 + 云端浏览器：本机的站点登录态对云端浏览器不可见，开演前先搬过去（每个任务一次）。
+   * 只搬 policy.sites 授权的站点；密码本凭据本来就在服务端，不走这里。
+   */
+  async ensureBrowserState(session: Session) {
+    const employeeId = session.employeeId, taskId = session.taskId;
+    if (!employeeId || !taskId || session.localBrowser || !session.localAgent) return;
+    const employee = await this.deps.employeeFor(employeeId);
+    const task = employee.task(await employee.state({ runs: false }), taskId);
+    if (task.browserSyncedAt) return;
+    const sites = (await this.policy(employeeId)).sites || [];
+    if (!sites.length) return; // 没授权站点就不擅自搬登录态
+    return this.exclusive("browser:" + taskId, async () => {
+      const local = await this.browserChrome(task, "local");
+      const remote = await this.browserChrome(task, "cloud");
+      assert(local, "本机浏览器不可用，登录态未同步到云端浏览器");
+      assert(remote, "云端浏览器不可用，登录态未同步");
+      const captured = await captureBrowser(local, sites, AbortSignal.timeout(60_000));
+      const restored = await restoreBrowser(remote, captured, AbortSignal.timeout(150_000));
+      await employee.update((state) => {
+        const current = employee.task(state, taskId);
+        current.browserSyncedAt = Date.now();
+        current.browserSyncNote = restored.ok
+          ? `已把 ${captured.origins.join("、")} 的登录态同步到云端浏览器`
+          : "登录态同步后仍需处理：" + restored.warnings.slice(0, 3).join("；");
+        return state;
+      });
+      return { ok: restored.ok, origins: captured.origins, warnings: restored.warnings };
+    });
   }
 
   /** A client left for good (past the reconnect grace): take over its tasks when the policy allows. */

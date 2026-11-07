@@ -1322,16 +1322,20 @@ async function employeeTaskAction(task, action, text) {
     return true;
   });
 }
-async function changeEmployeeExecution(prefer) {
+async function changeEmployeeExecution(prefer, browserPlace) {
   if (employeeExecutionBusy.value) return;
   const id = selectedEmployee.value;
   employeeExecutionBusy.value = true;
   try {
-    const result = await api(`/employees/${id}/execution`, "POST", { prefer });
+    const result = await api(`/employees/${id}/execution`, "POST", { prefer, browserPlace: browserPlace === "cloud" ? "cloud" : "follow" });
     const updated = await api(`/employees/${id}`);
     if (selectedEmployee.value === id) employee.value = updated;
     toast(prefer === "client"
-      ? (result?.clientOnline === false ? "已设为客户端优先；当前没有在线客户端，新任务先在服务端执行。" : "已设为客户端优先：新任务在开着客户端的机器上执行。")
+      ? (result?.clientOnline === false
+        ? "已设为客户端优先；当前没有在线客户端，新任务先在服务端执行。"
+        : browserPlace === "cloud"
+          ? "已设为客户端优先 + 云端浏览器：任务在本机执行，云端浏览器访问本地服务走流量中继。"
+          : "已设为客户端优先：任务和浏览器都在开着客户端的机器上。")
       : "已设为服务端优先：新任务在 Vega 服务端执行。");
   } catch (error) { employeeError.value = error.message; }
   finally { employeeExecutionBusy.value = false; }
