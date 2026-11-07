@@ -135,6 +135,7 @@ func main() {
 		}
 	})
 	fmt.Fprintln(os.Stderr, "vega-local: connection settings at http://"+localAddress+"/config/"+a.configToken)
+	a.clientLog("本地端口 %s 已启用（浏览器需在同一台电脑打开站点）", localAddress)
 	quit := func() {
 		butterflyPanelClose()
 		cancel()

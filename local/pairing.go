@@ -68,9 +68,19 @@ func newAgentAt(exeDir string) (*Agent, error) {
 	// 只认安装包里的站点，其它来源不参与白名单。
 	a.config.TrustedOrigins = []string{a.pinnedOrigin}
 	if len(a.config.Servers) == 0 {
-		a.config.Servers = legacyServers(a.pinnedOrigin)
-		if len(a.config.Servers) > 0 {
+		// clientId 必须跟凭据一起搬：服务端的授权记录把它和 token 绑定，换成新 id 握手就过不了。
+		imported, importedClientID := legacyServers(a.pinnedOrigin)
+		a.config.Servers = imported
+		if len(imported) > 0 {
+			if importedClientID != "" {
+				a.config.ClientID = importedClientID
+			}
 			a.clientLog("沿用旧版配对凭据：%s", a.pinnedOrigin)
+			// 立刻落到自己的目录，别每次启动都去读旧配置（它随时可能被删除）。
+			if data, marshalErr := json.Marshal(a.config); marshalErr == nil {
+				_ = os.MkdirAll(dir, 0o700)
+				_ = os.WriteFile(a.configPath, data, 0o600)
+			}
 		}
 	}
 	kept := a.config.Servers[:0]
@@ -164,18 +174,18 @@ func (a *Agent) allowOrigin(origin string) bool {
 
 // legacyServers 把旧版共用配置里属于本安装包站点的配对搬过来：数据目录一按站点分开，
 // 老用户的设备凭据不然就丢了，得重新让浏览器配对一次。
-func legacyServers(origin string) []ServerCredential {
+func legacyServers(origin string) ([]ServerCredential, string) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	data, err := os.ReadFile(filepath.Join(configDir, "vega-local", "trusted-sites.json"))
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	var legacy Config
 	if json.Unmarshal(data, &legacy) != nil {
-		return nil
+		return nil, ""
 	}
 	imported := []ServerCredential{}
 	for _, saved := range legacy.Servers {
@@ -183,7 +193,10 @@ func legacyServers(origin string) []ServerCredential {
 			imported = append(imported, saved)
 		}
 	}
-	return imported
+	if len(imported) == 0 {
+		return nil, ""
+	}
+	return imported, legacy.ClientID
 }
 
 // noteSite 记下最近一次站点连接：图形方式启动时 stderr 看不到，配置页和 client.log 是唯一线索。

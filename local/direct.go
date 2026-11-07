@@ -56,10 +56,22 @@ type directConnection struct {
 
 func (a *Agent) connectionStatus(connection *directConnection, status connectionStatus) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	previous := connection.status
 	connection.status = status
 	close(connection.changed)
 	connection.changed = make(chan struct{})
+	a.mu.Unlock()
+	// 连不上时日志里必须留下后端回的原话，不然只能看到“未连接”。
+	if previous.Code != status.Code || previous.Message != status.Message {
+		detail := status.Code
+		if status.HTTPStatus != 0 {
+			detail += fmt.Sprintf(" HTTP %d", status.HTTPStatus)
+		}
+		if status.Message != "" {
+			detail += "：" + status.Message
+		}
+		a.clientLog("后端 %s %s", connection.origin, detail)
+	}
 }
 
 func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredential, error) {
