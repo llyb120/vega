@@ -187,8 +187,8 @@ export class Engine {
       session.executionCwds = { ...session.executionCwds, [previous]: session.cwd, [target]: cwd };
       session.cwd = cwd;
       session.localAgent = localAgent;
-      // 切到服务端后本机浏览器不再可用；本机浏览器保留仅当执行位置也在本机。
-      if (!localAgent) session.localBrowser = false;
+      // 浏览器位置由客户端自己的配置决定：切到本机就按那台客户端的设置，切到服务端则一定用云端浏览器。
+      session.localBrowser = !!agent && agent.browser !== "cloud";
       session.localPlatform = agent?.platform;
       session.clientId = agent?.clientId;
       session.clientName = agent?.name;
@@ -202,10 +202,9 @@ export class Engine {
     }
   }
 
-  /** 只选“客户端优先 / 服务端优先”；具体哪台客户端由当前生效的客户端决定，不再逐个选择设备。 */
-  async switchEmployeeExecution(key: string, prefer: unknown, userId: string, browserPlace?: unknown) {
+  /** 只选“客户端优先 / 服务端优先”；具体哪台客户端由当前生效的客户端决定，浏览器位置由客户端自己配置。 */
+  async switchEmployeeExecution(key: string, prefer: unknown, userId: string) {
     assert(prefer === "client" || prefer === "cloud", "执行位置只有「客户端优先」或「服务端优先」");
-    assert(browserPlace === undefined || browserPlace === "follow" || browserPlace === "cloud", "浏览器位置只有「跟随执行位置」或「云端」");
     const employee = await this.employee.for(key), state = await employee.state({ runs: false }), lock = "employee:" + key;
     assert(!this.executionSwitches.has(lock) && !employee.deleting && !this.closing, "执行位置正在切换或牛马正在删除");
     this.executionSwitches.add(lock);
@@ -213,10 +212,10 @@ export class Engine {
       const ownerId = state.ownerId || userId;
       const clientOnline = prefer === "client" ? !!this.localAgents.active(ownerId) : undefined;
       await employee.update((next) => {
-        next.execution = { prefer: prefer as "client" | "cloud", browserPlace: browserPlace === "cloud" ? "cloud" : "follow" };
+        next.execution = { prefer: prefer as "client" | "cloud" };
         return next.execution;
       });
-      return { execution: { prefer, browserPlace: browserPlace === "cloud" ? "cloud" : "follow" }, clientOnline };
+      return { execution: { prefer }, clientOnline };
     } finally { this.executionSwitches.delete(lock); }
   }
   /**
@@ -249,7 +248,7 @@ export class Engine {
       // “客户端”就是当前开着 vega-local 的那台机器（最新登录生效），不是用户手里的手机/浏览器。
       client: (ownerId) => {
         const agent = this.localAgents.active(ownerId);
-        return agent ? { clientId: agent.clientId, clientName: agent.name, localPlatform: agent.platform, cwd: agent.cwd } : undefined;
+        return agent ? { clientId: agent.clientId, clientName: agent.name, localPlatform: agent.platform, cwd: agent.cwd, browser: agent.browser, prefer: agent.prefer } : undefined;
       },
       groups: {
         post: (group, employeeId, message, wake) => this.groups.post(group, employeeId, message, wake),
@@ -521,7 +520,7 @@ export class Engine {
     return "";
   }
   async chromeFor(session: Session, signal?: AbortSignal) {
-    // 浏览器位置不等同于执行位置：默认云端，只有显式选择本机浏览器时才用客户端扩展。
+    // 浏览器位置不等同于执行位置：由客户端自己的配置决定（默认本机），只有它选了本机浏览器时才用客户端扩展。
     if (session.localBrowser) {
       assert(session.localAgent && session.clientId, "本机浏览器只在任务执行位置为本机时可用；执行权在云端时请改用云端浏览器（或先接回本机）。");
       return this.localBrowsers.get(session, signal);

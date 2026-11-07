@@ -20,6 +20,10 @@ export type Agent = {
   cwd: string;
   platform: string;
   supplement?: string;
+  /** 客户端本地选择的执行位置偏好：client = 客户端优先（默认），cloud = 服务端优先。 */
+  prefer?: "client" | "cloud";
+  /** 浏览器位置由客户端自己配置：local（默认）= 用本机 Chrome 扩展，cloud = 用服务端浏览器。 */
+  browser?: "local" | "cloud";
   pending: Map<string, Pending>;
   browserLeases: Set<string>;
   onlineUntil: number;
@@ -39,6 +43,8 @@ export function validateClient(a: Obj) {
   assert(typeof a.cwd === "string" && a.cwd.length > 0 && a.cwd.length <= 4096 && !a.cwd.includes("\0"), "Invalid agent cwd");
   assert(["windows", "linux", "darwin"].includes(a.platform), "Invalid agent platform");
   assert(a.supplement === undefined || (typeof a.supplement === "string" && Buffer.byteLength(a.supplement) <= 8192 && !a.supplement.includes("\0")), "Invalid client supplement");
+  assert(a.prefer === undefined || a.prefer === "client" || a.prefer === "cloud", "Invalid client execution preference");
+  assert(a.browser === undefined || a.browser === "local" || a.browser === "cloud", "Invalid client browser location");
   return clientId;
 }
 
@@ -67,13 +73,13 @@ export class LocalAgents {
     return { userId: principal.user.id, instance: entry!.instance, expiresAt: principal.expiresAt };
   }
   list(userId?: string) {
-    const online: { id: string; name: string; cwd: string; platform: string; active: boolean }[] = [];
+    const online: { id: string; name: string; cwd: string; platform: string; browser: "local" | "cloud"; active: boolean }[] = [];
     const primary = userId ? this.primary.get(userId) : undefined;
     for (const agent of [...this.agents.values()]) {
       if (agent.userId !== userId) continue;
       this.expire(agent);
       if (!this.agents.has(agent.userId + ":" + agent.clientId)) continue;
-      online.push({ id: agent.clientId, name: agent.name, cwd: agent.cwd, platform: agent.platform, active: agent.clientId === primary });
+      online.push({ id: agent.clientId, name: agent.name, cwd: agent.cwd, platform: agent.platform, browser: agent.browser || "local", active: agent.clientId === primary });
     }
     return online;
   }
@@ -117,6 +123,15 @@ export class LocalAgents {
       this.emit({ type: "clients_changed", targetUser: userId });
     }
     agent.supplement = a.supplement || "";
+    // 客户端配置决定浏览器位置；旧客户端不上报时按本机浏览器处理。
+    agent.browser = a.browser === "cloud" ? "cloud" : "local";
+    // 客户端本地的执行位置：切成服务端优先后立即安排接力，切回客户端优先时已有任务不动。
+    const prefer = a.prefer === "cloud" ? "cloud" : "client";
+    if (agent.prefer !== prefer) {
+      const changed = agent.prefer !== undefined;
+      agent.prefer = prefer;
+      if (changed && prefer === "cloud") this.emit({ type: "clients_changed", targetUser: userId });
+    }
     const recovering = agent.reconnecting, previous = agent.transport;
     if (transport) agent.transport = transport;
     // Ping/result refresh calls connect() without a transport. That must not clear a suspended

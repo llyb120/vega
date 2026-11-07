@@ -100,13 +100,16 @@ test("switching employee execution defaults never changes old, running, resumed 
     const local = await add(employee, "client work");
     assert.equal(local.execution?.clientId, client.clientId);
     assert.equal(local.cwd, client.cwd);
-    assert.equal(local.execution?.localBrowser, true, "客户端优先默认让浏览器跟随到本机");
-    // 显式选云端浏览器：任务仍在本机，浏览器位置在云端（访问本地服务走流量中继）。
-    await engine.switchEmployeeExecution(employee.employeeId, "client", "alice", "cloud");
+    // 调用方会话（例如云端普通会话）会把自己的 cwd 带进来；客户端优先时仍必须落在客户端目录。
+    const injected = await employee.execute("", { action: "add", kind: "todo", text: "client work from a cloud chat", cwd: "/workspace/.vega-users/alice/workspace" });
+    assert.equal(employee.task(await employee.state(), injected.value.id).cwd, client.cwd, "客户端优先忽略调用方会话的云端目录");
+    assert.equal(local.execution?.localBrowser, true, "客户端未配置浏览器位置时默认用本机浏览器");
+    // 浏览器位置由客户端自己的配置决定：客户端上报 cloud 后，新任务仍在本机执行，但浏览器在云端。
+    engine.localAgents.connect("alice", { ...client, browser: "cloud" });
     const cloudBrowserTask = await add(employee, "client work with cloud browser");
     assert.equal(cloudBrowserTask.execution?.localAgent, true);
     assert.equal(cloudBrowserTask.execution?.localBrowser, false);
-    await engine.switchEmployeeExecution(employee.employeeId, "client", "alice", "follow");
+    engine.localAgents.connect("alice", { ...client, browser: "local" });
     const child = await employee.execute(original.id, { action: "add", kind: "todo", text: "child inherits server" });
     assert.equal(employee.task(await employee.state(), child.value.id).execution?.localAgent, false);
     await engine.switchEmployeeExecution(employee.employeeId, "cloud", "alice");

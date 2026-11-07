@@ -28,7 +28,7 @@ class Memory {
 
 const under = (memory: Memory, root: string) => [...memory.files.keys()].filter((path) => path.startsWith(root + "/")).map((path) => [path, memory.text(path)] as const);
 
-function world(options: { clientOnline?: boolean; running?: boolean; cloud?: boolean; local?: Memory; remote?: Memory } = {}) {
+function world(options: { clientOnline?: boolean; running?: boolean; cloud?: boolean; local?: Memory; remote?: Memory; prefer?: "client" | "cloud" } = {}) {
   const local = options.local || new Memory();
   const remote = options.remote || new Memory();
   const task: any = {
@@ -39,7 +39,7 @@ function world(options: { clientOnline?: boolean; running?: boolean; cloud?: boo
   const state: any = { id: "e1", ownerId: "u1", execution: { ...task.execution }, cwd: task.cwd, tasks: [task], duties: [], memories: [], runs: [], orbit: [] };
   const sessions = new Map<string, any>([["s1", { id: "s1", cwd: task.cwd, localAgent: true, clientId: "c1", taskId: "t1", employeeId: "e1", ownerId: "u1", title: "工作" }]]);
   const objects = new Map<string, any>();
-  const agent = { userId: "u1", clientId: "c1", name: "本机", instance: "i1", cwd: "/local", platform: "windows" };
+  const agent = { userId: "u1", clientId: "c1", name: "本机", instance: "i1", cwd: "/local", platform: "windows", prefer: options.prefer };
   const store: any = {
     async object(kind: string, key: string) { return objects.get(kind + ":" + key); },
     async objects(kind: string) { return [...objects].filter(([key]) => key.startsWith(kind + ":")).map(([, value]) => value); },

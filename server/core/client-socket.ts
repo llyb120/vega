@@ -115,7 +115,7 @@ export class ClientSockets {
           close: () => this.close(socket.id),
         };
         this.hub.connect(grant.userId, value, connection.transport);
-        connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, supplement: value.supplement, resume: value.resume === true, autoUpdate: value.autoUpdate === true && value.resume === true && !!value.version };
+        connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, supplement: value.supplement, browser: value.browser, prefer: value.prefer, resume: value.resume === true, autoUpdate: value.autoUpdate === true && value.resume === true && !!value.version };
         const agent = this.hub.active(grant.userId, grant.clientId)!;
         accepted = true;
         socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) }));
@@ -132,11 +132,24 @@ export class ClientSockets {
         }
         accepted = true;
         socket.send(JSON.stringify({ type: idle ? "update_ready" : "update_busy" }));
+      } else if (value.type === "offline" && !connection.updating) {
+        // 客户端主动下线：立即下线，不等心跳和重连宽限。
+        accepted = true;
+        this.close(socket.id, true);
+        return;
       } else if (value.type === "ping") {
         if (value.relay !== undefined) await this.relay?.configure(grant, value.relay);
         if ("supplement" in value) {
           validateClient({ ...connection.details, supplement: value.supplement });
           connection.details.supplement = value.supplement;
+        }
+        if ("browser" in value) {
+          validateClient({ ...connection.details, browser: value.browser });
+          connection.details.browser = value.browser;
+        }
+        if ("prefer" in value) {
+          validateClient({ ...connection.details, prefer: value.prefer });
+          connection.details.prefer = value.prefer;
         }
         if (!connection.updating) this.hub.connect(grant.userId, connection.details);
         accepted = true;

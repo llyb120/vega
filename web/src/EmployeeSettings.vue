@@ -6,10 +6,9 @@ const props = defineProps({ employee: Object, api: Function, saving: Boolean, de
 const emit = defineEmits(["save", "delete", "reset", "execution", "avatar", "cancel"]);
 const clients = computed(() => props.employee.executionClients || []);
 const prefer = computed(() => props.employee.execution?.prefer === "client" ? "client" : "cloud");
-const browserPlace = computed(() => props.employee.execution?.browserPlace === "cloud" ? "cloud" : "follow");
 const activeClient = computed(() => clients.value.find((client) => client.active));
-function setPrefer(value) { emit("execution", value, browserPlace.value); }
-function setBrowser(value) { emit("execution", prefer.value, value); }
+const browserPlace = computed(() => activeClient.value?.browser === "cloud" ? "cloud" : "local");
+function setPrefer(value) { emit("execution", value); }
 </script>
 <template>
   <div class="page-scroll settings-page">
@@ -30,10 +29,7 @@ function setBrowser(value) { emit("execution", prefer.value, value); }
             <button type="button" role="radio" :aria-checked="prefer === 'cloud'" :disabled="busy" @click="setPrefer('cloud')"><Icon name="server" /><span><strong>服务端优先</strong><small>在 Vega 服务端；需要本机时可手动接回</small></span></button>
             <button type="button" role="radio" :aria-checked="prefer === 'client'" :disabled="busy" @click="setPrefer('client')"><Icon name="laptop" /><span><strong>客户端优先</strong><small>{{ activeClient?.name ? '在开着客户端的机器上执行 · ' + activeClient.name : '当前没有在线客户端，新任务先在服务端执行' }}</small></span></button>
           </div>
-          <div v-if="prefer === 'client'" class="place-options browser-options" role="radiogroup" aria-label="浏览器位置">
-            <button type="button" role="radio" :aria-checked="browserPlace === 'follow'" :disabled="busy" @click="setBrowser('follow')"><Icon name="laptop" /><span><strong>浏览器跟随执行位置</strong><small>在本机执行时用本机浏览器</small></span></button>
-            <button type="button" role="radio" :aria-checked="browserPlace === 'cloud'" :disabled="busy" @click="setBrowser('cloud')"><Icon name="globe" /><span><strong>用云端浏览器</strong><small>任务仍在本机执行；云端浏览器访问本地服务走流量中继</small></span></button>
-          </div>
+          <p v-if="prefer === 'client' && activeClient" class="hint">浏览器位置由这台客户端自己配置：{{ browserPlace === 'cloud' ? '用云端浏览器（访问本地服务走流量中继）' : '用本机浏览器' }}。在客户端的「连接授权」页修改。</p>
           <p v-if="!clients.length" class="hint">无在线客户端；客户端连上后，客户端优先才会落到那台机器。</p>
         </section>
         <section class="card danger-zone">
@@ -56,7 +52,6 @@ function setBrowser(value) { emit("execution", prefer.value, value); }
 .card-head h3 { font-size: 14px; }
 .form-actions { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
 .place-options { display: grid; gap: 6px; }
-.browser-options { margin-top: 8px; }
 .place-options button { justify-content: flex-start; gap: 12px; height: auto; padding: 10px 12px; border-color: var(--border); text-align: left; white-space: normal; }
 .place-options button .icon-svg { color: var(--muted); }
 .place-options button span { display: grid; }

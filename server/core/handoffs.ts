@@ -3,7 +3,7 @@
  * 交接是唯一改变它的方式；每次交接递增 epoch，旧端的结果不再推进任务。
  *
  * 规则（与产品约定一致）：
- * - 浏览器默认在云端；只有显式选择本地浏览器时才用客户端扩展。交接不搬运浏览器状态。
+ * - 浏览器位置由客户端自己的配置决定（默认本机，可改成云端）；交接时接回本机按那台客户端的设置绑定，云端侧一律用云端浏览器。
  * - 本地在线时必须现读工作区；本地离线只能用云端已有的副本，并如实说明"以检查点为准"。
  * - 只有目标端真的拿到工作区，才切换执行权；否则保持原样并记失败原因。
  * - 回传只写文件、不抢执行权；冲突两边都留，不覆盖任何一方。
@@ -56,8 +56,6 @@ export type HandoffRecord = {
   /** The cloud workspace the task continues in. */
   cloudCwd?: string;
   base: HandoffFile[];
-  /** 交接前任务自己是否用本机浏览器，接回本机时恢复。 */
-  taskBrowser?: boolean;
   /** 登录态密文（vault 加密）：不进入模型上下文、日志或经验库。 */
   browser?: string;
   browserNote?: string;
@@ -221,7 +219,6 @@ export class TaskHandoffs {
         localCwd: record.where === "local" ? task.cwd : record.localCwd,
         cloudCwd,
         base: files,
-        taskBrowser: task.execution?.localBrowser === true ? true : record.taskBrowser,
         note: notes.join("；"),
         error: undefined,
         conflicts: record.conflicts || [],
@@ -286,7 +283,7 @@ export class TaskHandoffs {
         ].filter(Boolean).join("；"),
         error: undefined,
       };
-      await this.switch(employee, taskId, next, { localAgent: true, clientId: agent.clientId, cwd, clientName: agent.name, localPlatform: agent.platform, localBrowser: record!.taskBrowser === true });
+      await this.switch(employee, taskId, next, { localAgent: true, clientId: agent.clientId, cwd, clientName: agent.name, localPlatform: agent.platform, localBrowser: agent.browser !== "cloud" });
       if (next.browser && next.browserSites?.length) {
         try {
           const fresh = employee.task(await employee.state({ runs: false }), taskId);
@@ -374,15 +371,24 @@ export class TaskHandoffs {
     });
   }
 
-  /** A client left for good (past the reconnect grace): take over its tasks when the policy allows. */
+  /** A client left for good (past the reconnect grace): take over its tasks unless auto handoff was turned off. */
   async clientsGone(clientId: string, ownerId?: string) {
     if (this.deps.agents.active(ownerId || "", clientId)) return;
+    await this.takeOver(clientId, ownerId);
+  }
+  /** 客户端在线但本地改成了服务端优先：把绑定它的任务搬到云端继续。 */
+  async preferCloud(clientId: string, ownerId?: string) {
+    if (!this.deps.agents.active(ownerId || "", clientId)) return;
+    await this.takeOver(clientId, ownerId);
+  }
+  private async takeOver(clientId: string, ownerId?: string) {
     const employees = await this.deps.employees();
     for (const employee of employees) {
       const state = await employee.state({ runs: false });
       if (ownerId && state.ownerId !== ownerId) continue;
       const policy = await this.policy(employee.employeeId);
-      if (!policy.auto || policy.enabled === false) continue;
+      // 默认接管：客户端退出或改到服务端优先后就在云端继续，不需要先配置开关。
+      if (policy.auto === false || policy.enabled === false) continue;
       for (const task of state.tasks) {
         if (ended(task.status) || task.execution?.localAgent !== true || task.execution?.clientId !== clientId) continue;
         const record = await this.record(task.id);
@@ -421,7 +427,9 @@ export class TaskHandoffs {
     for (const record of (await this.deps.store.objects<HandoffRecord>(RECORD)) || [])
       if (record.ownerId === userId && record.clientId) clientIds.add(record.clientId);
     for (const clientId of clientIds) {
-      if (this.deps.agents.active(userId, clientId)) await this.syncBack(clientId, userId).catch(() => {});
+      const agent = this.deps.agents.active(userId, clientId);
+      if (agent?.prefer === "cloud") await this.preferCloud(clientId, userId).catch(() => {});
+      else if (agent) await this.syncBack(clientId, userId).catch(() => {});
       else await this.clientsGone(clientId, userId).catch(() => {});
     }
   }

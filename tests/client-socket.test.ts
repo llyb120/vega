@@ -101,6 +101,21 @@ test("client supplements update through heartbeats without replacing jobs, lease
   assert.equal(socket.closed.length, 0);
 });
 
+test("client browser location follows the client's own config on hello and heartbeat", async (t) => {
+  const f = await fixture(t), paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
+  const socket = f.peer(paired.deviceToken), owner = f.login.principal.user.id;
+  await f.sockets.open(socket);
+  // 旧客户端不上报 browser：按本机浏览器处理。
+  await f.sockets.message(socket, JSON.stringify({ type: "hello", ...details }));
+  assert.equal(f.hub.active(owner, details.clientId)!.browser, "local");
+  assert.equal(f.hub.list(owner)[0].browser, "local");
+  await f.sockets.message(socket, JSON.stringify({ type: "ping", browser: "cloud" }));
+  assert.equal(f.hub.active(owner, details.clientId)!.browser, "cloud");
+  assert.equal(f.hub.list(owner)[0].browser, "cloud");
+  await f.sockets.message(socket, JSON.stringify({ type: "ping", browser: "bogus" }));
+  assert.equal(socket.closed.length, 1, "无效位置不静默接受");
+});
+
 test("client supplements reject oversized, non-text and NUL input on hello and heartbeat", async (t) => {
   for (const phase of ["hello", "ping"]) for (const supplement of [null, 42, "x".repeat(8193), "中".repeat(3000), "bad\0text"]) {
     const f = await fixture(t), paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId }), socket = f.peer(paired.deviceToken);
@@ -447,4 +462,18 @@ test("a node minimum client version refuses older clients with a visible reason"
   await f.sockets.message(current, JSON.stringify({ type: "hello", ...details, version: "0.3.5" }));
   assert.equal(current.messages[0]?.type, "ready");
   assert(f.hub.active(owner, details.clientId));
+});
+
+test("client execution preference and an explicit offline request are honoured", async (t) => {
+  const f = await fixture(t), paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
+  const owner = f.login.principal.user.id, socket = f.peer(paired.deviceToken);
+  await f.sockets.open(socket);
+  await f.sockets.message(socket, JSON.stringify({ type: "hello", ...details, prefer: "cloud" }));
+  assert.equal(f.hub.active(owner, details.clientId)?.prefer, "cloud");
+  await f.sockets.message(socket, JSON.stringify({ type: "ping", prefer: "client" }));
+  assert.equal(f.hub.active(owner, details.clientId)?.prefer, "client");
+  // 主动下线要立刻生效，不能等心跳和重连宽限。
+  await f.sockets.message(socket, JSON.stringify({ type: "offline" }));
+  assert.equal(f.hub.active(owner, details.clientId), undefined);
+  assert.equal(socket.closed.length, 1);
 });

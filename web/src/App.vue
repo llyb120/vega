@@ -1322,32 +1322,21 @@ async function employeeTaskAction(task, action, text) {
     return true;
   });
 }
-async function changeEmployeeExecution(prefer, browserPlace) {
+async function changeEmployeeExecution(prefer) {
   if (employeeExecutionBusy.value) return;
   const id = selectedEmployee.value;
   employeeExecutionBusy.value = true;
   try {
-    const result = await api(`/employees/${id}/execution`, "POST", { prefer, browserPlace: browserPlace === "cloud" ? "cloud" : "follow" });
+    const result = await api(`/employees/${id}/execution`, "POST", { prefer });
     const updated = await api(`/employees/${id}`);
     if (selectedEmployee.value === id) employee.value = updated;
     toast(prefer === "client"
       ? (result?.clientOnline === false
         ? "已设为客户端优先；当前没有在线客户端，新任务先在服务端执行。"
-        : browserPlace === "cloud"
-          ? "已设为客户端优先 + 云端浏览器：任务在本机执行，云端浏览器访问本地服务走流量中继。"
-          : "已设为客户端优先：任务和浏览器都在开着客户端的机器上。")
+        : "已设为客户端优先：新任务在开着客户端的机器上执行；浏览器位置按那台客户端的本地配置。")
       : "已设为服务端优先：新任务在 Vega 服务端执行。");
   } catch (error) { employeeError.value = error.message; }
   finally { employeeExecutionBusy.value = false; }
-}
-async function changeHandoffPolicy(patch) {
-  const id = selectedEmployee.value;
-  try {
-    await api(`/employees/${id}/handoff`, "POST", patch);
-    const updated = await api(`/employees/${id}`);
-    if (selectedEmployee.value === id) employee.value = { ...employee.value, handoffPolicy: updated.handoffPolicy };
-    toast(patch.auto ? "已开启：客户端彻底离线后，任务会从云端副本继续。" : "已关闭离线自动接管。");
-  } catch (error) { employeeError.value = error.message; }
 }
 async function openEmployeeTask(id) {
   const owner = selectedEmployee.value;
@@ -1676,7 +1665,6 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             @tab="employeeTabChanged"
             @delete="deleteEmployee"
             @execution="changeEmployeeExecution"
-            @handoff="changeHandoffPolicy"
             @menu="openNavigation"
           />
           <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭牛马错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>

@@ -112,7 +112,7 @@ func (a *Agent) startConnections(ctx context.Context) {
 func (a *Agent) startConnection(saved ServerCredential, token string) *directConnection {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.updating || !validOrigin(saved.Origin) {
+	if a.updating || a.config.Offline || !validOrigin(saved.Origin) {
 		return nil
 	}
 	trusted := false
@@ -150,6 +150,8 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	ctx, cancel := context.WithCancel(parent)
 	connection := &directConnection{origin: saved.Origin, token: token, instance: instance, jobs: newJobRunner(ctx, true), cancel: cancel, status: connectionStatus{Code: "backend_connecting"}, changed: make(chan struct{})}
 	connection.jobs.supplement = a.config.Supplement
+	connection.jobs.browser = browserPlace(a.config.Browser)
+	connection.jobs.prefer = executionPlace(a.config.Prefer)
 	a.configureRelay(connection, saved, ctx)
 	a.direct[key] = connection
 	go func() {
@@ -231,12 +233,13 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	}
 	a.mu.Lock()
 	clientID, supplement := a.config.ClientID, a.config.Supplement
+	browser := browserPlace(a.config.Browser)
 	a.mu.Unlock()
 	connection.jobs.mu.Lock()
 	rules := append([]string{}, connection.jobs.relayRules...)
 	connection.jobs.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "relay": rules, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true, false
 	}
@@ -310,6 +313,8 @@ type jobRunner struct {
 	resumable    bool
 	sessionBusy  bool
 	supplement   string
+	browser      string
+	prefer       string
 	lastActivity time.Time
 	updateReady  chan bool
 	recovery     *time.Timer
@@ -466,7 +471,10 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 			case <-ticker.C:
 				runner.mu.Lock()
 				if runner.conn == conn {
-					message := map[string]any{"type": "ping", "supplement": runner.supplement}
+					message := map[string]any{"type": "ping", "supplement": runner.supplement, "prefer": executionPlace(runner.prefer)}
+					if runner.browser != "" {
+						message["browser"] = runner.browser
+					}
 					if runner.relay != nil {
 						message["relay"] = runner.relayRules
 					}

@@ -23,6 +23,9 @@ import (
 type Config struct {
 	ClientID       string             `json:"clientId"`
 	Supplement     string             `json:"supplement,omitempty"`
+	Browser        string             `json:"browser,omitempty"` // local = 本机浏览器（默认），cloud = 服务端浏览器
+	Prefer         string             `json:"prefer,omitempty"`  // client = 客户端优先（默认），cloud = 服务端优先
+	Offline        bool               `json:"offline,omitempty"` // 手动下线：不连站点、不接任务
 	TrustedOrigins []string           `json:"trustedOrigins"`
 	Servers        []ServerCredential `json:"servers,omitempty"`
 }
@@ -189,6 +192,34 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   {{end}}
 
   <section class="card">
+    <h2>浏览器位置</h2>
+    <form method="post">
+      <label class="switch"><input type="checkbox" name="browserLocal" value="1"{{if .BrowserLocal}} checked{{end}}>在本机执行时用本机浏览器</label>
+      <small>默认用本机 Chrome（需装 Nova Chrome 扩展）。取消后改用服务端浏览器，访问本机内网服务靠下方流量中继；新任务生效，已有任务不变。</small>
+      <div class="row"><button name="saveBrowser" value="1">保存浏览器位置</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>执行位置</h2>
+    <form method="post">
+      <label class="switch"><input type="checkbox" name="executionClient" value="1"{{if not .ExecutionCloud}} checked{{end}}>客户端优先：任务在本机执行</label>
+      <small>默认客户端优先。取消后改为服务端优先：新任务在云端执行，本机正在跑的任务会自动接力到云端继续，本机文件通过接力同步。</small>
+      <div class="row"><button name="saveExecution" value="1">保存执行位置</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>接单状态</h2>
+    <p>{{if .Offline}}当前<b>已下线</b>：不连接站点、不接任务；已在跑的任务由服务端接续。{{else}}当前<b>在线</b>：可以接任务。{{end}}</p>
+    <form method="post">
+      <div class="row">
+        {{if .Offline}}<button name="setOnline" value="1">上线（恢复接单）</button>{{else}}<button name="setOffline" value="1">下线（暂停接单）</button>{{end}}
+      </div>
+    </form>
+  </section>
+
+  <section class="card">
     <h2>补充内容</h2>
     <form method="post">
       <label for="supplement">本机项目目录等辅助提示</label>
@@ -243,9 +274,25 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid form", 400)
 			return
 		}
-		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" {
+		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" || r.FormValue("saveBrowser") == "1" || r.FormValue("saveExecution") == "1" || r.FormValue("setOnline") == "1" || r.FormValue("setOffline") == "1" {
 			var err error
-			if r.FormValue("saveSupplement") == "1" {
+			if r.FormValue("saveBrowser") == "1" {
+				place := "cloud"
+				if r.FormValue("browserLocal") == "1" {
+					place = "local"
+				}
+				err = a.saveBrowserPlace(place)
+			} else if r.FormValue("saveExecution") == "1" {
+				place := "cloud"
+				if r.FormValue("executionClient") == "1" {
+					place = "client"
+				}
+				err = a.saveExecutionPlace(place)
+			} else if r.FormValue("setOnline") == "1" {
+				err = a.setOnline(true)
+			} else if r.FormValue("setOffline") == "1" {
+				err = a.setOnline(false)
+			} else if r.FormValue("saveSupplement") == "1" {
 				err = a.editSupplement(func(string) (string, bool, error) { return r.FormValue("supplement"), true, nil })
 			} else {
 				err = a.saveRelay(r.FormValue("relayOrigin"), r.FormValue("relayUser"), r.FormValue("relayRules"), r.FormValue("relayOn") == "1")
@@ -363,14 +410,20 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		accounts = append(accounts, account{saved.Origin, saved.UserID, strings.Join(saved.Relay, "\n"), status, enabled})
 	}
 	supplement := a.config.Supplement
+	browserLocal := browserPlace(a.config.Browser) == "local"
+	executionCloud := executionPlace(a.config.Prefer) == "cloud"
+	offline := a.config.Offline
 	a.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pairingPage.Execute(w, struct {
 		Pending, Trusted                   []string
 		Approved, Revoked, Saved, Unpaired bool
 		Supplement                         string
+		BrowserLocal                       bool
+		ExecutionCloud                     bool
+		Offline                            bool
 		Accounts                           []account
-	}{pending, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, accounts})
+	}{pending, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, browserLocal, executionCloud, offline, accounts})
 }
 
 type loginProof struct {

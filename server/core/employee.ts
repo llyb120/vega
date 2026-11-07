@@ -18,18 +18,10 @@ import { cloudFor } from "./cloud";
 
 export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
 /** 员工级策略：只能在“客户端优先 / 服务端优先”之间选；具体哪台机器由当前生效的客户端决定。 */
-export type ExecutionPolicy = {
-  prefer: "client" | "cloud";
-  /** 浏览器位置：follow = 跟随执行位置（客户端优先时用本机浏览器）；cloud = 始终用云端浏览器（访问本地服务走流量中继）。 */
-  browserPlace?: "follow" | "cloud";
-};
-/** 旧数据存的是具体设备，统一映射成优先策略。 */
-export const executionPolicy = (value: any): ExecutionPolicy => {
-  if (value?.prefer === "client" || value?.prefer === "cloud")
-    return { prefer: value.prefer, browserPlace: value.browserPlace === "cloud" ? "cloud" : "follow" };
-  // 旧数据：localAgent 表示在客户端，localBrowser 表示那时用本机浏览器。
-  return { prefer: value?.localAgent ? "client" : "cloud", browserPlace: value?.localBrowser ? "follow" : "cloud" };
-};
+export type ExecutionPolicy = { prefer: "client" | "cloud" };
+/** 旧数据存的是具体设备，统一映射成优先策略；未标记的新记录默认客户端优先。 */
+export const executionPolicy = (value: any): ExecutionPolicy =>
+  value?.prefer === "client" || value?.prefer === "cloud" ? { prefer: value.prefer } : { prefer: value?.localAgent === false ? "cloud" : "client" };
 export type Owner = { token: string; name: string };
 export type Task = Obj & {
   id: string;
@@ -412,7 +404,7 @@ export type EmployeeRuntime = {
   isolated?: boolean;
   presence?: () => Promise<Presence>;
   /** 当前生效的客户端机器（开着 vega-local 的那台），用于把“客户端优先”落到具体执行位置。 */
-  client?: (ownerId: string) => { clientId: string; clientName?: string; localPlatform?: string; cwd: string } | undefined;
+  client?: (ownerId: string) => { clientId: string; clientName?: string; localPlatform?: string; cwd: string; browser?: "local" | "cloud"; prefer?: "client" | "cloud" } | undefined;
   /** Group chats (groups.ts): task notices of tasks started in a group go back there; false when the group is gone. */
   groups?: {
     post: (group: NonNullable<Task["group"]>, employeeId: string, message: Message, wake: boolean) => Promise<boolean>;
@@ -776,14 +768,16 @@ export class Employee {
     if (migrated.changed || pruned.changed) await this.save(state);
     return state;
   }
-  /** 按员工策略给新任务绑定执行位置：客户端优先就绑当前生效的那台机器，没有就落到服务端并说明。 */
+  /** 按执行策略给新任务绑定执行位置：客户端本地选了服务端优先就落云端；否则客户端优先绑当前生效的机器，没有就落服务端并说明。 */
   private bindExecution(state: EmployeeState): { execution: Execution; cwd?: string; note?: string } {
-    const prefer = state.execution?.prefer || "cloud";
-    const client = prefer === "client" ? this.runtime.client?.(state.ownerId) : undefined;
-    if (client) {
-      // 浏览器默认跟着优先走（在本机执行就用本机浏览器）；显式选云端时浏览器走云端，访问本地服务靠流量中继。
-      const localBrowser = state.execution?.browserPlace !== "cloud";
-      return { execution: { localAgent: true, localBrowser, ...client, ownerId: state.ownerId }, cwd: client.cwd };
+    const prefer = state.execution?.prefer || "client";
+    const client = this.runtime.client?.(state.ownerId);
+    // 客户端本地选“服务端优先”时不再看牛马策略：任务在云端执行，本地文件由接力同步。
+    if (client?.prefer === "cloud")
+      return { execution: { localAgent: false, localBrowser: false, ownerId: state.ownerId }, note: "客户端设置了服务端优先，任务在云端执行；本地文件通过接力同步。" };
+    if (prefer === "client" && client) {
+      // 浏览器位置由客户端自己的配置决定（客户端连接授权页），服务端不另行选择。
+      return { execution: { localAgent: true, localBrowser: client.browser !== "cloud", ...client, ownerId: state.ownerId }, cwd: client.cwd };
     }
     return {
       execution: { localAgent: false, localBrowser: false, ownerId: state.ownerId },
@@ -1035,7 +1029,9 @@ export class Employee {
                 status: "queued",
                 createdAt: now,
                 profile: p,
-                cwd: t?.cwd || a.cwd || bound?.cwd || s.cwd,
+                // 执行位置决定目录基准：客户端优先且有在线客户端时，任务必须落在客户端目录，
+                // 不能沿用调用方会话（可能是云端）的 cwd，否则会在客户端读云端路径。
+                cwd: t?.cwd || bound?.cwd || a.cwd || s.cwd,
                 owner: t?.owner || owner,
                 employeeId: this.employeeId,
                 execution: t ? { ...(t.execution || {} ) } : bound!.execution,
@@ -1923,7 +1919,7 @@ export class Employee {
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用task_progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器默认在云端，不因本地开发而转到本地；只有用户显式选择本机浏览器时才使用客户端扩展（此时本机 Chrome 未启动可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接），连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统会选用本次交付期内最新较长正文；已写出正文时不要传[]，确实没有单独正文才传deliverableRefs=[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
+      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用task_progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统会选用本次交付期内最新较长正文；已写出正文时不要传[]，确实没有单独正文才传deliverableRefs=[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       // Attachments the work session has not been given yet.
       const given = new Set(rowsBefore.flatMap((m) => [...(m.images || []), ...(m.files || [])].map((x: { blobId?: string }) => x.blobId)));
