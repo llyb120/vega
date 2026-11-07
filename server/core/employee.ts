@@ -1422,7 +1422,7 @@ export class Employee {
         return { data: im.data, ext: im.mime.split("/")[1] };
     }
   }
-  async control(a: Obj, owner: Owner = { token: "", name: "" }) {
+  async control(a: Obj, owner: Owner = { token: "", name: "" }, echoChatReply = true) {
     let chatReply: { text: string; taskId: string } | undefined;
     const value = await this.update(async (s) => {
           if (a.action === "settings") {
@@ -1618,7 +1618,8 @@ export class Employee {
       const executionStopped = stopped() && ended(current.status);
       return { ...value, id: task.id, status: !executionStopped && current.status === "stopped" ? "stopping" : current.status, executionStopped, next: executionStopped ? "任务执行已结束；已提交的外部作业或已发生的操作不代表已撤销，不能承诺回滚" : "停止请求已发出，但当前尚不能确认执行已结束；不能宣称已经停止，也不要循环查询" };
     }
-    if (chatReply) {
+    // A reply typed in the chat window is already visible there; only replies made elsewhere (task detail, work panel) are echoed as a quoted bubble.
+    if (chatReply && echoChatReply) {
       const state = await this.state();
       const delivery = await this.latestTaskDelivery(state.chatSession, chatReply.taskId);
       if (await this.appendChatReply(state.chatSession, delivery, chatReply.text))
