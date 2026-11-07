@@ -25,7 +25,7 @@ import { Catalog } from "./catalog";
 import { Providers, ProviderError, type Emit } from "./provider";
 import { Tools, type Outcome } from "./tools";
 import { Context, estimate, ACP_GUIDE } from "./context";
-import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, type EmployeeRuntime } from "./employee";
+import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, followUpOpen, followUpSummary, type EmployeeRuntime } from "./employee";
 import { EmployeeBrowsers } from "./employee-browsers";
 import { NetworkRelay } from "./network-relay";
 import { LocalBrowsers } from "./local-browsers";
@@ -768,10 +768,16 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       const activeTasks = employee && !session.taskId
         ? (employee.tasks || []).filter((task) => !ended(task.status)).slice(-20).map(taskSummary)
         : [];
+      const followUps = employee && !session.taskId
+        ? (employee.tasks || []).filter((task) => followUpOpen(task)).slice(-5).map(followUpSummary)
+        : [];
+      const followUpDigest = followUps.length
+        ? `[近期已交付、可在原任务续做] ${JSON.stringify(followUps)}\n仅当用户新消息是对其中某任务结果的直接后续（同一目标、页面或产物上的下一步，如搜完后点开某条结果）时，用 employee_task_manage 的 resume 带 supplement 写清新增要求，原任务在原会话续做并保留已交付结果；目标不同、换了对象或已过 followUpUntil 的用 employee_task_create 新建（可写明关联任务）。拿不准就新建；resume 被拒时改为新建，不要声称已在原任务续做。\n`
+        : "";
       const taskDigest = employee && !session.taskId
-        ? activeTasks.length
+        ? followUpDigest + (activeTasks.length
           ? `\n[当前活跃任务摘要] ${JSON.stringify(activeTasks)}\n以上已注入：新需求直接 employee_task_create（建议带 dedupeKey），同一条回复一两句说明并调用，勿复述；同一调查目标已有未完成任务用 resume；仅在需要完整字段/计划/结果或摘要不够时再 employee_status。\n`
-          : `\n[当前活跃任务摘要] 无活跃任务。新需求直接 employee_task_create，不必先 employee_status。\n`
+          : `\n[当前活跃任务摘要] 无活跃任务。新需求直接 employee_task_create，不必先 employee_status。\n`)
         : "";
       const employeePrompt = employee ? `\n[当前数字牛马] ${employee.name}（id=${employee.id}）\n${employee.instruction}\n你只管理当前牛马。用户向你交代工作时可直接用 employee_task_create 派单，无需“交给牛马”口令。独立工作放到任务中执行；沟通会话用于回答、派单、补充和恢复任务。参考启用职责，不重复派单、不扩大授权。\n${EMPLOYEE_SCENE_RULES}\n${EMPLOYEE_MEMORY_RULES}\n${taskDigest}` : "";
       const stable =
