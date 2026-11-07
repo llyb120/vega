@@ -202,31 +202,20 @@ export class Engine {
     }
   }
 
-  async switchEmployeeExecution(key: string, localAgent: boolean, clientId: string | undefined, userId: string, localBrowser?: boolean) {
-    assert(typeof localAgent === "boolean", "Invalid execution mode");
-    assert(clientId === undefined || (typeof clientId === "string" && /^[a-f0-9-]{32,36}$/.test(clientId)), "Invalid client ID");
-    const employee = await this.employee.for(key), state = await employee.state(), lock = "employee:" + key;
+  /** 只选“客户端优先 / 服务端优先”；具体哪台客户端由当前生效的客户端决定，不再逐个选择设备。 */
+  async switchEmployeeExecution(key: string, prefer: unknown, userId: string) {
+    assert(prefer === "client" || prefer === "cloud", "执行位置只有「客户端优先」或「服务端优先」");
+    const employee = await this.employee.for(key), state = await employee.state({ runs: false }), lock = "employee:" + key;
     assert(!this.executionSwitches.has(lock) && !employee.deleting && !this.closing, "执行位置正在切换或牛马正在删除");
-    // Change defaults only; every task/session keeps its creation-time execution binding.
-    const ownerId = state.ownerId || userId;
-    const agent = localAgent ? this.localAgents.active(ownerId, clientId || state.execution?.clientId) : undefined;
-    assert(!localAgent || agent, "所选客户端未连接，请选择在线客户端");
     this.executionSwitches.add(lock);
     try {
-      const cloud = cloudFor({ ownerId, localAgent });
-      const target = agent ? "client:" + agent.clientId : "server";
-      const previous = state.execution?.localAgent ? "client:" + state.execution.clientId : "server";
-      const cwd = state.executionCwds?.[target] || (agent ? agent.cwd : cloud ? (await cloud.identity()).cwd : target === previous ? state.cwd : process.cwd());
-      const path = agent ? await localCwdExists(this.localAgents, agent, agent.cwd, cwd, AbortSignal.timeout(10000)) : cloud ? await cloud.cwd(cwd) : cwd;
-      if (!agent && !cloud) assert((await stat(path)).isDirectory(), "服务端工作目录不存在");
-      if (agent) assert(this.localAgents.active(ownerId, agent.clientId) === agent, "客户端已断开，请重连后再切换");
-      assert(!employee.deleting && !this.closing, "牛马正在删除或服务已停止");
-      return await employee.update((next) => {
-              next.executionCwds = { ...next.executionCwds, [previous]: state.cwd, [target]: path };
-              next.cwd = path;
-              next.execution = { localAgent, ownerId, clientId: agent?.clientId, clientName: agent?.name, localPlatform: agent?.platform, localBrowser: localAgent ? (localBrowser ?? state.execution?.localBrowser ?? false) : false };
-              return { execution: next.execution, cwd: path };
-            });
+      const ownerId = state.ownerId || userId;
+      const clientOnline = prefer === "client" ? !!this.localAgents.active(ownerId) : undefined;
+      await employee.update((next) => {
+        next.execution = { prefer: prefer as "client" | "cloud" };
+        return next.execution;
+      });
+      return { execution: { prefer }, clientOnline };
     } finally { this.executionSwitches.delete(lock); }
   }
   /**
@@ -256,6 +245,11 @@ export class Engine {
       emit: (type, data, session?) => this.emit({ type, data, session }),
       config: () => this.config(),
       isolated: true,
+      // “客户端”就是当前开着 vega-local 的那台机器（最新登录生效），不是用户手里的手机/浏览器。
+      client: (ownerId) => {
+        const agent = this.localAgents.active(ownerId);
+        return agent ? { clientId: agent.clientId, clientName: agent.name, localPlatform: agent.platform, cwd: agent.cwd } : undefined;
+      },
       groups: {
         post: (group, employeeId, message, wake) => this.groups.post(group, employeeId, message, wake),
         taskContext: (groupId, employeeId) => this.groups.taskContext(groupId, employeeId),

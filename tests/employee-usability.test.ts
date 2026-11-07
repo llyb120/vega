@@ -92,16 +92,17 @@ test("switching employee execution defaults never changes old, running, resumed 
     engine.active.set(session.id, { control: new AbortController(), steer: [] });
     engine.localAgents.connect("alice", client);
     engine.localAgents.request = async (_agent, op, args) => { assert.equal(op, "file"); assert.equal(args.op, "stat"); return { isDir: true, path: args.path }; };
-    await engine.switchEmployeeExecution(employee.employeeId, true, client.clientId, "alice");
+    const preferClient = await engine.switchEmployeeExecution(employee.employeeId, "client", "alice");
+    assert.equal(preferClient.clientOnline, true);
     assert.equal((await store.session(session.id)).localAgent, undefined);
     assert.equal(engine.active.has(session.id), true);
-    assert.equal((await employee.state()).tasks[0].execution?.localAgent, undefined);
+    assert.equal((await employee.state()).tasks[0].execution?.localAgent, false);
     const local = await add(employee, "client work");
     assert.equal(local.execution?.clientId, client.clientId);
     assert.equal(local.cwd, client.cwd);
     const child = await employee.execute(original.id, { action: "add", kind: "todo", text: "child inherits server" });
-    assert.equal(employee.task(await employee.state(), child.value.id).execution?.localAgent, undefined);
-    await engine.switchEmployeeExecution(employee.employeeId, false, undefined, "alice");
+    assert.equal(employee.task(await employee.state(), child.value.id).execution?.localAgent, false);
+    await engine.switchEmployeeExecution(employee.employeeId, "cloud", "alice");
     assert.equal(employee.task(await employee.state(), local.id).execution?.clientId, client.clientId);
     assert.equal(employee.task(await employee.state(), local.id).cwd, client.cwd);
     engine.active.delete(session.id); employee.busy.clear();
@@ -123,9 +124,12 @@ test("switching employee execution defaults never changes old, running, resumed 
     await employee.run(localTask);
     employee.runtime.run = originalRun;
     engine.localAgents.disconnect("alice");
-    const before = await employee.state();
-    await assert.rejects(engine.switchEmployeeExecution(employee.employeeId, true, client.clientId, "alice"), /未连接/);
-    assert.deepEqual(await employee.state(), before);
+    // 客户端离线也能改策略（策略不是设备绑定）；新任务落到服务端并说明原因。
+    const offline = await engine.switchEmployeeExecution(employee.employeeId, "client", "alice");
+    assert.equal(offline.clientOnline, false);
+    const offlineTask = await add(employee, "client prefer without client");
+    assert.equal(offlineTask.execution?.localAgent, false);
+    assert.match(offlineTask.checkpoint || "", /客户端优先，但当前没有在线的客户端/);
   } finally { engine.active.clear(); (await engine.employee.all()).forEach((employee) => employee.busy.clear()); await engine.close(); await store.close(); }
 });
 

@@ -17,6 +17,11 @@ import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
 
 export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
+/** 员工级策略：只能在“客户端优先 / 服务端优先”之间选；具体哪台机器由当前生效的客户端决定。 */
+export type ExecutionPolicy = { prefer: "client" | "cloud" };
+/** 旧数据存的是具体设备，统一映射成优先策略。 */
+export const executionPolicy = (value: any): ExecutionPolicy =>
+  value?.prefer === "client" || value?.prefer === "cloud" ? { prefer: value.prefer } : { prefer: value?.localAgent ? "client" : "cloud" };
 export type Owner = { token: string; name: string };
 export type Task = Obj & {
   id: string;
@@ -41,7 +46,7 @@ export type EmployeeState = {
   avatar?: string;
   instruction: string;
   ownerId: string;
-  execution?: Execution;
+  execution?: ExecutionPolicy;
   executionCwds?: Record<string, string>;
   /** 任务接力：本地客户端与云端之间的交接策略（handoffs.ts）。 */
   handoffPolicy?: Obj;
@@ -398,6 +403,8 @@ export type EmployeeRuntime = {
   config: () => Obj | Promise<Obj>;
   isolated?: boolean;
   presence?: () => Promise<Presence>;
+  /** 当前生效的客户端机器（开着 vega-local 的那台），用于把“客户端优先”落到具体执行位置。 */
+  client?: (ownerId: string) => { clientId: string; clientName?: string; localPlatform?: string; cwd: string } | undefined;
   /** Group chats (groups.ts): task notices of tasks started in a group go back there; false when the group is gone. */
   groups?: {
     post: (group: NonNullable<Task["group"]>, employeeId: string, message: Message, wake: boolean) => Promise<boolean>;
@@ -726,7 +733,9 @@ export class Employee {
       const creator = await this.store.one("SELECT id FROM web_users WHERE role='admin' ORDER BY createdAt,id LIMIT 1");
       if (creator) { state.ownerId = creator.id; await this.save(state); }
     }
-    const defaultCwd = !state.execution?.localAgent && (!state.cwd || state.cwd === process.cwd());
+    // 执行位置改成优先策略：旧数据里的具体设备归约成 client/cloud。
+    state.execution = executionPolicy(state.execution);
+    const defaultCwd = state.execution.prefer !== "client" && (!state.cwd || state.cwd === process.cwd());
     const savedDefaultCwd = state.executionCwds?.server === process.cwd();
     if (state.ownerId && (defaultCwd || savedDefaultCwd)) {
       const cloud = cloudFor({ ownerId: state.ownerId });
@@ -757,6 +766,16 @@ export class Employee {
     state.memories = pruned.memories;
     if (migrated.changed || pruned.changed) await this.save(state);
     return state;
+  }
+  /** 按员工策略给新任务绑定执行位置：客户端优先就绑当前生效的那台机器，没有就落到服务端并说明。 */
+  private bindExecution(state: EmployeeState): { execution: Execution; cwd?: string; note?: string } {
+    const prefer = state.execution?.prefer || "cloud";
+    const client = prefer === "client" ? this.runtime.client?.(state.ownerId) : undefined;
+    if (client) return { execution: { localAgent: true, ...client, ownerId: state.ownerId }, cwd: client.cwd };
+    return {
+      execution: { localAgent: false, ownerId: state.ownerId },
+      note: prefer === "client" ? "客户端优先，但当前没有在线的客户端，先在服务端执行；客户端上线后可「接回本机」。" : undefined,
+    };
   }
   /** Read-modify-write of the whole employee (record, tasks, runs) in one transaction. */
   async update<T>(fn: (s: EmployeeState) => T | Promise<T>): Promise<T> {
@@ -996,16 +1015,17 @@ export class Employee {
                 s.tasks.filter((t) => !ended(t.status)).length < 100,
                 "Active task capacity reached",
               );
+              const bound = t ? undefined : this.bindExecution(s);
               const task: Task = {
                 id: id("t"),
                 text: content,
                 status: "queued",
                 createdAt: now,
                 profile: p,
-                cwd: t?.cwd || a.cwd || s.cwd,
+                cwd: t?.cwd || a.cwd || bound?.cwd || s.cwd,
                 owner: t?.owner || owner,
                 employeeId: this.employeeId,
-                execution: t ? { ...(t.execution || {} ) } : { ...(s.execution || {}) },
+                execution: t ? { ...(t.execution || {} ) } : bound!.execution,
                 key: a.key || "",
                 origin: t?.id || "",
                 fromDuty: t?.dutyId || t?.fromDuty || "",
@@ -1014,6 +1034,7 @@ export class Employee {
                 plan: [],
                 progress: [],
               };
+              if (bound?.note) task.checkpoint = bound.note;
               s.tasks.push(task);
               return { id: task.id };
             }
@@ -1587,10 +1608,10 @@ export class Employee {
                 text: t.text,
                 status: "queued",
                 profile: t.profile,
-                cwd: s.cwd,
+                cwd: this.bindExecution(s).cwd || s.cwd,
                 owner: t.owner,
                 employeeId: this.employeeId,
-                execution: { ...(s.execution || {}) },
+                execution: this.bindExecution(s).execution,
                 createdAt: Date.now(),
                 plan: [],
                 progress: [],
@@ -1629,15 +1650,16 @@ export class Employee {
     return value;
   }
   fire(s: EmployeeState, d: Obj, now: number, event?: string) {
+    const bound = this.bindExecution(s);
     const t: Task = {
       id: id("t"),
       text: d.text,
       status: "queued",
       profile: profile(d.profile),
-      cwd: s.cwd,
+      cwd: bound.cwd || s.cwd,
       owner: d.owner || { token: "", name: "" },
       employeeId: this.employeeId,
-      execution: { ...(s.execution || {}) },
+      execution: bound.execution,
       createdAt: now,
       dutyId: d.id,
       triggerCondition: d.condition,
@@ -1646,8 +1668,7 @@ export class Employee {
       progress: [],
     };
     s.tasks.push(t);
-    d.firedAt = now;
-    if (!d.everyMinutes && !d.times?.length) d.nextCheckAt = 0;
+    d.firedAt = now;    if (!d.everyMinutes && !d.times?.length) d.nextCheckAt = 0;
     return t;
   }
   async tick(now = Date.now()) {

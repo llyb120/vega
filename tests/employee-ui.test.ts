@@ -116,15 +116,15 @@ test("execution switch never overwrites a different employee selected while defa
     api: async (path: string, method = "GET", data?: any) => { calls.push({ path, method, data }); return method === "POST" ? {} : response; },
   };
   const change = vm.runInNewContext(between("async function changeEmployeeExecution(", "async function employeeTabChanged") + "\nchangeEmployeeExecution", context);
-  const changing = change(true, "client-a");
+  const changing = change("client");
   await Promise.resolve();
   context.selectedEmployee.value = "eb";
   context.employee.value = { id: "eb", name: "Keep" };
-  finish({ id: "ea", execution: { localAgent: true } });
+  finish({ id: "ea", execution: { prefer: "client" } });
   await changing;
   assert.equal(context.employee.value.id, "eb");
   assert.equal(calls[0].path, "/employees/ea/execution");
-  assert.equal(calls[0].data.localAgent, true);
+  assert.equal(calls[0].data.prefer, "client");
 });
 
 test("chat task links reveal the matching task and refresh stale lists without jumping across employees", async () => {

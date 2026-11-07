@@ -1322,15 +1322,17 @@ async function employeeTaskAction(task, action, text) {
     return true;
   });
 }
-async function changeEmployeeExecution(localAgent, clientId, localBrowser) {
+async function changeEmployeeExecution(prefer) {
   if (employeeExecutionBusy.value) return;
   const id = selectedEmployee.value;
   employeeExecutionBusy.value = true;
   try {
-    await api(`/employees/${id}/execution`, "POST", { localAgent, localBrowser, ...(localAgent ? { clientId: clientId || employee.value.executionClients?.[0]?.id } : {}) });
+    const result = await api(`/employees/${id}/execution`, "POST", { prefer });
     const updated = await api(`/employees/${id}`);
     if (selectedEmployee.value === id) employee.value = updated;
-    toast("已切换新任务的默认执行位置；已有和正在进行的任务不变。");
+    toast(prefer === "client"
+      ? (result?.clientOnline === false ? "已设为客户端优先；当前没有在线客户端，新任务先在服务端执行。" : "已设为客户端优先：新任务在开着客户端的机器上执行。")
+      : "已设为服务端优先：新任务在 Vega 服务端执行。");
   } catch (error) { employeeError.value = error.message; }
   finally { employeeExecutionBusy.value = false; }
 }

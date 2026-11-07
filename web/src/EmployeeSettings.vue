@@ -5,7 +5,8 @@ import EmployeeAvatarPicker from "./EmployeeAvatarPicker.vue";
 const props = defineProps({ employee: Object, api: Function, saving: Boolean, deleting: Boolean, resetting: String, busy: Boolean });
 const emit = defineEmits(["save", "delete", "reset", "execution", "avatar", "cancel"]);
 const clients = computed(() => props.employee.executionClients || []);
-const local = computed(() => !!props.employee.execution?.localAgent);
+const prefer = computed(() => props.employee.execution?.prefer === "client" ? "client" : "cloud");
+const activeClient = computed(() => clients.value.find((client) => client.active));
 </script>
 <template>
   <div class="page-scroll settings-page">
@@ -22,13 +23,12 @@ const local = computed(() => !!props.employee.execution?.localAgent);
       <div class="side">
         <EmployeeAvatarPicker :key="employee.id" :api="api" :employee-id="employee.id" :name="employee.name" :avatar="employee.avatar" @change="emit('avatar', $event)" />
         <section class="card">
-          <div class="card-head"><h3>新任务执行位置</h3><p class="hint">只影响之后的新任务，已有和正在进行的任务不变。</p></div>
+          <div class="card-head"><h3>新任务执行位置</h3><p class="hint">只影响之后的新任务，已有和正在进行的任务不变；具体哪台机器由当前生效的客户端决定。</p></div>
           <div class="place-options" role="radiogroup" aria-label="新任务执行位置">
-            <button type="button" role="radio" :aria-checked="!local" :disabled="busy" @click="emit('execution', false)"><Icon name="server" /><span><strong>服务端</strong><small>在 Vega 服务所在机器执行</small></span></button>
-            <button v-for="client in clients" :key="client.id" type="button" role="radio" :aria-checked="local && employee.execution.clientId === client.id" :disabled="busy" @click="emit('execution', true, client.id)"><Icon name="laptop" /><span><strong>{{ client.name }}</strong><small>{{ client.platform }} · 在线</small></span></button>
-            <button v-if="local && !clients.some((client) => client.id === employee.execution.clientId)" type="button" role="radio" aria-checked="true" disabled><Icon name="laptop" /><span><strong>{{ employee.execution.clientName }}</strong><small>离线</small></span></button>
+            <button type="button" role="radio" :aria-checked="prefer === 'cloud'" :disabled="busy" @click="emit('execution', 'cloud')"><Icon name="server" /><span><strong>服务端优先</strong><small>在 Vega 服务端；需要本机时可手动接回</small></span></button>
+            <button type="button" role="radio" :aria-checked="prefer === 'client'" :disabled="busy" @click="emit('execution', 'client')"><Icon name="laptop" /><span><strong>客户端优先</strong><small>{{ activeClient?.name ? '在开着客户端的机器上执行 · ' + activeClient.name : '当前没有在线客户端，新任务先在服务端执行' }}</small></span></button>
           </div>
-          <p v-if="!clients.length" class="hint">无在线客户端；连接后可切换。</p>
+          <p v-if="!clients.length" class="hint">无在线客户端；客户端连上后，客户端优先才会落到那台机器。</p>
         </section>
         <section class="card danger-zone">
           <div class="card-head"><h3>危险操作</h3><p class="hint">清空聊天只删除对话记录；重置会停止并删除全部会话和任务，保留记忆、职责、设置、密码本和浏览器登录；删除会连同职责、记忆、密码本、任务和浏览器登录一并清除。项目文件不会删除。</p></div>
