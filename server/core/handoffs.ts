@@ -104,7 +104,7 @@ export class TaskHandoffs {
       : current.commands;
     const next: HandoffPolicy = {
       enabled: input.enabled === undefined ? current.enabled ?? true : !!input.enabled,
-      auto: input.auto === undefined ? !!current.auto : !!input.auto,
+      auto: input.auto === undefined ? current.auto !== false : !!input.auto,
       commands,
       prepare: input.prepare === undefined ? current.prepare : (String(input.prepare || "").trim() || undefined),
       sites: input.sites === undefined ? current.sites : (Array.isArray(input.sites) && input.sites.length ? browserOrigins(input.sites) : undefined),

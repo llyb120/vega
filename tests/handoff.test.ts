@@ -175,21 +175,35 @@ test("cloud preparation is explicit and bounded", async () => {
   assert.match(record.note!, /未配置环境准备命令/);
 });
 
-test("non-terminal tasks whose client died are taken over only when the policy allows it", async () => {
+test("non-terminal tasks whose client died move to the cloud by default; only an explicit opt-out keeps them local", async () => {
   const options: any = { clientOnline: true };
   const w = world(options);
   w.local.put("/local/work/a.ts", "v1");
   const handoffs = new TaskHandoffs(w.deps);
-  options.clientOnline = false;
-  await handoffs.clientsGone("c1", "u1");
-  assert.equal(w.state.tasks[0].execution.localAgent, true, "默认不自动接管");
-
-  options.clientOnline = true;
   await handoffs.toCloud("e1", "t1");
-  await handoffs.configure("e1", { auto: true });
   await handoffs.toLocal("e1", "t1");
   options.clientOnline = false;
   await handoffs.clientsGone("c1", "u1");
-  assert.equal(w.state.tasks[0].execution.localAgent, false, "策略允许时从云端副本继续");
+  assert.equal(w.state.tasks[0].execution.localAgent, false, "客户端退出后默认转回云端");
+  assert.equal((await handoffs.record("t1"))!.source, "auto");
+
+  const optedOut: any = { clientOnline: true };
+  const kept = world(optedOut);
+  kept.local.put("/local/work/a.ts", "v1");
+  const configured = new TaskHandoffs(kept.deps);
+  await configured.toCloud("e1", "t1");
+  await configured.toLocal("e1", "t1");
+  await configured.configure("e1", { auto: false });
+  optedOut.clientOnline = false;
+  await configured.clientsGone("c1", "u1");
+  assert.equal(kept.state.tasks[0].execution.localAgent, true, "显式关闭自动接管时保留本地绑定");
+});
+
+test("a client that switches itself to server-first hands its tasks to the cloud", async () => {
+  const w = world({ clientOnline: true, prefer: "cloud" });
+  w.local.put("/local/work/a.ts", "v1");
+  const handoffs = new TaskHandoffs(w.deps);
+  await handoffs.clients({ type: "clients_changed", targetUser: "u1" });
+  assert.equal(w.state.tasks[0].execution.localAgent, false, "客户端在线但选了服务端优先后自动接力");
   assert.equal((await handoffs.record("t1"))!.source, "auto");
 });
