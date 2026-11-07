@@ -66,9 +66,15 @@ test("a longer reply written after the cited one auto-upgrades to that newer bod
   assert.deepEqual(resolveDeliverable(later, [5]).refs, [8]);
 });
 
-test("explicit empty deliverableRefs stay empty even when bodies exist", () => {
-  assert.deepEqual(resolveDeliverable(session, []).refs, []);
-  assert.equal(resolveDeliverable(session, []).auto, undefined);
+test("explicit empty deliverableRefs never auto-pick a body: refused once naming it, then honored when confirmed", () => {
+  const refused = resolveDeliverable(session, []);
+  assert.deepEqual(refused.refs, []);
+  assert.equal(refused.auto, undefined);
+  assert.equal(refused.emptyGuard, 4);
+  assert.match(refused.error!, /#4/);
+  const confirmed = resolveDeliverable(session, [], { confirmEmpty: 4 });
+  assert.equal(confirmed.error, undefined);
+  assert.deepEqual(confirmed.texts, []);
 });
 
 test("memory claim limit fits path-heavy environment facts", () => {
