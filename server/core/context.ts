@@ -998,7 +998,11 @@ export class Context {
     ];
     const artifacts = new Set<string>();
     for (const m of span) {
-      if (m.role === "assistant" && m.text) lines.push("- assistant: " + short(m.text, 160));
+      if (m.role === "assistant" && m.text) {
+        const length = [...m.text.trim()].length;
+        // Long replies are delivery bodies: keep their number so task_complete can cite them instead of rewriting.
+        lines.push(length >= 300 ? `- assistant #${m.seq}（${length}字正文，原文保留，可用 deliverableRefs:[${m.seq}] 引用）: ${short(m.text, 160)}` : "- assistant: " + short(m.text, 160));
+      }
       for (const c of m.calls || [])
         if (c.name === "task_progress" && Array.isArray(c.arguments?.plan))
           lines.push("- called task_progress " + short(String(c.arguments.message || ""), 100) + " | plan: " + short(c.arguments.plan.map((step: Obj) => `[${step.status}] ${short(String(step.content || ""), 60)}`).join("; "), 400));
