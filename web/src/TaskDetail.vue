@@ -65,6 +65,7 @@ async function run(action) {
       <h2 class="sr-only">任务详情</h2>
       <MessageText :text="task.text" />
       <p v-if="task.status === 'queued' && task.queueReason" class="detail-note" role="status"><Icon name="clock" :size="14" />{{ task.queueReason }}</p>
+      <p v-if="task.handoffState?.note || task.handoffState?.error" class="detail-note" role="status"><Icon :name="task.handoffState?.error ? 'alert' : 'server'" :size="14" />{{ task.handoffState?.error || task.handoffState.note }}</p>
     </header>
 
     <section v-if="task.status === 'approval'" class="attention-block">
@@ -136,6 +137,7 @@ async function run(action) {
       <span class="spacer"></span>
       <span v-if="task.status === 'deferred'" class="hint">无需等待，牛马会按恢复点继续检查。</span>
       <template v-if="!readonly">
+        <button v-if="!ended" type="button" :disabled="busy || task.status === 'running'" :title="task.status === 'running' ? '等这一轮结束或先暂停任务，再交接执行权' : ''" @click="run(task.execution?.localAgent ? 'handoff-cloud' : 'handoff-local')"><Icon name="server" :size="14" />{{ task.execution?.localAgent ? '交给云端继续' : '接回本机' }}</button>
         <button v-if="task.status === 'running'" type="button" :disabled="busy" @click="run('stop')"><Icon name="stop" :size="14" />停止任务</button>
         <button v-else-if="!ended" type="button" :disabled="busy" @click="run('stop')"><Icon name="pause" :size="14" />暂停任务</button>
         <button v-if="resumable" type="button" class="primary" :disabled="busy" @click="run('resume')"><Icon name="play" :size="14" />继续任务</button>

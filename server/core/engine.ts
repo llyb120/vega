@@ -3,6 +3,7 @@ import { NEW_SESSION_NOTICE } from "./new-session";
 import { Fire } from "./fire";
 import { Groups } from "./groups";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
+import { TaskHandoffs } from "./handoffs";
 import { builtinCommand, expandBuiltin } from "./builtins";
 import { requireSceneModel, sceneModels, maskedConfig, mergeSecrets, schedulerLimits, DEFAULT_GLOBAL_SLOTS, DEFAULT_PER_EMPLOYEE_SLOTS } from "./config";
 import { validateContextRules } from "../../shared/context-rules";
@@ -102,6 +103,8 @@ export class Engine {
   redactors = new Map<string, Redactor>();
   providers = new Providers();
   employee: Employee;
+  /** 任务执行权调度：本地客户端与云端之间的交接、检查点与回传。 */
+  handoffs!: TaskHandoffs;
   browsers: EmployeeBrowsers;
   relay: NetworkRelay;
   localBrowsers: LocalBrowsers;
@@ -109,7 +112,11 @@ export class Engine {
   /** Group chats: users and their employees working together (groups.ts). */
   groups: Groups;
   fire: Fire;
-  localAgents = new LocalAgents((value) => this.emit(value as AgentEvent));
+  localAgents = new LocalAgents((value) => {
+    this.emit(value as AgentEvent);
+    // 客户端离线/回连由调度器统一处理：自动接管与增量回传不依赖界面点击。
+    if ((value as Obj)?.type === "clients_changed") void this.handoffs?.clients(value as Obj).catch(() => {});
+  });
   closing = false;
   executionSwitches = new Set<string>();
   mcpSessions = new Map<string, { key: string; client: MCP }>();
@@ -179,6 +186,8 @@ export class Engine {
       session.executionCwds = { ...session.executionCwds, [previous]: session.cwd, [target]: cwd };
       session.cwd = cwd;
       session.localAgent = localAgent;
+      // 切到服务端后本机浏览器不再可用；本机浏览器保留仅当执行位置也在本机。
+      if (!localAgent) session.localBrowser = false;
       session.localPlatform = agent?.platform;
       session.clientId = agent?.clientId;
       session.clientName = agent?.name;
@@ -192,7 +201,7 @@ export class Engine {
     }
   }
 
-  async switchEmployeeExecution(key: string, localAgent: boolean, clientId: string | undefined, userId: string) {
+  async switchEmployeeExecution(key: string, localAgent: boolean, clientId: string | undefined, userId: string, localBrowser?: boolean) {
     assert(typeof localAgent === "boolean", "Invalid execution mode");
     assert(clientId === undefined || (typeof clientId === "string" && /^[a-f0-9-]{32,36}$/.test(clientId)), "Invalid client ID");
     const employee = await this.employee.for(key), state = await employee.state(), lock = "employee:" + key;
@@ -214,7 +223,7 @@ export class Engine {
       return await employee.update((next) => {
               next.executionCwds = { ...next.executionCwds, [previous]: state.cwd, [target]: path };
               next.cwd = path;
-              next.execution = { localAgent, ownerId, clientId: agent?.clientId, clientName: agent?.name, localPlatform: agent?.platform };
+              next.execution = { localAgent, ownerId, clientId: agent?.clientId, clientName: agent?.name, localPlatform: agent?.platform, localBrowser: localAgent ? (localBrowser ?? state.execution?.localBrowser ?? false) : false };
               return { execution: next.execution, cwd: path };
             });
     } finally { this.executionSwitches.delete(lock); }
@@ -269,6 +278,14 @@ export class Engine {
         this.active.get(session)?.control.abort(Error("Fire paused")),
       (type, data, session?) => this.emit({ type, data, session }),
     );
+    this.handoffs = new TaskHandoffs({
+      store,
+      employees: () => this.employee.all(),
+      employeeFor: (employeeId) => this.employee.for(employeeId),
+      agents: this.localAgents,
+      isRunning: (session) => !!session && (this.active.has(session) || this.fire.running.has(session)),
+      cloud: (ownerId) => ownerId ? cloudFor({ ownerId }) : undefined,
+    });
   }
   async config(session?: Session): Promise<Config> {
     await migrateEmployeeCapabilities(this.store);
@@ -502,7 +519,11 @@ export class Engine {
     return "";
   }
   async chromeFor(session: Session, signal?: AbortSignal) {
-    if (session.localAgent) return this.localBrowsers.get(session, signal);
+    // 浏览器位置不等同于执行位置：默认云端，只有显式选择本机浏览器时才用客户端扩展。
+    if (session.localBrowser) {
+      assert(session.localAgent && session.clientId, "本机浏览器只在任务执行位置为本机时可用；执行权在云端时请改用云端浏览器（或先接回本机）。");
+      return this.localBrowsers.get(session, signal);
+    }
     const ownerId = await this.browserOwnerId(session);
     // Employee/task work and cloud sessions use the owner's shared private profile.
     if (session.employeeId || session.taskId || cloudFor(session)) return this.browsers.get(this.browserProfileKey(ownerId));
@@ -1210,7 +1231,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
           await this.store.saveSession(session);
         }
-        const browser = session?.localAgent ? this.localBrowsers.peek(key) : session?.ownerId && (session.employeeId || session.taskId || cloudFor(session)) ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : session?.employeeId ? undefined : this.chrome;
+        const browser = session?.localBrowser ? this.localBrowsers.peek(key) : session?.ownerId && (session.employeeId || session.taskId || cloudFor(session)) ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : session?.employeeId ? undefined : this.chrome;
         await browser?.experiences.finish(key, !error);
       } catch (cleanupError: any) {
         error ||= new Error(String(redact.value(cleanupError?.message || cleanupError)));

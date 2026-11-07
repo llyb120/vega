@@ -356,7 +356,7 @@ export class Tools {
     assert(entry, "Vault entry not found for this task");
     const task = this.session.taskId ? (await this.engine.employeeFor(this.session)).task(await (await this.engine.employeeFor(this.session)).state(), this.session.taskId).text
       : (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "";
-    const browser = this.session.localAgent ? this.engine.localBrowsers.peek(this.session.id) : this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud) ? this.engine.browsers.peek(this.engine.browserProfileKey(this.session.ownerId)) : this.engine.chrome;
+    const browser = this.session.localBrowser ? this.engine.localBrowsers.peek(this.session.id) : this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud) ? this.engine.browsers.peek(this.engine.browserProfileKey(this.session.ownerId)) : this.engine.chrome;
     const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
     const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
     const pages = (observation?.pages || []).filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
@@ -450,6 +450,13 @@ export class Tools {
     }
     if (call.name === "bash") {
       const agent = this.agent();
+      // 命名命令可以固定在某一端：执行权不在那一端时明确拒绝，不在另一端跑同一命令。
+      if (this.session.employeeId) {
+        const side = await this.engine.handoffs.commandSide(this.session.employeeId, String(a.command || ""));
+        const where = this.session.localAgent ? "local" : "cloud";
+        if (side && side !== where)
+          throw new Error(`这条命令固定在${side === "local" ? "本机" : "云端"}执行，而任务当前执行权在${where === "local" ? "本机" : "云端"}；本步未执行。请先交接执行权，不把同一命令放到另一端跑。`);
+      }
       return agent
         ? localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal)
         : shell(this.session.cwd, a, this.signal, this.emit, this.cloud);

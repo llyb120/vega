@@ -1308,6 +1308,13 @@ async function resetEmployee(scope) {
 }
 async function employeeTaskAction(task, action, text) {
   return attempt(async () => {
+    if (action === "handoff-cloud" || action === "handoff-local") {
+      const to = action === "handoff-cloud" ? "to-cloud" : "to-local";
+      await api(`/employees/${selectedEmployee.value}/tasks/${task.id}/handoff`, "POST", { action: to });
+      await refreshEmployee();
+      toast(to === "to-cloud" ? "已交接：本机工作文件已同步，任务改为在云端继续；浏览器始终在云端。" : "已接回本机继续；云端成果已回传到本机。");
+      return true;
+    }
     if (action === "remove" && !confirm("永久删除此任务记录？")) return;
     if (action === "redispatch" && !confirm("重新派发为新任务？此前外部操作不会回滚。")) return;
     if (action === "seal" && !confirm("封存此任务？封存后不能再恢复、续做或重新派发，只能查看或删除。")) return;
@@ -1315,17 +1322,26 @@ async function employeeTaskAction(task, action, text) {
     return true;
   });
 }
-async function changeEmployeeExecution(localAgent, clientId) {
+async function changeEmployeeExecution(localAgent, clientId, localBrowser) {
   if (employeeExecutionBusy.value) return;
   const id = selectedEmployee.value;
   employeeExecutionBusy.value = true;
   try {
-    await api(`/employees/${id}/execution`, "POST", { localAgent, ...(localAgent ? { clientId: clientId || employee.value.executionClients?.[0]?.id } : {}) });
+    await api(`/employees/${id}/execution`, "POST", { localAgent, localBrowser, ...(localAgent ? { clientId: clientId || employee.value.executionClients?.[0]?.id } : {}) });
     const updated = await api(`/employees/${id}`);
     if (selectedEmployee.value === id) employee.value = updated;
     toast("已切换新任务的默认执行位置；已有和正在进行的任务不变。");
   } catch (error) { employeeError.value = error.message; }
   finally { employeeExecutionBusy.value = false; }
+}
+async function changeHandoffPolicy(patch) {
+  const id = selectedEmployee.value;
+  try {
+    await api(`/employees/${id}/handoff`, "POST", patch);
+    const updated = await api(`/employees/${id}`);
+    if (selectedEmployee.value === id) employee.value = { ...employee.value, handoffPolicy: updated.handoffPolicy };
+    toast(patch.auto ? "已开启：客户端彻底离线后，任务会从云端副本继续。" : "已关闭离线自动接管。");
+  } catch (error) { employeeError.value = error.message; }
 }
 async function openEmployeeTask(id) {
   const owner = selectedEmployee.value;
@@ -1655,7 +1671,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             @tab="employeeTabChanged"
             @delete="deleteEmployee"
             @execution="changeEmployeeExecution"
-            @toggle-work="toggleWorkPanel"
+            @handoff="changeHandoffPolicy"
             @menu="openNavigation"
           />
           <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭牛马错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>

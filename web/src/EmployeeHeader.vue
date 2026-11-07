@@ -17,14 +17,15 @@ const props = defineProps({
   workOpen: Boolean,
   workCount: Number,
 });
-const emit = defineEmits(["tab", "delete", "execution", "toggle-work", "menu"]);
+const emit = defineEmits(["tab", "delete", "execution", "handoff", "toggle-work", "menu"]);
 const menu = ref(null), place = ref(null);
 const icons = { chat: "chat", tasks: "tasks", browser: "globe", duties: "repeat", memories: "memory", capabilities: "zap", vault: "key", settings: "settings" };
 const location = computed(() => props.employee?.execution?.localAgent ? props.employee.execution.clientName || "客户端" : "服务端");
 const clients = computed(() => props.employee?.executionClients || []);
 const offlineCurrent = computed(() => props.employee?.execution?.localAgent && !clients.value.some((client) => client.id === props.employee.execution.clientId));
 function close(target) { if (target.value) target.value.open = false; }
-function choose(localAgent, clientId) { close(place); emit("execution", localAgent, clientId); }
+function choose(localAgent, clientId, localBrowser) { close(place); emit("execution", localAgent, clientId, localBrowser); }
+function toggleAuto() { close(place); emit("handoff", { auto: !props.employee?.handoffPolicy?.auto }); }
 </script>
 <template>
   <header class="employee-header">
@@ -45,10 +46,11 @@ function choose(localAgent, clientId) { close(place); emit("execution", localAge
       <details v-if="employee.canManage" ref="place" class="popover place-popover">
         <summary class="place-chip" :title="'新任务默认执行位置：' + location"><Icon :name="employee.execution?.localAgent ? 'laptop' : 'server'" :size="15" /><span class="truncate">{{ location }}</span><Icon name="down" :size="14" /></summary>
         <div class="popover-panel" role="menu" aria-label="新任务执行位置">
-          <p class="popover-title">新任务执行位置</p>
-          <button type="button" role="menuitemradio" :aria-checked="!employee.execution?.localAgent" :disabled="busy" @click="choose(false)"><Icon name="server" :size="16" /><span>服务端</span><Icon v-if="!employee.execution?.localAgent" name="check" :size="16" class="check" /></button>
+          <p class="popover-title">新任务执行位置</p>          <button type="button" role="menuitemradio" :aria-checked="!employee.execution?.localAgent" :disabled="busy" @click="choose(false)"><Icon name="server" :size="16" /><span>服务端</span><Icon v-if="!employee.execution?.localAgent" name="check" :size="16" class="check" /></button>
           <button v-for="client in clients" :key="client.id" type="button" role="menuitemradio" :aria-checked="employee.execution?.localAgent && employee.execution.clientId === client.id" :disabled="busy" @click="choose(true, client.id)"><Icon name="laptop" :size="16" /><span>{{ client.name }}<small>{{ client.platform }}</small></span><Icon v-if="employee.execution?.localAgent && employee.execution.clientId === client.id" name="check" :size="16" class="check" /></button>
           <button v-if="offlineCurrent" type="button" disabled><Icon name="laptop" :size="16" /><span>{{ employee.execution.clientName }}<small>离线</small></span><Icon name="check" :size="16" class="check" /></button>
+          <button v-if="employee.execution?.localAgent" type="button" role="menuitemcheckbox" :aria-checked="!!employee.execution?.localBrowser" :disabled="busy" @click="choose(true, employee.execution.clientId, !employee.execution.localBrowser)"><Icon name="laptop" :size="16" /><span>用本机浏览器<small>默认在云端；仅本机登录态/扩展才需要</small></span><Icon v-if="employee.execution?.localBrowser" name="check" :size="16" class="check" /></button>
+          <button type="button" role="menuitemcheckbox" :aria-checked="!!employee.handoffPolicy?.auto" :disabled="busy" @click="toggleAuto"><Icon name="refresh" :size="16" /><span>离线自动接管<small>客户端断开超过重连宽限后，任务改在云端继续</small></span><Icon v-if="employee.handoffPolicy?.auto" name="check" :size="16" class="check" /></button>
           <p class="popover-hint">{{ busy ? '正在验证执行环境…' : clients.length ? '只影响之后的新任务，已有任务不变。' : '无在线客户端，连接后可切换；只影响新任务。' }}</p>
         </div>
       </details>

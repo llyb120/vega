@@ -201,7 +201,20 @@ export default defineEventHandler(async (event) => {
       }
       if (path[2] === "execution" && method === "POST") {
         check(await employee.manageable(user), 403, "只有牛马管理者可以切换默认执行位置");
-        return engine.switchEmployeeExecution(employee.employeeId, a.localAgent, a.clientId, user.id);
+        return engine.switchEmployeeExecution(employee.employeeId, a.localAgent, a.clientId, user.id, a.localBrowser);
+      }
+      // 任务执行权：同一个任务同一时刻只在一个位置跑，交接是唯一改变它的方式。
+      if (path[2] === "tasks" && path[4] === "handoff" && method === "POST") {
+        check(await employee.manageable(user), 403, "只有牛马管理者可以交接执行权");
+        const taskId = String(path[3] || "");
+        if (a.action === "status") return engine.handoffs.status(employee.employeeId, taskId);
+        if (a.action === "to-cloud") return engine.handoffs.toCloud(employee.employeeId, taskId, { source: "manual" });
+        if (a.action === "to-local") return engine.handoffs.toLocal(employee.employeeId, taskId, { clientId: a.clientId });
+        check(false, 400, "action 是 to-cloud、to-local 或 status");
+      }
+      if (path[2] === "handoff" && path.length === 3 && method === "POST") {
+        check(await employee.manageable(user), 403, "只有牛马管理者可以配置接力");
+        return engine.handoffs.configure(employee.employeeId, a);
       }
       if (path.length === 2 && method === "DELETE") {
         check(await employee.manageable(user), 403, "只有牛马管理者可以删除牛马");

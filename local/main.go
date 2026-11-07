@@ -321,6 +321,8 @@ func fileOperation(req fileReq) map[string]any {
 	case "stat":
 		st, err := os.Stat(path)
 		return map[string]any{"path": path, "isDir": err == nil && st.IsDir()}
+	case "list":
+		return listWorkspace(path)
 	case "upload":
 		root, err := filepath.EvalSymlinks(req.Cwd)
 		if err != nil {

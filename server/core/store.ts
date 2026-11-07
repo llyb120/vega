@@ -61,6 +61,8 @@ export type Session = {
   taskId?: string;
   employeeId?: string;
   localAgent?: boolean;
+  /** 浏览器位置与执行位置解耦：只有显式选择本机浏览器时才为 true（默认云端）。 */
+  localBrowser?: boolean;
   localPlatform?: string;
   clientId?: string;
   clientName?: string;
