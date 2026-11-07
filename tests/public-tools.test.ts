@@ -208,16 +208,47 @@ test("visible tools and branches follow session, scene and permission like the o
   for (const name of ["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete"]) assert(STANDALONE_TOOLS.has(name));
 });
 
-test("chrome tools appear only where the old chrome tool did", async (t) => {
+test("chrome definitions are one stable leading block in every scene for eligible sessions; ineligible sessions get none", async (t) => {
   const store = await Store.open(":memory:");
   t.after(async () => await store.close());
-  const engine = { store, vault: new Vault(store), mcpFor: () => ({}) } as any;
+  const engine = { store, vault: new Vault(store), mcpFor: () => ({}), employeeFor: async () => { throw new Error("no employee"); } } as any;
   const config = { model: "", provider: {}, scenes: { lightweight: ["p/l"], coding: ["p/c"], computer: ["p/x"] } } as any;
-  const visible = async (session: any, model?: any) => (await (await Tools.create(engine, session, config, new AbortController().signal, () => {})).definitions(model)).filter((d) => d.name.startsWith("chrome_")).length;
-  assert.equal(await visible(await store.newSession({ scene: "computer" })), 14);
-  assert.equal(await visible(await store.newSession({ scene: "coding" })), 0);
-  assert.equal(await visible(await store.newSession({ scene: "coding" }), { selection: "p/x" }), 14);
-  assert.equal(await visible(await store.newSession({ scene: "computer", readOnly: true })), 0);
+  const defs = async (session: any) => (await Tools.create(engine, session, config, new AbortController().signal, () => {})).definitions();
+  const chrome = (list: any[]) => list.filter((d) => d.name.startsWith("chrome_"));
+  const expected = JSON.stringify(chrome(await defs(await store.newSession({ scene: "computer" }))));
+  assert.equal(JSON.parse(expected).length, CHROME_TOOL_DEFINITIONS.length);
+  assert.deepEqual(JSON.parse(expected).map((d: any) => d.name), CHROME_TOOL_DEFINITIONS.map((d) => d.name));
+  for (const extra of [{}, { employeeId: "e", taskId: "task" }])
+    for (const scene of ["lightweight", "coding", "computer"]) {
+      const list = await defs(await store.newSession({ scene, ...extra }));
+      assert.equal(JSON.stringify(chrome(list)), expected, `identical chrome schemas/descriptions/order in ${scene} ${JSON.stringify(extra)}`);
+      assert.equal(JSON.stringify(list.slice(0, CHROME_TOOL_DEFINITIONS.length)), expected, "chrome block leads the list");
+    }
+  assert.equal(chrome(await defs(await store.newSession({ scene: "computer", readOnly: true }))).length, 0, "read-only sessions stay without chrome");
+  assert.equal(chrome(await defs(await store.newSession({ scene: "lightweight", employeeId: "e" }))).length, 0, "employee chat stays without chrome");
+});
+
+test("chrome invocations outside the computer scene are rejected before any browser connection; computer scene runs", async (t) => {
+  const store = await Store.open(":memory:");
+  t.after(async () => await store.close());
+  let driver = 0;
+  const engine = { store, vault: new Vault(store), mcpFor: () => ({}), chromeFor: async () => { driver++; return { execute: async () => ({ connected: true }) }; } } as any;
+  const config = { model: "", provider: {}, scenes: { lightweight: ["p/l"], coding: ["p/c"], computer: ["p/x"] } } as any;
+  const tools = async (scene: string, cfg = config) => Tools.create(engine, await store.newSession({ scene }), cfg, new AbortController().signal, () => {});
+  for (const scene of ["lightweight", "coding"]) {
+    const outside = await tools(scene);
+    for (const { name } of CHROME_TOOL_DEFINITIONS)
+      await assert.rejects(outside.execute({ id: name, name, arguments: {} } as any, {} as any), /只能在 computer 场景执行.*switch_scene\(scene=computer\).*不是浏览器扩展故障/s, `${name} in ${scene}`);
+    await assert.rejects((outside as any).chrome({ operation: "status" }), /只能在 computer 场景执行/, "internal driver entry is gated too");
+  }
+  assert.equal(driver, 0, "no browser was started, connected or driven");
+  const unconfigured = await tools("coding", { ...config, scenes: { ...config.scenes, computer: [] } });
+  await assert.rejects(unconfigured.execute({ id: "c", name: "chrome_connection", arguments: {} } as any, {} as any), /computer 场景未配置模型/);
+  assert.equal(driver, 0);
+  const inside = await tools("computer");
+  const result = await inside.execute({ id: "c", name: "chrome_connection", arguments: { command: "status" } } as any, {} as any);
+  assert.deepEqual(result.value, { connected: true });
+  assert.equal(driver, 1, "computer scene reaches the driver");
 });
 
 test("dispatch and status descriptions steer away from copied tool names and redundant dedupe checks", () => {

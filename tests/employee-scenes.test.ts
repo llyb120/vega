@@ -9,6 +9,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { ProviderError } from "../server/core/provider";
 import type { Task } from "../server/core/employee";
 import { EMPLOYEE_DECISION_RULES } from "../server/core/prompt";
+import { CHROME_TOOL_DEFINITIONS } from "../server/core/public-tools";
 import { chromeCall, employeeCall } from "./public-call";
 
 async function fixture() {
@@ -334,33 +335,56 @@ test("attached log scenario: lightweight task whose model is shared with compute
   const { store, engine, employee, add, segment } = await fixture();
   // One image-capable model serves lightweight and computer, as in the reported deployment.
   const config = await engine.config(); config.scenes!.lightweight = ["p/vision"]; config.scenes!.computer = ["p/vision"]; await store.put("config", config);
-  const selected: string[] = []; let phase = 0, work = "";
+  let driver = 0;
+  (engine as any).chromeFor = async () => { driver++; return { execute: async () => ({ connected: true }) }; };
+  const selected: string[] = []; let phase = 0, work = "", chromeDefs = "";
   engine.providers.chat = async (model, system, messages, definitions) => {
     selected.push(model.selection);
     assert.equal(model.selection, "p/vision");
+    assert(phase <= 4, "task_complete must succeed from the computer scene instead of looping");
     const names = definitions.map(tool => tool.name);
     assert(!names.includes("task_relay_computer"), "relay is never exposed");
+    const chrome = JSON.stringify(definitions.filter(tool => tool.name.startsWith("chrome_")));
     if (phase++ === 0) {
-      assert.deepEqual(chromeNames(definitions), [], "lightweight starts without chrome tools");
+      chromeDefs = chrome;
+      assert(chromeNames(definitions).includes("chrome_navigate"), "chrome definitions are listed from the start");
+      assert(system.includes("[Chrome 场景]") && !system.includes("[Chrome 规则]"), "only the short gate rule outside computer");
       assert(sceneEnum(definitions).includes("computer"), "shared model must not hide switch_scene(computer)");
       assert(names.includes("task_progress") && names.includes("task_complete"));
-      return call("browser", "switch_scene", { scene: "computer", message: "在服务端浏览器打开百度并核实" });
+      return { role: "assistant", calls: [
+        { id: "early-nav", name: "chrome_navigate", arguments: { url: "https://www.baidu.com/" } },
+        { id: "early-status", name: "chrome_connection", arguments: { command: "status" } },
+      ] };
     }
     if (phase === 2) {
+      for (const id of ["early-nav", "early-status"]) {
+        const rejected = messages.find(message => message.role === "tool" && message.callId === id)!;
+        assert(rejected.error && /只能在 computer 场景执行.*switch_scene\(scene=computer\)/s.test(rejected.text!), "out-of-scene batch call is rejected with guidance");
+      }
+      assert.equal(driver, 0, "rejected calls never reach the browser driver");
+      return call("browser", "switch_scene", { scene: "computer", message: "在服务端浏览器打开百度并核实" });
+    }
+    if (phase === 3) {
       const outcome = messages.findLast(message => message.role === "tool" && message.name === "switch_scene")!;
       assert(!outcome.error, "switch_scene executes instead of reporting the model already covers the scene");
       assert(!outcome.text!.includes("continue without switching"));
       assert(JSON.parse(outcome.text!).scene === "computer");
       assert(messages.some(message => message.role === "user" && message.text?.includes("在服务端浏览器打开百度首页")), "task text stays in history");
-      assert(chromeNames(definitions).includes("chrome_navigate") && chromeNames(definitions).includes("chrome_connection"), "chrome tools exposed after the transition");
+      assert.equal(chrome, chromeDefs, "chrome schemas, descriptions and order unchanged by the scene switch");
+      assert(system.includes("[Chrome 规则]") && !system.includes("[Chrome 场景]"), "full Chrome rules only in computer");
       assert(names.includes("task_progress") && names.includes("task_complete"), "main task progress/complete stay usable");
       assert(!names.includes("write") && !names.includes("edit"), "computer scene keeps its restricted file tools");
       assert(sceneEnum(definitions).includes("lightweight") && !sceneEnum(definitions).includes("computer"), "return path exists, no self-switch");
       assert(!system.includes("[电脑场景未配置]"));
       work = (await store.sessions())[0].id;
+      return call("status", "chrome_connection", { command: "status" });
+    }
+    if (phase === 4) {
+      const status = messages.findLast(message => message.role === "tool" && message.callId === "status")!;
+      assert(!status.error, status.text);
+      assert.equal(driver, 1, "computer scene reaches the browser driver");
       return verified();
     }
-    assert(phase <= 3, "task_complete must succeed from the computer scene instead of looping");
     return completed();
   };
   try {
@@ -374,7 +398,7 @@ test("attached log scenario: lightweight task whose model is shared with compute
     assert.equal(session.taskId, job.id);
     assert.notEqual(job.side, "computer", "task is not flipped to the isolated computer side");
     assert.equal(session.relayComputer, undefined);
-    assert.deepEqual(selected, ["p/vision", "p/vision", "p/vision"]);
+    assert.deepEqual(selected, ["p/vision", "p/vision", "p/vision", "p/vision", "p/vision"]);
     assert.equal((await employee.state()).runs.length, 1, "one continuous run");
   } finally { await engine.close(); await store.close(); }
 });
@@ -385,7 +409,7 @@ test("lightweight and computer on different models: switch changes model and exp
   engine.providers.chat = async (model, _system, _messages, definitions) => {
     if (phase++ === 0) {
       assert.equal(model.selection, "p/light");
-      assert.deepEqual(chromeNames(definitions), []);
+      assert(chromeNames(definitions).includes("chrome_navigate"), "listed before the switch, gated at execution");
       return call("browser", "switch_scene", { scene: "computer", message: "打开网页核实" });
     }
     assert(phase <= 3, "task_complete must succeed from the computer scene instead of looping");
@@ -409,7 +433,7 @@ test("computer scene without a model: not offered, accurate setup diagnosis inst
   engine.providers.chat = async (model, system, messages, definitions) => {
     assert.equal(model.selection, "p/light");
     assert(!sceneEnum(definitions).includes("computer"));
-    assert.deepEqual(chromeNames(definitions), []);
+    assert(chromeNames(definitions).includes("chrome_navigate"), "definitions stay stable even without a computer model");
     assert.match(system, /\[电脑场景未配置\].*computer 场景未配置模型.*不是浏览器扩展连接问题/s);
     if (phase++ === 0) return call("browser", "switch_scene", { scene: "computer", message: "强行切换" });
     const outcome = messages.findLast(message => message.role === "tool" && message.name === "switch_scene")!;
@@ -437,7 +461,7 @@ test("one model for every scene: lightweight to coding to computer all execute i
       return call("code", "switch_scene", { scene: "coding", message: "改代码" });
     }
     if (phase === 2) {
-      assert(names.includes("write") && chromeNames(definitions).length === 0);
+      assert(names.includes("write") && chromeNames(definitions).length === CHROME_TOOL_DEFINITIONS.length);
       assert.deepEqual(sceneEnum(definitions).sort(), ["computer", "lightweight"]);
       return call("browser", "switch_scene", { scene: "computer", message: "浏览器验证" });
     }

@@ -994,15 +994,23 @@ export class Context {
     if (!this.closed(rows, start, end)) return { status: "noop" as const };
     const span = rows.filter((m) => m.seq! >= start && m.seq! <= end);
     const lines = [
-      `(Scene fold: ${fromScene} → ${toScene}; mechanical outline, not proof of success. decompress / recall / search_context for originals.)`,
+      `(Scene fold: ${fromScene} → ${toScene}; mechanical outline, not proof of success. The calls listed already ran: do not repeat them; decompress / recall / search_context for originals.)`,
     ];
+    const artifacts = new Set<string>();
     for (const m of span) {
       if (m.role === "assistant" && m.text) lines.push("- assistant: " + short(m.text, 160));
       for (const c of m.calls || [])
-        lines.push("- called " + c.name + " " + short(JSON.stringify(c.arguments), 100));
+        if (c.name === "task_progress" && Array.isArray(c.arguments?.plan))
+          lines.push("- called task_progress " + short(String(c.arguments.message || ""), 100) + " | plan: " + short(c.arguments.plan.map((step: Obj) => `[${step.status}] ${short(String(step.content || ""), 60)}`).join("; "), 400));
+        else lines.push("- called " + c.name + " " + short(JSON.stringify(c.arguments), 100));
       if (m.role === "tool")
         lines.push("- " + (m.name || "tool") + (m.error ? " failed: " : ": ") + short(m.text || "", 120));
+      for (const image of m.images || []) {
+        const ref = image.url || image.path || (image.blobId ? "sqlite:blob/" + image.blobId : "");
+        if (ref) artifacts.add(ref);
+      }
     }
+    if (artifacts.size) lines.splice(1, 0, "- artifacts: " + [...artifacts].slice(-8).join(", "));
     const s = await this.state();
     const fold: Fold = {
       id: await this.nextID(s),
