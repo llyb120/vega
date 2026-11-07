@@ -220,10 +220,17 @@ export default defineEventHandler(async (event) => {
         return await engine.resetEmployee(employee.employeeId);
       }
       if (path[2] === "tasks" && path[4] === "workspace" && path.length === 5 && method === "POST") {
-        check(await employee.manageable(user), 403, "只有牛马管理者可以交接任务执行位置");
         const task = state.tasks.find((item) => item.id === path[3]);
         check(!!task?.workSession, 404, "任务尚未开始，没有执行会话");
+        if (a.action === "status") check(await employee.accessible(user), 403, "无权查看该任务的交接状态");
+        else check(await employee.manageable(user), 403, "只有牛马管理者可以交接任务执行位置");
         return await engine.handoffs.control(task!.workSession, a);
+      }
+      if (path[2] === "tasks" && path[4] === "files" && path.length === 5 && method === "POST") {
+        check(await employee.manageable(user), 403, "只有牛马管理者可以把下载导回客户端");
+        const task = state.tasks.find((item) => item.id === path[3]);
+        check(!!task?.workSession, 404, "任务尚未开始，没有执行会话");
+        return await engine.handoffs.exportDownload(task!.workSession, a);
       }
       if (path[2] === "chat" && path[3] === "clear" && method === "POST") {
         check(await employee.manageable(user), 403, "只有牛马管理者可以清空聊天记录");
@@ -379,6 +386,8 @@ export default defineEventHandler(async (event) => {
         return await engine.setBrowserLocation(key, a.location, a.reason);
       if (path[2] === "workspace" && method === "POST")
         return await engine.handoffs.control(key, a);
+      if (path[2] === "files" && method === "POST")
+        return await engine.handoffs.exportDownload(key, a);
       if (path[2] === "stage" && method === "POST")
         return await store.stage(key, a.inheritModel === true);
       if (path[2] === "cancel" && method === "POST") {

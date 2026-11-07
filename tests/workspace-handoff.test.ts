@@ -412,3 +412,75 @@ test("an exceptional local browser migrates only authorized task tabs and is ver
   assert.equal(after.browserLocation, undefined, "the task now uses the cloud browser");
   assert.match((await store.messages(session.id)).findLast((m) => m.notice)!.text!, /已迁移本机标签页：https:\/\/app\.test\/dash/);
 });
+
+test("automatic checkpoints coalesce, keep the last complete revision on failure, and do not take the execution lock", async (t) => {
+  const { engine, session, local } = await fixture(t);
+  engine.handoffs.debounceMs = 40;
+  engine.handoffs.intervalMs = 60_000;
+  let gitCalls = 0;
+  const original = engine.localAgents.request;
+  engine.localAgents.request = async (agent, op, args, signal) => {
+    if (op === "exec" && String(args.command).includes("status")) gitCalls++;
+    return await original(agent, op, args, signal);
+  };
+  await writeFile(join(local, "app.txt"), "auto\n");
+  engine.handoffs.scheduleCheckpoint(session.id);
+  engine.handoffs.scheduleCheckpoint(session.id);
+  assert.equal(engine.executionSwitches.has(session.id), false);
+  await new Promise((done) => setTimeout(done, 500));
+  assert.equal(gitCalls, 1, "two requests in one window become one checkpoint");
+  assert.equal((await engine.handoffs.record(session.id))!.rev, 1);
+  assert.equal(engine.executionSwitches.has(session.id), false, "a follow-up turn can still start");
+  const first = join(engine.store.files.root, "handoff", session.id, "rev-1.json");
+  engine.localAgents.request = async (agent, op, args, signal) => {
+    if (op === "exec") throw Error("git failed after the previous checkpoint");
+    return await original(agent, op, args, signal);
+  };
+  engine.handoffs.debounceMs = 20;
+  await writeFile(join(local, "app.txt"), "again\n");
+  engine.handoffs.scheduleCheckpoint(session.id);
+  await new Promise((done) => setTimeout(done, 400));
+  assert.equal((await engine.handoffs.record(session.id))!.lastComplete, 1);
+  assert.equal(JSON.parse(await readFile(first, "utf8")).complete, true);
+  engine.active.set(session.id, {} as any);
+  const record = (await engine.handoffs.record(session.id))!;
+  record.pending = "transfer_back";
+  record.owner = "cloud";
+  record.depsVerified = true;
+  await engine.store.save("handoff", session.id, record);
+  await engine.handoffs.boundary(session.id);
+  const held = (await engine.handoffs.record(session.id))!;
+  assert.equal(held.owner, "cloud");
+  assert.equal(held.pending, "transfer_back", "an active turn is not transferred at the boundary");
+  engine.active.delete(session.id);
+});
+
+test("download export reads the browser profile, not the client cwd, and fails closed", async (t) => {
+  const { engine, session, local, base } = await fixture(t);
+  const downloads = join(base, "downloads");
+  await mkdir(downloads);
+  await writeFile(join(downloads, "report.txt"), "from-browser");
+  await writeFile(join(local, "report.txt"), "DECOY");
+  await symlink(join(local, "report.txt"), join(downloads, "linked.txt"));
+  engine.browsers.downloadRoots = () => [downloads];
+  const chrome = { bridge: { request: async () => ({ downloads: [{ id: "7", state: "complete", path: join(downloads, "report.txt") }] }) } };
+  engine.peekBrowser = () => chrome as any;
+  await assert.rejects(engine.handoffs.exportDownload(session.id, { authorize: false, path: "out.txt", downloadId: "7" }), /显式授权/);
+  await assert.rejects(engine.handoffs.exportDownload(session.id, { authorize: true, path: "../out.txt", downloadId: "7" }), /越出/);
+  chrome.bridge.request = async () => ({ downloads: [{ id: "8", state: "complete", path: join(local, "report.txt") }] });
+  await assert.rejects(engine.handoffs.exportDownload(session.id, { authorize: true, path: "out.txt", downloadId: "8" }), /受控目录/);
+  assert.equal(await readFile(join(local, "report.txt"), "utf8"), "DECOY");
+  chrome.bridge.request = async () => ({ downloads: [{ id: "9", state: "complete", path: join(downloads, "linked.txt") }] });
+  await assert.rejects(engine.handoffs.exportDownload(session.id, { authorize: true, path: "out.txt", downloadId: "9" }), /符号链接/);
+  chrome.bridge.request = async () => ({ downloads: [{ id: "7", state: "complete", path: join(downloads, "report.txt") }] });
+  await writeFile(join(local, "out.txt"), "keep");
+  await assert.rejects(engine.handoffs.exportDownload(session.id, { authorize: true, path: "out.txt", downloadId: "7" }), /不会覆盖/);
+  assert.equal(await readFile(join(local, "out.txt"), "utf8"), "keep");
+  const saved = await engine.handoffs.exportDownload(session.id, { authorize: true, path: "fresh.txt", downloadId: "7" });
+  assert.equal(await readFile(join(local, "fresh.txt"), "utf8"), "from-browser");
+  assert.equal(saved.bytes, Buffer.byteLength("from-browser"));
+  const agent = engine.localAgents.active("alice", client.clientId)!;
+  agent.transport = undefined;
+  await assert.rejects(engine.handoffs.exportDownload(session.id, { authorize: true, path: "other.txt", downloadId: "7" }), /离线/);
+  await assert.rejects(readFile(join(local, "other.txt")));
+});

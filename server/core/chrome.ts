@@ -1,4 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { normalizeAction } from "./browser-actions";
+import type { FileSource } from "./file-bridge";
 import { validatePlan, literalMet, runCandidates, bindStep, chains, runState, type Candidate } from "./browser-run";
 import { assertCredentialInput, credentialOrigins, vaultSite, type CredentialBinding } from "./credentials";
 import sharp from "sharp";
@@ -38,6 +40,8 @@ export const CONTEXT_RETRIES = 4;
 export const contextLost = (message?: string) =>
   /Cannot find context with specified id|Execution context was destroyed|No frame for given id|Cannot find default execution context|Inspected target navigated or closed/i.test(String(message || ""));
 
+const fileSource = new AsyncLocalStorage<FileSource>();
+
 export class Chrome {
   gate = new Mutex();
   tabGates = new Map<string, Mutex>();
@@ -54,6 +58,12 @@ export class Chrome {
   cancelled = new Map<string, AbortController>();
   experiences: Experiences;
   workspaceFile = workspaceFile;
+  /** Uses the per-call client file source when one was supplied, and never falls back to the server cwd. */
+  private async resolveInput(cwd: string, input: string) {
+    const source = fileSource.getStore();
+    if (source) return await source(cwd, input);
+    return await this.workspaceFile(cwd, input);
+  }
   constructor(
     public store: Store,
     public bridge: ChromeBridge,
@@ -790,7 +800,7 @@ export class Chrome {
       } else if (action.action === "scroll") assert(action.frame === 0, "子框架滚动需要明确 ref");
       if (action.action === "upload") {
         assert(o.frames[action.frame], "upload.frame is not in the observation");
-        action.files = await Promise.all(action.files.map((path: string) => this.workspaceFile(cwd, path)));
+        action.files = await Promise.all(action.files.map((path: string) => this.resolveInput(cwd, path)));
       }
       if (["click_at", "move", "drag", "scroll_at"].includes(action.action)) {
         const image = this.coordinateImage(o, top.imageId);
@@ -971,7 +981,7 @@ export class Chrome {
         "upload requires a frame, unique selector and 1–16 workspace files",
       );
       const files = await Promise.all(
-        a.files.map((p: string) => this.workspaceFile(cwd, p)),
+        a.files.map((p: string) => this.resolveInput(cwd, p)),
       );
       const r = await this.cdp(
         tag,
@@ -1215,7 +1225,9 @@ export class Chrome {
     args: Obj,
     parent?: AbortSignal,
     credentials: CredentialBinding[] = [],
+    files?: FileSource,
   ): Promise<any> {
+    if (files && fileSource.getStore() !== files) return fileSource.run(files, () => this.execute(owner, cwd, args, parent, credentials, files));
     if (args.operation === "stop") {
       this.cancelled.get(owner)?.abort();
       return { stopped: true };

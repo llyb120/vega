@@ -1215,10 +1215,13 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         this.active.delete(key);
         this.redactors.delete(key);
         emit("done", { error: !!error });
-        if (continued.length && !this.closing) {
-          // History already holds the steered messages; a fresh run picks them up as context.
+        // Scene return to the caller already continued inside this run. A follow-up run must start
+        // before boundary: boundary moves ownership and takes the execution lock, so it only runs when nothing else will.
+        const followUp = continued.length > 0;
+        if (followUp && !this.closing) {
           void this.run(key).catch(() => {});
         } else if (!this.closing) void this.handoffs.boundary(key).catch(() => {});
+        if (!this.closing && session?.localAgent) this.handoffs.scheduleCheckpoint(key);
         // A member turn that ended without a final reply (a tool stopped it) still reports what it did; either way
         // the group's "typing" state changes.
         if (session?.groupId && session.employeeId && !session.taskId) {

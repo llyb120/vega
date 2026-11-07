@@ -12,6 +12,8 @@ import { LocalAgentUnavailable, type Agent } from "./local-agent";
 import { assertShellCommand } from "./shell-policy";
 import { previewHost, previewOrigin, validRelayHost, type PreviewBackend } from "./network-relay";
 import { assert, sleep, type Obj } from "./util";
+import { clientFileOps, exportClientFile, readRegularInside, workspaceRelative } from "./file-bridge";
+import { usesLocalBrowser } from "./store";
 
 export const SYNC_LIMITS = { files: 2000, bytes: 64 << 20 };
 /** Never synced unless listed in `include`; .git internals and browser profiles are never synced at all. */
@@ -35,6 +37,8 @@ export type HandoffRecord = {
   services: (Service & { pid?: number })[];
   previews: { host: string; previous: PreviewBackend }[];
   deps: Dependency[];
+  /** Set only after takeover has checked every declared dependency. Empty or unchecked deps never mean the computer can be closed. */
+  depsVerified?: boolean;
   conflicts: { path: string; copy: string; side: "cloud" | "local"; at: number }[];
   pendingDeletes: string[];
   unknown: { tool: string; startedAt: number }[];
@@ -53,6 +57,11 @@ const sha = (data: Uint8Array) => createHash("sha256").update(data).digest("hex"
 const quote = (path: string) => "'" + path.replace(/'/g, "'\\''") + "'";
 const missing = (error: any) => error?.code === "ENOENT" || /ENOENT|no such file|not exist|cannot find/i.test(String(error?.message || error));
 const ADVICE = { local: "文件已同步，仍依赖本地", cloud: "云端已接管，可以关闭电脑" };
+const AUTO_PHASES = new Set(["idle", "checkpointed", "local_owned", "files_synced_local_dependent", "synced_back", "failed"]);
+/** True only when ownership is cloud and takeover verified a non-empty dependency list that is entirely cloud. */
+export function canCloseComputer(record?: { owner?: string; depsVerified?: boolean; deps?: { status: string }[] }) {
+  return !!record && record.owner === "cloud" && record.depsVerified === true && !!record.deps?.length && record.deps.every((dep) => dep.status === "cloud");
+}
 
 export function syncable(path: string, include: string[] = []): string | undefined {
   if (!path || path.includes("\0") || path.includes("\\") || path.startsWith("/") || /^[a-z]:/i.test(path) || path.split("/").some((part) => part === ".." || part === "" || part === "."))
@@ -85,8 +94,16 @@ export class Handoffs {
   private quiesced = new Map<string, Quiesce>();
   private locks = new Set<string>();
   private processes = new Map<number, ReturnType<typeof spawn>>();
+  private checkpointTail = new Map<string, Promise<unknown>>();
+  private debounce = new Map<string, ReturnType<typeof setTimeout>>();
+  private watched = new Set<string>();
+  private timer?: ReturnType<typeof setInterval>;
   drainMs = 30000;
   readyMs = 60000;
+  /** Automatic checkpoints coalesce for this long and never run on the model turn's stack. */
+  debounceMs = 5000;
+  intervalMs = 60000;
+  keepRevisions = 3;
   constructor(private engine: Engine) {}
 
   private get store() { return this.engine.store; }
@@ -101,9 +118,10 @@ export class Handoffs {
     return record;
   }
   view(record?: HandoffRecord) {
-    if (!record) return { owner: "local", phase: "idle", message: "" };
+    if (!record) return { owner: "local", phase: "idle", message: "", canCloseComputer: false, deps: [] as Dependency[] };
     const { history, applied, ...rest } = record;
-    return { ...rest, appliedFiles: applied ? Object.keys(applied.files).length : 0, canCloseComputer: record.owner === "cloud" && record.deps.every((dep) => dep.status === "cloud") };
+    const checkpointAt = [...history].reverse().find((item) => item.phase === "checkpointed")?.at;
+    return { ...rest, appliedFiles: applied ? Object.keys(applied.files).length : 0, checkpointAt, canCloseComputer: canCloseComputer(record) };
   }
 
   /** Tools call this for every local operation of a session; a handoff refuses new ones and a checkpoint delays them. */
@@ -131,8 +149,20 @@ export class Handoffs {
     assert(!this.locks.has(key) && !this.engine.executionSwitches.has(key), "交接或执行位置切换正在进行，请稍后再试");
     this.locks.add(key);
     this.engine.executionSwitches.add(key);
-    try { return await work(); }
+    try {
+      const pending = this.checkpointTail.get(key);
+      if (pending) await Promise.race([pending, sleep(this.drainMs)]);
+      return await work();
+    }
     finally { this.locks.delete(key); this.engine.executionSwitches.delete(key); }
+  }
+  /** Serialise checkpoint work per session. A later call waits for the earlier one instead of interleaving revisions. */
+  private enqueue(key: string, work: () => Promise<unknown>) {
+    const previous = this.checkpointTail.get(key) || Promise.resolve();
+    const next = previous.then(work, work);
+    this.checkpointTail.set(key, next);
+    void next.finally(() => { if (this.checkpointTail.get(key) === next) this.checkpointTail.delete(key); }).catch(() => {});
+    return next;
   }
 
   private async fresh(session: Session): Promise<HandoffRecord> {
@@ -157,13 +187,18 @@ export class Handoffs {
   }
 
   async checkpoint(key: string, options: HandoffOptions = {}) {
-    return await this.lock(key, () => this.capture(key, options));
+    const checkpoint = await this.lock(key, () => this.capture(key, options));
+    assert(checkpoint, "检查点没有生成");
+    return checkpoint;
   }
   /** Copies the client's uncommitted and untracked work into a content-addressed snapshot; only a fully stored one is complete. */
-  private async capture(key: string, options: HandoffOptions = {}, unknown?: Checkpoint["unknown"]) {
-    const session = await this.store.session(key), agent = this.agent(session), record = await this.fresh(session);
-    assert(record.owner === "local", "执行权已在云端；本机检查点只在本机执行时生成");
-    const ownQuiesce = !unknown;
+  private async capture(key: string, options: HandoffOptions = {}, unknown?: Checkpoint["unknown"], background = false) {
+    const session = await this.store.session(key), record = await this.fresh(session);
+    if (background && (this.locks.has(key) || this.engine.executionSwitches.has(key) || this.engine.closing || !AUTO_PHASES.has(record.phase) || record.owner !== "local")) return;
+    const agent = this.agent(session);
+    if (!background) assert(record.owner === "local", "执行权已在云端；本机检查点只在本机执行时生成");
+    else if (record.owner !== "local") return;
+    const ownQuiesce = !unknown && !background;
     if (ownQuiesce) unknown = await this.quiesce(key, "pause");
     try {
       const probe = await this.client(agent, "file", { op: "upload", cwd: session.cwd, path: "." });
@@ -200,10 +235,12 @@ export class Handoffs {
       await nodefs.writeFile(temporary, JSON.stringify(checkpoint), { mode: 0o600 });
       await nodefs.rename(temporary, join(dir, `rev-${rev}.json`));
       const latest = (await this.record(key)) || record;
+      if (background && (this.locks.has(key) || this.engine.executionSwitches.has(key) || !AUTO_PHASES.has(latest.phase) || latest.owner !== "local")) return;
       latest.rev = rev;
       latest.lastComplete = rev;
       latest.local = { clientId: agent.clientId, clientName: session.clientName, cwd: session.cwd, platform: session.localPlatform, browserLocation: session.browserLocation, browserReason: session.browserReason };
       await this.save(latest, "checkpointed", `检查点 rev ${rev} 已完整保存：${files.length} 个改动文件${skipped.length ? `，跳过 ${skipped.length} 个（见 skipped）` : ""}${checkpoint.unknown.length ? `，${checkpoint.unknown.length} 个操作结果待核验` : ""}`);
+      await this.prune(key).catch(() => {});
       return checkpoint;
     } finally { if (ownQuiesce) this.unquiesce(key); }
   }
@@ -437,6 +474,7 @@ export class Handoffs {
           for (const deadline = Date.now() + 15000; this.engine.active.has(key);) { assert(Date.now() < deadline, "当前轮未能在安全边界停下，交接取消"); await sleep(25); }
         }
         const checkpoint = await this.capture(key, options, unknown);
+        assert(checkpoint, "检查点没有生成");
         return await this.takeover(key, checkpoint, options, tabs, false);
       } finally { this.unquiesce(key); }
     });
@@ -491,6 +529,7 @@ export class Handoffs {
         if (this.engine.localBrowser(session) && options.migrateBrowser) moved = await this.migrateBrowser(session);
         record.previews = [...record.previews.filter((item) => !rerouted.some((next) => next.host === item.host)), ...rerouted];
         record.deps = deps;
+        record.depsVerified = deps.every((dep) => dep.status === "cloud");
         record.unknown = unknown;
         record.owner = "cloud";
         await this.transfer(session, { localAgent: false, cwd: place.cwd }, moved.length > 0);
@@ -499,6 +538,7 @@ export class Handoffs {
         return this.view(await this.save(record, "cloud_owned", blocked.length ? `已在云端继续，但以下内容缺失，相关步骤会阻塞：${blocked.map((dep) => dep.name).join("、")}` : ADVICE.cloud));
       }
       record.deps = deps;
+      record.depsVerified = false;
       record.unknown = unknown;
       return this.view(await this.save(record, "files_synced_local_dependent", `${ADVICE.local}：${deps.filter((dep) => dep.status !== "cloud").map((dep) => `${dep.name}（${dep.detail}）`).join("；")}。执行权仍在本机，不要关闭电脑。`));
     } catch (error) {
@@ -616,12 +656,17 @@ export class Handoffs {
     await this.note(session, "执行权已交回本机；浏览器仍是云端浏览器。");
     return await this.save(record, "local_owned", "执行权已交回本机；预览恢复经流量中继访问本机服务。");
   }
-  /** Called when a run ends: deferred sync/transfer happens here, never in the middle of a turn. */
+  /**
+   * Called only after a run has fully ended, including an in-run scene return.
+   * A follow-up run (steer, or a later scene continuation that starts another turn) must not reach this:
+   * pending ownership transfer waits until that turn ends, and a live turn is never interrupted.
+   */
   async boundary(key: string) {
     const record = await this.record(key);
-    if (!record?.pending || this.engine.active.has(key) || this.locks.has(key)) return;
+    if (!record?.pending || this.engine.active.has(key) || this.locks.has(key) || this.engine.closing) return;
     const pending = record.pending;
     await this.lock(key, async () => {
+      if (this.engine.active.has(key)) return;
       const session = await this.store.session(key);
       try {
         if (pending === "sync_back") await this.reverseSync(session, record);
@@ -646,7 +691,12 @@ export class Handoffs {
   }
   async status(key: string) {
     const record = await this.record(key);
-    return { ...this.view(record), previews: (await this.engine.relay.previews(key)).map((preview) => ({ origin: previewOrigin(preview), backend: preview.backend })) };
+    const session = await this.store.session(key).catch(() => undefined);
+    return {
+      ...this.view(record),
+      browser: { location: session?.browserLocation === "local" ? "local" : "cloud", reason: session?.browserReason || "" },
+      previews: (await this.engine.relay.previews(key)).map((preview) => ({ origin: previewOrigin(preview), backend: preview.backend })),
+    };
   }
   async control(key: string, a: Obj): Promise<any> {
     const options: HandoffOptions = {
@@ -668,7 +718,110 @@ export class Handoffs {
     }
     throw Error("Unknown workspace action");
   }
+  /** Coalesce a complete checkpoint. It does not run inline and does not take the execution-switch lock, so a follow-up turn can start. */
+  scheduleCheckpoint(key: string) {
+    if (!key || this.engine.closing) return;
+    this.watched.add(key);
+    this.dirty.add(key);
+    const generation = (this.requestGen.get(key) || 0) + 1;
+    this.requestGen.set(key, generation);
+    if (this.debounce.has(key)) return;
+    const timer = setTimeout(() => {
+      this.debounce.delete(key);
+      if (!this.dirty.has(key) || this.engine.closing) return;
+      const started = this.requestGen.get(key);
+      void this.enqueue(key, () => this.backgroundCapture(key)).then(() => {
+        if (this.requestGen.get(key) === started) this.dirty.delete(key);
+      }, () => { this.dirty.add(key); });
+    }, this.debounceMs);
+    timer.unref?.();
+    this.debounce.set(key, timer);
+    this.ensureTimer();
+  }
+  private dirty = new Set<string>();
+  private requestGen = new Map<string, number>();
+  private ensureTimer() {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      if (this.engine.closing) return;
+      for (const key of this.watched) {
+        if (!this.dirty.has(key) && !this.engine.active.has(key)) continue;
+        if (this.debounce.has(key) || this.checkpointTail.has(key)) continue;
+        this.dirty.add(key);
+        const started = this.requestGen.get(key) || 0;
+        void this.enqueue(key, () => this.backgroundCapture(key)).then(() => {
+          if ((this.requestGen.get(key) || 0) === started) this.dirty.delete(key);
+        }, () => { this.dirty.add(key); });
+      }
+    }, this.intervalMs);
+    this.timer.unref?.();
+  }
+  private async backgroundCapture(key: string) {
+    if (this.locks.has(key) || this.engine.executionSwitches.has(key) || this.engine.closing) return;
+    let session: Session;
+    try { session = await this.store.session(key); }
+    catch { this.watched.delete(key); this.dirty.delete(key); return; }
+    if (!session.localAgent) { this.watched.delete(key); this.dirty.delete(key); return; }
+    await this.capture(key, {}, undefined, true);
+  }
+  /** Drop revision files older than the retained window. The newest complete revision is never removed first. */
+  private async prune(key: string) {
+    const record = await this.record(key);
+    if (!record?.lastComplete || this.keepRevisions < 1) return;
+    const dir = this.snapshotDir(key);
+    const names = await nodefs.readdir(dir).catch(() => [] as string[]);
+    const revs = names.flatMap((name) => { const match = /^rev-(\d+)\.json$/.exec(name); return match ? [Number(match[1])] : []; });
+    const doomed = revs.filter((rev) => rev !== record.lastComplete && rev < record.lastComplete! - (this.keepRevisions - 1));
+    if (!doomed.length) return;
+    const kept = revs.filter((rev) => !doomed.includes(rev));
+    const used = new Set<string>();
+    for (const rev of kept) {
+      const checkpoint = JSON.parse(await nodefs.readFile(join(dir, `rev-${rev}.json`), "utf8")) as Checkpoint;
+      for (const file of checkpoint.files) if ("blob" in file) used.add(file.blob);
+    }
+    for (const rev of doomed) await nodefs.rm(join(dir, `rev-${rev}.json`), { force: true });
+    for (const blob of await nodefs.readdir(join(dir, "blobs")).catch(() => [] as string[]))
+      if (!used.has(blob) && /^[0-9a-f]{64}$/.test(blob)) await nodefs.rm(join(dir, "blobs", blob), { force: true });
+  }
+  /**
+   * Copy one completed cloud-browser download into the client workspace.
+   * The source must sit inside the browser profile; the client cwd is not a read root.
+   */
+  async exportDownload(key: string, a: Obj) {
+    assert(a.authorize === true, "把云端浏览器的下载导回客户端需要显式授权");
+    const destination = workspaceRelative(String(a.path || ""));
+    assert(typeof a.downloadId === "string" && /^\d+$/.test(a.downloadId), "downloadId 必须是云端浏览器下载记录里的 ID");
+    const session = await this.store.session(key);
+    assert(!usesLocalBrowser(session), "本机浏览器的下载留在客户端，不会按服务器路径读取");
+    const record = await this.record(key);
+    const local = session.localAgent && session.clientId
+      ? { userId: session.ownerId || record?.userId || "", clientId: session.clientId, cwd: session.cwd }
+      : record?.owner === "cloud" && record.local
+        ? { userId: record.userId, clientId: record.local.clientId, cwd: record.local.cwd }
+        : undefined;
+    assert(local?.clientId && local.cwd, "没有可写回的客户端工作区");
+    const agent = this.engine.localAgents.active(local.userId, local.clientId);
+    assert(agent?.transport && !agent.reconnecting, "客户端离线，下载不会改写服务器文件，也不会假称已导回");
+    const chrome = this.engine.peekBrowser(session);
+    assert(chrome, "云端浏览器未打开，没有可导出的下载");
+    const listed = await chrome.bridge.request("downloads", { downloadId: a.downloadId });
+    const item = (listed?.downloads || []).find((entry: Obj) => String(entry.id) === a.downloadId);
+    assert(item?.state === "complete" && typeof item.path === "string", "下载未完成或不在云端浏览器的下载记录里");
+    const ownerId = session.ownerId || local.userId;
+    const roots = this.engine.browsers.downloadRoots(this.engine.browserProfileKey(ownerId));
+    const entry = this.engine.browsers.entries.get(this.engine.browserProfileKey(ownerId));
+    if (entry?.cloud) throw Error("隔离环境中的下载导回需要容器内路径复核，当前不会改从服务器同名路径读取");
+    const data = await readRegularInside(roots, item.path);
+    return await exportClientFile(clientFileOps(this.engine.localAgents, agent, AbortSignal.timeout(45000)), local.cwd, destination, data, true);
+  }
   close() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    for (const timer of this.debounce.values()) clearTimeout(timer);
+    this.debounce.clear();
+    this.watched.clear();
+    this.dirty.clear();
+    this.requestGen.clear();
     for (const quiesce of this.quiesced.values()) quiesce.release();
   }
 }

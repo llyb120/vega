@@ -6,7 +6,8 @@ import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
-const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function, employeeId: String });
+import WorkspaceHandoff from "./WorkspaceHandoff.vue";
+const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function, employeeId: String, api: Function, handoffRevision: Number });
 const emit = defineEmits(["inspect", "back"]);
 const busy = ref(false), answer = ref(""), exportOpen = ref(false), exportError = ref(""), settleSelected = ref([]), settling = ref(false);
 const suggestions = computed(() => props.task.memorySuggestions || []);
@@ -66,6 +67,7 @@ async function run(action) {
       <MessageText :text="task.text" />
       <p v-if="task.status === 'queued' && task.queueReason" class="detail-note" role="status"><Icon name="clock" :size="14" />{{ task.queueReason }}</p>
     </header>
+    <WorkspaceHandoff v-if="api && employeeId && task.id" :api="api" :employee-id="employeeId" :task-id="task.id" :readonly="readonly" :revision="handoffRevision" />
 
     <section v-if="task.status === 'approval'" class="attention-block">
       <h3><Icon name="alert" :size="16" />需要你确认</h3>

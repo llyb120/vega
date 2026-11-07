@@ -29,6 +29,7 @@ import { sceneModels, maskedConfig, mergeSecrets } from "./config";
 import { omitPlaceholders } from "./tool-args";
 import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type Internal, type ToolContext } from "./public-tools";
 import { peekBrowser, usesLocalBrowser, type Session, type Call, type Message } from "./store";
+import { clientFileOps, importClientFile, needsClientFileBridge } from "./file-bridge";
 import type { Engine } from "./engine";
 import { CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
 import { prepareDutyInput } from "./duty-condition";
@@ -343,6 +344,18 @@ export class Tools {
     }
     return defs;
   }
+  /** Bytes come from the bound client; they are staged under the cloud browser profile, never read from session.cwd on the server. */
+  private async clientFileSource() {
+    const agent = this.agent();
+    if (!agent?.transport || agent.reconnecting) throw new LocalAgentUnavailable("客户端离线，无法从本机工作区取文件，不会改读服务器上的同名路径");
+    const ownerId = this.session.ownerId || await this.engine.browserOwnerId(this.session);
+    const profile = this.engine.browserProfileKey(ownerId);
+    const ops = clientFileOps(this.engine.localAgents, agent, this.signal);
+    return async (cwd: string, input: string) => {
+      const file = await importClientFile(ops, cwd, input);
+      return await this.engine.browsers.stageForBrowser(profile, file.relativePath, file.data);
+    };
+  }
   private agent() {
     if (!this.session.localAgent) return;
     if (!this.session.clientId) throw new LocalAgentUnavailable("此历史会话尚未绑定客户端，请在输入框旁选择执行客户端后继续；不会自动选择设备或重试操作。");
@@ -393,7 +406,10 @@ export class Tools {
       if (error instanceof LocalAgentUnavailable && !this.signal.aborted)
         return { value: { status: "needs_review", reason: error.message }, error: true, stop: true, pause: error.message };
       throw error;
-    } finally { done?.(); }
+    } finally {
+      done?.();
+      if (this.session.localAgent && ["write", "edit", "bash"].includes(call.name)) this.engine.handoffs?.scheduleCheckpoint(this.session.id);
+    }
   }
   private async executeInner(call: Call, model: Model): Promise<Outcome> {
     this.signal.throwIfAborted();
@@ -596,12 +612,14 @@ export class Tools {
       if (!failure) throw error;
       return { value: { connected: false, privateBrowser: "start_failed", ...failure } };
     }
+    const bridge = needsClientFileBridge(this.session) ? await this.clientFileSource() : undefined;
     const result = await browser.execute(
       this.session.id,
       this.session.cwd,
       a,
       this.signal,
       this.credentials,
+      bridge,
     );
     this.browserTab = result.tabTag || a.tabTag || this.browserTab;
     const images: Outcome["images"] = [];
