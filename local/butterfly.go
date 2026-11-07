@@ -4,6 +4,7 @@ package main
 // 真实鼠标键盘在动、操作可能已经部分执行时，用户必须在自己电脑上看得见，而不是只写在会话记录里。
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,10 +47,9 @@ func butterflyOpen() {
 	}
 }
 
-// assistantURL 选一个已配对的站点：优先已连接的，其次最后保存的。
+// assistantURL 面板打开的地址：本站点的对话页（蝴蝶里该是 BOT 会话，不是站点首页）。
 func (a *Agent) assistantURL() string {
-	// 面板、登录跳转都用安装包自带的站点，不发散。
-	return a.pinnedOrigin
+	return strings.TrimRight(a.pinnedOrigin, "/") + "/chat"
 }
 
 // butterflyNotify 更新提示并显示气泡；同一条内容不反复弹。
