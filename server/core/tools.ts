@@ -30,7 +30,7 @@ import { omitPlaceholders } from "./tool-args";
 import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type Internal, type ToolContext } from "./public-tools";
 import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
-import { CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
+import { CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
 import { prepareDutyInput } from "./duty-condition";
 import { Context } from "./context";
 import type { EmployeeState } from "./employee";
@@ -129,17 +129,22 @@ export class Tools {
   async rules(model?: Model) {
     const names = new Set((await this.definitions(model)).map((d) => d.name));
     const ctx = await this.toolContext(), parts: string[] = [];
-    if ([...names].some((n) => CHROME_TOOLS.has(n))) parts.push(CHROME_RULES);
+    if ([...names].some((n) => CHROME_TOOLS.has(n)))
+      parts.push(this.session.scene === "computer" ? CHROME_RULES : CHROME_GATE_RULE);
     if (names.has("vault_get")) parts.push("[密码本] " + VAULT_USAGE);
     if (ctx.kind === "task") parts.push(EMPLOYEE_TASK_RULES);
-    if (ctx.kind === "task" && this.session.scene !== "computer" && !sceneModels(this.config, "computer").length)
-      parts.push("[电脑场景未配置] 设置里没有为 computer 场景选择模型，所以本会话无法进入电脑场景、没有 chrome_* 工具。需要网页/浏览器操作时，用 task_ask_user 如实说明“computer 场景未配置模型（需选择支持图片的模型，可与其他场景共用同一个）”，请用户到设置里补上；这不是浏览器扩展连接问题，不要让用户重连扩展，也不要用 bash 或脚本绕行。");
+    if ([...names].some((n) => CHROME_TOOLS.has(n)) && this.session.scene !== "computer" && !sceneModels(this.config, "computer").length)
+      parts.push("[电脑场景未配置] 设置里没有为 computer 场景选择模型，所以本会话无法进入电脑场景，列出的 chrome_* 工具也无法执行。需要网页/浏览器操作时如实说明“computer 场景未配置模型（需选择支持图片的模型，可与其他场景共用同一个）”，请用户到设置里补上（任务中用 task_ask_user）；这不是浏览器扩展连接问题，不要让用户重连扩展，也不要用 bash 或脚本绕行。");
     if (ctx.kind === "normal" && names.has("employee_status")) parts.push(NORMAL_SESSION_EMPLOYEE_RULES);
     if (ctx.kind === "chat") parts.push(ctx.member ? GUEST_RULES : OWNER_RULES);
     return parts.length ? "\n" + parts.join("\n") : "";
   }
-  async definitions(model?: Model) {
+  async definitions(_model?: Model) {
+    // Chrome definitions lead the list unchanged in every scene so the tool prefix stays stable across switch_scene;
+    // listing is not authorization: execution is gated by assertBrowserScene().
+    const browser = !this.session.readOnly && !(this.session.employeeId && !this.session.taskId);
     const defs: Tool[] = [
+      ...(browser ? structuredClone(CHROME_TOOL_DEFINITIONS) : []),
       schema(
         "read",
         "Read numbered lines using 1-based offset/limit; images return their pixels. Archived results (Chrome documentPath and images[].path, archivePath of oversized results, paths named in omitted-from-context notices) and the server paths of message attachments ([附件文件]) read from the server even in client sessions; binary attachments cannot be read as text; JSON archives read as numbered pretty-JSON lines, lines over 2000 chars wrapped onto the next numbers, about 12KiB per call: continue from nextOffset while hasMore. Read an old screenshot only when it is really needed (e.g. as evidence or for comparison); for the current page take a new one.",
@@ -205,7 +210,7 @@ export class Tools {
         ),
         schema(
           "bash",
-          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; employee main tasks must switch_scene(scene=computer) before webpage work. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
+          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; chrome_* run only in the computer scene: switch_scene(scene=computer) first. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
           { command: string, timeout: positive },
           ["command"],
         ),
@@ -259,13 +264,6 @@ export class Tools {
       );
       const ctx = await this.toolContext();
       defs.push(...employeeTools(ctx), ...vaultTools(ctx));
-      if (
-        (!this.session.taskId || this.session.scene === "computer") &&
-        (this.session.scene === "computer" ||
-          model?.selection === this.config.scenes?.computer?.[0] ||
-          !this.config.scenes?.computer?.length)
-      )
-        defs.push(...structuredClone(CHROME_TOOL_DEFINITIONS));
     }
     const isolatedComputer = !!this.session.taskId && this.session.scene === "computer" && !!this.session.relayComputer;
     const mainTask = !!this.session.taskId && !isolatedComputer;
@@ -396,6 +394,7 @@ export class Tools {
     this.signal.throwIfAborted();
     const definition = (await this.definitions(model)).find((t) => t.name === call.name);
     assert(definition, "Tool unavailable in this scene");
+    if (CHROME_TOOLS.has(call.name)) this.assertBrowserScene(call.name);
     const split = CHROME_TOOLS.has(call.name) || EMPLOYEE_TOOLS.has(call.name) || VAULT_TOOLS.has(call.name);
     let internal: Internal | undefined, rest: Obj = {};
     if (split) {
@@ -572,7 +571,16 @@ export class Tools {
     }
     return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? await taskLink(result.value.id) : undefined };
   }
+  /** Chrome tools are listed in every scene but only run in the computer scene; no automatic switch or relay. */
+  private assertBrowserScene(tool = "chrome_*") {
+    if (this.session.scene === "computer") return;
+    const configured = sceneModels(this.config, "computer").length > 0;
+    throw new Error(configured
+      ? `${tool} 只能在 computer 场景执行，当前场景是 ${this.session.scene || "未设置"}，本次未连接浏览器、未执行任何操作。请先单独调用 switch_scene(scene=computer) 在同一会话切入（保留历史与任务），再重新调用；不要用 task_relay_computer 或新开会话。这不是浏览器扩展故障。`
+      : `${tool} 只能在 computer 场景执行，但 computer 场景未配置模型，本次未执行任何操作。请如实告知用户需在设置里为 computer 场景选择支持图片的模型（可与其他场景共用）；这不是浏览器扩展故障，不要让用户重连扩展。`);
+  }
   private async chrome(a: Obj): Promise<Outcome> {
+    this.assertBrowserScene();
     const profileKey = !this.session.localAgent && this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud)
       ? this.engine.browserProfileKey(this.session.ownerId) : "";
     let browser: Awaited<ReturnType<Engine["chromeFor"]>>;
