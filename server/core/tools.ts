@@ -356,7 +356,7 @@ export class Tools {
     assert(entry, "Vault entry not found for this task");
     const task = this.session.taskId ? (await this.engine.employeeFor(this.session)).task(await (await this.engine.employeeFor(this.session)).state(), this.session.taskId).text
       : (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "";
-    const browser = this.session.localAgent ? this.engine.localBrowsers.peek(this.session.id) : this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud) ? this.engine.browsers.peek(this.engine.browserProfileKey(this.session.ownerId)) : this.engine.chrome;
+    const browser = this.engine.peekBrowser(this.session);
     const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
     const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
     const pages = (observation?.pages || []).filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
@@ -581,7 +581,7 @@ export class Tools {
   }
   private async chrome(a: Obj): Promise<Outcome> {
     this.assertBrowserScene();
-    const profileKey = !this.session.localAgent && this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud)
+    const profileKey = !this.engine.localBrowser(this.session) && this.session.ownerId && (this.session.employeeId || this.session.taskId || this.session.localAgent || this.cloud)
       ? this.engine.browserProfileKey(this.session.ownerId) : "";
     let browser: Awaited<ReturnType<Engine["chromeFor"]>>;
     try { browser = await this.engine.chromeFor(this.session, this.signal); }

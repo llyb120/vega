@@ -17,7 +17,7 @@ async function fixture(t: TestContext) {
   engine.employee.closed = true;
   t.after(async () => { await engine.close(); await store.close(); });
   engine.localAgents.connect("alice", client);
-  const session = await store.newSession({ localAgent: true, clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
+  const session = await store.newSession({ localAgent: true, browserLocation: "local", browserReason: "existing_page", clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
   const calls: any[] = [];
   let holder = "";
   engine.localAgents.request = async (agent, op, args) => {
@@ -76,7 +76,7 @@ test("local Chrome tools and employee tasks use only their selected native brows
 
 test("local navigation invalidates other sessions on the same client without sharing their input context", async (t) => {
   const { engine, store, session } = await fixture(t);
-  const second = await store.newSession({ localAgent: true, clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
+  const second = await store.newSession({ localAgent: true, browserLocation: "local", browserReason: "existing_page", clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
   const firstBrowser = await engine.chromeFor(session);
   const observation = { id: "old", tabTag: "local-a", frames: [], pages: [], images: [], coverageGaps: [], captured: Date.now(), fullPage: false, screenshot: false };
   firstBrowser.observations.set(session.id + ":local-a", observation);
@@ -91,7 +91,7 @@ test("local navigation invalidates other sessions on the same client without sha
   engine.localAgents.connect("alice", otherClient);
   const request = engine.localAgents.request;
   engine.localAgents.request = async (agent, ...args) => agent.clientId === otherClient.clientId ? { result: { connected: true } } : request(agent, ...args);
-  const other = await store.newSession({ localAgent: true, clientId: otherClient.clientId, ownerId: "alice", cwd: client.cwd });
+  const other = await store.newSession({ localAgent: true, browserLocation: "local", browserReason: "existing_page", clientId: otherClient.clientId, ownerId: "alice", cwd: client.cwd });
   const otherBrowser = await engine.chromeFor(other);
   otherBrowser.observations.set(other.id + ":local-a", observation);
 
@@ -113,7 +113,7 @@ test("employee relay keeps its task-bound local Chrome for new and legacy comput
     engine.catalog.resolve = async (_c, selection) => resolveModel(config, selection || config.scenes.lightweight[0]);
     const execution = { localAgent: true, clientId: client.clientId, clientName: client.name, localPlatform: client.platform, ownerId: "alice" };
     await employee.update((state) => { state.cwd = client.cwd; state.execution = execution; });
-    const added = await employee.execute("", { action: "add", kind: "todo", text: "Use the existing local Chrome tab" });
+    const added = await employee.execute("", { action: "add", kind: "todo", text: "Use the existing local Chrome tab", localBrowser: "existing_page" });
     const id = added.value.id;
     let turns = 0;
     engine.providers.chat = async () => {
@@ -196,7 +196,7 @@ test("ending a browser turn during an outage clears its retained lease even if c
 test("competing sessions pause without input; releasing a turn admits the next session", async (t) => {
   const { engine, store, session, calls } = await fixture(t);
   await engine.chromeFor(session);
-  const second = await store.newSession({ localAgent: true, clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
+  const second = await store.newSession({ localAgent: true, browserLocation: "local", browserReason: "existing_page", clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
   const tools = await Tools.create(engine, second, { model: "", provider: {} }, new AbortController().signal, () => {});
   const result = await tools.execute({ id: "busy", ...chromeCall({ operation: "open", url: "https://example.com" }) }, {} as any);
   assert.equal(result.stop, true);
@@ -228,7 +228,7 @@ test("native browser leases survive model/tool roundtrips and release on complet
     const config = { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true, modalities: { input: ["text", "image"] } } } } } };
     await store.put("config", config);
     engine.catalog.resolve = async (_c, selection) => resolveModel(config, selection || config.scenes.lightweight[0]);
-    const next = await store.newSession({ localAgent: true, clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
+    const next = await store.newSession({ localAgent: true, browserLocation: "local", browserReason: "existing_page", clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });
     let turns = 0;
     engine.providers.chat = async () => {
       if (++turns === 1) return { role: "assistant", calls: [{ id: "local-tabs", ...chromeCall({ operation: "tabs" }) }] };

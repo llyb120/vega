@@ -19,6 +19,7 @@ import { rm, stat } from "node:fs/promises";
 import { keyDir } from "./key-files";
 import { resolve } from "node:path";
 import type { Store, Session, Message, Call } from "./store";
+import { LOCAL_BROWSER_REASONS } from "./store";
 import type { Config, Model } from "./config";
 import type { Chrome } from "./chrome";
 import { Catalog } from "./catalog";
@@ -501,12 +502,36 @@ export class Engine {
     if (session.employeeId || session.taskId) return (await (await this.employeeFor(session)).state()).ownerId;
     return "";
   }
+  /** The client's own Chrome only on a recorded exception; a client workspace alone keeps the browser in the cloud. */
+  localBrowser(session: Pick<Session, "localAgent" | "browserLocation">) {
+    return !!session.localAgent && session.browserLocation === "local";
+  }
+  private privateBrowser(session: Session) {
+    return !!(session.employeeId || session.taskId || session.localAgent || cloudFor(session));
+  }
   async chromeFor(session: Session, signal?: AbortSignal) {
-    if (session.localAgent) return this.localBrowsers.get(session, signal);
+    if (this.localBrowser(session)) return this.localBrowsers.get(session, signal);
     const ownerId = await this.browserOwnerId(session);
-    // Employee/task work and cloud sessions use the owner's shared private profile.
-    if (session.employeeId || session.taskId || cloudFor(session)) return this.browsers.get(this.browserProfileKey(ownerId));
+    // Employee/task work, client-workspace and cloud sessions use the owner's shared private profile.
+    if (this.privateBrowser(session)) return this.browsers.get(this.browserProfileKey(ownerId));
     return this.chrome;
+  }
+  peekBrowser(session: Session) {
+    if (this.localBrowser(session)) return this.localBrowsers.peek(session.id);
+    if (this.privateBrowser(session)) return session.ownerId ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : undefined;
+    return session.employeeId ? undefined : this.chrome;
+  }
+  async setBrowserLocation(key: string, location: unknown, reason: unknown) {
+    assert(location === "local" || location === "cloud", "浏览器位置只能是 local 或 cloud");
+    assert(location === "cloud" || LOCAL_BROWSER_REASONS.includes(reason as string), "本地浏览器只用于例外：existing_page（用户本机已有页面）、hardware、certificate 或 extension");
+    assert(!this.active.has(key) && !this.executionSwitches.has(key), "请先停止或等待当前轮执行结束，再切换浏览器位置");
+    const session = await this.store.session(key);
+    assert(location === "cloud" || session.localAgent, "本地浏览器需要会话在客户端执行；工作区在服务端时浏览器保持云端");
+    if (location === "cloud") { session.browserLocation = undefined; session.browserReason = undefined; await this.localBrowsers.release(key, true); }
+    else { session.browserLocation = "local"; session.browserReason = reason as string; }
+    await this.store.saveSession(session);
+    this.emit({ type: "execution_changed", session: key, data: session });
+    return session;
   }
   async compact(tools: Tools, model: Model, system: string, force = false) {
     const ctx = tools.context;
@@ -1170,7 +1195,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
           await this.store.saveSession(session);
         }
-        const browser = session?.localAgent ? this.localBrowsers.peek(key) : session?.ownerId && (session.employeeId || session.taskId || cloudFor(session)) ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : session?.employeeId ? undefined : this.chrome;
+        const browser = session ? this.peekBrowser(session) : undefined;
         await browser?.experiences.finish(key, !error);
       } catch (cleanupError: any) {
         error ||= new Error(String(redact.value(cleanupError?.message || cleanupError)));

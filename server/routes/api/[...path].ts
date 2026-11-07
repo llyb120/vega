@@ -369,6 +369,8 @@ export default defineEventHandler(async (event) => {
       }
       if (path[2] === "execution" && method === "POST")
         return await engine.switchExecution(key, a.localAgent, a.clientId, user.id);
+      if (path[2] === "browser" && method === "POST")
+        return await engine.setBrowserLocation(key, a.location, a.reason);
       if (path[2] === "stage" && method === "POST")
         return await store.stage(key, a.inheritModel === true);
       if (path[2] === "cancel" && method === "POST") {

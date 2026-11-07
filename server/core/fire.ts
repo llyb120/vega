@@ -162,6 +162,8 @@ export class Fire {
                   clientId: root.clientId,
                   clientName: root.clientName,
                   executionCwds: root.executionCwds,
+                  browserLocation: root.browserLocation,
+                  browserReason: root.browserReason,
                   readerIds: root.readerIds,
                   model: root.model,
                   title: `[Fire] ${s.role === "judge" ? "判断" : "阶段"} ${s.attempt}`,

@@ -50,6 +50,7 @@ export type Message = {
   usage?: any;
   at?: number;
 };
+export const LOCAL_BROWSER_REASONS = ["existing_page", "hardware", "certificate", "extension"];
 export type Call = { id: string; name: string; arguments: Record<string, any> };
 export type Session = {
   id: string;
@@ -72,6 +73,9 @@ export type Session = {
   fireRole?: "work" | "judge";
   /** A group chat's own session (no employee), or a member employee's session inside that group. */
   groupId?: string;
+  /** "local" only for a recorded exception (LOCAL_BROWSER_REASONS); otherwise Chrome runs in the cloud wherever the workspace is. */
+  browserLocation?: "local";
+  browserReason?: string;
   /** Isolated computer session created by task_relay_computer (cannot switch_scene back). */
   relayComputer?: boolean;
   createdAt: number;
@@ -476,6 +480,8 @@ export class Store {
           clientId: source.clientId,
           clientName: source.clientName,
           executionCwds: source.executionCwds,
+          browserLocation: source.browserLocation,
+          browserReason: source.browserReason,
           readerIds: source.readerIds,
           model: inherit ? source.model : undefined,
           readOnly: source.readOnly,

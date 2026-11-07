@@ -147,7 +147,8 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : ctx.group ? "。群聊里只给按群公告归你的工作派单；归其他牛马的不要派单，在回复里 @它 交出。" : "。"),
     { instructions: instructions("任务目标、范围、约束和交付标准，保留用户原话；不写工具名或动作名"),
       dedupeKey: str("业务唯一标识，≤200 字；同 key 已有任务（含已收尾）时直接返回原任务。用户明确要求重做已完成的事时用新 key（如原 key 加 :v2）", { minLength: 1, maxLength: 200 }),
-      runAt: beijing("开始时间；省略立即排队"), delayMinutes: delayMinutes("多久后开始"), profile },
+      runAt: beijing("开始时间；省略立即排队"), delayMinutes: delayMinutes("多久后开始"), profile,
+      localBrowser: { type: "string", enum: ["existing_page", "hardware", "certificate", "extension"], description: "通常省略：浏览器默认在云端，本地开发预览走流量中继，需要用户登录/确认时用远程浏览器界面接管。仅当用户明确要求用其电脑上已打开的页面（existing_page），或必须依赖本机硬件、证书或指定扩展时填写；需要牛马在客户端执行" } },
     ["instructions"]));
   if (!task) {
     const allowed = ctx.kind === "chat" ? (ctx.member ? ["resume", "answer", "stop"] : TASK_COMMANDS) : ["update", "set_instructions", "set_profile", "reschedule", "cancel"];
@@ -368,7 +369,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
 
     case "employee_status": return employee(defined({ action: "list", id: a.taskId, key: a.dedupeKey, status: a.status === "all" ? undefined : a.status, query: a.memoryQuery }));
     case "employee_task_create":
-      return employee(defined({ action: "add", kind: "todo", text: a.instructions, key: a.dedupeKey, ...when(a, "", false), profile: a.profile }));
+      return employee(defined({ action: "add", kind: "todo", text: a.instructions, key: a.dedupeKey, ...when(a, "", false), profile: a.profile, localBrowser: a.localBrowser }));
     case "employee_task_manage": {
       const r = a.request, id = a.taskId;
       switch (r.command) {
