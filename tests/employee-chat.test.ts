@@ -452,6 +452,11 @@ test("answer appends a quoted user message in chat without duplicating identical
     assert.match(users[0].quote!.text, /验证码|需要你处理/);
     assert.equal((await employee.appendChatReply(chat.id, delivery, "123456"))?.seq, users[0].seq);
     assert.equal((await store.messages(chat.id)).filter((message) => message.role === "user" && message.text === "123456").length, 1);
+    // Answered from the chat window (tools.ts): the user's own message is there already, so no quoted echo is added.
+    await employee.update((state) => { Object.assign(state.tasks[0], { status: "waiting", waiting: "请提供验证码" }); });
+    await employee.control({ action: "answer", id: job.id, text: "654321" }, undefined, false);
+    assert.equal((await store.messages(chat.id)).filter((message) => message.role === "user" && message.text === "654321").length, 0);
+    assert.equal((await employee.state()).tasks[0].status, "queued");
   } finally { await engine.close(); await store.close(); }
 });
 
