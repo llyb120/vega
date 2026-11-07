@@ -11,11 +11,10 @@ const local = computed(() => !!props.employee.execution?.localAgent);
   <div class="page-scroll settings-page">
     <div class="settings-grid">
       <form class="card profile" @submit.prevent="emit('save')">
-        <div class="card-head"><h3>牛马资料</h3><p class="hint">保存后，新任务会使用更新的工作原则和目录。</p></div>
+        <div class="card-head"><h3>牛马资料</h3><p class="hint">保存后，新任务会使用更新的工作原则。</p></div>
         <div class="form-grid">
           <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
           <label>工作原则<textarea v-model="employee.instruction" rows="6" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
-          <label>工作目录<input v-model="employee.cwd" class="mono-input" required spellcheck="false" /></label>
         </div>
         <div class="actions end form-actions"><button type="button" class="ghost" @click="emit('cancel')">返回对话</button><button class="primary" :disabled="saving">{{ saving ? '保存中…' : '保存修改' }}</button></div>
       </form>
@@ -48,7 +47,6 @@ const local = computed(() => !!props.employee.execution?.localAgent);
 .side > .card + .card { margin-top: 0; }
 .card-head { display: grid; gap: 2px; margin-bottom: 14px; }
 .card-head h3 { font-size: 14px; }
-.mono-input { font-family: var(--mono); font-size: 12.5px; }
 .form-actions { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
 .place-options { display: grid; gap: 6px; }
 .place-options button { justify-content: flex-start; gap: 12px; height: auto; padding: 10px 12px; border-color: var(--border); text-align: left; white-space: normal; }
