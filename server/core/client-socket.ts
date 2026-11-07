@@ -8,6 +8,19 @@ import type { NetworkRelay } from "./network-relay";
 
 /** Large results are posted over HTTP (up to CLIENT_BODY_LIMIT); socket messages stay small so heartbeats never queue behind them. */
 export const CLIENT_BODY_LIMIT = 48 << 20, CLIENT_SOCKET_LIMIT = 1 << 20;
+/** Node-level compatibility gate: this deployment refuses older clients instead of failing mid-job. */
+export const minClientVersion = () => process.env.VEGA_MIN_CLIENT_VERSION || "";
+const triple = (value?: string) => (/^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(value || "") ? value!.split(".").map(Number) : undefined);
+/** Clients that never reported a version predate the gate, so they count as outdated. */
+export function clientOutdated(minimum: string, actual?: string) {
+  const floor = triple(minimum);
+  assert(!minimum || floor, "VEGA_MIN_CLIENT_VERSION must be x.y.z");
+  if (!floor) return false;
+  const version = triple(actual);
+  if (!version) return true;
+  for (let i = 0; i < 3; i++) if (version[i] !== floor[i]) return version[i] < floor[i];
+  return false;
+}
 type Socket = Pick<Peer, "id" | "request" | "send" | "close">;
 type Grant = { hash: string; userId: string; clientId: string; createdAt: number };
 type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj; transport?: Agent["transport"]; updating?: boolean; tail?: Promise<void> };
@@ -83,6 +96,13 @@ export class ClientSockets {
         assert(value.type === "hello" && value.clientId === grant.clientId, "Client identity mismatch");
         validateClient(value);
         assert(value.version === undefined || (typeof value.version === "string" && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(value.version)), "Invalid client version");
+        const minimum = minClientVersion();
+        if (clientOutdated(minimum, value.version)) {
+          // Say why before closing: a bare socket close only looks like a network fault on the client.
+          socket.send(JSON.stringify({ type: "error", code: "client_outdated", message: `本节点要求客户端 ${minimum} 或更新，当前为 ${value.version || "未知版本"}，请到「资源」页下载并安装新客户端。` }));
+          this.close(socket.id, true);
+          return;
+        }
         if (value.relay !== undefined) await this.relay?.configure(grant, value.relay);
         // Read before connecting, so nothing awaits between connect and "ready" (queued jobs follow "ready").
         const busy = value.autoUpdate === true && value.resume === true && !!value.version ? await this.clientInUse(grant.clientId) : false;

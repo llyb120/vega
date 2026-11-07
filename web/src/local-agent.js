@@ -19,6 +19,7 @@ const STATUS = {
   backend_tls: "站点已授权，但后端 HTTPS 证书校验失败，请修复证书链或域名；不会跳过证书校验。",
   backend_http: "站点已授权，但后端拒绝了客户端 WebSocket，请检查 /api/local-agent/socket 的 Upgrade、Connection、Authorization 转发及设备授权。",
   backend_protocol: "客户端已接通 WebSocket，但未收到有效的后端 ready 确认，请检查前后端与客户端版本及代理配置。",
+  client_outdated: "客户端版本低于本节点要求，请到「资源」页下载并安装新客户端。",
   backend_timeout: "登录验证已通过，但后端连接尚未就绪。客户端会独立重连，可稍后重新检测。",
   backend_disconnected: "客户端到后端的连接已中断，客户端会独立重连；不会重发已提交的任务。",
   backend_cwd: "客户端无法读取启动目录，请从仍然存在且有权限的目录重新启动客户端。",
@@ -28,6 +29,7 @@ const STATUS = {
 };
 export function pairingStatusText(status) {
   if (!status) return "";
+  if (typeof status.message === "string" && status.message) return status.message;
   const text = STATUS[status.code] || STATUS.login_invalid;
   return text + (Number.isInteger(status.httpStatus) && status.httpStatus >= 100 && status.httpStatus <= 599 ? `（HTTP ${status.httpStatus}）` : "");
 }
@@ -49,11 +51,11 @@ export class LocalAgentPairing {
     this.instance = [...crypto.getRandomValues(new Uint8Array(16))]
       .map((n) => n.toString(16).padStart(2, "0")).join("");
     const instance = this.instance;
-    const retry = (code, httpStatus) => {
+    const retry = (code, httpStatus, message) => {
       if (this.closed || this.paired || generation !== this.generation) return;
       this.generation++;
       clearTimeout(this.timeout);
-      this.report(code, httpStatus);
+      this.report(code, httpStatus, message);
       this.socket?.close();
       const terminal = ["credential_save", "login_invalid"].includes(code) ||
         (code === "backend_http" && [401, 403].includes(httpStatus));
@@ -78,9 +80,9 @@ export class LocalAgentPairing {
         try {
           if (typeof data !== "string" || data.length > 4096) throw Error("Invalid pairing response");
           const message = JSON.parse(data);
-          if (message.type === "status" && Object.hasOwn(STATUS, message.code) && message.code !== "connected") {
+          if (message.type === "status" && (Object.hasOwn(STATUS, message.code) || typeof message.message === "string") && message.code !== "connected") {
             if (["authorizing", "backend_connecting"].includes(message.code)) this.report(message.code);
-            else retry(message.code, message.httpStatus);
+            else retry(message.code, message.httpStatus, message.message);
             return;
           }
           if (message.type !== "paired" || message.instance !== instance || message.userId !== this.userId || !/^[a-f0-9]{32}$/.test(message.clientId)) throw Error("Local pairing mismatch");
@@ -93,8 +95,8 @@ export class LocalAgentPairing {
       };
     } catch { retry("ticket_failed"); }
   }
-  report(code, httpStatus) {
-    this.lastStatus = { code, ...(Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? { httpStatus } : {}) };
+  report(code, httpStatus, message) {
+    this.lastStatus = { code, ...(typeof message === "string" && message ? { message } : {}), ...(Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? { httpStatus } : {}) };
     this.status(this.lastStatus);
   }
   close() {
