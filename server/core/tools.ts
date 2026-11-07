@@ -222,7 +222,7 @@ export class Tools {
         ),
         schema(
           "switch_scene",
-          "Switch within SAME session/shared history. Call alone. coding for development; computer for Chrome (same session, no new browser session). Employee main tasks may use lightweight/coding/computer and return; system auto-folds unrelated context (decompress/recall/search_context still restore details). resume only for concrete caller work, not repeating a summary. Do not use task_relay_computer.",
+          "Switch within SAME session/shared history. Call alone. coding for development; computer for Chrome (same session, no new browser session). Employee main tasks may use lightweight/coding/computer and return; system auto-folds unrelated context (decompress/recall/search_context still restore details). resume only for concrete caller work, not repeating a summary: it survives interruptions, and a plain reply (no tool call) or task_complete in the callee scene returns there automatically. After delivery the session returns to the scene computer was entered from. Do not use task_relay_computer.",
           {
             scene: {
               type: "string",
