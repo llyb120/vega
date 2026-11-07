@@ -9,7 +9,9 @@ import type { NetworkRelay } from "./network-relay";
 /** Large results are posted over HTTP (up to CLIENT_BODY_LIMIT); socket messages stay small so heartbeats never queue behind them. */
 export const CLIENT_BODY_LIMIT = 48 << 20, CLIENT_SOCKET_LIMIT = 1 << 20;
 /** Node-level compatibility gate: this deployment refuses older clients instead of failing mid-job. */
-export const minClientVersion = () => process.env.VEGA_MIN_CLIENT_VERSION || "";
+// 与 local/VERSION 同步：发布新客户端时一并抬高。环境变量覆盖；设成空串表示不限制。
+export const MIN_CLIENT_VERSION = "0.3.5";
+export const minClientVersion = () => process.env.VEGA_MIN_CLIENT_VERSION ?? MIN_CLIENT_VERSION;
 const triple = (value?: string) => (/^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(value || "") ? value!.split(".").map(Number) : undefined);
 /** Clients that never reported a version predate the gate, so they count as outdated. */
 export function clientOutdated(minimum: string, actual?: string) {

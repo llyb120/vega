@@ -57,7 +57,7 @@ async function fixture(t: TestContext) {
 
 test("native control route registers before an immediate hello despite slow authorization", { timeout: 10000 }, async (t) => {
   const f = await fixture(t), ws = f.connect(f.headers);
-  ws.on("open", () => ws.send(JSON.stringify({ type: "hello", clientId: f.clientId, instance: f.instance, cwd: "/work", platform: "linux", resume: true })));
+  ws.on("open", () => ws.send(JSON.stringify({ type: "hello", clientId: f.clientId, instance: f.instance, cwd: "/work", platform: "linux", resume: true, version: "0.3.5" })));
   const [raw] = await once(ws, "message", { signal: AbortSignal.timeout(2000) });
   const ready = JSON.parse(raw.toString());
   assert.equal(ready.type, "ready");

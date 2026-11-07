@@ -8,6 +8,10 @@ import { NetworkRelay } from "../server/core/network-relay";
 
 const details = { clientId: "d".repeat(32), instance: "a".repeat(32), name: "Office PC", cwd: "C:\\work", platform: "windows" };
 async function fixture(t: any, clientInUse: (clientId: string) => boolean = () => false) {
+  // 多数用例用旧版本号或省略版本模拟历史客户端；版本门槛单独测，这里先关掉。
+  const minimum = process.env.VEGA_MIN_CLIENT_VERSION;
+  process.env.VEGA_MIN_CLIENT_VERSION = "";
+  t.after(() => { if (minimum === undefined) delete process.env.VEGA_MIN_CLIENT_VERSION; else process.env.VEGA_MIN_CLIENT_VERSION = minimum; });
   const store = await Store.open(":memory:"), auth = new Auth(store, "client-pairing-fixture-token");
   const login = await auth.setup({ setupToken: "client-pairing-fixture-token", username: "admin", password: "Long pairing fixture password" });
   const events: any[] = [], hub = new LocalAgents((event) => events.push(event)), relay = new NetworkRelay(store, hub), sockets = new ClientSockets(store, auth, hub, clientInUse, relay);
@@ -425,8 +429,9 @@ test("large results arrive over HTTP from the same device and instance; the sock
 test("a node minimum client version refuses older clients with a visible reason", async (t) => {
   const f = await fixture(t), paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
   const owner = f.login.principal.user.id, previous = process.env.VEGA_MIN_CLIENT_VERSION;
-  process.env.VEGA_MIN_CLIENT_VERSION = "0.3.5";
-  t.after(() => { if (previous === undefined) delete process.env.VEGA_MIN_CLIENT_VERSION; else process.env.VEGA_MIN_CLIENT_VERSION = previous; });
+  // 不配置也应该按发布版本拦截（MIN_CLIENT_VERSION 与 local/VERSION 同步）。
+  delete process.env.VEGA_MIN_CLIENT_VERSION;
+  t.after(() => { process.env.VEGA_MIN_CLIENT_VERSION = previous ?? ""; });
   for (const [id, version] of [["old", "0.3.4"], ["legacy", undefined]] as const) {
     const socket = f.peer(paired.deviceToken, id);
     await f.sockets.open(socket);
