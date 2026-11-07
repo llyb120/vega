@@ -43,6 +43,7 @@ type Agent struct {
 	updating        bool
 	editing         bool
 	context         context.Context
+	lastSite        string
 }
 
 func main() {
@@ -91,6 +92,7 @@ func main() {
 		return
 	}
 	keyDir = filepath.Join(a.dataDir, "keys")
+	a.clientLog("启动 %s · 站点 %s · 数据目录 %s", clientVersion, a.pinnedOrigin, a.dataDir)
 	clearKeys()
 	lis, err := net.Listen("tcp", localAddress)
 	if err != nil {
@@ -180,9 +182,11 @@ func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
 		UserID string `json:"userId"`
 	}
 	if conn.ReadJSON(&auth) != nil || auth.Type != "auth" || auth.UserID == "" {
+		a.noteSite(origin, "站点连上来但没发有效的登录票据")
 		pairingStatus(conn, connectionStatus{Code: "login_invalid"})
 		return
 	}
+	a.noteSite(origin, "收到站点配对请求")
 	if !a.allowOrigin(origin) {
 		pairingStatus(conn, connectionStatus{Code: "permission_required"})
 		return
@@ -200,26 +204,32 @@ func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
 	proof, err := verifyLogin(origin, auth.Ticket, clientID, existing)
 	if err != nil {
 		if failure, ok := err.(*pairingError); ok {
+			a.noteSite(origin, "配对失败："+failure.connectionStatus.Code)
 			pairingStatus(conn, failure.connectionStatus)
 		} else {
+			a.noteSite(origin, "配对失败："+err.Error())
 			pairingStatus(conn, connectionStatus{Code: "login_invalid"})
 		}
 		return
 	}
 	if proof.UserID != auth.UserID {
+		a.noteSite(origin, "配对失败：用户不一致")
 		pairingStatus(conn, connectionStatus{Code: "login_invalid"})
 		return
 	}
 	saved, err := a.saveCredential(origin, proof)
 	if err != nil {
+		a.noteSite(origin, "配对失败：凭据保存")
 		pairingStatus(conn, connectionStatus{Code: "credential_save"})
 		return
 	}
 	connection := a.startConnection(saved, proof.DeviceToken)
 	if connection == nil {
+		a.noteSite(origin, "配对失败：权限不足")
 		pairingStatus(conn, connectionStatus{Code: "permission_required"})
 		return
 	}
+	a.noteSite(origin, "配对成功，连后端中")
 	pairingStatus(conn, connectionStatus{Code: "backend_connecting"})
 	deadline := time.NewTimer(20 * time.Second)
 	defer deadline.Stop()

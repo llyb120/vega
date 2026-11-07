@@ -67,6 +67,12 @@ func newAgentAt(exeDir string) (*Agent, error) {
 	}
 	// 只认安装包里的站点，其它来源不参与白名单。
 	a.config.TrustedOrigins = []string{a.pinnedOrigin}
+	if len(a.config.Servers) == 0 {
+		a.config.Servers = legacyServers(a.pinnedOrigin)
+		if len(a.config.Servers) > 0 {
+			a.clientLog("沿用旧版配对凭据：%s", a.pinnedOrigin)
+		}
+	}
 	kept := a.config.Servers[:0]
 	for _, saved := range a.config.Servers {
 		if saved.Origin == a.pinnedOrigin {
@@ -145,13 +151,64 @@ func validOrigin(origin string) bool {
 // allowOrigin 只放行安装包自带的站点；其它站点一律拒绝，也不弹窗请求授权。
 func (a *Agent) allowOrigin(origin string) bool {
 	if !validOrigin(origin) {
+		a.noteSite(origin, "拒绝：来源地址不合法")
 		return false
 	}
 	if origin != a.pinnedOrigin {
+		a.noteSite(origin, "拒绝：本客户端只属于 "+a.pinnedOrigin)
 		fmt.Fprintf(os.Stderr, "vega-local: 拒绝站点 %s：此客户端只属于 %s\n", origin, a.pinnedOrigin)
 		return false
 	}
 	return true
+}
+
+// legacyServers 把旧版共用配置里属于本安装包站点的配对搬过来：数据目录一按站点分开，
+// 老用户的设备凭据不然就丢了，得重新让浏览器配对一次。
+func legacyServers(origin string) []ServerCredential {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(configDir, "vega-local", "trusted-sites.json"))
+	if err != nil {
+		return nil
+	}
+	var legacy Config
+	if json.Unmarshal(data, &legacy) != nil {
+		return nil
+	}
+	imported := []ServerCredential{}
+	for _, saved := range legacy.Servers {
+		if saved.Origin == origin {
+			imported = append(imported, saved)
+		}
+	}
+	return imported
+}
+
+// noteSite 记下最近一次站点连接：图形方式启动时 stderr 看不到，配置页和 client.log 是唯一线索。
+func (a *Agent) noteSite(origin, result string) {
+	line := time.Now().Format("15:04:05") + " · " + result
+	if origin != "" {
+		line = time.Now().Format("15:04:05") + " · " + origin + " · " + result
+	}
+	a.mu.Lock()
+	a.lastSite = line
+	a.mu.Unlock()
+	a.clientLog("站点 %s", line)
+}
+
+// clientLog 追加到 <数据目录>/client.log（双击启动时没有控制台）。
+func (a *Agent) clientLog(format string, args ...any) {
+	if a.dataDir == "" {
+		return
+	}
+	file, err := os.OpenFile(filepath.Join(a.dataDir, "client.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	fmt.Fprintf(file, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
 }
 
 var pairingPage = template.Must(template.New("pairing").Parse(`<!doctype html>
@@ -194,10 +251,9 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   {{if .Unpaired}}<div class="flash warn" role="status">指定账户的本地配对已移除，其他账户和站点授权不变。若该账户仍在 Vega 网页中登录，网页可能再次发起配对。</div>{{end}}
 
   <section class="card">
-    <h2>连接请求</h2>
-    {{range .Pending}}
-    <form method="post" class="site"><div>请求连接的站点<br><strong><code>{{.}}</code></strong></div><button name="origin" value="{{.}}">允许此站点</button></form>
-    {{else}}<p class="empty">当前没有新的连接请求。请保持客户端运行，并登录 Vega 网站。</p>{{end}}
+    <h2>站点连接</h2>
+    {{if .LastSite}}<p>{{.LastSite}}</p>{{else}}<p class="empty">还没有任何站点连到本机客户端。用<b>同一台电脑</b>的浏览器打开 <code>{{.Pin}}</code> 并登录，页面会自动发起配对。</p>{{end}}
+    <small>这个页面只说客户端看到了什么。如果一直为空：浏览器和客户端不在同一台电脑、浏览器在 https 页面上、或者浏览器拦住了到 127.0.0.1 的连接。详细记录在数据目录的 client.log。</small>
   </section>
 
   {{if .Trusted}}
@@ -410,11 +466,8 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
-	pending := []string{}
-	for origin := range a.pendingOrigins {
-		pending = append(pending, origin)
-	}
 	trusted := append([]string{}, a.config.TrustedOrigins...)
+	lastSite := a.lastSite
 	type account struct {
 		Origin, UserID, Rules, Status string
 		Enabled                       bool
@@ -442,11 +495,12 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		Approved, Revoked, Saved, Unpaired bool
 		Supplement                         string
 		Pin                                string
+		LastSite                           string
 		BrowserLocal                       bool
 		ExecutionCloud                     bool
 		Offline                            bool
 		Accounts                           []account
-	}{pending, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, browserLocal, executionCloud, offline, accounts})
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, browserLocal, executionCloud, offline, accounts})
 }
 
 type loginProof struct {
