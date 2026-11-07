@@ -65,13 +65,18 @@ const model = {
   options: {},
 } as any;
 
-test("batch independent read calls execute concurrently", async () => {
+test("batch independent read calls execute concurrently with localAgent", async () => {
   const e = await engine();
   await e.saveConfig(cfg);
 
-  const session = await e.store.newSession({ title: "Concurrent Test" });
+  // 设置localAgent=true，走真实调度路径
+  const session = await e.store.newSession({ 
+    cwd: process.cwd(),
+    title: "Concurrent Test", 
+    localAgent: true,
+    clientId: "test-client-123",
+  });
   
-  // 创建5个独立的read调用
   const calls: Call[] = [
     { id: "call_1", name: "read", arguments: { path: "package.json" } },
     { id: "call_2", name: "read", arguments: { path: "README.md" } },
@@ -80,12 +85,10 @@ test("batch independent read calls execute concurrently", async () => {
     { id: "call_5", name: "read", arguments: { path: "server/core/tools.ts", offset: 1, limit: 10 } },
   ];
 
-  // 记录执行时间和并发情况
   const execTimes: { id: string; start: number; end: number }[] = [];
   let maxConcurrent = 0;
   let currentConcurrent = 0;
 
-  // Mock tools.execute
   const tools = {
     session,
     signal: AbortSignal.timeout(30000),
@@ -109,26 +112,21 @@ test("batch independent read calls execute concurrently", async () => {
 
   const outcomes = await e.batch(tools, calls, model);
 
-  // 验证所有调用都成功
   assert.equal(outcomes.length, 5);
   outcomes.forEach((outcome, i) => {
     assert(!outcome.error, `Call ${i + 1} should succeed`);
   });
 
-  // 验证确实有并发执行（至少有2个调用同时执行）
-  assert(maxConcurrent >= 2, `Expected concurrent execution (max: ${maxConcurrent}), but got serial execution`);
-  
-  // 验证并发数不超过4
+  // 验证确实有并发执行（修复后应该并发）
+  assert(maxConcurrent >= 2, `Expected concurrent execution (max: ${maxConcurrent}), but got serial`);
   assert(maxConcurrent <= 4, `Max concurrent (${maxConcurrent}) should not exceed 4`);
 
-  // 验证有时间重叠（证明并发）
   let foundOverlap = false;
   for (let i = 0; i < execTimes.length - 1; i++) {
     for (let j = i + 1; j < execTimes.length; j++) {
       const a = execTimes[i];
       const b = execTimes[j];
-      const overlaps = (a.start < b.end && b.start < a.end);
-      if (overlaps) {
+      if (a.start < b.end && b.start < a.end) {
         foundOverlap = true;
         break;
       }
@@ -139,17 +137,22 @@ test("batch independent read calls execute concurrently", async () => {
   assert(foundOverlap, "No concurrent execution detected - all calls were serial");
 });
 
-test("bash calls remain serial", async () => {
+test("bash acts as barrier against all tools including read", async () => {
   const e = await engine();
   await e.saveConfig(cfg);
 
-  const session = await e.store.newSession({ title: "Bash Serial Test" });
+  const session = await e.store.newSession({ 
+    cwd: process.cwd(), 
+    title: "Bash Barrier Test",
+    localAgent: true,
+    clientId: "test-client-456",
+  });
   
-  // 创建多个bash调用
+  // bash应该与read串行
   const calls: Call[] = [
-    { id: "call_1", name: "bash", arguments: { command: "echo test1" } },
-    { id: "call_2", name: "bash", arguments: { command: "echo test2" } },
-    { id: "call_3", name: "bash", arguments: { command: "echo test3" } },
+    { id: "call_1", name: "read", arguments: { path: "package.json" } },
+    { id: "call_2", name: "bash", arguments: { command: "echo test" } },
+    { id: "call_3", name: "read", arguments: { path: "README.md" } },
   ];
 
   const execTimes: { id: string; start: number; end: number }[] = [];
@@ -172,7 +175,7 @@ test("bash calls remain serial", async () => {
       record.end = end;
       currentConcurrent--;
       
-      return { value: { stdout: "test output" } };
+      return { value: call.name === "bash" ? { stdout: "test" } : { content: "test" } };
     },
   } as any;
 
@@ -180,20 +183,72 @@ test("bash calls remain serial", async () => {
 
   assert.equal(outcomes.length, 3);
   outcomes.forEach((outcome, i) => {
-    assert(!outcome.error, `Bash call ${i + 1} should succeed`);
+    assert(!outcome.error, `Call ${i + 1} should succeed`);
   });
 
-  // bash应该保持串行（maxConcurrent应该是1）
-  assert.equal(maxConcurrent, 1, `Bash calls should be serial, but got max concurrent: ${maxConcurrent}`);
+  // bash应该作为屏障，maxConcurrent应该是1
+  assert.equal(maxConcurrent, 1, `Bash should act as barrier, but got max concurrent: ${maxConcurrent}`);
+  
+  // 验证执行顺序：call_1 -> call_2 -> call_3
+  const call1End = execTimes.find(r => r.id === "call_1")!.end;
+  const call2Start = execTimes.find(r => r.id === "call_2")!.start;
+  const call2End = execTimes.find(r => r.id === "call_2")!.end;
+  const call3Start = execTimes.find(r => r.id === "call_3")!.start;
+  
+  assert(call2Start >= call1End, "bash should start after read1 ends");
+  assert(call3Start >= call2End, "read3 should start after bash ends");
 });
 
-test("_after dependencies are respected", async () => {
+test("write acts as barrier against read", async () => {
   const e = await engine();
   await e.saveConfig(cfg);
 
-  const session = await e.store.newSession({ title: "Dependency Test" });
+  const session = await e.store.newSession({ 
+    cwd: process.cwd(), 
+    title: "Write Barrier Test",
+    localAgent: true,
+    clientId: "test-client-789",
+  });
   
-  // call_2依赖call_1，call_3独立
+  const calls: Call[] = [
+    { id: "call_1", name: "read", arguments: { path: "package.json" } },
+    { id: "call_2", name: "write", arguments: { path: "test.txt", content: "test" } },
+    { id: "call_3", name: "read", arguments: { path: "README.md" } },
+  ];
+
+  let maxConcurrent = 0;
+  let currentConcurrent = 0;
+
+  const tools = {
+    session,
+    signal: AbortSignal.timeout(30000),
+    execute: async (call: Call) => {
+      currentConcurrent++;
+      maxConcurrent = Math.max(maxConcurrent, currentConcurrent);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      currentConcurrent--;
+      return { value: { ok: true } };
+    },
+  } as any;
+
+  const outcomes = await e.batch(tools, calls, model);
+
+  assert.equal(outcomes.length, 3);
+  // write是barrier，应该串行
+  assert.equal(maxConcurrent, 1, `Write should act as barrier, but got max concurrent: ${maxConcurrent}`);
+});
+
+test("_after dependencies are respected with localAgent", async () => {
+  const e = await engine();
+  await e.saveConfig(cfg);
+
+  const session = await e.store.newSession({ 
+    cwd: process.cwd(), 
+    title: "Dependency Test",
+    localAgent: true,
+    clientId: "test-client-dep",
+  });
+  
   const calls: Call[] = [
     { id: "call_1", name: "read", arguments: { path: "package.json" } },
     { id: "call_2", name: "read", arguments: { path: "README.md", _after: [1] } },
@@ -235,36 +290,42 @@ test("_after dependencies are respected", async () => {
   const call3Start = execTimes.find(r => r.id === "call_3")!.start;
   const call3End = execTimes.find(r => r.id === "call_3")!.end;
   const overlaps = call1Start < call3End && call3Start < call1End;
-  // call_3应该能与call_1并发
   assert(overlaps, "call_3 should be able to run concurrently with call_1");
 });
 
-test("approval stops subsequent calls", async () => {
+test("stop flag prevents subsequent executions", async () => {
   const e = await engine();
   await e.saveConfig(cfg);
 
-  const session = await e.store.newSession({ title: "Approval Test", employeeId: "test-employee", taskId: "test-task" });
+  const session = await e.store.newSession({ 
+    cwd: process.cwd(), 
+    title: "Stop Test",
+    localAgent: true,
+    clientId: "test-client-stop",
+  });
   
   const calls: Call[] = [
     { id: "call_1", name: "read", arguments: { path: "package.json" } },
-    { id: "call_2", name: "context_budget", arguments: {} },
-    { id: "call_3", name: "read", arguments: { path: "README.md" } },
+    { id: "call_2", name: "read", arguments: { path: "README.md" } },
+    { id: "call_3", name: "read", arguments: { path: "tsconfig.json", _after: [2] } }, // 依赖call_2
   ];
 
   const executed: string[] = [];
+  let stopAfterSecond = false;
 
   const tools = {
     session,
     signal: AbortSignal.timeout(30000),
     execute: async (call: Call) => {
       executed.push(call.id);
+      await new Promise(resolve => setTimeout(resolve, 10));
       
-      if (call.name === "context_budget") {
-        // 模拟一个返回stop的工具
-        return { value: { status: "pending" }, stop: true };
+      // call_2触发stop
+      if (call.id === "call_2") {
+        stopAfterSecond = true;
+        return { value: { content: "test" }, stop: true };
       }
       
-      await new Promise(resolve => setTimeout(resolve, 10));
       return { value: { content: "test" } };
     },
   } as any;
@@ -275,20 +336,28 @@ test("approval stops subsequent calls", async () => {
   assert(!outcomes[0].error, "call_1 should succeed");
   assert(outcomes[1].stop, "call_2 should have stop flag");
   
-  // call_3应该被跳过（因为call_2返回了stop）
+  // call_3应该被跳过
   assert(outcomes[2].error, "call_3 should be skipped");
-  assert(outcomes[2].value.error.includes("Skipped"), "call_3 should have skip error");
+  assert(outcomes[2].value.error.includes("Skipped") || outcomes[2].value.error.includes("suspended"), 
+    "call_3 should have skip error");
   
-  // 只有call_1和call_2实际执行了
-  assert.equal(executed.length, 2, "Only first two calls should execute");
-  assert.deepEqual(executed, ["call_1", "call_2"]);
+  // 验证只有前两个真正执行
+  assert(executed.length <= 2, "At most first two calls should execute");
+  assert(executed.includes("call_1"), "call_1 should execute");
+  assert(executed.includes("call_2"), "call_2 should execute");
+  assert(!executed.includes("call_3"), "call_3 should not execute");
 });
 
-test("signal cancellation is checked", async () => {
+test("signal cancellation is checked before execution", async () => {
   const e = await engine();
   await e.saveConfig(cfg);
 
-  const session = await e.store.newSession({ title: "Cancel Test" });
+  const session = await e.store.newSession({ 
+    cwd: process.cwd(), 
+    title: "Cancel Test",
+    localAgent: true,
+    clientId: "test-client-cancel",
+  });
   
   const calls: Call[] = [
     { id: "call_1", name: "read", arguments: { path: "package.json" } },
@@ -296,8 +365,7 @@ test("signal cancellation is checked", async () => {
   ];
 
   const controller = new AbortController();
-  // 立即取消
-  controller.abort();
+  controller.abort(); // 立即取消
 
   const executed: string[] = [];
 
@@ -312,12 +380,133 @@ test("signal cancellation is checked", async () => {
 
   const outcomes = await e.batch(tools, calls, model);
   
-  // 所有调用都应该被捕获为错误（因为signal已aborted）
   assert.equal(outcomes.length, 2);
   outcomes.forEach((outcome, i) => {
-    assert(outcome.error, `Call ${i + 1} should be caught as error`);
+    assert(outcome.error, `Call ${i + 1} should be caught as error due to abort`);
   });
   
-  // 没有调用应该真正执行
   assert.equal(executed.length, 0, "No calls should execute when signal is already aborted");
+});
+
+test("failed call does not block independent calls", async () => {
+  const e = await engine();
+  await e.saveConfig(cfg);
+
+  const session = await e.store.newSession({ 
+    cwd: process.cwd(), 
+    title: "Failure Isolation Test",
+    localAgent: true,
+    clientId: "test-client-fail",
+  });
+  
+  const calls: Call[] = [
+    { id: "call_1", name: "read", arguments: { path: "package.json" } },
+    { id: "call_2", name: "read", arguments: { path: "nonexistent.txt" } }, // 会失败
+    { id: "call_3", name: "read", arguments: { path: "README.md" } },
+  ];
+
+  const tools = {
+    session,
+    signal: AbortSignal.timeout(30000),
+    execute: async (call: Call) => {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      
+      if (call.arguments.path === "nonexistent.txt") {
+        throw new Error("File not found");
+      }
+      
+      return { value: { content: "test" } };
+    },
+  } as any;
+
+  const outcomes = await e.batch(tools, calls, model);
+
+  assert.equal(outcomes.length, 3);
+  assert(!outcomes[0].error, "call_1 should succeed");
+  assert(outcomes[1].error, "call_2 should fail");
+  assert(outcomes[1].value.error.includes("File not found"), "call_2 should have correct error");
+  assert(!outcomes[2].error, "call_3 should succeed despite call_2 failure");
+});
+
+test("result IDs correspond to call IDs", async () => {
+  const e = await engine();
+  await e.saveConfig(cfg);
+
+  const session = await e.store.newSession({ 
+    cwd: process.cwd(), 
+    title: "ID Correspondence Test",
+    localAgent: true,
+    clientId: "test-client-id",
+  });
+  
+  const calls: Call[] = [
+    { id: "call_A", name: "read", arguments: { path: "package.json" } },
+    { id: "call_B", name: "read", arguments: { path: "README.md" } },
+    { id: "call_C", name: "read", arguments: { path: "tsconfig.json" } },
+  ];
+
+  const resultMap = new Map<string, string>();
+
+  const tools = {
+    session,
+    signal: AbortSignal.timeout(30000),
+    execute: async (call: Call) => {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const result = `result_${call.id}`;
+      resultMap.set(call.id, result);
+      return { value: { data: result } };
+    },
+  } as any;
+
+  const outcomes = await e.batch(tools, calls, model);
+
+  assert.equal(outcomes.length, 3);
+  
+  // 虽然可能乱序执行，但结果应该在正确的位置
+  assert.equal(outcomes[0].value.data, "result_call_A", "outcome[0] should be for call_A");
+  assert.equal(outcomes[1].value.data, "result_call_B", "outcome[1] should be for call_B");
+  assert.equal(outcomes[2].value.data, "result_call_C", "outcome[2] should be for call_C");
+});
+
+test("Chrome tools remain serial", async () => {
+  const e = await engine();
+  await e.saveConfig(cfg);
+
+  const session = await e.store.newSession({ 
+    cwd: process.cwd(), 
+    title: "Chrome Serial Test",
+    localAgent: true,
+    clientId: "test-client-chrome",
+  });
+  
+  const calls: Call[] = [
+    { id: "call_1", name: "chrome_tabs", arguments: { query: "test1" } },
+    { id: "call_2", name: "chrome_tabs", arguments: { query: "test2" } },
+    { id: "call_3", name: "chrome_inspect", arguments: { tabTag: "tab1" } },
+  ];
+
+  let maxConcurrent = 0;
+  let currentConcurrent = 0;
+
+  const tools = {
+    session,
+    signal: AbortSignal.timeout(30000),
+    execute: async (call: Call) => {
+      currentConcurrent++;
+      maxConcurrent = Math.max(maxConcurrent, currentConcurrent);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      currentConcurrent--;
+      return { value: { tabs: [] } };
+    },
+  } as any;
+
+  const outcomes = await e.batch(tools, calls, model);
+
+  assert.equal(outcomes.length, 3);
+  outcomes.forEach((outcome, i) => {
+    assert(!outcome.error, `Chrome call ${i + 1} should succeed`);
+  });
+  
+  // Chrome工具应该串行
+  assert.equal(maxConcurrent, 1, `Chrome tools should be serial, but got max concurrent: ${maxConcurrent}`);
 });

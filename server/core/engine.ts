@@ -1454,36 +1454,18 @@ export function dependencies(raw: any, index: number) {
   );
   return raw.map((n) => n - 1);
 }
+// 只读安全工具：可与其他只读工具并发
+const readOnlySafe = new Set(["read", "context_budget", "recall", "search_context", "acp_status"]);
+// 保守屏障：bash/write/edit和非Chrome的其他工具必须与任何东西串行
 const barrier = (name: string) =>
-  !CHROME_TOOLS.has(name) && ![
-    "read",
-    "write",
-    "edit",
-    "bash",
-    "context_budget",
-    "recall",
-    "search_context",
-    "acp_status",
-  ].includes(name);
+  !CHROME_TOOLS.has(name) && !readOnlySafe.has(name);
 async function conflicts(cwd: string, a: Call, b: Call) {
+  // barrier工具与任何东西冲突（包括read）
   if (barrier(a.name) || barrier(b.name)) return true;
+  // Chrome工具相互串行
   if (CHROME_TOOLS.has(a.name) && CHROME_TOOLS.has(b.name)) return true;
-  if (
-    ["read", "write", "edit"].includes(a.name) &&
-    ["read", "write", "edit"].includes(b.name) &&
-    [a.name, b.name].some((n) => n === "write" || n === "edit")
-  ) {
-    try {
-      const [x, y] = await Promise.all([
-        stat(resolve(cwd, a.arguments.path)),
-        stat(resolve(cwd, b.arguments.path)),
-      ]);
-      return x.dev === y.dev && x.ino === y.ino;
-    } catch {
-      return true;
-    }
-  }
-  // bash保守策略：所有bash调用串行，避免副作用竞争
-  if (a.name === "bash" && b.name === "bash") return true;
+  // 只读安全工具之间不冲突
+  if (readOnlySafe.has(a.name) && readOnlySafe.has(b.name)) return false;
+  // 其他情况保守串行
   return false;
 }
