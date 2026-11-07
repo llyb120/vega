@@ -87,6 +87,15 @@ export const taskSummary = (t: Task) =>
     nextAt: ended(t.status) ? undefined : at(t.nextCheckAt),
     finishedAt: at(t.finishedAt),
   }).filter(([, v]) => v !== undefined));
+/**
+ * A delivered task accepts a direct follow-up in its own session only within this window after its latest delivery.
+ * The window is enforced here; whether the follow-up is related is the communication model's judgement.
+ */
+export const FOLLOW_UP_WINDOW_MS = 30 * 60_000;
+export const followUpOpen = (t: Task, now = Date.now()) =>
+  t.status === "done" && !t.dutyId && !t.fromDuty && t.side !== "computer" && !!t.workSession &&
+  typeof t.finishedAt === "number" && t.finishedAt > 0 && now - t.finishedAt <= FOLLOW_UP_WINDOW_MS;
+export const followUpSummary = (t: Task) => ({ ...taskSummary(t), followUpUntil: at(t.finishedAt + FOLLOW_UP_WINDOW_MS) });
 /** Sealed tasks are archived by the user by hand; nothing (model, scheduler, remote member) may revive them. */
 const SEALED_MESSAGE = "任务已封存，禁止恢复、续做或重新派发";
 
@@ -1120,6 +1129,7 @@ export class Employee {
               }
               t.summary = a.summary?.trim() || "";
               t.completion = content;
+              t.completedRevision = t.revision || 0;
               t.deliverableRefs = cited.refs;
               t.deliverable = cited.texts.join("\n\n");
               delete t.deliverableNeeded;
@@ -1438,10 +1448,19 @@ export class Employee {
             assert(["stop", "remove"].includes(a.action), SEALED_MESSAGE);
           if (a.action === "resume" && a.text) {
             assert(typeof a.text === "string" && a.text.length <= 8000 && a.text.trim(), "Invalid task supplement");
-            assert(!["approval", "done", "cancelled"].includes(t.status), "Use explicit approval or a new task");
+            assert(!["approval", "cancelled"].includes(t.status), "Use explicit approval or a new task");
             const text = a.text.replace(/\r\n?/g, "\n").trim();
             const previous = t.lastSupplement ?? t.answer?.replace(/\r\n?/g, "\n").split("\n用户补充：").at(-1)?.trim();
             const duplicate = previous === text;
+            const reopening = t.status === "done";
+            if (reopening) {
+              const now = Date.now();
+              assert(!t.dutyId && !t.fromDuty && t.side !== "computer" && t.workSession, "职责触发或没有原工作会话的已交付任务不能在原任务续做；请用 employee_task_create 新建任务，并在 instructions 写明关联任务 id 与已有结果");
+              assert(followUpOpen(t, now), `该任务已于 ${at(t.finishedAt) || "未知时间"} 交付，超过 ${FOLLOW_UP_WINDOW_MS / 60_000} 分钟续做时限，未在原任务续做；请用 employee_task_create 新建任务，并在 instructions 写明关联任务 id 与已有结果`);
+              if (duplicate) return { ok: true, duplicate, status: t.status, next: "This supplement was already handled and delivered; do not reopen the task or create a new one for it" };
+              t.deliveries = [...(t.deliveries || []), { revision: t.revision || 0, finishedAt: t.finishedAt, summary: t.summary || "", result: clip(t.result || "", 8000), deliverableRefs: t.deliverableRefs || [] }].slice(-5);
+              t.answer = (t.answer || "") + `\n[已交付任务的直接后续] 本任务已于 ${at(t.finishedAt)} 交付；已完成步骤、已验证结果和产物保留，不要重做，不要重复已执行的提交/发送；只做下面这条补充新增的部分，新增动作仅限补充明确要求的范围。用 task_progress 在原计划后追加新步骤，验证后 task_complete 交付本次新增结果。`;
+            }
             if (!duplicate) {
               t.answer = (t.answer || "") + "\n用户补充：" + a.text;
               t.supplementPending = true;
@@ -1456,7 +1475,7 @@ export class Employee {
             t.nextCheckAt = 0;
             t.waiting = "";
             t.finishedAt = 0;
-            return { ok: true, duplicate };
+            return reopening ? { ok: true, duplicate, reopened: true, next: "The delivered task continues in its original session with this supplement; do not create a new task" } : { ok: true, duplicate };
           }
           if (a.action !== "stop")
             assert(
@@ -1884,6 +1903,12 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                     t.answer = (t.answer ? t.answer + "\n" : "") +
                       "电脑会话完成，以下为结果数据、不是新授权；只继续未完成事项，不重做：\n" +
                       result;
+                  } else if (t.completion && t.completedRevision !== undefined && t.completedRevision !== (t.revision || 0)) {
+                    // A supplement arrived after task_complete was accepted: that completion is stale, deliver only the newer revision.
+                    t.status = "queued";
+                    t.nextCheckAt = 0;
+                    t.answer = (t.answer ? t.answer + "\n" : "") +
+                      "上一轮已调用 task_complete，但之后收到新补充，未交付；在已验证结果基础上只做新增部分，再按最新要求交付，不要重做已完成步骤。";
                   } else if (t.completion) {
                     t.status = "done";
                     result = t.deliverable ? t.deliverable + "\n\n---\n\n**验证证据**\n\n" + t.completion : t.completion;

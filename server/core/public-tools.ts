@@ -158,7 +158,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         ["set_profile", "改尚未开始的任务的开局场景偏好（职责触发的任务不能改）"],
         ["reschedule", "改执行时间，runAt 或 delayMinutes 二选一（职责触发的任务不能改期）"],
         ["cancel", "取消任务并保留记录，不交付（运行中的先 stop）"],
-        ["resume", "不带 supplement 时继续已停止、失败或取消的任务（复用原会话和计划）；带 supplement 时给未收尾的任务追加要求，相同内容不会重复记录"],
+        ["resume", "不带 supplement 时继续已停止、失败或取消的任务（复用原会话和计划）；带 supplement 时给未收尾的任务追加要求，或对交付后 30 分钟内的任务做直接后续（同一目标上的下一步，在原会话续做并保留已交付结果），相同内容不会重复记录；无关的新目标或超时用 employee_task_create"],
         ["answer", "回答正在等待信息的任务；审批只能用户在界面点击，不能用 answer 批准"],
         ["stop", "真正停止执行：回执 executionStopped=true 才算已停，false 表示停止请求已发出、正在收尾"],
       ]) + "。",
