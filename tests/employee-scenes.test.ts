@@ -393,8 +393,9 @@ test("attached log scenario: lightweight task whose model is shared with compute
     assert.equal(job.workSession, work, "task keeps its original work session");
     assert.equal((await store.sessions()).length, 1, "no relay/new browser session");
     const session = await store.session(job.workSession);
-    assert.equal(session.scene, "computer");
+    assert.equal(session.scene, "lightweight", "delivery restores the scene the task entered computer from");
     assert.equal(session.model, "p/vision");
+    assert.equal(session.sceneStack, undefined);
     assert.equal(session.taskId, job.id);
     assert.notEqual(job.side, "computer", "task is not flipped to the isolated computer side");
     assert.equal(session.relayComputer, undefined);
@@ -422,7 +423,8 @@ test("lightweight and computer on different models: switch changes model and exp
     const job = await segment(await add("打开网页核实"));
     assert.equal(job.status, "done");
     assert.equal((await store.sessions()).length, 1);
-    assert.equal((await store.session(job.workSession)).scene, "computer");
+    assert.equal((await store.session(job.workSession)).scene, "lightweight", "delivery restores the origin scene and model");
+    assert.equal((await store.session(job.workSession)).model, "p/light");
   } finally { await engine.close(); await store.close(); }
 });
 
@@ -475,6 +477,6 @@ test("one model for every scene: lightweight to coding to computer all execute i
     const job = await segment(await add("改代码并在浏览器验证", "coding"));
     assert.equal(job.status, "done");
     assert.equal((await store.sessions()).length, 1);
-    assert.equal((await store.session(job.workSession)).scene, "computer");
+    assert.equal((await store.session(job.workSession)).scene, "coding", "delivery returns to the scene computer was entered from, not the task's first scene");
   } finally { await engine.close(); await store.close(); }
 });
