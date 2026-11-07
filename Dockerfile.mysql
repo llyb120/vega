@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-# Vega 镜像，数据库用 MySQL（8.0.19+，不支持 MariaDB）。除下面 ENV 中的 DB_TYPE/MYSQL_* 默认值外与 Dockerfile 完全一致。
-# 运行时传 MYSQL_PASSWORD；也可用 MYSQL_URL 或覆盖 MYSQL_HOST 等。截图等文件仍在 /data/files，需持久化 /data。
+# Vega 镜像，数据库用 MySQL（8.0.19+，不支持 MariaDB）：镜像本身不包含也不启动 MySQL，连接外部已有的库。除下面 ENV 中的 DB_TYPE/MYSQL_* 默认值外与 Dockerfile 完全一致。
+# 运行时传 MYSQL_URL（或 MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE）；截图等文件仍在 /data/files，需持久化 /data。
 #   docker build -f Dockerfile.mysql -t vega:mysql .
 FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS clients
 WORKDIR /src
@@ -50,8 +50,6 @@ ENV NODE_ENV=production \
     VEGA_CLOUD_ISOLATION=1 \
     VEGA_CHROMIUM_NO_SANDBOX=0 \
     DB_TYPE=mysql \
-    MYSQL_HOST=mysql \
-    MYSQL_PORT=3306 \
     MYSQL_USER=vega \
     MYSQL_DATABASE=vega
 COPY --from=build /app/.output /app/.output

@@ -30,7 +30,7 @@ Node >=24.10，使用内置 `node:sqlite`，无需另装数据库。默认数据
 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | 分项配置，默认 `127.0.0.1` / `3306` / `root` / 空 / `vega` |
 | `MYSQL_POOL_SIZE` | 连接池大小，默认 10 |
 
-MySQL 需要 **8.0.19 及以上**（不支持 MariaDB），数据库须事先创建（建议 `CHARACTER SET utf8mb4`），首次启动自动建表。只支持单个 Vega 进程连接同一个库。示例：`docker compose -f docker/docker-compose.mysql.yml up -d --build`（见文件内说明）。也可单独构建默认连 MySQL 的 Vega 镜像：`docker build -f Dockerfile.mysql -t vega:mysql .`，它默认 `DB_TYPE=mysql`、主机 `mysql:3306`、用户和库都是 `vega`，运行时用 `-e MYSQL_PASSWORD=...` 传密码，其他项可用环境变量覆盖。
+MySQL 需要 **8.0.19 及以上**（不支持 MariaDB），数据库须事先创建（建议 `CHARACTER SET utf8mb4`），首次启动自动建表。只支持单个 Vega 进程连接同一个库。`docker compose -f docker/docker-compose.mysql.yml up -d --build` 会连同一个 compose 文件里自带的 MySQL；用外部已有 MySQL 则 `docker build -f Dockerfile.mysql -t vega:mysql .`，镜像只默认 `DB_TYPE=mysql`、用户和库都是 `vega`，运行前必须用 `MYSQL_URL` 或 `MYSQL_HOST`（以及 `MYSQL_PORT`/`MYSQL_PASSWORD`）指向外部库。
 
 数据库结构版本为 6，**不做旧版本迁移**：版本不符的非空库会拒绝启动且不修改，请使用新库。
 
@@ -41,6 +41,8 @@ MySQL 需要 **8.0.19 及以上**（不支持 MariaDB），数据库须事先创
 ## 本机执行端
 
 各台电脑启动新版 `vega-local` 后，只需在该电脑网页登录一次并确认站点授权。前端仅传递一次性登录票据，客户端直接向后端换取设备凭据、持久保存并通过 `/api/local-agent/socket` 建立独立连接；之后**关掉网页、浏览器后台休眠、客户端或服务端重启都不依赖网页**，联网后客户端自行重连。输入框旁按实际在线设备选择电脑，手机可选远端电脑且不会尝试本机连接。心跳容忍30秒，短暂断连保留原任务并给同一客户端实例60秒重连；执行中的操作不重发，客户端仅补传尚未确认的结果，连接恢复后自动续做；响应超时也先尝试一次重连接回结果，而非立即判定中断。超过恢复期限、客户端进程重启或结果仍不确定时才暂停、等待确认，不自动重放或换机。需同时升级服务端、网页和客户端，升级后在电脑端重新握手一次。详见 [local/README.md](local/README.md)。
+
+**客户端版本门槛**：部署节点设置 `VEGA_MIN_CLIENT_VERSION=0.3.5`（`x.y.z`）后，低于该版本或未上报版本的客户端在握手阶段被拒绝，网页显示节点要求的最低版本与升级提示，旧客户端连上也不能执行任何任务；不设置则不限制。升级客户端后自动恢复，无需改服务端。
 
 ## 账号、登录与权限
 

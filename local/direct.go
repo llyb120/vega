@@ -40,6 +40,7 @@ func (s ServerCredential) activeRelay() []string {
 type connectionStatus struct {
 	Code       string `json:"code"`
 	HTTPStatus int    `json:"httpStatus,omitempty"`
+	Message    string `json:"message,omitempty"`
 }
 type directConnection struct {
 	origin     string
@@ -242,11 +243,24 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	conn.SetReadLimit(maxBody)
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var ready struct {
-		Type, UserID, ClientID                string
+		Type, UserID, ClientID, Code, Message string
 		Resume, AutoUpdate, SessionIdle, Busy bool
 		Pending, Leases                       []string
 	}
-	if conn.ReadJSON(&ready) != nil || ready.Type != "ready" || ready.UserID != saved.UserID || ready.ClientID != clientID {
+	if conn.ReadJSON(&ready) != nil {
+		a.connectionStatus(connection, connectionStatus{Code: "backend_protocol"})
+		return true, false
+	}
+	// The node refuses clients older than its minimum version; show its reason instead of a bare protocol error.
+	if ready.Type == "error" {
+		code := ready.Code
+		if code == "" {
+			code = "backend_protocol"
+		}
+		a.connectionStatus(connection, connectionStatus{Code: code, Message: ready.Message})
+		return true, false
+	}
+	if ready.Type != "ready" || ready.UserID != saved.UserID || ready.ClientID != clientID {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_protocol"})
 		return true, false
 	}

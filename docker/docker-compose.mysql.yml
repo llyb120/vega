@@ -23,6 +23,7 @@ services:
       mysql: { condition: service_healthy }
     environment:
       VEGA_TOKEN: ${VEGA_TOKEN:?set VEGA_TOKEN}
+      MYSQL_HOST: mysql
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     ports: ["127.0.0.1:8080:8080"]
     volumes: [vega-data:/data, vega-workspace:/workspace]

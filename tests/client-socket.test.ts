@@ -421,3 +421,25 @@ test("large results arrive over HTTP from the same device and instance; the sock
   await f.sockets.message(socket, JSON.stringify({ type: "result", id: job.id, result: { content } }));
   assert.equal(socket.closed.length, 1, "an oversized socket message is refused");
 });
+
+test("a node minimum client version refuses older clients with a visible reason", async (t) => {
+  const f = await fixture(t), paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
+  const owner = f.login.principal.user.id, previous = process.env.VEGA_MIN_CLIENT_VERSION;
+  process.env.VEGA_MIN_CLIENT_VERSION = "0.3.5";
+  t.after(() => { if (previous === undefined) delete process.env.VEGA_MIN_CLIENT_VERSION; else process.env.VEGA_MIN_CLIENT_VERSION = previous; });
+  for (const [id, version] of [["old", "0.3.4"], ["legacy", undefined]] as const) {
+    const socket = f.peer(paired.deviceToken, id);
+    await f.sockets.open(socket);
+    await f.sockets.message(socket, JSON.stringify({ type: "hello", ...details, version }));
+    assert.equal(socket.messages[0]?.type, "error", "older and version-less clients are refused before any job");
+    assert.equal(socket.messages[0]?.code, "client_outdated");
+    assert.match(socket.messages[0]?.message, /0\.3\.5/);
+    assert.equal(f.hub.active(owner, details.clientId), undefined);
+    assert.equal(socket.closed.length, 1);
+  }
+  const current = f.peer(paired.deviceToken, "current");
+  await f.sockets.open(current);
+  await f.sockets.message(current, JSON.stringify({ type: "hello", ...details, version: "0.3.5" }));
+  assert.equal(current.messages[0]?.type, "ready");
+  assert(f.hub.active(owner, details.clientId));
+});
