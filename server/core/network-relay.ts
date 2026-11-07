@@ -88,7 +88,11 @@ export class NetworkRelay {
     const record = records[0];
     assert(record.rules.includes(`${host}:${port}`), "客户端未授权该域名端口");
     const agent = this.hub.active(userId, record.clientId);
-    assert(agent?.transport && !agent.reconnecting, "中继客户端离线，不会回退直连");
+    // 区分“这台在线但待命”和“真的离线”：两者都不回退，但用户要看到不同原因。
+    const standby = this.hub.list(userId).some((client) => client.id === record.clientId && !client.active);
+    assert(agent?.transport && !agent.reconnecting, standby
+      ? "本账号的工作已由最新登录的客户端接管，这台设备的流量中继处于待命（不会从它出流量）；请在新设备配置相同的中继规则，或让新设备退出。"
+      : "中继客户端离线，不会回退直连");
     return { record, agent };
   }
   inUse(clientId: string) { return [...this.flows.values()].some((flow) => flow.grant.clientId === clientId); }

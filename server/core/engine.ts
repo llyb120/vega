@@ -158,7 +158,8 @@ export class Engine {
       const source = await this.store.session(key);
       assert(!source.taskId && !source.employeeId, "牛马会话的执行位置由牛马任务控制");
       const ownerId = source.ownerId || requestingUser;
-      const agent = localAgent ? this.localAgents.active(ownerId, clientId ?? source.clientId) : undefined;
+      // 不指定设备时用当前生效的那台（同账号以最新登录为准）；显式指定但已待命就报错，不偷偷换设备。
+      const agent = localAgent ? this.localAgents.active(ownerId, clientId) ?? (clientId === undefined ? this.localAgents.active(ownerId) : undefined) : undefined;
       assert(!localAgent || agent, "所选客户端未连接，或存在多个客户端；请选择在线客户端");
       if (!!source.localAgent === localAgent && (!localAgent || source.clientId === agent!.clientId)) return source;
       const cloud = cloudFor({ ownerId, localAgent });

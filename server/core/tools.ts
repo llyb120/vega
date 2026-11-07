@@ -346,7 +346,13 @@ export class Tools {
     if (!this.session.localAgent) return;
     if (!this.session.clientId) throw new LocalAgentUnavailable("此历史会话尚未绑定客户端，请在输入框旁选择执行客户端后继续；不会自动选择设备或重试操作。");
     const agent = this.engine.localAgents.active(this.session.ownerId, this.session.clientId);
-    if (!agent) throw new LocalAgentUnavailable();
+    if (!agent) {
+      // 同账号只允许一台设备干活：被新登录设备接管时，旧会话不会偷偷换到另一台执行。
+      const online = !!this.session.ownerId && this.engine.localAgents.list(this.session.ownerId).length > 0;
+      throw new LocalAgentUnavailable(online
+        ? "本会话绑定的客户端已被同账号下最新登录的设备接管，这台现在待命；本次未执行任何操作。请在新设备继续，或让新设备退出后回复「继续」。"
+        : undefined);
+    }
     return agent;
   }
 

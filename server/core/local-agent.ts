@@ -26,6 +26,8 @@ export type Agent = {
   reconnecting?: boolean;
   heartbeat?: ReturnType<typeof setTimeout>;
   transport?: { send: (job: Obj) => void; close: () => void };
+  /** 登录顺序：同一账号只有一个设备干活，以最新登录的为准。 */
+  order: number;
 };
 
 export function validateClient(a: Obj) {
@@ -44,6 +46,9 @@ export function validateClient(a: Obj) {
 export class LocalAgents {
   private agents = new Map<string, Agent>();
   private tickets = new Map<string, { hash: string; instance: string; until: number }>();
+  /** 当前生效的设备（最近登录的那台）；其它设备在线但待命，它退出后才轮到下一台。 */
+  private primary = new Map<string, string>();
+  private seq = 0;
   constructor(private emit: (value: Obj) => void = () => {}) {}
   ticket(principal: Principal, instance: unknown) {
     assert(typeof instance === "string" && /^[a-f0-9-]{32,36}$/.test(instance), "Invalid agent instance");
@@ -62,39 +67,53 @@ export class LocalAgents {
     return { userId: principal.user.id, instance: entry!.instance, expiresAt: principal.expiresAt };
   }
   list(userId?: string) {
-    const online: Agent[] = [];
-    for (const agent of this.agents.values()) {
+    const online: { id: string; name: string; cwd: string; platform: string; active: boolean }[] = [];
+    const primary = userId ? this.primary.get(userId) : undefined;
+    for (const agent of [...this.agents.values()]) {
       if (agent.userId !== userId) continue;
-      if (this.active(userId, agent.clientId) === agent) online.push(agent);
+      this.expire(agent);
+      if (!this.agents.has(agent.userId + ":" + agent.clientId)) continue;
+      online.push({ id: agent.clientId, name: agent.name, cwd: agent.cwd, platform: agent.platform, active: agent.clientId === primary });
     }
-    return online.map(({ clientId: id, name, cwd, platform }) => ({ id, name, cwd, platform }));
+    return online;
   }
+  /**
+   * 一个账号同时只有一个设备干活：以最新登录的为准，其余设备在线但待命。
+   * 不传 clientId 时返回当前生效设备；传入的不是生效设备就返回 undefined（不派发任何操作）。
+   */
   active(userId?: string, clientId?: string) {
     if (!userId) return;
+    const primary = this.primary.get(userId);
     if (clientId === undefined) {
-      const online = this.list(userId);
-      if (online.length !== 1) return;
-      clientId = online[0].id;
-    }
-    const agent = this.agents.get(userId + ":" + clientId);
-    if (agent && agent.onlineUntil <= Date.now()) {
-      if (agent.reconnecting) {
-        this.disconnect(userId, agent.instance);
-        return;
-      }
-      this.suspend(userId, agent.instance);
-    }
-    return agent;
+      if (!primary) return;
+      clientId = primary;
+    } else if (primary && clientId !== primary) return;
+    const key = userId + ":" + clientId;
+    const agent = this.agents.get(key);
+    if (!agent) return;
+    this.expire(agent);
+    return this.agents.get(key);
+  }
+  /** 心跳过期：先宽限期恢复，过宽限就断开（不直接丢工作）。 */
+  private expire(agent: Agent) {
+    if (agent.onlineUntil > Date.now()) return;
+    if (agent.reconnecting) this.disconnect(agent.userId, agent.instance);
+    else this.suspend(agent.userId, agent.instance);
   }
   connect(userId: string, a: Obj, transport?: Agent["transport"]) {
-    const clientId = validateClient(a);
-    let agent = this.active(userId, clientId);
+    const clientId = validateClient(a), key = userId + ":" + clientId;
+    // 不能用 active() 判断：待命设备也要能重连，否则会被当成新设备而撞 instance。
+    let agent = this.agents.get(key);
+    if (agent) this.expire(agent);
+    if (!this.agents.has(key)) agent = undefined;
     assert(!agent || agent.instance === a.instance, "此客户端已由另一个浏览器连接");
     if (!agent) {
       assert(this.list(userId).length < 8, "Too many connected clients");
       assert(![...this.agents.values()].some((item) => item.userId === userId && item.instance === a.instance), "Agent instance already registered");
-      agent = { userId, clientId, name: a.name?.trim() || "客户端 " + clientId.slice(0, 8), instance: a.instance, cwd: a.cwd, platform: a.platform, pending: new Map(), browserLeases: new Set(), onlineUntil: Date.now() + CLIENT_HEARTBEAT_TIMEOUT, transport };
-      this.agents.set(userId + ":" + clientId, agent);
+      agent = { userId, clientId, name: a.name?.trim() || "客户端 " + clientId.slice(0, 8), instance: a.instance, cwd: a.cwd, platform: a.platform, pending: new Map(), browserLeases: new Set(), onlineUntil: Date.now() + CLIENT_HEARTBEAT_TIMEOUT, transport, order: ++this.seq };
+      this.agents.set(key, agent);
+      // 最新登录的设备接管本账号的工作；其余设备保持在线但待命。
+      this.primary.set(userId, clientId);
       this.emit({ type: "clients_changed", targetUser: userId });
     }
     agent.supplement = a.supplement || "";
@@ -123,7 +142,8 @@ export class LocalAgents {
   }
   result(userId: string, a: Obj) {
     const agent = [...this.agents.values()].find((item) => item.userId === userId && item.instance === a.instance);
-    assert(agent && this.active(userId, agent.clientId) === agent, "Agent disconnected");
+    // 待命设备已发出的操作仍可回传结果：只停止新派发，不把在途结果丢掉。
+    assert(agent, "Agent disconnected");
     assert(typeof a.id === "string" && a.result && typeof a.result === "object" && !Array.isArray(a.result), "Invalid agent result");
     // Late results are acknowledged but never recreate or replay an operation.
     agent.pending.get(a.id)?.resolve(a.result);
@@ -141,7 +161,7 @@ export class LocalAgents {
     }
     signal.throwIfAborted();
     assert(agent.pending.size < 16, "Too many local operations");
-    if (this.active(agent.userId, agent.clientId) !== agent) throw new LocalAgentUnavailable();
+    if (this.active(agent.userId, agent.clientId) !== agent) throw new LocalAgentUnavailable("另一台设备已登录并接管本账号的工作，此客户端处于待命状态，不会派发新操作；请在新设备继续，或让新设备退出后再用这台。");
     const id = randomUUID();
     return new Promise<Obj>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined, sent = false, settled = false, recovered = false;
@@ -216,8 +236,16 @@ export class LocalAgents {
       for (const pending of [...agent.pending.values()]) pending.reject(new LocalAgentUnavailable());
       try { agent.transport?.close(); } catch {}
       changed = true;
+      if (this.primary.get(userId) === agent.clientId) this.primary.delete(userId);
     }
-    if (changed) this.emit({ type: "clients_changed", targetUser: userId });
+    if (changed) {
+      // 生效设备退出后，回退到最后登录的仍在线设备（旧设备可以重新工作）。
+      if (!this.primary.get(userId)) {
+        const next = [...this.agents.values()].filter((agent) => agent.userId === userId).sort((a, b) => b.order - a.order)[0];
+        if (next) this.primary.set(userId, next.clientId);
+      }
+      this.emit({ type: "clients_changed", targetUser: userId });
+    }
   }
   close() {
     this.tickets.clear();
