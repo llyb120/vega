@@ -736,7 +736,8 @@ export class Employee {
     }
     // 执行位置改成优先策略：旧数据里的具体设备归约成 client/cloud。
     state.execution = executionPolicy(state.execution);
-    const defaultCwd = state.execution.prefer !== "client" && (!state.cwd || state.cwd === process.cwd());
+    // 未指定或等于服务端启动目录的 cwd 视为旧默认值：云模式下迁到用户私有工作区（客户端优先不改变这个基准）。
+    const defaultCwd = !state.cwd || state.cwd === process.cwd();
     const savedDefaultCwd = state.executionCwds?.server === process.cwd();
     if (state.ownerId && (defaultCwd || savedDefaultCwd)) {
       const cloud = cloudFor({ ownerId: state.ownerId });
