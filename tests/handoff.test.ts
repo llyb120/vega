@@ -76,6 +76,9 @@ function world(options: { clientOnline?: boolean; running?: boolean; cloud?: boo
     agents,
     isRunning: () => !!options.running,
     cloud: () => cloud,
+    browsers: { local: async () => { throw Error("no local browser"); }, cloud: async () => { throw Error("no cloud browser"); } },
+    seal: async (value: any) => JSON.stringify(value),
+    open: async (blob: string) => JSON.parse(blob),
   };
   return { deps, local, remote, state, task, sessions };
 }
@@ -136,6 +139,17 @@ test("both sides changed means both copies are kept", async () => {
   await handoffs.syncBack("c1", "u1");
   assert.equal(w.local.text("/local/work/a.ts"), "local", "本机原文件保留");
   assert.equal(w.local.text("/local/work/a.ts.vega-conflict-cloud"), "cloud", "云端版本另存");
+});
+
+test("browser state is only migrated for authorised sites and only from a local browser", async () => {
+  const w = world();
+  const handoffs = new TaskHandoffs(w.deps);
+  await assert.rejects(handoffs.configure("e1", { sites: ["ftp://example.test"] }), /http/);
+  await handoffs.configure("e1", { sites: ["https://example.test/a/b"] });
+  assert.deepEqual((await handoffs.policy("e1")).sites, ["https://example.test"]);
+  const record = await handoffs.toCloud("e1", "t1");
+  assert.match(record.browserNote!, /浏览器已在云端/);
+  assert.equal(record.browser, undefined, "默认云端浏览器不需要迁移登录态");
 });
 
 test("cloud preparation is explicit and bounded", async () => {

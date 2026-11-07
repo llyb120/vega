@@ -285,6 +285,12 @@ export class Engine {
       agents: this.localAgents,
       isRunning: (session) => !!session && (this.active.has(session) || this.fire.running.has(session)),
       cloud: (ownerId) => ownerId ? cloudFor({ ownerId }) : undefined,
+      browsers: {
+        local: (session) => this.localBrowsers.get(session),
+        cloud: (session) => this.browsers.get(this.browserProfileKey(session.ownerId || "")),
+      },
+      seal: (value, aad) => this.vault.sealObject(value, aad),
+      open: (blob, aad) => this.vault.openObject(blob, aad),
     });
   }
   async config(session?: Session): Promise<Config> {

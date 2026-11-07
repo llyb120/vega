@@ -9,6 +9,8 @@
  * - 回传只写文件、不抢执行权；冲突两边都留，不覆盖任何一方。
  */
 import { relativePath, allowed, manifest, merge, LIMITS } from "../../shared/workspace-sync.mjs";
+import { browserOrigins, captureBrowser, restoreBrowser } from "./browser-handoff";
+import type { Chrome } from "./chrome";
 import { shell } from "./tools";
 import type { CloudRuntime } from "./cloud";
 import type { Employee, Task } from "./employee";
@@ -36,6 +38,8 @@ export type HandoffPolicy = {
   commands?: { name: string; where: HandoffWhere }[];
   /** One-off command run in the cloud workspace before the execution right is handed over (install/build). */
   prepare?: string;
+  /** 迁移登录态的授权站点（最多 20 个）：只导出这些站点的 Cookie 与页面存储。 */
+  sites?: string[];
 };
 export type HandoffRecord = {
   taskId: string;
@@ -52,6 +56,10 @@ export type HandoffRecord = {
   /** The cloud workspace the task continues in. */
   cloudCwd?: string;
   base: HandoffFile[];
+  /** 登录态密文（vault 加密）：不进入模型上下文、日志或经验库。 */
+  browser?: string;
+  browserNote?: string;
+  browserSites?: string[];
   note?: string;
   error?: string;
   conflicts?: string[];
@@ -63,6 +71,9 @@ export type HandoffDeps = {
   agents: LocalAgents;
   isRunning: (session?: string) => boolean;
   cloud: (ownerId: string) => CloudRuntime | undefined;
+  browsers: { local: (session: Session) => Promise<Chrome>; cloud: (session: Session) => Promise<Chrome> };
+  seal: (value: any, aad: string) => Promise<string>;
+  open: (blob: string, aad: string) => Promise<any>;
 };
 
 const join = (cwd: string, path: string) => (cwd.endsWith("/") || cwd.endsWith("\\") ? cwd + path : cwd + "/" + path);
@@ -96,6 +107,7 @@ export class TaskHandoffs {
       auto: input.auto === undefined ? !!current.auto : !!input.auto,
       commands,
       prepare: input.prepare === undefined ? current.prepare : (String(input.prepare || "").trim() || undefined),
+      sites: input.sites === undefined ? current.sites : (Array.isArray(input.sites) && input.sites.length ? browserOrigins(input.sites) : undefined),
     };
     assert(!next.prepare || next.prepare.length <= 2000, "环境准备命令太长（上限 2000 字）");
     const employee = await this.deps.employeeFor(employeeId);
@@ -174,7 +186,26 @@ export class TaskHandoffs {
       } else {
         notes.push("未配置环境准备命令：依赖本地服务的步骤需在云端重新启动后再继续");
       }
-      if (task.execution?.localBrowser) notes.push("任务使用本机浏览器；云端只有普通页面访问，网页步骤可能需要用户接管");
+      // 登录态：只迁移授权站点；复制 Cookie 不等于登录成功，恢复后必须打开页面核对。
+      const sites = policy.sites || [];
+      let sealed = "";
+      let browserNote = "";
+      let browserSites: string[] = [];
+      if (task.execution?.localBrowser) {
+        try {
+          const local = await this.browserChrome(task, "local");
+          if (!local) browserNote = "本机浏览器未连接，登录态未迁移";
+          else {
+            const state = await captureBrowser(local, sites, AbortSignal.timeout(60_000));
+            browserSites = state.origins;
+            sealed = await this.deps.seal(state, "browser-handoff:" + taskId);
+            browserNote = `已采集 ${state.cookies.length} 个 Cookie 与 ${state.pages.length} 个页面存储（${state.origins.join("，")}）`;
+            if (state.warnings.length) browserNote += "（" + state.warnings.slice(0, 2).join("；") + "）";
+          }
+        } catch (error: any) {
+          browserNote = "登录态未迁移：" + String(error?.message || error).slice(0, 200);
+        }
+      } else if (sites.length) browserNote = "浏览器已在云端，登录态不需要迁移";
       if (task.side === "computer") notes.push("这是电脑会话任务：浏览器与桌面默认在云端，本机专属能力仍需本地");
 
       const next: HandoffRecord = {
@@ -191,8 +222,29 @@ export class TaskHandoffs {
         note: notes.join("；"),
         error: undefined,
         conflicts: record.conflicts || [],
+        browser: sealed || record.browser,
+        browserNote,
+        browserSites: browserSites.length ? browserSites : record.browserSites,
       };
-      await this.switch(employee, taskId, next, { localAgent: false, clientId: undefined, cwd: cloudCwd });
+      await this.switch(employee, taskId, next, { localAgent: false, clientId: undefined, cwd: cloudCwd, localBrowser: false });
+      // 恢复在交接之后：执行权已在云端，页面停在授权站点上，下一次观察直接看到真实结果。
+      if (next.browser && next.browserSites?.length) {
+        try {
+          const fresh = employee.task(await employee.state({ runs: false }), taskId);
+          const remote = await this.browserChrome(fresh, "cloud");
+          if (!remote) next.browserNote = browserNote + "；云端浏览器不可用，登录态未恢复";
+          else {
+            const state = await this.deps.open(next.browser, "browser-handoff:" + taskId);
+            const restored = await restoreBrowser(remote, state, AbortSignal.timeout(150_000));
+            next.browserNote = browserNote + "；云端" + (restored.ok ? "已恢复并核对：" : "恢复失败：") +
+              restored.pages.map((page) => `${page.needLogin ? "需重新登录" : "已登录"} ${page.url}`).join("，") +
+              (restored.warnings.length ? "（" + restored.warnings.slice(0, 2).join("；") + "）" : "");
+          }
+        } catch (error: any) {
+          next.browserNote = browserNote + "；云端恢复失败：" + String(error?.message || error).slice(0, 200);
+        }
+      }
+      next.note = [...notes, next.browserNote].filter(Boolean).join("；");
       await this.deps.store.save(RECORD, taskId, next);
       return next;
     });
@@ -231,7 +283,23 @@ export class TaskHandoffs {
         ].filter(Boolean).join("；"),
         error: undefined,
       };
-      await this.switch(employee, taskId, next, { localAgent: true, clientId: agent.clientId, cwd, clientName: agent.name, localPlatform: agent.platform });
+      await this.switch(employee, taskId, next, { localAgent: true, clientId: agent.clientId, cwd, clientName: agent.name, localPlatform: agent.platform, localBrowser: !!record!.browser });
+      if (next.browser && next.browserSites?.length) {
+        try {
+          const fresh = employee.task(await employee.state({ runs: false }), taskId);
+          const local = await this.browserChrome(fresh, "local");
+          if (!local) next.browserNote = "本机浏览器未连接，登录态未恢复";
+          else {
+            const state = await this.deps.open(next.browser, "browser-handoff:" + taskId);
+            const restored = await restoreBrowser(local, state, AbortSignal.timeout(150_000));
+            next.browserNote = "已在本机" + (restored.ok ? "恢复并核对：" : "恢复失败：") +
+              restored.pages.map((page) => `${page.needLogin ? "需重新登录" : "已登录"} ${page.url}`).join("，");
+          }
+        } catch (error: any) {
+          next.browserNote = "本地恢复失败：" + String(error?.message || error).slice(0, 200);
+        }
+        next.note = [next.note, next.browserNote].filter(Boolean).join("；");
+      }
       await this.deps.store.save(RECORD, taskId, next);
       return next;
     });
@@ -357,6 +425,7 @@ export class TaskHandoffs {
         clientName: target.clientName,
         localPlatform: target.localPlatform,
         ownerId: record.ownerId || task.execution?.ownerId,
+        ...(target.localBrowser === undefined ? {} : { localBrowser: !!target.localBrowser }),
       };
       task.cwd = String(target.cwd);
       task.handoffState = { where: record.where, epoch: record.epoch, at: record.at, note: record.note, error: record.error };
@@ -374,8 +443,22 @@ export class TaskHandoffs {
       session.clientId = target.clientId;
       session.clientName = target.clientName;
       session.localPlatform = target.localPlatform;
+      if (target.localBrowser !== undefined) session.localBrowser = !!target.localBrowser;
       session.cwd = String(target.cwd);
       await this.deps.store.saveSession(session);
+    }
+  }
+
+  /** The browser this task would use on one side, if it can be reached at all. */
+  private async browserChrome(task: Task, side: "local" | "cloud") {
+    const sessionId = task.computerSession || task.workSession;
+    if (!sessionId) return undefined;
+    try {
+      const session = await this.deps.store.session(sessionId);
+      if (!session.ownerId) return undefined;
+      return side === "local" ? await this.deps.browsers.local(session) : await this.deps.browsers.cloud(session);
+    } catch {
+      return undefined;
     }
   }
 
