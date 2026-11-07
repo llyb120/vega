@@ -26,6 +26,7 @@ const (
 var (
 	chipUser32 = windows.NewLazySystemDLL("user32.dll")
 	chipGDI32  = windows.NewLazySystemDLL("gdi32.dll")
+	chipNtdll  = windows.NewLazySystemDLL("ntdll.dll")
 
 	procChipFindWindow  = chipUser32.NewProc("FindWindowW")
 	procChipFindChild   = chipUser32.NewProc("FindWindowExW")
@@ -45,6 +46,12 @@ var (
 	procChipDestroy     = chipUser32.NewProc("DestroyWindow")
 	procChipScreenPoint = chipUser32.NewProc("ScreenToClient")
 	procChipGetDpi      = chipUser32.NewProc("GetDpiForSystem")
+	procChipEnumChild   = chipUser32.NewProc("EnumChildWindows")
+	procChipChild       = chipUser32.NewProc("GetWindow")
+	procChipLayered     = chipUser32.NewProc("SetLayeredWindowAttributes")
+	procChipTopWindow   = chipUser32.NewProc("GetTopWindow")
+	procChipGetParent   = chipUser32.NewProc("GetParent")
+	procChipVersion     = chipNtdll.NewProc("RtlGetVersion")
 
 	procChipBrush     = chipGDI32.NewProc("CreateSolidBrush")
 	procChipPen       = chipGDI32.NewProc("CreatePen")
@@ -164,7 +171,7 @@ func chipThread() {
 		return
 	}
 	chipPlace()
-	_, _, _ = procChipTimer.Call(uintptr(chipHwnd()), butterflyChipTick, 1000, 0)
+	_, _, _ = procChipTimer.Call(uintptr(chipHwnd()), butterflyChipTick, 250, 0)
 	for {
 		result, _, _ := procChipGetMsg.Call(uintptr(unsafe.Pointer(&message)), 0, 0, 0)
 		if int32(result) <= 0 {
@@ -203,8 +210,28 @@ func chipCreate() bool {
 		wsClipSiblings = 0x04000000
 		exToolWindow   = 0x00000080
 		exNoActivate   = 0x08000000
+		exLayered      = 0x00080000
 	)
-	hwnd, _, last := procChipCreate.Call(exToolWindow|exNoActivate, uintptr(unsafe.Pointer(butterflyUTF16(butterflyChipClass))), uintptr(unsafe.Pointer(butterflyUTF16(butterflyChipTitle))), wsChild|wsVisible|wsClipSiblings, 0, 0, 1, 1, taskbar, 0, uintptr(chipModule()), 0)
+	create := func(ex uintptr) (uintptr, error) {
+		handle, _, last := procChipCreate.Call(ex|exToolWindow|exNoActivate, uintptr(unsafe.Pointer(butterflyUTF16(butterflyChipClass))), uintptr(unsafe.Pointer(butterflyUTF16(butterflyChipTitle))), wsChild|wsVisible|wsClipSiblings, 0, 0, 1, 1, taskbar, 0, uintptr(chipModule()), 0)
+		return handle, last
+	}
+	// Win11 的 XAML 任务栏没有重定向表面，普通 GDI 子窗口根本到不了屏幕；带 layered 的子窗口才有自己的表面。
+	// Win10 的 GDI 任务栏反过来不显示 layered 子窗口，所以只在 22000+ 用。
+	var hwnd uintptr
+	var last error
+	if chipBuild() >= 22000 {
+		hwnd, last = create(exLayered)
+		if hwnd != 0 {
+			if ok, _, _ := procChipLayered.Call(hwnd, 0, 255, 0x00000002); ok == 0 { // LWA_ALPHA
+				_, _, _ = procChipDestroy.Call(hwnd)
+				hwnd = 0
+			}
+		}
+	}
+	if hwnd == 0 {
+		hwnd, last = create(0)
+	}
 	if hwnd == 0 {
 		chipDebug("create", last)
 		return false
@@ -213,6 +240,19 @@ func chipCreate() bool {
 	chipState.hwnd, chipState.parent = windows.Handle(hwnd), windows.Handle(taskbar)
 	chipState.Unlock()
 	return true
+}
+
+// chipBuild 读真实系统 build：没有 manifest 时 GetVersionExW 会谎报 6.2。
+func chipBuild() uint32 {
+	var info struct {
+		Size, Major, Minor, Build, Platform uint32
+		ServicePack                         [128]uint16
+	}
+	info.Size = uint32(unsafe.Sizeof(info))
+	if status, _, _ := procChipVersion.Call(uintptr(unsafe.Pointer(&info))); int32(status) < 0 {
+		return 0
+	}
+	return info.Build
 }
 
 func chipModule() uintptr {
@@ -236,11 +276,11 @@ func chipEnsure() {
 	chipState.hwnd, chipState.parent = 0, 0
 	chipState.Unlock()
 	if chipCreate() {
-		_, _, _ = procChipTimer.Call(uintptr(chipHwnd()), butterflyChipTick, 1000, 0)
+		_, _, _ = procChipTimer.Call(uintptr(chipHwnd()), butterflyChipTick, 250, 0)
 	}
 }
 
-// chipPlace 贴在托盘左边：竖直方向在任务栏里居中。
+// chipPlace 贴着托盘左边放：托盘图标一个都不压，竖直方向在任务栏里居中。
 func chipPlace() {
 	hwnd := chipHwnd()
 	if hwnd == 0 {
@@ -252,31 +292,120 @@ func chipPlace() {
 	}
 	var bar appuseWinRect
 	_, _, _ = procWindowRect.Call(taskbar, uintptr(unsafe.Pointer(&bar)))
+	band := bar.Bottom - bar.Top
+	if band < 20 {
+		return
+	}
 	dpi := chipDPI(taskbar)
-	size := chipScale(44, dpi)
-	width, height := size, chipScale(36, dpi)
-	x := bar.Right - width - chipScale(8, dpi)
+	width := chipScale(44, dpi)
+	height := chipScale(36, dpi)
+	if height > band-4 {
+		height = band - 4
+	}
+	y := bar.Top + (band-height)/2
+	right := bar.Right - chipScale(10, dpi)
+	trayLeft := int32(0)
 	if tray, _, _ := procChipFindChild.Call(taskbar, 0, uintptr(unsafe.Pointer(butterflyUTF16("TrayNotifyWnd"))), 0); tray != 0 {
 		var trayRect appuseWinRect
 		_, _, _ = procWindowRect.Call(tray, uintptr(unsafe.Pointer(&trayRect)))
 		if trayRect.Left > bar.Left {
-			x = trayRect.Left - width - chipScale(6, dpi)
+			right = trayRect.Left - chipScale(4, dpi)
+			trayLeft = trayRect.Left
 		}
 	}
-	y := bar.Top + (bar.Bottom-bar.Top-height)/2
+	// 从右往左挪，直到整只蝴蝶都落在没有图标的空档里（OneDrive、其它客户端的蝴蝶都算挡位）。
+	obstacles := chipObstacles(windows.Handle(taskbar), hwnd, trayLeft, dpi)
+	x := right - width
+	for x > bar.Left+width && chipBlocked(obstacles, appuseWinRect{Left: x, Top: y, Right: x + width, Bottom: y + height}) {
+		x -= 4
+	}
+	if x <= bar.Left+width {
+		x = right - width
+	}
 	chipState.Lock()
-	placed := chipState.placedX == x && chipState.placedY == y && chipState.width == width && chipState.height == height
+	same := chipState.placedX == x && chipState.placedY == y && chipState.width == width && chipState.height == height
 	chipState.width, chipState.height, chipState.dpi, chipState.light = width, height, dpi, chipLightTheme()
 	chipState.placedX, chipState.placedY = x, y
 	chipState.Unlock()
-	if placed {
+	top, _, _ := procChipTopWindow.Call(taskbar)
+	if same && top == uintptr(hwnd) {
 		return
 	}
 	// 子窗口的坐标是相对任务栏客户区的，屏幕坐标得先换算。
 	point := appuseWinPoint{X: x, Y: y}
 	_, _, _ = procChipScreenPoint.Call(taskbar, uintptr(unsafe.Pointer(&point)))
-	_, _, _ = procButterflyPlace.Call(uintptr(hwnd), 0, uintptr(point.X), uintptr(point.Y), uintptr(width), uintptr(height), 0x0010|0x0004) // SWP_NOACTIVATE|SWP_NOZORDER
-	chipInvalidate(hwnd)
+	// Explorer 会把自己的子窗口重新提到顶上，所以每次都放回子窗口顶层（HWND_TOP = 0）。
+	_, _, _ = procButterflyPlace.Call(uintptr(hwnd), 0, uintptr(point.X), uintptr(point.Y), uintptr(width), uintptr(height), 0x0150) // SWP_SHOWWINDOW|SWP_NOACTIVATE|SWP_NOCOPYBITS
+	if !same {
+		chipInvalidate(hwnd)
+	}
+}
+
+// chipObstacles 收集会挡住蝴蝶的窗口：任务栏直接挂的叶子（应用芯片、OneDrive 之类）和托盘一带的图标；
+// 任务列表容器（MSTaskListWClass 等）整条横跨，不算挡位。
+func chipObstacles(taskbar, self windows.Handle, trayLeft int32, dpi uint32) []appuseWinRect {
+	chipSlot.Lock()
+	if chipSlot.proc == 0 {
+		chipSlot.proc = syscall.NewCallback(chipCollectChild)
+	}
+	proc := chipSlot.proc
+	chipSlot.list = chipSlot.list[:0]
+	chipSlot.self, chipSlot.parent, chipSlot.trayLeft, chipSlot.dpi = self, taskbar, trayLeft, dpi
+	chipSlot.Unlock()
+	_, _, _ = procChipEnumChild.Call(uintptr(taskbar), proc, 0)
+	chipSlot.Lock()
+	list := append([]appuseWinRect{}, chipSlot.list...)
+	chipSlot.Unlock()
+	return list
+}
+
+var chipSlot struct {
+	sync.Mutex
+	list     []appuseWinRect
+	self     windows.Handle
+	parent   windows.Handle
+	trayLeft int32
+	dpi      uint32
+	proc     uintptr
+}
+
+func chipCollectChild(hwnd uintptr, _ uintptr) uintptr {
+	if uintptr(chipSlot.self) == hwnd {
+		return 1
+	}
+	if visible, _, _ := procWindowVisible.Call(hwnd); visible == 0 {
+		return 1
+	}
+	if child, _, _ := procChipChild.Call(hwnd); child != 0 {
+		return 1
+	}
+	var rect appuseWinRect
+	if ok, _, _ := procWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rect))); ok == 0 {
+		return 1
+	}
+	if rect.Right-rect.Left <= 0 || rect.Bottom-rect.Top <= 0 {
+		return 1
+	}
+	// 横跨半条任务栏的容器/工具条（ReBar、任务列表）躲不开也没必要躲，只避开芯片和图标。
+	if rect.Right-rect.Left > chipScale(260, chipSlot.dpi) {
+		return 1
+	}
+	parent, _, _ := procChipGetParent.Call(hwnd)
+	if uintptr(chipSlot.parent) != parent && rect.Left < chipSlot.trayLeft-chipScale(120, chipSlot.dpi) {
+		return 1
+	}
+	chipSlot.list = append(chipSlot.list, rect)
+	return 1
+}
+
+func chipBlocked(obstacles []appuseWinRect, slot appuseWinRect) bool {
+	const margin = 2
+	for _, rect := range obstacles {
+		if slot.Left-margin < rect.Right && rect.Left < slot.Right+margin && slot.Top < rect.Bottom && rect.Top < slot.Bottom {
+			return true
+		}
+	}
+	return false
 }
 
 // chipInvalidate 让下一帧重画（PostMessage(WM_PAINT) 没有失效区，画不出东西）。
