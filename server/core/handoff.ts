@@ -10,7 +10,7 @@ import type { Session } from "./store";
 import { cloudEnabled, cloudFor, within, type CloudRuntime } from "./cloud";
 import { LocalAgentUnavailable, type Agent } from "./local-agent";
 import { assertShellCommand } from "./shell-policy";
-import { previewHost, previewOrigin, type PreviewBackend } from "./network-relay";
+import { previewHost, previewOrigin, validRelayHost, type PreviewBackend } from "./network-relay";
 import { assert, sleep, type Obj } from "./util";
 
 export const SYNC_LIMITS = { files: 2000, bytes: 64 << 20 };
@@ -423,10 +423,9 @@ export class Handoffs {
   /** Online handoff: quiesce → checkpoint → rebuild → reroute and verify → transfer ownership of the same session. */
   async handoff(key: string, options: HandoffOptions = {}) {
     return await this.lock(key, async () => {
-      const session = await this.store.session(key);
-      this.agent(session);
-      const before = await this.fresh(session);
+      const session = await this.store.session(key), before = await this.fresh(session);
       assert(before.owner === "local", "执行权已在云端");
+      this.agent(session);
       const previews = await this.engine.relay.previews(key);
       const tabs = (await Promise.all(previews.map((preview) => this.previewTabs(session, preview.host)))).flat();
       if (tabs.length && !options.acknowledgeReload)
@@ -637,7 +636,7 @@ export class Handoffs {
   async preview(key: string, host: unknown, port: unknown) {
     const session = await this.store.session(key);
     assert(session.localAgent && session.clientId && session.ownerId, "预览后端经客户端流量中继访问本机服务；会话需在客户端执行");
-    assert(typeof host === "string" && Number.isInteger(port), "需要客户端流量中继里的精确域名和端口");
+    assert(typeof host === "string" && validRelayHost(host) && Number.isInteger(port) && (port as number) > 0 && (port as number) <= 65535, "预览后端需要客户端流量中继里的精确域名和端口，不能是 localhost 或 IP");
     await this.engine.relay.client(session.ownerId, session.clientId, host, port as number).catch((error) => {
       if (!/离线/.test(error.message)) throw error;
     });
