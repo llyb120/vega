@@ -30,7 +30,7 @@ Node >=24.10，使用内置 `node:sqlite`，无需另装数据库。默认数据
 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | 分项配置，默认 `127.0.0.1` / `3306` / `root` / 空 / `vega` |
 | `MYSQL_POOL_SIZE` | 连接池大小，默认 10 |
 
-MySQL 需要 **8.0.19 及以上**（不支持 MariaDB），数据库须事先创建（建议 `CHARACTER SET utf8mb4`），首次启动自动建表。只支持单个 Vega 进程连接同一个库。示例：`docker compose -f docker/docker-compose.mysql.yml up -d --build`（见文件内说明）。也可单独构建默认连 MySQL 的 Vega 镜像：`docker build -f Dockerfile.mysql -t vega:mysql .`，它默认 `DB_TYPE=mysql`、主机 `mysql:3306`、用户和库都是 `vega`，运行时用 `-e MYSQL_PASSWORD=...` 传密码，其他项可用环境变量覆盖。
+MySQL 需要 **8.0.19 及以上**（不支持 MariaDB），数据库须事先创建（建议 `CHARACTER SET utf8mb4`），首次启动自动建表。只支持单个 Vega 进程连接同一个库。`docker compose -f docker/docker-compose.mysql.yml up -d --build` 会连同一个 compose 文件里自带的 MySQL；用外部已有 MySQL 则 `docker build -f Dockerfile.mysql -t vega:mysql .`，镜像只默认 `DB_TYPE=mysql`、用户和库都是 `vega`，运行前必须用 `MYSQL_URL` 或 `MYSQL_HOST`（以及 `MYSQL_PORT`/`MYSQL_PASSWORD`）指向外部库。
 
 数据库结构版本为 6，**不做旧版本迁移**：版本不符的非空库会拒绝启动且不修改，请使用新库。
 
