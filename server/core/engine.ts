@@ -19,7 +19,7 @@ import { rm, stat } from "node:fs/promises";
 import { keyDir } from "./key-files";
 import { resolve } from "node:path";
 import type { Store, Session, Message, Call } from "./store";
-import { LOCAL_BROWSER_REASONS } from "./store";
+import { LOCAL_BROWSER_REASONS, peekBrowser, usesLocalBrowser, usesPrivateBrowser } from "./store";
 import { Handoffs } from "./handoff";
 import type { Config, Model } from "./config";
 import type { Chrome } from "./chrome";
@@ -505,25 +505,15 @@ export class Engine {
     if (session.employeeId || session.taskId) return (await (await this.employeeFor(session)).state()).ownerId;
     return "";
   }
-  /** The client's own Chrome only on a recorded exception; a client workspace alone keeps the browser in the cloud. */
-  localBrowser(session: Pick<Session, "localAgent" | "browserLocation">) {
-    return !!session.localAgent && session.browserLocation === "local";
-  }
-  private privateBrowser(session: Session) {
-    return !!(session.employeeId || session.taskId || session.localAgent || cloudFor(session));
-  }
+  localBrowser(session: Pick<Session, "localAgent" | "browserLocation">) { return usesLocalBrowser(session); }
   async chromeFor(session: Session, signal?: AbortSignal) {
-    if (this.localBrowser(session)) return this.localBrowsers.get(session, signal);
+    if (usesLocalBrowser(session)) return this.localBrowsers.get(session, signal);
     const ownerId = await this.browserOwnerId(session);
     // Employee/task work, client-workspace and cloud sessions use the owner's shared private profile.
-    if (this.privateBrowser(session)) return this.browsers.get(this.browserProfileKey(ownerId));
+    if (usesPrivateBrowser(session, !!cloudFor(session))) return this.browsers.get(this.browserProfileKey(ownerId));
     return this.chrome;
   }
-  peekBrowser(session: Session) {
-    if (this.localBrowser(session)) return this.localBrowsers.peek(session.id);
-    if (this.privateBrowser(session)) return session.ownerId ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : undefined;
-    return session.employeeId ? undefined : this.chrome;
-  }
+  peekBrowser(session: Session) { return peekBrowser(this, session); }
   async previewPrompt(session: Session) {
     const previews = await this.relay.previews(session.id);
     return previews.length ? `\n[稳定预览地址] ${previews.map((preview) => `${previewOrigin(preview)}（当前后端：${preview.backend.kind === "client" ? "客户端中继 " + preview.backend.host + ":" + preview.backend.port : "云端服务"}）`).join("；")}。浏览器访问开发服务用这个地址，不写 localhost 或中继域名；后端在本机与云端之间切换时地址不变。` : "";

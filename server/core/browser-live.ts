@@ -409,7 +409,7 @@ class LiveSession {
       return;
     }
     this.hub.controllers.set(this.tabTag, this);
-    this.hub.chrome.userControl.add(this.tabTag);
+    this.hub.chrome.userControl?.add(this.tabTag);
     this.wantsControl = true;
     this.lastInput = Date.now();
     this.send({ type: "mode", mode: "waiting" });
@@ -434,7 +434,7 @@ class LiveSession {
         this.stopping = false;
         if (this.hub.controllers.get(this.tabTag) === this) {
           this.hub.controllers.delete(this.tabTag);
-          this.hub.chrome.userControl.delete(this.tabTag);
+          this.hub.chrome.userControl?.delete(this.tabTag);
         }
       });
   }
@@ -446,7 +446,7 @@ class LiveSession {
     this.release = undefined;
     if (this.hub.controllers.get(this.tabTag) === this && !this.locked) {
       this.hub.controllers.delete(this.tabTag);
-      this.hub.chrome.userControl.delete(this.tabTag);
+      this.hub.chrome.userControl?.delete(this.tabTag);
     }
     this.send({ type: "mode", mode: "view", reason });
   }

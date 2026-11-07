@@ -28,7 +28,7 @@ import { isDeepStrictEqual } from "node:util";
 import { sceneModels, maskedConfig, mergeSecrets } from "./config";
 import { omitPlaceholders } from "./tool-args";
 import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type Internal, type ToolContext } from "./public-tools";
-import type { Session, Call, Message } from "./store";
+import { peekBrowser, usesLocalBrowser, type Session, type Call, type Message } from "./store";
 import type { Engine } from "./engine";
 import { CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
 import { prepareDutyInput } from "./duty-condition";
@@ -357,7 +357,7 @@ export class Tools {
     assert(entry, "Vault entry not found for this task");
     const task = this.session.taskId ? (await this.engine.employeeFor(this.session)).task(await (await this.engine.employeeFor(this.session)).state(), this.session.taskId).text
       : (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "";
-    const browser = this.engine.peekBrowser(this.session);
+    const browser = peekBrowser(this.engine, this.session, true);
     const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
     const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
     const pages = (observation?.pages || []).filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
@@ -386,8 +386,8 @@ export class Tools {
     let done: (() => void) | undefined;
     try {
       // Client-side work is tracked so a handoff can quiesce it and record anything still in flight as unverified.
-      if (this.session.localAgent && (CLIENT_TOOLS.has(call.name) || (CHROME_TOOLS.has(call.name) && this.engine.localBrowser(this.session))))
-        done = await this.engine.handoffs.admit(this.session.id, call.name);
+      if (this.session.localAgent && (CLIENT_TOOLS.has(call.name) || (CHROME_TOOLS.has(call.name) && usesLocalBrowser(this.session))))
+        done = await this.engine.handoffs?.admit(this.session.id, call.name);
       return await this.executeInner(call, model);
     } catch (error) {
       if (error instanceof LocalAgentUnavailable && !this.signal.aborted)
@@ -586,7 +586,7 @@ export class Tools {
   }
   private async chrome(a: Obj): Promise<Outcome> {
     this.assertBrowserScene();
-    const profileKey = !this.engine.localBrowser(this.session) && this.session.ownerId && (this.session.employeeId || this.session.taskId || this.session.localAgent || this.cloud)
+    const profileKey = !usesLocalBrowser(this.session) && this.session.ownerId && (this.session.employeeId || this.session.taskId || this.session.localAgent || this.cloud)
       ? this.engine.browserProfileKey(this.session.ownerId) : "";
     let browser: Awaited<ReturnType<Engine["chromeFor"]>>;
     try { browser = await this.engine.chromeFor(this.session, this.signal); }

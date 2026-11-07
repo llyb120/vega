@@ -648,7 +648,7 @@ export class Handoffs {
     const record = await this.record(key);
     return { ...this.view(record), previews: (await this.engine.relay.previews(key)).map((preview) => ({ origin: previewOrigin(preview), backend: preview.backend })) };
   }
-  async control(key: string, a: Obj) {
+  async control(key: string, a: Obj): Promise<any> {
     const options: HandoffOptions = {
       include: a.include, services: a.services, setup: a.setup, requires: a.requires, cloudCwd: a.cloudCwd,
       acknowledgeReload: a.acknowledgeReload === true, migrateBrowser: a.migrateBrowser === true,

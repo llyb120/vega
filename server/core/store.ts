@@ -51,6 +51,16 @@ export type Message = {
   at?: number;
 };
 export const LOCAL_BROWSER_REASONS = ["existing_page", "hardware", "certificate", "extension"];
+/** The client's own Chrome only on a recorded exception; a client workspace alone keeps the browser in the cloud. */
+export const usesLocalBrowser = (s: Pick<Session, "localAgent" | "browserLocation">) => !!s.localAgent && s.browserLocation === "local";
+export const usesPrivateBrowser = (s: Session, cloud: boolean) => !!(s.employeeId || s.taskId || s.localAgent || cloud);
+type Peekable = { peek(key: string): any };
+/** Already-running browser of a session, without starting one; takes only the fields it reads. */
+export function peekBrowser<C>(engine: { localBrowsers: Peekable; browsers: Peekable; chrome: C }, session: Session, serverFallback = false) {
+  if (usesLocalBrowser(session)) return engine.localBrowsers.peek(session.id) as C | undefined;
+  if (session.ownerId && usesPrivateBrowser(session, !!cloudFor(session))) return engine.browsers.peek("user_" + session.ownerId) as C | undefined;
+  return session.employeeId && !serverFallback ? undefined : engine.chrome;
+}
 export type Call = { id: string; name: string; arguments: Record<string, any> };
 export type Session = {
   id: string;
