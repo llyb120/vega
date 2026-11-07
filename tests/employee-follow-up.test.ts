@@ -65,19 +65,25 @@ test("a direct follow-up within the window continues the delivered task in its o
     assert.equal(job.deliveries[0].summary, "已搜索你好，结果页首条为百度百科", "previous delivery is archived, not erased");
     assert.deepEqual(job.plan, [SEARCH], "plan kept");
 
+    assert.equal((await f.store.session(work)).scene, "lightweight", "delivery restored the scene the task entered computer from");
     let phase = 0;
     f.engine.providers.chat = async (model, _system, messages, definitions) => {
       if (phase++ === 0) {
-        assert.equal(model.selection, "p/vision", "computer scene and its model are retained");
-        assert(definitions.some(tool => tool.name === "chrome_navigate"), "browser tools available without switching again");
+        assert.equal(model.selection, "p/light", "the follow-up starts from the restored origin scene");
+        assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("computer"), "the browser is one same-session switch away");
         assert(messages.some(m => m.calls?.some(c => c.name === "switch_scene")), "earlier history of the same session is present");
         const latest = messages.filter(m => m.role === "user").at(-1)!.text!;
         assert.match(latest, /在同一结果页点击第一条自然结果/);
         assert.match(latest, /已交付任务的直接后续.*不要重做/s);
         assert.match(latest, /在百度搜索「你好」并核实结果页/, "existing plan is shown to the run");
-        return complete("early", "未做新步骤就交付");
+        return call("browser-again", "switch_scene", { scene: "computer", message: "在同一结果页点击第一条自然结果" });
       }
       if (phase === 2) {
+        assert.equal(model.selection, "p/vision");
+        assert(definitions.some(tool => tool.name === "chrome_navigate"));
+        return complete("early", "未做新步骤就交付");
+      }
+      if (phase === 3) {
         const refused = messages.findLast(m => m.role === "tool" && m.name === "task_complete")!;
         assert(refused.error && /planRevision=0，revision=1/.test(refused.text!), "the old revision cannot be re-delivered before applying the supplement");
         return progress("p2", [SEARCH, CLICK]);
