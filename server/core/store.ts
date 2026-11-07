@@ -74,8 +74,11 @@ export type Session = {
   groupId?: string;
   /** Isolated computer session created by task_relay_computer (cannot switch_scene back). */
   relayComputer?: boolean;
+  /** Employee main task: scenes to return to (caller work in `resume`), kept across runs so a 429/stop/resume does not drop them. */
+  sceneStack?: SceneFrame[];
   createdAt: number;
 };
+export type SceneFrame = { scene?: string; model?: string; resume?: string };
 /** Schema version kept in settings; a database of another version is refused (no migrations). */
 const SCHEMA = 6;
 /**
