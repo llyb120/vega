@@ -19,19 +19,19 @@ const clients = [
         <article v-for="client in clients" :key="client.file" class="card">
           <div class="section-heading"><h3>{{ client.name }}</h3><span class="pill">{{ client.arch }}</span></div>
           <p class="hint">{{ client.description }}</p>
-          <a class="client-download" :href="'/clients/' + client.file" :download="client.file" :aria-label="'下载 ' + client.name + ' ' + client.arch + ' 客户端'">下载客户端 ↓</a>
+          <a class="client-download" :href="'/api/clients/' + client.file + '.zip'" :download="client.file + '.zip'" :aria-label="'下载 ' + client.name + ' ' + client.arch + ' 客户端安装包'">下载安装包（ZIP） ↓</a>
         </article>
       </div>
     </section>
     <section class="card" aria-labelledby="client-start-heading">
       <h3 id="client-start-heading">开始使用</h3>
       <ol>
-        <li>选择与电脑系统及芯片匹配的版本。Windows 双击运行后在系统托盘查看状态；Linux / macOS 在终端为下载的文件执行 <code>chmod +x 文件名</code>，再用 <code>./文件名</code> 启动并保持进程运行。</li>
-        <li>在同一台电脑上打开本站并登录，允许浏览器访问本地网络，确认客户端弹出的站点授权。授权后可关闭网页，客户端会独立保持连接。</li>
+        <li>下载后会得到一个 ZIP：里面是客户端和本站的 <code>instance.json</code>。解压到任意目录，再运行里面的可执行文件（不要单拿出来拷给别的电脑）。Windows 双击运行后在系统托盘查看状态；Linux / macOS 在终端为可执行文件执行 <code>chmod +x 文件名</code>，再用 <code>./文件名</code> 启动并保持进程运行。</li>
+        <li>第一次启动会自动打开本站。若浏览器已登录，页面会直接发起配对；没登录就登录后回到工作台即可。这个客户端只能连接下载它时所在的站点。</li>
         <li>回到工作台，在牛马或会话的执行位置选择“客户端”及对应电脑，即可从电脑或手机提交任务。</li>
       </ol>
-      <p class="hint">升级前先退出旧客户端，再启动新版本。下载的是未签名的可执行文件，Windows / macOS 可能提示安全拦截，请仅在确认本站与文件可信后按系统提示批准运行。</p>
-      <p class="hint">仅授权可信站点：客户端可执行命令和读写本机文件。远程访问建议使用 HTTPS；HTTP 会明文传输登录信息、设备凭据和命令。</p>
+      <p class="hint">升级前先退出旧客户端，再启动新版本（也可以直接在托盘里等自动升级）。下载的是未签名的可执行文件，Windows / macOS 可能提示安全拦截，请仅在确认本站与文件可信后按系统提示批准运行。</p>
+      <p class="hint">每个站点的安装包只能用在这个站点：客户端会拒绝连接其它服务端。多个站点需要各下载一份，数据目录互不影响。远程访问建议使用 HTTPS；HTTP 会明文传输登录信息、设备凭据和命令。</p>
     </section>
     <section class="card" aria-labelledby="chrome-extension-heading">
       <h3 id="chrome-extension-heading">Chrome 扩展</h3>

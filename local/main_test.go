@@ -138,7 +138,7 @@ func TestWebSocketRequiresTrustedOriginAndOneTimeWebsiteLogin(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": strings.Repeat("c", 32), "deviceToken": strings.Repeat("d", 43)})
 	}))
 	defer website.Close()
-	agent := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{website.URL}}, connections: make(map[*websocket.Conn]struct{}), pendingOrigins: map[string]bool{"https://untrusted.test": true}}
+	agent := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), pinnedOrigin: website.URL, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{website.URL}}, connections: make(map[*websocket.Conn]struct{}), pendingOrigins: map[string]bool{"https://untrusted.test": true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent.startConnections(ctx)
@@ -189,70 +189,78 @@ func TestWebSocketRequiresTrustedOriginAndOneTimeWebsiteLogin(t *testing.T) {
 		t.Fatalf("used login ticket was accepted or failed silently: %v", status)
 	}
 }
-func TestPermissionPageRequiresLocalOrigin(t *testing.T) {
+func TestPermissionPageRefusesOtherSites(t *testing.T) {
 	origin := "https://vega.example"
-	agent := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), pendingOrigins: map[string]bool{origin: true}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), pinnedOrigin: origin, config: Config{TrustedOrigins: []string{origin}}, pendingOrigins: map[string]bool{}, connections: make(map[*websocket.Conn]struct{})}
 	page := httptest.NewRecorder()
 	agent.configure(page, httptest.NewRequest("GET", "http://"+localAddress+"/config/token", nil))
 	if page.Code != 200 || page.Header().Get("Referrer-Policy") != "same-origin" {
 		t.Fatalf("permission page must preserve same-origin form origins: %d %v", page.Code, page.Header())
 	}
-	form := "origin=https%3A%2F%2Fvega.example"
-	for _, origin := range []string{"", "null", "https://evil.example", "http://localhost:47673"} {
+	if !strings.Contains(page.Body.String(), origin) {
+		t.Fatal("page must name the site this package belongs to")
+	}
+	// 外站的表单（不管带什么 Origin）都不能新增授权。
+	form := "origin=https%3A%2F%2Fevil.example"
+	for _, formOrigin := range []string{"", "null", "https://evil.example", "http://" + localAddress} {
 		request := httptest.NewRequest("POST", "http://"+localAddress+"/config/token", strings.NewReader(form))
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		request.Header.Set("Origin", origin)
+		request.Header.Set("Origin", formOrigin)
 		denied := httptest.NewRecorder()
 		agent.configure(denied, request)
-		if denied.Code != 403 || len(agent.config.TrustedOrigins) != 0 {
-			t.Fatalf("invalid approval origin accepted: %q", origin)
+		if denied.Code == 303 || len(agent.config.TrustedOrigins) != 1 {
+			t.Fatalf("foreign site approval accepted from origin %q", formOrigin)
 		}
 	}
-	request := httptest.NewRequest("POST", "http://"+localAddress+"/config/token", strings.NewReader(form))
+	// 安装包自带的站点不能在这里撤销，否则客户端就永久失联了。
+	request := httptest.NewRequest("POST", "http://"+localAddress+"/config/token", strings.NewReader("remove=https%3A%2F%2Fvega.example"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Origin", "http://"+localAddress)
-	allowed := httptest.NewRecorder()
-	agent.configure(allowed, request)
-	if allowed.Code != 303 || len(agent.config.TrustedOrigins) != 1 || !agent.allowOrigin(origin) {
-		t.Fatalf("explicit site approval failed: %d", allowed.Code)
+	revoked := httptest.NewRecorder()
+	agent.configure(revoked, request)
+	if revoked.Code != 400 || len(agent.config.TrustedOrigins) != 1 || !agent.allowOrigin(origin) {
+		t.Fatalf("pinned site must not be revocable: %d", revoked.Code)
 	}
-	page = httptest.NewRecorder()
-	agent.configure(page, httptest.NewRequest("GET", "http://"+localAddress+allowed.Header().Get("Location"), nil))
-	if !strings.Contains(page.Body.String(), "站点权限已保存") {
-		t.Fatal("approval must explain the next connection stage")
-	}
-	saved, err := os.ReadFile(agent.configPath)
-	if err != nil || !strings.Contains(string(saved), origin) {
-		t.Fatalf("site permission not persisted: %v", err)
+	if agent.allowOrigin("https://evil.example") {
+		t.Fatal("client accepted a site that is not in its package")
 	}
 }
 
-func TestClientIdentitySurvivesRestartsAndPermissionMigration(t *testing.T) {
+func TestClientIdentitySurvivesRestartsAndDataDirFollowsSite(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("APPDATA", dir)
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
-	configDir, err := os.UserConfigDir()
-	if err != nil {
+	origin := "https://vega.example"
+	if err := os.WriteFile(filepath.Join(dir, "instance.json"), []byte(`{"origin":"`+origin+`"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(configDir, "vega-local", "trusted-sites.json")
-	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(path, []byte(`{"trustedOrigins":["https://vega.example"]}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	first, err := newAgent()
+	first, err := newAgentAt(dir)
 	if err != nil || len(first.config.ClientID) != 32 {
 		t.Fatalf("missing stable client ID: %v", err)
 	}
 	if strings.HasPrefix(first.configToken, first.config.ClientID) {
 		t.Fatal("public device identity must not expose the local permission token")
 	}
-	second, err := newAgent()
-	if err != nil || first.config.ClientID != second.config.ClientID || !second.allowOrigin("https://vega.example") {
-		t.Fatalf("restart changed identity or trusted origins: %v", err)
+	if !strings.HasSuffix(first.dataDir, filepath.Join("vega-local", "vega.example")) {
+		t.Fatalf("data dir must be per site: %s", first.dataDir)
+	}
+	if saved, err := os.ReadFile(filepath.Join(first.dataDir, "instance.json")); err != nil || !strings.Contains(string(saved), origin) {
+		t.Fatalf("site info not written to the data dir: %v", err)
+	}
+	second, err := newAgentAt(dir)
+	if err != nil || first.config.ClientID != second.config.ClientID || second.dataDir != first.dataDir || !second.allowOrigin(origin) {
+		t.Fatalf("restart changed identity, data dir or pinned site: %v", err)
+	}
+}
+
+func TestMissingInstanceFileRefusesToStart(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	if _, err := newAgentAt(dir); err == nil || !strings.Contains(err.Error(), "instance.json") {
+		t.Fatalf("client without package site info must refuse to start: %v", err)
 	}
 }
 

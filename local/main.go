@@ -33,6 +33,8 @@ type Agent struct {
 	mu              sync.Mutex
 	config          Config
 	configPath      string
+	dataDir         string
+	pinnedOrigin    string
 	configToken     string
 	pendingOrigins  map[string]bool
 	connections     map[*websocket.Conn]struct{}
@@ -53,13 +55,49 @@ func main() {
 		case "--apply-update":
 			must(applyUpdate(os.Args[2:]))
 			return
+		case "--butterfly-preview":
+			// 只为看气泡长什么样：真实提示来自 appuse（第二个参数 running 看“正在操作”态）。
+			if len(os.Args) > 2 && os.Args[2] == "running" {
+				butterflyNotify("running", "正在用鼠标键盘操作这台电脑（appuse act），期间请不要抢鼠标")
+			} else {
+				butterflyNotify("needs_review", "appuse 可能已经部分执行：点击后输入文字可能已发出；请核对屏幕上的实际结果")
+			}
+			time.Sleep(20 * time.Second)
+			return
+		case "--butterfly-panel-open":
+			// 只验证入口：像点托盘一样拉起（或唤到前面）面板，然后退出，不再持有它。
+			url := "http://127.0.0.1:8080/"
+			if len(os.Args) > 2 {
+				url = os.Args[2]
+			}
+			fmt.Println(butterflyPanelOpen(url))
+			return
+		case "--butterfly-panel":
+			// 由托盘/气泡拉起的面板子进程：go run . --butterfly-panel <bot-chat-url>
+			url := "http://127.0.0.1:8080/"
+			if len(os.Args) > 2 {
+				url = os.Args[2]
+			}
+			butterflySetOpen(func() { openBrowser(url) })
+			if !butterflyPanelRun(url) {
+				fmt.Fprintln(os.Stderr, "vega-local: WebView2 不可用，无法打开蝴蝶面板")
+			}
+			return
 		}
 	}
 	a, err := newAgent()
-	must(err)
+	if err != nil {
+		alertUser(err.Error())
+		return
+	}
+	keyDir = filepath.Join(a.dataDir, "keys")
 	clearKeys()
 	lis, err := net.Listen("tcp", localAddress)
-	must(err)
+	if err != nil {
+		// 一个安装目录只跑一份：另一个站点的客户端已占用本机端口。
+		alertUser("另一个站点的客户端正在运行。本机同一时间只能运行一个客户端，请先在托盘退出它，再启动这一个。")
+		return
+	}
 	browserServer, browserErr := localChrome.start()
 	if browserErr != nil {
 		fmt.Fprintln(os.Stderr, "vega-local browser:", browserErr)
@@ -71,10 +109,31 @@ func main() {
 	go func() { _ = srv.Serve(lis) }()
 	ctx, cancel := context.WithCancel(context.Background())
 	must(notifyUpdateReady())
+	// 第一次打开且还没配对：直接打开本安装包的站点，浏览器已登录就会自动开始配对。
+	needsPairing := len(a.config.Servers) == 0
 	a.startConnections(ctx)
+	setSiteLabel(a.siteLabel())
+	if needsPairing {
+		go func() {
+			time.Sleep(1 * time.Second)
+			openBrowser(a.pinnedOrigin)
+		}()
+	}
 	configure := func() { openBrowser("http://" + localAddress + "/config/" + a.configToken) }
+	butterflySetOpen(func() {
+		url := a.assistantURL()
+		if url == "" {
+			configure()
+			return
+		}
+		// 蝴蝶面板里就是网页里的 BOT 会话；WebView2 不可用时退回系统浏览器。
+		if !butterflyPanelOpen(url) {
+			openBrowser(url)
+		}
+	})
 	fmt.Fprintln(os.Stderr, "vega-local: connection settings at http://"+localAddress+"/config/"+a.configToken)
 	quit := func() {
+		butterflyPanelClose()
 		cancel()
 		a.mu.Lock()
 		for conn := range a.connections {
@@ -214,6 +273,13 @@ func execute(ctx context.Context, j job) map[string]any {
 			return failure("Invalid key request")
 		}
 		return keyOperation(req)
+	}
+	if j.Op == "appuse" {
+		// 只有客户端能操作真实桌面；空参数在 appuseExecute 里按未执行退回，不会静默成功。
+		if len(j.Args) == 0 {
+			return failure("appuse 缺少参数；本批次尚未执行")
+		}
+		return appuseExecute(j.Args)
 	}
 	return failure("Unknown operation")
 }

@@ -21,3 +21,5 @@ func systrayRun(configure, onQuit func()) {
 
 // no-op state hook: tooltip updates only exist on Windows.
 var setState = func(bool) {}
+
+var setSiteLabel = func(string) {}

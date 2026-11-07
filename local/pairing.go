@@ -30,16 +30,34 @@ type Config struct {
 	Servers        []ServerCredential `json:"servers,omitempty"`
 }
 
+// pinnedOrigin 是安装包自带的站点（只允许连它）；dataDir 是它自己的数据目录。
+
 func newAgent() (*Agent, error) {
-	dir, err := os.UserConfigDir()
+	executable, err := os.Executable()
 	if err != nil {
+		return nil, err
+	}
+	return newAgentAt(filepath.Dir(executable))
+}
+
+// newAgentAt 以安装目录里的 instance.json 为准：它决定数据目录和唯一允许的站点。
+func newAgentAt(exeDir string) (*Agent, error) {
+	pin, err := readInstancePin(exeDir)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := siteDataDir(pin.Origin)
+	if err != nil {
+		return nil, err
+	}
+	if err = ensureInstanceFile(dir, pin); err != nil {
 		return nil, err
 	}
 	token := make([]byte, 24)
 	if _, err = rand.Read(token); err != nil {
 		return nil, err
 	}
-	a := &Agent{configPath: filepath.Join(dir, "vega-local", "trusted-sites.json"), configToken: hex.EncodeToString(token), connections: make(map[*websocket.Conn]struct{}), pendingOrigins: make(map[string]bool)}
+	a := &Agent{configPath: filepath.Join(dir, "trusted-sites.json"), dataDir: dir, pinnedOrigin: pin.Origin, configToken: hex.EncodeToString(token), connections: make(map[*websocket.Conn]struct{}), pendingOrigins: make(map[string]bool)}
 	data, err := os.ReadFile(a.configPath)
 	if err == nil {
 		err = json.Unmarshal(data, &a.config)
@@ -47,6 +65,15 @@ func newAgent() (*Agent, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
+	// 只认安装包里的站点，其它来源不参与白名单。
+	a.config.TrustedOrigins = []string{a.pinnedOrigin}
+	kept := a.config.Servers[:0]
+	for _, saved := range a.config.Servers {
+		if saved.Origin == a.pinnedOrigin {
+			kept = append(kept, saved)
+		}
+	}
+	a.config.Servers = kept
 	if err = validateSupplement(a.config.Supplement); err != nil {
 		return nil, err
 	}
@@ -114,26 +141,17 @@ func validOrigin(origin string) bool {
 	}
 	return u.Scheme == "https" || u.Scheme == "http"
 }
+
+// allowOrigin 只放行安装包自带的站点；其它站点一律拒绝，也不弹窗请求授权。
 func (a *Agent) allowOrigin(origin string) bool {
 	if !validOrigin(origin) {
 		return false
 	}
-	a.mu.Lock()
-	for _, trusted := range a.config.TrustedOrigins {
-		if trusted == origin {
-			a.mu.Unlock()
-			return true
-		}
+	if origin != a.pinnedOrigin {
+		fmt.Fprintf(os.Stderr, "vega-local: 拒绝站点 %s：此客户端只属于 %s\n", origin, a.pinnedOrigin)
+		return false
 	}
-	show := !a.pendingOrigins[origin] && len(a.pendingOrigins) < 8
-	if show {
-		a.pendingOrigins[origin] = true
-	}
-	a.mu.Unlock()
-	if show {
-		openBrowser("http://" + localAddress + "/config/" + a.configToken)
-	}
-	return false
+	return true
 }
 
 var pairingPage = template.Must(template.New("pairing").Parse(`<!doctype html>
@@ -168,7 +186,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
 .empty{color:var(--muted);margin:0}
 </style>
 <main>
-  <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>只允许你信任的 Vega 站点；允许后，该站点登录的账号可在本机读写文件、执行命令。</p></div></div>
+  <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p></div></div>
 
   {{if .Approved}}<div class="flash ok" role="status"><strong>站点权限已保存。</strong>请回到 Vega 查看登录验证与后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输。</div>{{end}}
   {{if .Revoked}}<div class="flash warn" role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</div>{{end}}
@@ -254,7 +272,6 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   </section>
 </main></html>`))
 
-
 func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
@@ -333,6 +350,11 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		} else if origin != "" && a.pendingOrigins[origin] {
 			next.TrustedOrigins = append(next.TrustedOrigins, origin)
 		} else if remove != "" {
+			if remove == a.pinnedOrigin {
+				a.mu.Unlock()
+				http.Error(w, "本客户端固定属于安装包自带的站点，不能在此撤销；如需更换请重新下载对应站点的安装包", http.StatusBadRequest)
+				return
+			}
 			next.TrustedOrigins = nil
 			for _, item := range a.config.TrustedOrigins {
 				if item != remove {
@@ -395,7 +417,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	trusted := append([]string{}, a.config.TrustedOrigins...)
 	type account struct {
 		Origin, UserID, Rules, Status string
-		Enabled                      bool
+		Enabled                       bool
 	}
 	accounts := []account{}
 	for _, saved := range a.config.Servers {
@@ -419,11 +441,12 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		Pending, Trusted                   []string
 		Approved, Revoked, Saved, Unpaired bool
 		Supplement                         string
+		Pin                                string
 		BrowserLocal                       bool
 		ExecutionCloud                     bool
 		Offline                            bool
 		Accounts                           []account
-	}{pending, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, browserLocal, executionCloud, offline, accounts})
+	}{pending, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, browserLocal, executionCloud, offline, accounts})
 }
 
 type loginProof struct {

@@ -447,19 +447,19 @@ test("a node minimum client version refuses older clients with a visible reason"
   // 不配置也应该按发布版本拦截（MIN_CLIENT_VERSION 与 local/VERSION 同步）。
   delete process.env.VEGA_MIN_CLIENT_VERSION;
   t.after(() => { process.env.VEGA_MIN_CLIENT_VERSION = previous ?? ""; });
-  for (const [id, version] of [["old", "0.3.4"], ["legacy", undefined]] as const) {
+  for (const [id, version] of [["old", "0.3.9"], ["legacy", undefined]] as const) {
     const socket = f.peer(paired.deviceToken, id);
     await f.sockets.open(socket);
     await f.sockets.message(socket, JSON.stringify({ type: "hello", ...details, version }));
     assert.equal(socket.messages[0]?.type, "error", "older and version-less clients are refused before any job");
     assert.equal(socket.messages[0]?.code, "client_outdated");
-    assert.match(socket.messages[0]?.message, /0\.3\.5/);
+    assert.match(socket.messages[0]?.message, /0\.4\.0/);
     assert.equal(f.hub.active(owner, details.clientId), undefined);
     assert.equal(socket.closed.length, 1);
   }
   const current = f.peer(paired.deviceToken, "current");
   await f.sockets.open(current);
-  await f.sockets.message(current, JSON.stringify({ type: "hello", ...details, version: "0.3.5" }));
+  await f.sockets.message(current, JSON.stringify({ type: "hello", ...details, version: "0.4.0" }));
   assert.equal(current.messages[0]?.type, "ready");
   assert(f.hub.active(owner, details.clientId));
 });

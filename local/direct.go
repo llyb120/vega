@@ -37,6 +37,7 @@ func (s ServerCredential) activeRelay() []string {
 	}
 	return append([]string{}, s.Relay...)
 }
+
 type connectionStatus struct {
 	Code       string `json:"code"`
 	HTTPStatus int    `json:"httpStatus,omitempty"`
@@ -62,6 +63,9 @@ func (a *Agent) connectionStatus(connection *directConnection, status connection
 }
 
 func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredential, error) {
+	if origin != a.pinnedOrigin {
+		return ServerCredential{}, fmt.Errorf("此客户端属于 %s，不能保存 %s 的凭据", a.pinnedOrigin, origin)
+	}
 	protected, err := protectToken(proof.DeviceToken)
 	if err != nil {
 		return ServerCredential{}, err
@@ -69,13 +73,6 @@ func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredentia
 	saved := ServerCredential{Origin: origin, UserID: proof.UserID, Token: protected}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	trusted := false
-	for _, item := range a.config.TrustedOrigins {
-		trusted = trusted || item == origin
-	}
-	if !trusted {
-		return saved, fmt.Errorf("Site permission revoked during pairing")
-	}
 	next := a.config
 	next.Servers = nil
 	for _, item := range a.config.Servers {

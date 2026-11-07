@@ -26,6 +26,7 @@ import { app, employeeLive } from "../../core/application";
 import { safeFileName, storeAttachments } from "../../core/attachments";
 import { cloudFor, cloudEnabled, cloudHealthy } from "../../core/cloud";
 import { newCommand } from "../../core/new-session";
+import { clientBaseName, clientPackage } from "../../core/client-package";
 import { CLIENT_BODY_LIMIT } from "../../core/client-socket";
 import { assert, filterAsync, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
@@ -53,6 +54,15 @@ export default defineEventHandler(async (event) => {
   if (path[0] === "health")
     return cloudEnabled() ? { connected: false, ready: await cloudHealthy() === true, isolated: true } : { connected: engine.chrome.bridge.status().connected, ready: true };
   if (["auth", "users"].includes(path[0])) return authRoute(event, path);
+  // 安装包下载：公开（和静态的 /clients 一样），不需要登录，但每个站点打出来的 ZIP 只指向自己。
+  if (path[0] === "clients" && path.length === 2) {
+    check(method === "GET", 405, "GET required");
+    const file = clientBaseName(path[1]), body = await clientPackage(file, publicOrigin(event));
+    setHeader(event, "Content-Type", "application/zip");
+    setHeader(event, "Content-Disposition", `attachment; filename="${file}.zip"`);
+    setHeader(event, "Cache-Control", "no-store");
+    return send(event, body);
+  }
   if (path[0] === "local-agent" && path[1] === "verify" && method === "POST") {
     const body = await bodyJSON(event, 4096);
     setHeader(event, "Cache-Control", "no-store");

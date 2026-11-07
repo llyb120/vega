@@ -169,7 +169,7 @@ export class LocalAgents {
     if (!agent.transport) throw new LocalAgentUnavailable();
     agent.transport.send(job);
   }
-  request(agent: Agent, op: "exec" | "file" | "browser" | "key", args: Obj, signal: AbortSignal) {
+  request(agent: Agent, op: "exec" | "file" | "browser" | "key" | "appuse", args: Obj, signal: AbortSignal) {
     if (op === "exec") {
       assert(typeof args.command === "string" && args.command.trim(), "command required");
       assertShellCommand(args.command);
@@ -183,7 +183,7 @@ export class LocalAgents {
       // Browser: Nova pickup ≤30s + CDP budget ≤10s, plus margin for slow pages and occasional large-result HTTP upload (Tapd etc.).
       // A too-tight budget used to fire this timer while the socket was healthy, suspend the client
       // as if the link dropped, then surface LocalAgentUnavailable — even when the page later loaded.
-      let remaining = op === "exec" ? (args.timeout + 15) * 1000 : op === "browser" ? 180000 : 30000, deadline = 0;
+      let remaining = op === "exec" ? (args.timeout + 15) * 1000 : op === "browser" || op === "appuse" ? 180000 : 30000, deadline = 0;
       const finish = (error?: Error, value?: Obj) => {
         if (settled) return;
         settled = true;
@@ -297,4 +297,13 @@ export async function localCwdExists(hub: LocalAgents, agent: Agent, cwd: string
   const r = await hub.request(agent, "file", { op: "stat", cwd, path }, signal);
   assert(r.isDir && typeof r.path === "string", "Existing local cwd directory required");
   return r.path as string;
+}
+/**
+ * appuse：客户端真实鼠标键盘与桌面截图。只有绑定本机客户端的会话能派发；
+ * 参数与快照由客户端严格校验，服务端只负责把返回的截图存进会话文件供模型和 read 使用。
+ */
+export async function localAppuse(hub: LocalAgents, agent: Agent, args: Obj, signal: AbortSignal) {
+  const result = await hub.request(agent, "appuse", args, signal);
+  if (result.error && result.status === undefined) throw Error(String(result.error));
+  return result;
 }

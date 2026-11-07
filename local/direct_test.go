@@ -83,7 +83,7 @@ func TestNativeClientContinuesAfterPairingPageClosesAndReconnectsAfterRestart(t 
 	}))
 	defer backend.Close()
 	path := filepath.Join(t.TempDir(), "trusted-sites.json")
-	agent := &Agent{configPath: path, config: Config{ClientID: clientID, Supplement: supplement, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: path, pinnedOrigin: backend.URL, config: Config{ClientID: clientID, Supplement: supplement, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent.startConnections(ctx)
