@@ -41,6 +41,8 @@ export const contextLost = (message?: string) =>
 export class Chrome {
   gate = new Mutex();
   tabGates = new Map<string, Mutex>();
+  /** Tabs a user is driving from the live view; agent input there is refused, never queued for later. */
+  userControl = new Set<string>();
   tabGate(tag: string) {
     let gate = this.tabGates.get(tag);
     if (!gate) this.tabGates.set(tag, (gate = new Mutex()));
@@ -1226,7 +1228,13 @@ export class Chrome {
       assert(matches.length === 1, "Explicit tabTag required; no active tab guessing");
       target = matches[0][1].tabTag;
     }
+    const yielded = () => {
+      if (target && this.userControl.has(target) && !["tabs", "status", "stop", "downloads"].includes(args.operation))
+        throw Error("用户正在远程浏览器中接管此标签页（登录、输入或确认），本步未执行，也不会排队稍后重放。等用户交还控制后先用 chrome_inspect 核对同一页面的当前状态再继续；不要改用用户本机浏览器。");
+    };
+    yielded();
     return await (target ? this.tabGate(target) : this.gate).run(async () => {
+      yielded();
       const control = new AbortController();
       this.cancelled.set(owner, control);
       const signal = AbortSignal.any([
