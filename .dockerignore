@@ -19,6 +19,8 @@
 !docker/**
 !local/
 !local/*.go
+!local/*.html
+!local/*.syso
 !local/go.mod
 !local/go.sum
 !local/icon.ico

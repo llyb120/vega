@@ -3,7 +3,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS clients
 WORKDIR /src
 COPY local/go.mod local/go.sum ./
 RUN go mod download
-COPY local/*.go local/icon.ico local/VERSION ./
+COPY local/*.go local/*.html local/*.syso local/*.ico local/VERSION ./
 RUN set -eu; mkdir -p /out; \
     for target in windows/amd64 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
         os="${target%/*}"; arch="${target#*/}"; \

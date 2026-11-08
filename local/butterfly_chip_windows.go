@@ -364,6 +364,11 @@ func chipCreate() bool {
 	}
 	if hwnd == 0 {
 		hwnd, last = create(0)
+		// Win11 的 XAML 任务栏只给 layered 子窗口表面，退回普通 GDI 子窗口等于隐身。
+		// 最常见的原因是构建时漏了应用清单（rsrc_windows_amd64.syso），CreateWindowEx(WS_EX_LAYERED) 才会失败。
+		if hwnd != 0 {
+			chipWarn("任务栏胶囊只能建成普通子窗口（Windows 11 上会看不见）：检查构建是否带上了 rsrc_*.syso 应用清单")
+		}
 	}
 	if hwnd == 0 {
 		chipDebug("create", last)
@@ -373,6 +378,15 @@ func chipCreate() bool {
 	chipState.hwnd, chipState.parent = windows.Handle(hwnd), windows.Handle(taskbar)
 	chipState.Unlock()
 	return true
+}
+
+// chipWarn 不受 VEGA_CHIP_DEBUG 限制：这类问题在屏幕上看不见，必须留在 client.log 里。
+func chipWarn(format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	fmt.Fprintln(os.Stderr, "vega-local: "+message)
+	if runningAgent != nil {
+		runningAgent.clientLog("%s", message)
+	}
 }
 
 // chipBuild 读真实系统 build：没有 manifest 时 GetVersionExW 会谎报 6.2。
