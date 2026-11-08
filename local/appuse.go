@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	"image/color"
 	"image/png"
 	"math"
 	"math/rand"
@@ -171,17 +170,15 @@ func appuseExecute(raw json.RawMessage) map[string]any {
 	if request.MonitorID != nil && request.Operation != "screenshot" {
 		return failure("monitorId 仅用于 screenshot；act 由 imageId 选择屏幕")
 	}
-	if request.Query != "" || request.Observe != nil {
-		if request.Operation != "windows" {
-			return failure("query/observe 仅用于 windows")
-		}
-	}
+	appuseDisplayOnly(&request)
 	appuseInit()
 	appuseMu.Lock()
 	defer appuseMu.Unlock()
 	// 只有会动鼠标键盘、会抢焦点的操作才提醒；纯截图不该打扰用户。
 	if request.Operation == "act" || request.Operation == "activate" {
 		butterflyNotify("running", appuseRunningText(request.Operation))
+		glowHold()
+		defer glowRelease()
 	}
 	result := appuseRunLocked(&request, maxEdge)
 	if request.Notes != "" {
@@ -189,6 +186,14 @@ func appuseExecute(raw json.RawMessage) map[string]any {
 	}
 	appuseAnnounce(result)
 	return result
+}
+
+// appuseDisplayOnly 丢掉只属于 windows 的展示选项：别的操作带上它不影响落点，
+// 整批退回只是让模型白跑一轮（弱模型会顺手给 activate 带 observe:false）。
+func appuseDisplayOnly(request *appuseRequest) {
+	if request.Operation != "windows" {
+		request.Query, request.Observe = "", nil
+	}
 }
 
 func appuseRunningText(operation string) string {
@@ -353,6 +358,12 @@ func appuseActivateOperation(request *appuseRequest, maxEdge uint32) map[string]
 	if _, err := appuseWindowInfo(id); err != nil {
 		return failure(err.Error())
 	}
+	// 切窗会抢前台（真实输入），与 act 共用同一把输入租约。
+	lease, err := appuseAcquireInput(request.Owner, "activate")
+	if err != nil {
+		return failure(err.Error())
+	}
+	defer lease.release()
 	if err := appuseActivate(id); err != nil {
 		return failure(err.Error())
 	}
@@ -434,6 +445,14 @@ func appuseActOperation(request *appuseRequest, maxEdge uint32) map[string]any {
 			return failure(fmt.Sprintf("actions[%d].%s；本批次尚未执行", index, err.Error()))
 		}
 	}
+	// 只有真要注入输入时才拿租约；等待类动作不占桌面。
+	lease, leaseErr := appuseAcquireInput(request.Owner, "act")
+	if leaseErr != nil {
+		result := map[string]any{"status": "not_executed", "completedActions": 0, "inputAttempted": false,
+			"errorCode": "input_busy", "error": leaseErr.Error()}
+		return result
+	}
+	defer lease.release()
 	monitor := shot.Monitor
 	windowID := shot.WindowID
 	expected := appuseForegroundWindow()
@@ -558,15 +577,21 @@ func appuseImageListError(snapshot *appuseSnapshot) string {
 	return fmt.Sprintf("imageId 缺失或不属于此截图；可用 imageId：%s。x/y 须按所选图片的像素坐标重算；沿用当前 snapshotId 并修正 imageId，无需重新截图", strings.Join(list, ", "))
 }
 
-// appuseCapture 只截可见桌面像素；windowId 仅用于定位所在显示器，不裁窗口。
+// appuseCapture 只截可见桌面像素；windowId 用于定位所在显示器，并在能取到窗口自身像素时优先用它
+// （与 Nova 一致：普通模式指定 windowId 就调窗口自身像素，被遮挡也不会截错内容）。
 func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegion, maxEdge uint32) map[string]any {
 	started := time.Now()
 	target := monitorID
+	var window *appuseWindow
 	if windowID != nil {
 		info, err := appuseWindowInfo(*windowID)
 		if err != nil {
 			return map[string]any{"observationError": err.Error()}
 		}
+		if info.Minimized {
+			return map[string]any{"observationError": "窗口已最小化，请先通过桌面恢复窗口"}
+		}
+		window = &info
 		target = &info.Monitor
 	}
 	monitors, err := appuseMonitors()
@@ -585,11 +610,14 @@ func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegi
 	before := appuseForegroundWindow()
 	images := []map[string]any{}
 	shots := []appuseShot{}
+	// 上一帧的原始像素：用来判断这次画面是否真的变了（unchanged 不重传图）。
+	previous := appusePreviousFrame(owner)
+	changed := false
 	for _, monitor := range monitors {
 		if target != nil && *target != monitor.ID {
 			continue
 		}
-		grab, err := appuseCaptureMonitor(monitor)
+		grab, err := appuseGrab(monitor, window)
 		if err != nil {
 			return map[string]any{"observationError": err.Error()}
 		}
@@ -597,6 +625,28 @@ func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegi
 		if sourceW == 0 || sourceH == 0 {
 			return map[string]any{"observationError": "截图范围为空"}
 		}
+		if prior := previous[monitor.ID]; prior != nil {
+			if region == nil && appuseEqualPixels(prior.Image, grab, 0.002) {
+				// 画面没变：沿用上一张图与它的路径，不重传、也不占用新的快照 ID。
+				unchanged := prior.Entry()
+				candidate := map[string]any{}
+				for key, value := range unchanged {
+					candidate[key] = value
+				}
+				if appuseEntryGeometryMatches(candidate, monitor, sourceW, sourceH) {
+					candidate["unchanged"] = true
+					shots = append(shots, appuseShot{
+						ImageID: candidate["imageId"].(string), Surface: monitor,
+						PixelsW: uint32(candidate["width"].(int)), PixelsH: uint32(candidate["height"].(int)),
+						SourceW: prior.SourceW, SourceH: prior.SourceH, Path: candidate["path"].(string),
+						WindowID: windowID, Monitor: monitor.ID,
+					})
+					images = append(images, candidate)
+					continue
+				}
+			}
+		}
+		changed = true
 		imageID := fmt.Sprintf("monitor-%d", monitor.ID)
 		delivered := grab
 		crop := appuseRegion{X: 0, Y: 0, Width: sourceW, Height: sourceH}
@@ -627,6 +677,7 @@ func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegi
 			"desktopBounds": map[string]any{"x": monitor.X, "y": monitor.Y, "width": monitor.W, "height": monitor.H},
 			"monitorId":     monitor.ID, "mime": "image/png", "path": path, "data": data,
 		}
+		appuseRememberFrame(owner, monitor.ID, grab, entry)
 		if region != nil {
 			entry["region"] = region
 		}
@@ -654,7 +705,7 @@ func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegi
 	return map[string]any{
 		"snapshotId": id, "historical": false, "windowId": windowID, "images": images,
 		"coordinateSpace": "image-pixels", "expiresInMs": int64(appuseSnapshotTTL / time.Millisecond),
-		"foreground": foreground, "maxEdge": maxEdge,
+		"foreground": foreground, "maxEdge": maxEdge, "changed": changed,
 		"timingsMs": map[string]any{"capture": time.Since(started).Milliseconds()},
 	}
 }
@@ -704,7 +755,14 @@ func appuseScale(src *image.RGBA, maxEdge uint32, forced bool) *image.RGBA {
 	return dst
 }
 
-// appuseMarkCursor 用同一套映射把系统指针画回图上：剑尖即热点，颜色是淡天蓝墨点。
+// appuseImage 只是像素视图：同一块 RGBA 缓冲交给指针混合用，避免再复制整张图。
+type appuseImage struct {
+	Pix  []uint8
+	W, H int
+}
+
+// appuseMarkCursor 用同一套映射把系统指针画回图上：剑尖即热点，与系统指针同款的剑；
+// 反馈图里的光晕刻意很淡，压住的内容仍然可读，不干扰模型对目标的判断。
 func appuseMarkCursor(img *image.RGBA, surface appuseSurface, source appusePoint, crop appuseRegion, position appusePoint) *appusePoint {
 	if surface.W == 0 || surface.H == 0 || source.X == 0 || source.Y == 0 {
 		return nil
@@ -717,43 +775,20 @@ func appuseMarkCursor(img *image.RGBA, surface appuseSurface, source appusePoint
 		return nil
 	}
 	edgeW, edgeH := int64(img.Bounds().Dx()), int64(img.Bounds().Dy())
-	imageX := (2*x + int64(source.X)) * edgeW / (2 * width)
-	imageY := (2*y + int64(source.Y)) * edgeH / (2 * height)
-	marker := color.RGBA{R: 56, G: 189, B: 248, A: 150}
-	const radius = 9
-	const ring = 15
-	for dy := -ring; dy <= ring; dy++ {
-		for dx := -ring; dx <= ring; dx++ {
-			px, py := int(imageX)+dx, int(imageY)+dy
-			if px < 0 || py < 0 || px >= img.Bounds().Dx() || py >= img.Bounds().Dy() {
-				continue
-			}
-			distance := math.Hypot(float64(dx), float64(dy))
-			alpha := 0.0
-			if distance <= radius {
-				alpha = 0.55
-			} else if distance <= radius+1.2 {
-				alpha = 0.85 // 一圈深色描边，压住的内容仍然可读
-			}
-			if alpha == 0 {
-				continue
-			}
-			paint := marker
-			if distance > radius {
-				paint = color.RGBA{R: 12, G: 30, B: 64, A: 200}
-			}
-			blend(img, px, py, paint, alpha)
+	// 映射到桌面像素中心（与 appusePointOf 同式），所以图内 (x,y) 就标在 (x,y)。
+	toImage := func(v, pixel, size, edge int64) int {
+		value := (2*v + pixel) * edge / (2 * size)
+		if value > edge-1 {
+			value = edge - 1
 		}
+		return int(value)
 	}
+	imageX := toImage(x, int64(source.X), width, edgeW)
+	imageY := toImage(y, int64(source.Y), height, edgeH)
+	const size = 32
+	pixels := appusePointerPixels(size, appuseMarkerGlow)
+	appuseBlendPointer(&appuseImage{Pix: img.Pix, W: int(edgeW), H: int(edgeH)}, size, int(appusePointerTip), pixels, imageX, imageY)
 	return &appusePoint{X: int32(imageX), Y: int32(imageY)}
-}
-
-func blend(img *image.RGBA, x, y int, over color.RGBA, alpha float64) {
-	at := img.PixOffset(x, y)
-	for index, value := range []uint8{over.R, over.G, over.B} {
-		img.Pix[at+index] = uint8(math.Round(float64(value)*alpha + float64(img.Pix[at+index])*(1-alpha)))
-	}
-	img.Pix[at+3] = 255
 }
 
 func appuseEncodePNG(path string, img *image.RGBA) (string, error) {
@@ -828,10 +863,68 @@ func appuseCheckTarget(snapshot *appuseSnapshot, shot *appuseShot, action appuse
 			if monitor.X != shot.Surface.X || monitor.Y != shot.Surface.Y || monitor.W != shot.Surface.W || monitor.H != shot.Surface.H {
 				return fmt.Errorf("显示器布局已改变，请重新截图")
 			}
-			return nil
+			return appuseGuardPixels(snapshot, shot, action)
 		}
 	}
 	return fmt.Errorf("显示器布局已改变，请重新截图")
+}
+
+// appuseGuardPixels 是视觉守卫：向下/双击/拖拽之前，比较目标周围那一小块画面
+// 是否还是截图里的那个样子。变了（弹窗、翻页、滚动、别的窗口盖住）就不执行，
+// 让人和模型先看新图——绝不直接点一个可能已经不是它以为是的东西的位置。
+func appuseGuardPixels(snapshot *appuseSnapshot, shot *appuseShot, action appuseAction) error {
+	switch action.Action {
+	case "click", "double_click", "drag":
+	default:
+		return nil
+	}
+	if action.X == nil || action.Y == nil {
+		return nil
+	}
+	frame := appusePreviousFrame(snapshot.Owner)[shot.Monitor]
+	if !appuseFrameFresh(frame, appuseSnapshotTTL) || frame.Image == nil {
+		return nil
+	}
+	point, err := appusePointOf(shot, action.X, action.Y)
+	if err != nil {
+		return err
+	}
+	grab, err := appuseCaptureMonitor(shot.Surface)
+	if err != nil {
+		// 抓不到当前画面就不能证明目标还在，直接不执行。
+		return fmt.Errorf("无法核对当前画面（%v）：本批未执行，请重新截图后再决策", err)
+	}
+	// 目标周围一圈：比一个点更能容下光标/悬停反馈，又不至于把整屏动画算进来。
+	const radius = 48
+	left := int32(point.X) - int32(shot.Surface.X) - radius
+	top := int32(point.Y) - int32(shot.Surface.Y) - radius
+	region := appuseRegion{X: uint32(maxInt32(left, 0)), Y: uint32(maxInt32(top, 0)), Width: radius * 2, Height: radius * 2}
+	if uint32(left) != region.X || uint32(top) != region.Y {
+		return nil // 贴着屏幕边缘就不做像素比对，避免误报
+	}
+	if !appuseRegionUnchanged(frame.Image, grab, region, 0.06) {
+		return fmt.Errorf("目标周围画面在截图后已经变化（可能弹窗/翻页/被遮挡）；本批未执行，请基于新图重新定位，不要重放")
+	}
+	return nil
+}
+
+func maxInt32(a, b int32) int32 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// appusePressCombo 按一组组合键（不涉坐标，不需要快照）。
+func appusePressCombo(raw string) error {
+	keys, err := appuseKeys(raw)
+	if err != nil {
+		return err
+	}
+	if err := appuseKeyPress(keys); err != nil {
+		return err
+	}
+	return appuseKeyRelease(keys)
 }
 
 func appusePerform(shot *appuseShot, action appuseAction) error {
@@ -843,19 +936,13 @@ func appusePerform(shot *appuseShot, action appuseAction) error {
 		if action.Text == nil {
 			return fmt.Errorf("type 缺少 text")
 		}
-		return appuseTypeText(*action.Text)
+		// Windows 走整段粘贴：逐键输入会被中文输入法改写/吞掉。
+		return appusePasteText(*action.Text)
 	case "press":
 		if action.Key == nil {
 			return fmt.Errorf("press 缺少 key")
 		}
-		keys, err := appuseKeys(*action.Key)
-		if err != nil {
-			return err
-		}
-		if err := appuseKeyPress(keys); err != nil {
-			return err
-		}
-		return appuseKeyRelease(keys)
+		return appusePressCombo(*action.Key)
 	}
 	target, err := appusePointOf(shot, action.X, action.Y)
 	if err != nil {

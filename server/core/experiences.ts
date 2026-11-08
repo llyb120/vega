@@ -26,7 +26,7 @@ export class Experiences {
     }
   >();
   constructor(public store: Store, public kind = "experience") {}
-  scope(raw: string) {
+  scope(raw: string): string {
     const u = new URL(raw);
     assert(
       ["http:", "https:"].includes(u.protocol) &&
@@ -403,4 +403,17 @@ function objectRequest(v: any): Obj {
     "experience object required",
   );
   return { ...v, pitfalls: v.pitfalls || [] };
+}
+
+/**
+ * 桌面（剑来）路径的经验图谱：与浏览器路径共用同一套存储与评分，只有 scope 不同。
+ * 浏览器的 scope 必须是 HTTP(S) origin（站点隔离），桌面应用的 scope 是应用名/窗口标题，
+ * 所以这里放宽为“去空白、限长、不含换行”，依旧不允许空串。
+ */
+export class DesktopExperiences extends Experiences {
+  override scope(raw: string): string {
+    const value = String(raw ?? "").trim();
+    assert(value && value.length <= 120 && !/[\r\n]/.test(value), "桌面经验的 scope 是应用名或窗口标题，1–120 字符、不含换行");
+    return value;
+  }
 }

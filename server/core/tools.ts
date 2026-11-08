@@ -31,6 +31,8 @@ import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, che
 import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
 import { APPUSE_RULES, CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
+import { appuseTools, appuseArguments, APPUSE_TOOLS, normalizeDesktopAction } from "./appuse-tools";
+import { DesktopExperiences } from "./experiences";
 import { prepareDutyInput } from "./duty-condition";
 import { Context } from "./context";
 import type { EmployeeState } from "./employee";
@@ -132,7 +134,7 @@ export class Tools {
     const ctx = await this.toolContext(), parts: string[] = [];
     if ([...names].some((n) => CHROME_TOOLS.has(n)))
       parts.push(this.session.scene === "computer" ? CHROME_RULES : CHROME_GATE_RULE);
-    if (names.has("appuse")) parts.push(APPUSE_RULES);
+    if ([...names].some((n) => APPUSE_TOOLS.has(n))) parts.push(APPUSE_RULES);
     if (names.has("vault_get")) parts.push("[密码本] " + VAULT_USAGE);
     if (ctx.kind === "task") parts.push(EMPLOYEE_TASK_RULES);
     if ([...names].some((n) => CHROME_TOOLS.has(n)) && this.session.scene !== "computer" && !sceneModels(this.config, "computer").length)
@@ -325,44 +327,9 @@ export class Tools {
           );
     }
     // 剑来用真实鼠标键盘操作本机桌面：只在 Windows 客户端、可写的会话里列出，不在服务端执行。
+    // 与 Nova 一样按用途拆成窄工具：窄 schema 才不会被模型随手塞进无关字段（旧单个 appuse 就因此整批退回）。
     if (this.session.localAgent && this.session.localPlatform === "windows" && !this.session.readOnly)
-      defs.push(
-        schema(
-          "appuse",
-          "Operate this client computer's real mouse, keyboard and window screenshots (剑来). Only for GUI work: windows lists visible windows (query filters them, observe attaches that window's screen), screenshot captures a monitor/window at image-pixel region and returns snapshotId + imageId, activate brings a window to the foreground, act sends real input (click/double_click/move/drag/type/press/scroll/wait) at coordinates of the newest screenshot, recall only reads an old screenshot file. Coordinates are pixels of the shown image, not future guessed points.",
-          {
-            operation: { type: "string", enum: ["windows", "screenshot", "activate", "act", "recall"] },
-            windowId: integer,
-            monitorId: integer,
-            region: { type: "object", properties: { x: integer, y: integer, width: integer, height: integer }, required: ["x", "y", "width", "height"] },
-            regionSpace: { type: "string", enum: ["source", "image"] },
-            snapshotId: string,
-            imageId: string,
-            feedback: { type: "string", enum: ["screenshot", "desktop", "none"] },
-            maxEdge: { type: "integer", minimum: 0, maximum: 3840 },
-            imagePath: string,
-            notes: string,
-            query: string,
-            observe: { type: "boolean" },
-            actions: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  action: { type: "string", enum: ["click", "double_click", "move", "drag", "type", "press", "scroll", "wait"] },
-                  x: integer, y: integer, toX: integer, toY: integer,
-                  button: { type: "string", enum: ["left", "right", "middle"] },
-                  text: string, key: string, delta: integer,
-                  axis: { type: "string", enum: ["vertical", "horizontal"] },
-                  ms: integer, glide: { type: "boolean" },
-                },
-                required: ["action"],
-              },
-            },
-          },
-          ["operation"],
-        ),
-      );
+      defs.push(...appuseTools());
     for (const def of defs) {
       def.parameters = structuredClone(def.parameters);
       def.parameters.properties ??= {};
@@ -442,13 +409,19 @@ export class Tools {
     const definition = (await this.definitions(model)).find((t) => t.name === call.name);
     assert(definition, "Tool unavailable in this scene");
     if (CHROME_TOOLS.has(call.name)) this.assertBrowserScene(call.name);
-    const split = CHROME_TOOLS.has(call.name) || EMPLOYEE_TOOLS.has(call.name) || VAULT_TOOLS.has(call.name);
-    let internal: Internal | undefined, rest: Obj = {};
+    const split = CHROME_TOOLS.has(call.name) || EMPLOYEE_TOOLS.has(call.name) || VAULT_TOOLS.has(call.name) || APPUSE_TOOLS.has(call.name);
+    let internal: Internal | undefined, rest: Obj = {}, appuseArgs: Obj | undefined;
     if (split) {
       const { _after, ...publicArgs } = call.arguments || {};
       rest = publicArgs;
+      // 桌面动作先归一弱模型的等价写法（别名/字符串坐标），再拿窄 schema 严格校验其余部分。
+      const incoming = APPUSE_TOOLS.has(call.name) && Array.isArray(rest.actions)
+        ? { ...rest, actions: rest.actions.map(normalizeDesktopAction) }
+        : rest;
       // Validate against the visible (context-trimmed) schema before any side effect.
-      internal = toInternal(call.name, checkArgs(definition.parameters, rest), await this.toolContext());
+      const validated = checkArgs(definition.parameters, incoming);
+      if (APPUSE_TOOLS.has(call.name)) appuseArgs = appuseArguments(call.name, validated, this.session.id);
+      else internal = toInternal(call.name, validated, await this.toolContext());
     }
     const a = internal ? internal.args : omitPlaceholders({ ...call.arguments }, (definition as any).parameters);
     const waiting = this.session.employeeId && this.session.taskId && (await (await this.engine.employeeFor(this.session)).findTask(this.session.taskId))?.workspaceWait;
@@ -461,17 +434,23 @@ export class Tools {
       }
       return result;
     }
-    if (call.name === "appuse") {
+    if (call.name === "appuse" || appuseArgs) {
       const agent = this.agent();
-      assert(agent, "appuse 只能在本机客户端会话执行；当前会话没有绑定客户端，本步未执行任何操作。");
-      const result = await localAppuse(this.engine.localAgents, agent, { ...a, owner: this.session.id }, this.signal);
+      assert(agent, "桌面工具只能在本机客户端会话执行；当前会话没有绑定客户端，本步未执行任何操作。");
+      const args = appuseArgs || { ...a, owner: this.session.id };
+      // 经验图谱与浏览器路径共用同一套存储与评分，只是 scope 是应用名而不是站点 origin。
+      if (String(args.operation || "").startsWith("experience_")) {
+        const experiences = new DesktopExperiences(this.engine.store, "experience");
+        return { value: await experiences.execute(this.session.id, args, undefined) };
+      }
+      const result = await localAppuse(this.engine.localAgents, agent, args, this.signal);
       // 客户端在 images[].data 里回传 PNG；落到会话文件后删掉 base64，只留路径和地址。
       const images: Outcome["images"] = [];
       for (const image of result.images || []) {
         if (typeof image.data !== "string") continue;
         const data = Buffer.from(image.data, "base64");
         delete image.data;
-        const name = `appuse-${result.snapshotId}-${String(image.imageId || "image").replace(/[^\w.-]/g, "_")}.png`;
+        const name = `appuse-${result.snapshotId || "shot"}-${String(image.imageId || "image").replace(/[^\w.-]/g, "_")}.png`;
         const path = await this.engine.store.files.write(this.session, name, data);
         image.path = path; image.url = this.engine.store.files.url(path);
         images.push({ mime: image.mime || "image/png", path, url: image.url });

@@ -137,6 +137,20 @@ func TestAppuseRejectsUnknownFieldsBeforeDesktopWork(t *testing.T) {
 	}
 }
 
+func TestAppuseIgnoresWindowOnlyDisplayOptions(t *testing.T) {
+	// activate/act 带上 query/observe 不改落点，不能因此整批退回（模型经常顺手带 observe:false）。
+	request := &appuseRequest{Operation: "activate", Query: "Nova", Observe: boolPtr(false)}
+	appuseDisplayOnly(request)
+	if request.Query != "" || request.Observe != nil {
+		t.Fatalf("非 windows 操作应丢掉展示选项：%+v", request)
+	}
+	request = &appuseRequest{Operation: "windows", Query: "Nova", Observe: boolPtr(true)}
+	appuseDisplayOnly(request)
+	if request.Query != "Nova" || request.Observe == nil {
+		t.Fatalf("windows 的筛选与观察必须保留：%+v", request)
+	}
+}
+
 func TestAppuseKeyNamesMatchNovaShortcuts(t *testing.T) {
 	for _, raw := range []string{"Enter", "ctrl+shift+s", "f5", "PageDown", "meta+Left"} {
 		if _, err := appuseKeys(raw); err != nil {

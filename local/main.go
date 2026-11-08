@@ -65,6 +65,26 @@ func main() {
 			}
 			time.Sleep(20 * time.Second)
 			return
+		case "--glow-preview":
+			// 只为看光效与剑形指针：与 appuse 点亮时完全同一条路径（持有租约 → 亮光效/换指针 → 还原）。
+			glowStart()
+			lease, err := appuseAcquireInput("preview", "act")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "vega-local:", err)
+				return
+			}
+			glowHold()
+			time.Sleep(12 * time.Second)
+			glowRelease()
+			lease.release()
+			return
+		case "--grab-preview":
+			// 抓屏自检：DXGI 与 GDI 各抓一帧逐像素比对，证明“优先 DXGI + 失败回退”没把画面弄坏。
+			if err := grabPreview(); err != nil {
+				fmt.Fprintln(os.Stderr, "vega-local:", err)
+				os.Exit(1)
+			}
+			return
 		case "--butterfly-panel-open":
 			// 只验证入口：像点托盘一样拉起（或唤到前面）面板，然后退出，不再持有它。
 			url := "http://127.0.0.1:8080/"
@@ -91,6 +111,10 @@ func main() {
 		alertUser(err.Error())
 		return
 	}
+	runningAgent = a
+	// 进程被强杀时品牌指针会留到下次登录：启动时无条件还原用户自己的指针。
+	appuseResetCursorOnStart()
+	glowStart()
 	keyDir = filepath.Join(a.dataDir, "keys")
 	a.clientLog("启动 %s · 站点 %s · 数据目录 %s", clientVersion, a.pinnedOrigin, a.dataDir)
 	clearKeys()
