@@ -1,489 +1,608 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="bubble-mode">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vega 助理</title>
 <style>
-  :root {
-    --bg: #f1f2f5;
-    --card: #ffffff;
-    --rail: #fafafc;
-    --line: #ebecf1;
-    --ink: #1b1c20;
-    --muted: #8b8f9c;
-    --brand: #4b57d6;
-    --brand-soft: #eef0fe;
-    --ok: #2f9e6b;
-    --warn: #c2410c;
+  /* 外观与 Nova 的 taskbar bubble 对齐：同一套语义色、同一套卡片/气泡/输入条几何。
+     结构保留我们的两栏（左栏牛马与群聊、右栏会话），配色与尺寸照 Nova。 */
+  html.bubble-mode, html.bubble-mode body { margin: 0; background: transparent; overflow: hidden; height: 100%; }
+  html.bubble-mode, html.bubble-mode * { box-sizing: border-box; }
+
+  /* 跟随任务栏主题：默认深色，浅色任务栏时由脚本加 .light。--ink 是叠加色。 */
+  html.bubble-mode {
+    color-scheme: dark;
+    --ink: 255 255 255;
+    --fg: #f5f5f7;
+    --fg-strong: #fff;
+    --fg-body: #e5e5ea;
+    --fg-2: #c7c7cc;
+    --fg-3: #98989f;
+    --fg-4: #6e6e73;
+    --bg-top: #202128;
+    --bg-bottom: #16171b;
+    --surface: rgb(255 255 255 / 0.06);
+    --brand: #91adff;
+    --brand-fill: linear-gradient(135deg, #7c95ff 0%, #4f6fd8 100%);
+    --shadow: 0 16px 40px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.28);
+    --blue: #0a84ff;
+    --link: #64d2ff;
+    --orange: #ff9f0a;
+    --green: #30d158;
+    --red: #ff453a;
+    --red-text: #ff6961;
+    --gray: #8e8e93;
   }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
-  body {
-    font: 14px/1.6 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
-    color: var(--ink);
-    background: var(--bg);
-    -webkit-font-smoothing: antialiased;
-    overflow: hidden;
-    user-select: none;
+  html.bubble-mode.light {
+    color-scheme: light;
+    --ink: 0 0 0;
+    --fg: #1a1a1a;
+    --fg-strong: #000;
+    --fg-body: #2b2b2b;
+    --fg-2: #424242;
+    --fg-3: #616161;
+    --fg-4: #8a8a8a;
+    --bg-top: #f8f9fc;
+    --bg-bottom: #f1f3f8;
+    --surface: #fff;
+    --brand: #4363c7;
+    --brand-fill: linear-gradient(135deg, #6584f0 0%, #4363c7 100%);
+    --shadow: 0 16px 40px rgba(30, 40, 80, 0.16), 0 2px 8px rgba(30, 40, 80, 0.08);
+    --blue: #005fb8;
+    --link: #005fb8;
+    --orange: #9d5d00;
+    --green: #0f7b0f;
+    --red: #c42b1c;
+    --red-text: #c42b1c;
+    --gray: #707070;
   }
-  .app {
-    position: absolute; inset: 8px;
-    display: flex;
-    background: var(--card);
+
+  /* 透明 8px 边距留给卡片阴影，也是和任务栏之间的间隙。 */
+  .tb-shell { display: flex; flex-direction: column; height: 100vh; padding: 8px; }
+  .tb-card {
+    --accent: var(--gray);
+    position: relative; flex: 1; min-height: 0;
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 14px 16px 12px;
     border-radius: 16px;
-    overflow: hidden;
-    box-shadow: 0 12px 40px rgba(16, 18, 40, .16), 0 2px 8px rgba(16, 18, 40, .06);
+    color: var(--fg);
+    font: 13px/1.55 "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+    background:
+      radial-gradient(90% 40% at 100% 0%, color-mix(in srgb, var(--brand) 10%, transparent), transparent 70%),
+      linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+    border: 1px solid rgb(var(--ink) / 0.09);
+    box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    user-select: none; cursor: default;
   }
+  .tb-card.running { --accent: var(--blue); }
+  .tb-card.waiting { --accent: var(--orange); }
+  .tb-card.done { --accent: var(--green); }
+  .tb-card.error { --accent: var(--red); }
 
-  /* ── 左栏：牛马 / 群聊 ─────────────────────────────── */
-  .rail {
-    width: 156px; flex: 0 0 156px;
-    background: var(--rail);
-    border-right: 1px solid var(--line);
-    display: flex; flex-direction: column;
-    overflow: hidden;
+  .tb-head { display: flex; flex: none; align-items: center; gap: 8px; }
+  .tb-fly { flex: none; overflow: visible; fill: var(--accent); }
+  .tb-fly-body { fill: var(--fg); }
+  .tb-wings { transform-box: fill-box; transform-origin: center; }
+  .running .tb-wings { animation: tb-flap 0.6s ease-in-out infinite; }
+  .waiting .tb-wings { animation: tb-flap 1.4s ease-in-out infinite; }
+  @keyframes tb-flap { 50% { transform: scaleX(0.2); } }
+  .tb-state { font-size: 13.5px; font-weight: 600; color: var(--fg-strong); letter-spacing: 0.01em; }
+  .tb-time { font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+  .tb-head-text { min-width: 0; }
+  .tb-head-text > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tb-close {
+    margin-left: auto; display: grid; place-items: center;
+    width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%;
+    color: var(--fg-3); background: rgb(var(--ink) / 0.06); cursor: pointer;
+    transition: background 120ms, color 120ms;
   }
-  .brand {
-    display: flex; align-items: center; gap: 8px;
-    padding: 14px 14px 10px;
-    font-weight: 700; font-size: 15px;
-  }
-  .brand svg { width: 18px; height: 18px; color: var(--brand); }
-  .rail-scroll { flex: 1; overflow-y: auto; padding: 0 8px 10px; }
-  .rail-scroll::-webkit-scrollbar { width: 6px; }
-  .rail-scroll::-webkit-scrollbar-thumb { background: #dcdde4; border-radius: 3px; }
-  .group-title {
-    padding: 12px 8px 6px;
-    font-size: 11px; letter-spacing: .08em; color: var(--muted);
-  }
-  .item {
-    display: flex; align-items: center; gap: 8px;
-    width: 100%; padding: 7px 8px; margin-bottom: 2px;
-    border: 0; border-radius: 11px; background: transparent;
-    font: inherit; color: inherit; text-align: left; cursor: pointer;
-  }
-  .item:hover { background: #f2f3f8; }
-  .item.on { background: var(--card); box-shadow: 0 1px 3px rgba(20, 22, 50, .12); }
-  .face {
-    flex: 0 0 30px; width: 30px; height: 30px; border-radius: 10px;
-    display: grid; place-items: center;
-    background: var(--brand-soft); color: var(--brand);
-    font-size: 12px; font-weight: 700;
-    position: relative; overflow: hidden;
-  }
-  .face img { width: 100%; height: 100%; object-fit: cover; }
-  .item.on .face { background: var(--brand); color: #fff; }
-  .item .text { flex: 1; min-width: 0; }
-  .item .name {
-    display: flex; align-items: center; gap: 5px;
-    font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .item .hint {
-    display: block; font-size: 11px; color: var(--muted);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: 0 0 6px; }
-  .dot.warn { background: var(--warn); }
-  .badge {
-    flex: 0 0 auto; min-width: 17px; height: 17px; padding: 0 5px;
-    border-radius: 9px; background: var(--brand); color: #fff;
-    font-size: 10px; font-weight: 700; line-height: 17px; text-align: center;
-  }
+  .tb-close:hover { background: rgb(var(--ink) / 0.14); color: var(--fg); }
 
-  /* ── 右侧：会话 ───────────────────────────────────── */
-  .chat { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--card); }
-  .head {
-    display: flex; align-items: center; gap: 8px;
-    padding: 12px 14px; border-bottom: 1px solid var(--line);
+  /* 两栏：左栏牛马/群聊，右栏会话。 */
+  .tb-panes { flex: 1; min-height: 0; display: flex; gap: 12px; }
+  .tb-rail {
+    flex: 0 0 172px; min-width: 0; display: flex; flex-direction: column;
+    padding-right: 10px; border-right: 1px solid rgb(var(--ink) / 0.08);
   }
-  .head svg { width: 18px; height: 18px; color: var(--brand); }
-  .head .who { font-weight: 700; font-size: 15px; }
-  .head .sub { font-size: 11px; color: var(--muted); }
-  .head .spacer { flex: 1; }
-  .icon-btn {
-    width: 26px; height: 26px; border: 0; border-radius: 8px;
-    background: transparent; color: var(--muted); cursor: pointer;
-    font-size: 16px; line-height: 1;
+  .ta-section-title {
+    display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 0 2px 6px; font-size: 12px; font-weight: 600;
   }
-  .icon-btn:hover { background: #f2f3f8; color: var(--ink); }
+  .ta-section-title > span { font-size: 10px; font-weight: 400; color: var(--fg-3); }
+  .ta-session-list {
+    min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    display: flex; flex-direction: column; gap: 5px; padding-right: 2px;
+  }
+  .ta-session-list.grow { flex: 1 1 auto; }
+  .ta-session-list.short { flex: 0 1 auto; max-height: 34%; }
+  .ta-session {
+    flex: none; display: flex; flex-direction: column; gap: 2px; width: 100%;
+    padding: 7px 10px; border: 1px solid rgb(var(--ink) / 0.06); border-radius: 10px;
+    color: var(--fg); background: var(--surface); font: inherit; text-align: left; cursor: pointer;
+    transition: border-color 120ms, background 120ms;
+  }
+  .ta-session:hover { border-color: color-mix(in srgb, var(--brand) 35%, transparent); }
+  .ta-session.on { border-color: color-mix(in srgb, var(--brand) 55%, transparent); background: color-mix(in srgb, var(--brand) 10%, var(--surface)); }
+  .ta-session-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .ta-session-heading strong { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }
+  .ta-status { flex: none; color: var(--fg-3); font-size: 10px; }
+  .ta-status.running { color: var(--blue); }
+  .ta-status.waiting { color: var(--orange); }
+  .ta-status.done { color: var(--green); }
+  .ta-status.error { color: var(--red-text); }
+  .ta-session-text {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; overflow: hidden;
+    white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-2); font-size: 11px; line-height: 1.5;
+  }
+  .ta-badge {
+    flex: none; min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px;
+    background: var(--brand); color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+  }
+  .ta-empty { padding: 6px 2px; color: var(--fg-3); font-size: 11px; }
 
-  .stream { flex: 1; overflow-y: auto; padding: 14px 14px 6px; }
-  .stream::-webkit-scrollbar { width: 8px; }
-  .stream::-webkit-scrollbar-thumb { background: #dcdde4; border-radius: 4px; }
+  .tb-chat { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+  .ta-chat { position: relative; display: flex; flex: 1; min-height: 0; overflow: hidden; }
+  .ta-history {
+    flex: 1; min-width: 0; min-height: 0; overflow-y: auto; overflow-anchor: none;
+    overscroll-behavior: contain; padding: 4px 6px 4px 2px; outline-offset: -2px;
+  }
+  .ta-welcome { padding: 56px 12px; text-align: center; font-size: 15px; font-weight: 600; color: var(--fg); }
+  .ta-welcome small { display: block; margin-top: 8px; font-size: 12px; font-weight: 400; color: var(--fg-3); }
+  .ta-welcome code { padding: 1px 5px; border-radius: 4px; background: rgb(var(--ink) / 0.08); font-size: 11px; }
 
-  .row { display: flex; gap: 8px; margin-bottom: 12px; align-items: flex-start; }
-  .row.user { flex-direction: row-reverse; }
-  .avatar {
-    flex: 0 0 26px; width: 26px; height: 26px; border-radius: 50%;
-    display: grid; place-items: center; margin-top: 2px;
-    background: var(--brand); color: #fff; font-size: 11px; font-weight: 700;
+  .ta-message { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 14px; }
+  .ta-message.user { flex-direction: row-reverse; }
+  .ta-avatar {
+    flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 9px;
+    color: #fff; background: var(--brand-fill); box-shadow: 0 2px 6px color-mix(in srgb, var(--brand) 30%, transparent);
+    font-weight: 700; font-size: 12px;
   }
-  .row.user .avatar { background: #eceefb; color: var(--brand); }
-  .body { max-width: 78%; min-width: 0; }
-  .author { font-size: 11px; color: var(--muted); margin: 0 2px 3px; }
-  .bubble {
-    padding: 9px 12px; border-radius: 14px;
-    background: var(--card); border: 1px solid var(--line);
-    box-shadow: 0 1px 2px rgba(20, 22, 50, .04);
-    white-space: pre-wrap; word-break: break-word; user-select: text;
+  .ta-message.user .ta-avatar { display: none; }
+  .ta-message-content { min-width: 0; max-width: calc(100% - 44px); }
+  .ta-message.user .ta-message-content { max-width: 82%; }
+  .ta-author { margin: 0 2px 4px; font-size: 11px; color: var(--fg-3); }
+  .ta-bubble {
+    position: relative; padding: 9px 13px; border: 1px solid rgb(var(--ink) / 0.06);
+    border-radius: 4px 14px 14px 14px; white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; line-height: 1.6; color: var(--fg-body); background: var(--surface);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
   }
-  .row.user .bubble {
-    background: var(--brand); color: #fff; border-color: transparent;
-    border-bottom-right-radius: 5px;
+  .ta-message.user .ta-bubble {
+    border: 0; border-radius: 14px 4px 14px 14px; color: #fff; background: var(--brand-fill);
+    box-shadow: 0 3px 10px color-mix(in srgb, var(--brand) 28%, transparent);
   }
-  .row.bot .bubble { border-bottom-left-radius: 5px; }
-  .bubble.error { border-color: #f3c9b8; background: #fff7f3; color: var(--warn); }
-  .bubble.progress { background: #f6f7fb; color: #4a4d59; }
-  .bubble .chips { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
-  .chip {
-    font-size: 11px; padding: 1px 7px; border-radius: 999px;
-    background: rgba(75, 87, 214, .1); color: var(--brand);
+  .ta-bubble.md { white-space: normal; }
+  .ta-bubble.error { color: var(--red-text); border-color: color-mix(in srgb, var(--red) 40%, transparent); background: color-mix(in srgb, var(--red) 8%, var(--surface)); }
+  .ta-bubble.progress { color: var(--fg-2); background: rgb(var(--ink) / 0.03); }
+  .ta-bubble.typing { color: var(--fg-3); }
+  .ta-message-meta { display: flex; align-items: center; gap: 10px; margin: 5px 0 0 2px; color: var(--fg-3); font-size: 11px; }
+  .ta-message.user .ta-message-meta { justify-content: flex-end; }
+  .ta-notice { display: flex; justify-content: center; margin: 0 0 14px; }
+  .ta-notice span {
+    padding: 3px 12px; border-radius: 999px; background: rgb(var(--ink) / 0.05);
+    color: var(--fg-3); font-size: 11px;
   }
-  .row.user .chip { background: rgba(255, 255, 255, .22); color: #fff; }
+  .ta-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .ta-chip {
+    display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px;
+    border: 1px solid rgb(var(--ink) / 0.08); border-radius: 8px; background: rgb(var(--ink) / 0.04);
+    color: var(--fg-2); font-size: 11px;
+  }
+  .ta-message.user .ta-chip { border-color: rgb(255 255 255 / 0.3); background: rgb(255 255 255 / 0.16); color: #fff; }
 
-  .divider {
-    margin: 6px 0 12px; text-align: center;
-    font-size: 11px; color: var(--muted);
-  }
-  .divider span { background: #f4f5f9; padding: 2px 10px; border-radius: 999px; }
+  /* markdown（与 Nova 的 .ta-md 同一套规则） */
+  .ta-md > :first-child { margin-top: 0; }
+  .ta-md > :last-child { margin-bottom: 0; }
+  .ta-md :is(p, ul, ol, pre, blockquote, table) { margin: 0 0 8px; }
+  .ta-md :is(ul, ol) { padding-left: 20px; }
+  .ta-md li { margin: 2px 0; }
+  .ta-md :is(h1, h2, h3, h4) { margin: 10px 0 6px; font-size: 1em; font-weight: 650; }
+  .ta-md code { padding: 1px 4px; border-radius: 4px; font-size: 0.92em; background: rgb(var(--ink) / 0.06); }
+  .ta-md pre { padding: 8px 10px; overflow-x: auto; border-radius: 8px; background: rgb(var(--ink) / 0.05); overscroll-behavior: contain; }
+  .ta-md pre code { padding: 0; background: none; }
+  .ta-md a { color: var(--brand); text-decoration: none; }
+  .ta-md a:hover { text-decoration: underline; }
+  .ta-md blockquote { padding-left: 10px; border-left: 3px solid rgb(var(--ink) / 0.12); color: var(--fg-3); }
+  .ta-md table { border-collapse: collapse; font-size: 0.92em; }
+  .ta-md :is(th, td) { padding: 4px 8px; border: 1px solid rgb(var(--ink) / 0.1); }
+  .ta-md img { max-width: 100%; border-radius: 8px; }
+  .ta-md hr { border: 0; border-top: 1px solid rgb(var(--ink) / 0.1); margin: 10px 0; }
 
-  .typing { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin: 2px 0 10px 34px; }
-  .typing i {
-    width: 5px; height: 5px; border-radius: 50%; background: var(--brand);
-    display: inline-block; animation: blink 1.2s infinite ease-in-out;
-  }
-  .typing i:nth-child(2) { animation-delay: .2s; }
-  .typing i:nth-child(3) { animation-delay: .4s; }
-  @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+  .ta-dots { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; }
+  .ta-dots i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: ta-dot 1.2s infinite ease-in-out; }
+  .ta-dots i:nth-child(2) { animation-delay: 0.15s; }
+  .ta-dots i:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes ta-dot { 0%, 60%, 100% { opacity: 0.25; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
+  @media (prefers-reduced-motion: reduce) { .ta-dots i, .tb-wings { animation: none; } }
 
-  .empty { height: 100%; display: grid; place-items: center; text-align: center; color: var(--muted); font-size: 13px; }
-  .empty b { display: block; color: var(--ink); font-size: 14px; margin-bottom: 4px; }
+  .ta-latest {
+    position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+    padding: 4px 12px; border: 1px solid rgb(var(--ink) / 0.1); border-radius: 999px;
+    color: var(--brand); background: var(--surface); box-shadow: 0 4px 12px rgb(0 0 0 / 0.12);
+    font: inherit; font-size: 11px; cursor: pointer; transition: opacity 120ms, transform 120ms;
+  }
+  .ta-latest[hidden] { display: none; }
 
-  .composer {
-    display: flex; align-items: flex-end; gap: 8px;
-    margin: 8px 12px 12px; padding: 6px 6px 6px 10px;
-    border: 1px solid #e3e4ec; border-radius: 16px; background: #fff;
-    box-shadow: 0 2px 10px rgba(20, 22, 50, .05);
+  .ta-compose {
+    position: relative; flex: none; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: end; gap: 2px 6px; padding: 5px;
+    border: 1px solid rgb(var(--ink) / 0.1); border-radius: 14px; background: var(--surface);
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.05);
   }
-  .composer textarea {
-    flex: 1; border: 0; outline: 0; resize: none;
-    font: inherit; color: inherit; background: transparent;
-    max-height: 96px; padding: 6px 0; user-select: text;
+  .ta-input {
+    width: 100%; min-height: 34px; max-height: 96px; padding: 6px 8px; border: 0; background: transparent;
+    color: var(--fg); font: inherit; line-height: 1.5; resize: none; outline: none; user-select: text;
+    field-sizing: content;
   }
-  .composer textarea::placeholder { color: #a6a9b6; }
-  .send {
-    flex: 0 0 30px; width: 30px; height: 30px; border: 0; border-radius: 10px;
-    background: var(--brand); color: #fff; font-size: 15px; cursor: pointer;
+  .ta-input::placeholder { color: var(--fg-4); }
+  .ta-plus, .ta-submit {
+    display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 10px;
+    font: inherit; cursor: pointer; transition: filter 120ms, background 120ms, transform 80ms, opacity 120ms;
   }
-  .send:disabled { background: #c9cdf3; cursor: default; }
+  .ta-plus { color: var(--fg-3); background: transparent; font-size: 19px; line-height: 1; }
+  .ta-plus:hover, .ta-plus.open { color: var(--brand); background: color-mix(in srgb, var(--brand) 10%, transparent); }
+  .ta-plus.open { transform: rotate(45deg); }
+  .ta-submit { background: var(--brand-fill); color: #fff; font-size: 15px; }
+  .ta-submit:hover { filter: brightness(1.08); }
+  .ta-submit:active { transform: scale(0.95); }
+  .ta-submit:disabled { opacity: 0.35; cursor: default; filter: none; transform: none; }
+  .ta-error { grid-column: 1 / -1; padding: 0 8px 2px; color: var(--red-text); font-size: 10.5px; }
+  .ta-error[hidden] { display: none; }
+  .ta-menu {
+    position: absolute; z-index: 5; left: 0; bottom: calc(100% + 6px); display: flex; flex-direction: column;
+    min-width: 132px; padding: 4px; border: 1px solid rgb(var(--ink) / 0.1); border-radius: 12px;
+    background: var(--bg-top); box-shadow: var(--shadow);
+  }
+  .ta-menu[hidden] { display: none; }
+  .ta-menu > button {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 0; border-radius: 8px;
+    color: var(--fg); background: transparent; font: inherit; text-align: left; cursor: pointer; white-space: nowrap;
+  }
+  .ta-menu > button:hover { background: color-mix(in srgb, var(--brand) 10%, transparent); }
 
-  .toast {
-    position: absolute; left: 50%; bottom: 74px; transform: translateX(-50%);
-    max-width: 90%; padding: 7px 12px; border-radius: 10px;
-    background: #2b2c33; color: #fff; font-size: 12px;
-    opacity: 0; pointer-events: none; transition: opacity .18s;
-  }
-  .toast.show { opacity: 1; }
+  /* 滚动条也照 Nova：6px，thumb 是 16% 的墨色。 */
+  *::-webkit-scrollbar { width: 6px; height: 6px; }
+  *::-webkit-scrollbar-thumb { border-radius: 3px; background: rgb(var(--ink) / 0.16); }
+  *::-webkit-scrollbar-track { background: transparent; }
 </style>
 </head>
 <body>
-<div class="app">
-  <aside class="rail">
-    <div class="brand">
-      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3c1.6 2.3 2.6 4.6 3 6.9 1.6-1 3.2-1.5 4.7-1.6-1 2.6-2.6 4.7-4.8 6.2l1 3.8c.1.6-.4 1.2-1 1.2-.4 0-.8-.2-.9-.6L12 14.6l-2 4.3c-.1.4-.5.6-.9.6-.6 0-1.1-.6-1-1.2l1-3.8C6.9 13 5.3 10.9 4.3 8.3c1.5.1 3.1.6 4.7 1.6.4-2.3 1.4-4.6 3-6.9z"/></svg>
-      Vega 助理
-    </div>
-    <div class="rail-scroll" id="rail"></div>
-  </aside>
-
-  <main class="chat">
-    <header class="head">
-      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3c1.6 2.3 2.6 4.6 3 6.9 1.6-1 3.2-1.5 4.7-1.6-1 2.6-2.6 4.7-4.8 6.2l1 3.8c.1.6-.4 1.2-1 1.2-.4 0-.8-.2-.9-.6L12 14.6l-2 4.3c-.1.4-.5.6-.9.6-.6 0-1.1-.6-1-1.2l1-3.8C6.9 13 5.3 10.9 4.3 8.3c1.5.1 3.1.6 4.7 1.6.4-2.3 1.4-4.6 3-6.9z"/></svg>
-      <div>
-        <div class="who" id="who">Vega 助理</div>
-        <div class="sub" id="sub">选一个牛马或群聊开始</div>
+<div class="tb-shell">
+  <div class="tb-card" id="card">
+    <div class="tb-head">
+      <svg class="tb-fly" viewBox="-8 -7 16 13" width="16" height="13" aria-hidden="true">
+        <g class="tb-wings">
+          <path d="M0.5-0.5L1.8-4.4L4.4-6L7-5.2L7-2.6L0.5 0.6ZM0.5 0.6L4.6 1L5 3.4L2.8 5.2L0.5 2.8Z"/>
+          <path d="M0.5-0.5L1.8-4.4L4.4-6L7-5.2L7-2.6L0.5 0.6ZM0.5 0.6L4.6 1L5 3.4L2.8 5.2L0.5 2.8Z" transform="scale(-1 1)"/>
+        </g>
+        <rect class="tb-fly-body" x="-0.9" y="-4.6" width="1.8" height="9.2" rx="0.9"/>
+      </svg>
+      <div class="tb-head-text">
+        <div class="tb-state" id="who">Vega 助理</div>
+        <div class="tb-time" id="sub">选一个牛马或群聊</div>
       </div>
-      <span class="spacer"></span>
-      <button class="icon-btn" id="close" title="关闭">×</button>
-    </header>
-    <div class="stream" id="stream"><div class="empty"><div><b>还没有会话</b>左栏选一个牛马或群聊</div></div></div>
-    <div class="composer">
-      <textarea id="input" rows="1" placeholder="告诉牛马要做什么…"></textarea>
-      <button class="send" id="send" title="发送" disabled>↑</button>
+      <button class="tb-close" id="close" title="收起">×</button>
     </div>
-    <div class="toast" id="toast"></div>
-  </main>
+
+    <div class="tb-panes">
+      <aside class="tb-rail">
+        <div class="ta-section-title">牛马 <span id="empCount"></span></div>
+        <div class="ta-session-list grow" id="empList"></div>
+        <div class="ta-section-title" style="padding-top:8px">群聊 <span id="grpCount"></span></div>
+        <div class="ta-session-list short" id="grpList"></div>
+      </aside>
+
+      <main class="tb-chat">
+        <div class="ta-chat">
+          <div class="ta-history" id="stream">
+            <div class="ta-welcome">Vega 助理<small>左栏选一个牛马或群聊，就能在这里开工</small></div>
+          </div>
+          <button class="ta-latest" id="latest" hidden>↓ 回到底部</button>
+        </div>
+        <div class="ta-compose">
+          <button class="ta-plus" id="plus" title="更多">+</button>
+          <div class="ta-menu" id="menu" hidden>
+            <button data-act="new">新会话（/new）</button>
+            <button data-act="reload">重新加载</button>
+          </div>
+          <textarea class="ta-input" id="input" rows="1" placeholder="告诉牛马要做什么…"></textarea>
+          <button class="ta-submit" id="send" title="发送" disabled>↑</button>
+          <div class="ta-error" id="error" hidden></div>
+        </div>
+      </main>
+    </div>
+  </div>
 </div>
 
-<script>
-(function () {
-  "use strict";
-  var API = location.pathname.replace(/\/?$/, "/") + "api/";
-  var state = { threads: null, current: "", messages: [], lastSeq: 0, running: false, timer: 0, busy: false };
-  var el = {
-    rail: document.getElementById("rail"),
-    stream: document.getElementById("stream"),
-    who: document.getElementById("who"),
-    sub: document.getElementById("sub"),
-    input: document.getElementById("input"),
-    send: document.getElementById("send"),
-    close: document.getElementById("close"),
-    toast: document.getElementById("toast")
-  };
+<script type="module">
+import { marked } from "./marked.js";
 
-  function esc(text) {
-    return String(text == null ? "" : text).replace(/[&<>"]/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
-    });
-  }
-  function api(op, body) {
-    return fetch(API + op, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body || {})
-    }).then(function (response) {
-      return response.json().catch(function () { return {}; }).then(function (data) {
-        if (!response.ok) throw new Error(data.statusMessage || data.error || ("HTTP " + response.status));
-        return data;
-      });
-    });
-  }
-  function toast(message) {
-    el.toast.textContent = message;
-    el.toast.classList.add("show");
-    clearTimeout(toast.timer);
-    toast.timer = setTimeout(function () { el.toast.classList.remove("show"); }, 2600);
-  }
-  function initials(name) {
-    var text = String(name || "").trim();
-    return text ? text.slice(0, 1) : "·";
-  }
-  function clock(at) {
-    if (!at) return "";
-    var date = new Date(at);
-    if (isNaN(date)) return "";
-    return ("0" + date.getHours()).slice(-2) + ":" + ("0" + date.getMinutes()).slice(-2);
-  }
+marked.setOptions({ gfm: true, breaks: true, async: false });
 
-  // ── 左栏 ────────────────────────────────────────────
-  function renderRail() {
-    var data = state.threads || { employees: [], groups: [] };
-    var html = "";
-    function card(item) {
-      var on = item.thread === state.current ? " on" : "";
-      var face = '<span class="face">' + esc(initials(item.name)) + '</span>';
-      var flags = item.running ? '<span class="dot" title="正在工作"></span>' : (item.attention ? '<span class="dot warn" title="等你处理"></span>' : "");
-      var badge = item.unread ? '<span class="badge">' + (item.unread > 99 ? "99+" : item.unread) + "</span>" : "";
-      var hint = item.kind === "group"
-        ? (item.users + " 位用户 · " + item.employees + " 个牛马")
-        : (item.lastText || "还没有对话");
-      return '<button class="item' + on + '" data-thread="' + esc(item.thread) + '">' + face +
-        '<span class="text"><span class="name">' + esc(item.name) + flags + '</span>' +
-        '<span class="hint">' + esc(hint) + '</span></span>' + badge + "</button>";
-    }
-    if (data.employees.length) {
-      html += '<div class="group-title">牛马</div>' + data.employees.map(card).join("");
-    }
-    if (data.groups.length) {
-      html += '<div class="group-title">群聊</div>' + data.groups.map(card).join("");
-    }
-    if (!html) html = '<div class="group-title">还没有牛马或群聊</div>';
-    el.rail.innerHTML = html;
-    Array.prototype.forEach.call(el.rail.querySelectorAll(".item"), function (node) {
-      node.addEventListener("click", function () { open(node.getAttribute("data-thread")); });
-    });
-  }
+const API = location.pathname.replace(/\/?$/, "/") + "api/";
+const el = {
+  card: document.getElementById("card"),
+  who: document.getElementById("who"),
+  sub: document.getElementById("sub"),
+  empList: document.getElementById("empList"),
+  grpList: document.getElementById("grpList"),
+  empCount: document.getElementById("empCount"),
+  grpCount: document.getElementById("grpCount"),
+  stream: document.getElementById("stream"),
+  latest: document.getElementById("latest"),
+  input: document.getElementById("input"),
+  send: document.getElementById("send"),
+  plus: document.getElementById("plus"),
+  menu: document.getElementById("menu"),
+  error: document.getElementById("error"),
+  close: document.getElementById("close")
+};
 
-  // ── 聊天区 ──────────────────────────────────────────
-  function messageHTML(message, mine, botName) {
-    if (message.notice) {
-      return '<div class="divider"><span>' + esc(message.text || "") + "</span></div>";
-    }
-    if (message.role === "tool" || message.role === "call" || message.thinking) return "";
-    var text = message.displayText || message.text || "";
-    var author = message.author && message.author.name;
-    var fromMe = message.role === "user" && (!author || message.author.kind === "user" && message.author.me);
-    var user = message.role === "user" && !author;
-    var right = user || fromMe;
-    if (!text && !message.images && !message.files) return "";
-    var chips = "";
-    var extras = [];
-    if (message.images && message.images.length) extras.push({ kind: "images", label: message.images.length + " 张图片" });
-    if (message.files && message.files.length) extras.push({ kind: "files", label: message.files.length + " 个文件" });
-    if (extras.length) {
-      chips = '<div class="chips">' + extras.map(function (item) {
-        return '<span class="chip">' + esc(item.label) + "</span>";
-      }).join("") + "</div>";
-    }
-    var cls = "row " + (right ? "user" : "bot");
-    var bubble = "bubble" + (message.error ? " error" : "") + (message.progress ? " progress" : "");
-    var head = "";
-    if (!right) {
-      head = '<span class="avatar">' + esc(initials(botName)) + "</span>";
-    }
-    var name = (author && !fromMe) ? '<div class="author">' + esc(author.name) + "</div>" : "";
-    return '<div class="' + cls + '">' + head + '<div class="body">' + name +
-      '<div class="' + bubble + '">' + esc(text) + chips + "</div></div></div>";
-  }
+const state = { threads: { employees: [], groups: [] }, current: "", title: "", messages: [], lastSeq: 0, running: false, busy: false, stick: true };
 
-  function renderStream() {
-    var node = el.stream;
-    if (!state.current) {
-      node.innerHTML = '<div class="empty"><div><b>还没有选会话</b>左栏选一个牛马或群聊</div></div>';
-      return;
-    }
-    var html = state.messages.map(function (message) {
-      return messageHTML(message, false, state.title || "牛马");
-    }).join("");
-    if (state.running) {
-      html += '<div class="typing"><i></i><i></i><i></i><span>正在工作…</span></div>';
-    }
-    if (!html) html = '<div class="empty"><div><b>还没有消息</b>说一句话就能开工</div></div>';
-    node.innerHTML = html;
-    node.scrollTop = node.scrollHeight;
-  }
+// 跟随任务栏明暗（WebView2 跟随应用主题）。
+const scheme = matchMedia("(prefers-color-scheme: dark)");
+const applyScheme = () => document.documentElement.classList.toggle("light", !scheme.matches);
+applyScheme();
+scheme.addEventListener("change", applyScheme);
 
-  function updateHead() {
-    var data = state.threads || { employees: [], groups: [] };
-    var all = (data.employees || []).concat(data.groups || []);
-    var found = null;
-    for (var i = 0; i < all.length; i++) if (all[i].thread === state.current) found = all[i];
-    el.who.textContent = found ? found.name : "Vega 助理";
-    if (found) {
-      el.sub.textContent = found.kind === "group"
-        ? found.users + " 位用户 · " + found.employees + " 个牛马"
-        : (found.running ? "正在工作…" : "牛马");
-    } else {
-      el.sub.textContent = "选一个牛马或群聊开始";
-    }
-    state.title = found ? found.name : "牛马";
-  }
+const esc = (text) => String(text ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const initials = (name) => (String(name || "").trim().slice(0, 1) || "·");
+/** 会话卡片只放一行预览，markdown 记号会看着脏，先拍平。 */
+const plain = (text) => String(text ?? "")
+  .replace(/```[\s\S]*?```/g, "〔代码〕")
+  .replace(/!?\[([^\]]*)\]\([^)\s]*\)/g, "$1")
+  .replace(/[`*_~#>]/g, "")
+  .replace(/\s+/g, " ")
+  .trim();
 
-  function open(thread) {
-    if (!thread) return;
-    state.current = thread;
-    state.messages = [];
-    state.lastSeq = 0;
-    state.running = false;
-    try { localStorage.setItem("vega.assistant.thread", thread); } catch (e) {}
+/** 只留安全的节点与属性：模型输出里的脚本、事件属性、javascript: 链接一律去掉。 */
+function sanitize(html) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  tpl.content.querySelectorAll("script,iframe,object,embed,link,style,meta,base,form").forEach((node) => node.remove());
+  tpl.content.querySelectorAll("*").forEach((node) => {
+    for (const attr of [...node.attributes]) {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith("on")) node.removeAttribute(attr.name);
+      else if (["href", "src", "srcset", "xlink:href"].includes(name) && /^\s*(javascript|data:text\/html):/i.test(attr.value)) node.removeAttribute(attr.name);
+    }
+  });
+  return tpl.innerHTML;
+}
+
+async function api(op, body) {
+  const response = await fetch(API + op, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.statusMessage || data.error || ("HTTP " + response.status));
+  return data;
+}
+
+function toast(message) {
+  el.error.textContent = message;
+  el.error.hidden = !message;
+  clearTimeout(toast.timer);
+  if (message) toast.timer = setTimeout(() => { el.error.hidden = true; }, 4000);
+}
+
+// ── 左栏 ────────────────────────────────────────────────
+function sessionCard(item) {
+  const on = item.thread === state.current ? " on" : "";
+  const status = item.waiting ? ['waiting', "待确认"] : item.running ? ["running", "正在工作"] : item.kind === "group" ? ["", `${item.users} 人 · ${item.employees} 个牛马`] : ["", item.mine ? "我的牛马" : "共享牛马"];
+  const badge = item.unread ? `<span class="ta-badge">${item.unread > 99 ? "99+" : item.unread}</span>` : "";
+  return `<button class="ta-session${on}" data-thread="${esc(item.thread)}">
+    <span class="ta-session-heading"><strong>${esc(item.name)}</strong>${badge}<span class="ta-status ${status[0]}">${esc(status[1])}</span></span>
+    <span class="ta-session-text">${esc(plain(item.lastText) || "还没有对话")}</span>
+  </button>`;
+}
+
+function renderRail() {
+  const { employees, groups } = state.threads;
+  el.empList.innerHTML = employees.length ? employees.map(sessionCard).join("") : '<div class="ta-empty">还没有牛马</div>';
+  el.grpList.innerHTML = groups.length ? groups.map(sessionCard).join("") : '<div class="ta-empty">还没有群聊</div>';
+  el.empCount.textContent = employees.length || "";
+  el.grpCount.textContent = groups.length || "";
+  for (const node of document.querySelectorAll(".ta-session")) {
+    node.addEventListener("click", () => open(node.dataset.thread));
+  }
+}
+
+function threadOf(thread) {
+  return [...state.threads.employees, ...state.threads.groups].find((item) => item.thread === thread);
+}
+
+// ── 会话 ────────────────────────────────────────────────
+const clockOf = (message) => (message?.at ? new Date(message.at).toTimeString().slice(0, 5) : "");
+
+function messageHTML(message, prev) {
+  if (message.notice) return `<div class="ta-notice"><span>${esc(message.text || "")}</span></div>`;
+  if (message.role !== "user" && message.role !== "assistant") return "";
+  const text = message.displayText || message.text || "";
+  const mine = message.role === "user" && !message.author;
+  const other = message.author && message.author.kind === "user" && !mine;
+  const body = text ? (message.role === "assistant" ? `<div class="ta-md">${sanitize(marked.parse(text))}</div>` : esc(text)) : "";
+  const chips = [];
+  if (message.images?.length) chips.push(`${message.images.length} 张图片`);
+  if (message.files?.length) chips.push(`${message.files.length} 个文件`);
+  const chipHTML = chips.length ? `<div class="ta-chips">${chips.map((c) => `<span class="ta-chip">${esc(c)}</span>`).join("")}</div>` : "";
+  const avatars = message.role === "user"
+    ? (other ? `<span class="ta-avatar">${esc(initials(message.author.name))}</span>` : "")
+    : `<span class="ta-avatar">${esc(initials(state.title))}</span>`;
+  const author = other ? `<div class="ta-author">${esc(message.author.name)}</div>` : "";
+  const classes = ["ta-bubble"];
+  if (message.role === "assistant") classes.push(body ? "md" : "");
+  if (message.error) classes.push("error");
+  if (message.progress) classes.push("progress");
+  const clock = clockOf(message);
+  // 连着几条同一分钟的回复不重复写时间。
+  const showClock = clock && clock !== clockOf(prev);
+  const meta = showClock || message.error ? `<div class="ta-message-meta">${showClock ? esc(clock) : ""}</div>` : "";
+  return `<div class="ta-message ${message.role === "user" ? "user" : "bot"}">${avatars}
+    <div class="ta-message-content">${author}<div class="${classes.join(" ")}">${body}${chipHTML}</div>${meta}</div>
+  </div>`;
+}
+
+function renderStream(scroll = false) {
+  const thread = state.current;
+  if (!thread) return;
+  let html = state.messages.map((message, index) => messageHTML(message, state.messages[index - 1])).join("");
+  if (state.running) {
+    html += `<div class="ta-message bot"><span class="ta-avatar">${esc(initials(state.title))}</span>
+      <div class="ta-message-content"><div class="ta-bubble typing">正在工作<span class="ta-dots"><i></i><i></i><i></i></span></div></div></div>`;
+  }
+  el.stream.innerHTML = html || `<div class="ta-welcome">还没有消息<small>说一句话就能开工</small></div>`;
+  if (scroll || state.stick) scrollToEnd();
+  el.latest.hidden = state.stick;
+}
+
+function scrollToEnd() {
+  el.stream.scrollTop = el.stream.scrollHeight;
+  state.stick = true;
+  el.latest.hidden = true;
+}
+
+function updateHead() {
+  const item = threadOf(state.current);
+  el.who.textContent = state.title || item?.name || "Vega 助理";
+  const status = item?.waiting ? "等待你确认" : state.running ? "正在工作…" : item ? (item.kind === "group" ? `${item.users} 位用户 · ${item.employees} 个牛马` : (item.mine ? "我的牛马" : "共享牛马")) : "选一个牛马或群聊";
+  el.sub.textContent = status;
+  el.card.className = "tb-card" + (item?.waiting ? " waiting" : state.running ? " running" : "");
+}
+
+async function open(thread) {
+  if (!thread) return;
+  state.current = thread;
+  state.messages = [];
+  state.lastSeq = 0;
+  state.running = false;
+  state.stick = true;
+  state.title = threadOf(thread)?.name || "";
+  try { localStorage.setItem("vega.assistant.thread", thread); } catch {}
+  updateHead();
+  renderRail();
+  el.stream.innerHTML = `<div class="ta-welcome">正在打开…</div>`;
+  try {
+    const data = await api("messages", { thread, limit: 100 });
+    if (state.current !== thread) return;
+    state.messages = data.messages || [];
+    state.lastSeq = data.lastSeq || (state.messages.at(-1)?.seq ?? 0);
+    state.running = !!data.running;
+    state.title = data.title || state.title;
     updateHead();
-    renderRail();
-    renderStream();
-    api("messages", { thread: thread, limit: 100 }).then(function (data) {
-      if (state.current !== thread) return;
-      state.messages = data.messages || [];
-      state.lastSeq = data.lastSeq || (state.messages.length ? state.messages[state.messages.length - 1].seq : 0);
-      state.running = !!data.running;
-      state.title = data.title || state.title;
-      updateHead();
-      renderStream();
-      schedule();
-      // 打开即已读：不然后面那颗未读数永远不消失。
-      api("read", { thread: thread }).then(function () {
-        var data = state.threads || { employees: [], groups: [] };
-        (data.employees || []).concat(data.groups || []).forEach(function (item) {
-          if (item.thread === thread) item.unread = 0;
-        });
-        renderRail();
-      }).catch(function () {});
-    }).catch(function (error) {
-      toast(error.message);
-    });
+    renderStream(true);
+    api("read", { thread }).then(() => {
+      const item = threadOf(thread);
+      if (item) { item.unread = 0; renderRail(); }
+    }).catch(() => {});
+  } catch (error) {
+    el.stream.innerHTML = `<div class="ta-welcome">打不开这个会话<small>${esc(error.message)}</small></div>`;
+    toast(error.message);
   }
+}
 
-  function poll() {
-    if (!state.current || document.visibilityState === "hidden") return;
-    var thread = state.current;
-    api("messages", { thread: thread, after: state.lastSeq }).then(function (data) {
-      if (state.current !== thread) return;
-      var fresh = (data.messages || []).filter(function (message) { return message.seq > state.lastSeq; });
-      var running = !!data.running;
-      if (fresh.length) {
-        state.messages = state.messages.concat(fresh);
-        state.lastSeq = data.lastSeq || fresh[fresh.length - 1].seq;
-      }
-      if (fresh.length || running !== state.running) {
-        state.running = running;
-        updateHead();
-        renderStream();
-      }
-    }).catch(function () {});
-  }
-
-  function schedule() {
-    clearInterval(state.timer);
-    state.timer = setInterval(poll, 1500);
-  }
-
-  function send() {
-    var text = el.input.value.trim();
-    if (!text || !state.current || state.busy) return;
-    state.busy = true;
-    el.send.disabled = true;
-    api("send", { thread: state.current, text: text }).then(function () {
-      el.input.value = "";
-      grow();
-      state.running = true;
-      renderStream();
-      setTimeout(poll, 350);
-    }).catch(function (error) {
-      toast(error.message);
-    }).then(function () {
-      state.busy = false;
-      el.send.disabled = !el.input.value.trim();
-    });
-  }
-
-  function grow() {
-    el.input.style.height = "auto";
-    el.input.style.height = Math.min(96, el.input.scrollHeight) + "px";
-    el.send.disabled = !el.input.value.trim() || !state.current;
-  }
-
-  // ── 启动 ────────────────────────────────────────────
-  el.input.addEventListener("input", grow);
-  el.input.addEventListener("keydown", function (event) {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      send();
+async function pollMessages() {
+  const thread = state.current;
+  if (!thread) return;
+  try {
+    const data = await api("messages", { thread, after: state.lastSeq });
+    if (state.current !== thread) return;
+    const fresh = (data.messages || []).filter((m) => m.seq > state.lastSeq);
+    const running = !!data.running;
+    if (fresh.length) {
+      state.messages.push(...fresh);
+      state.lastSeq = data.lastSeq || fresh.at(-1).seq;
     }
-  });
-  el.send.addEventListener("click", send);
-  el.close.addEventListener("click", function () {
-    fetch(API + "close", { method: "POST" }).catch(function () {});
-  });
-
-  function boot() {
-    api("threads", {}).then(function (data) {
-      state.threads = { employees: data.employees || [], groups: data.groups || [] };
-      var wanted = (location.hash.match(/thread=([^&]+)/) || [])[1];
-      if (wanted) wanted = decodeURIComponent(wanted);
-      if (!wanted) { try { wanted = localStorage.getItem("vega.assistant.thread"); } catch (e) {} }
-      var all = state.threads.employees.concat(state.threads.groups);
-      var found = false;
-      for (var i = 0; i < all.length; i++) if (all[i].thread === wanted) found = true;
-      if (!found) wanted = all.length ? all[0].thread : "";
-      renderRail();
-      if (wanted) open(wanted);
-      else renderStream();
-    }).catch(function (error) {
-      el.rail.innerHTML = '<div class="group-title">牛马 / 群聊加载失败</div>';
-      el.stream.innerHTML = '<div class="empty"><div><b>连不上站点</b>' + esc(error.message) + "</div></div>";
-      toast(error.message);
-    });
-  }
-
-  boot();
-  setInterval(function () {
-    if (document.visibilityState === "hidden") return;
-    api("threads", {}).then(function (data) {
-      state.threads = { employees: data.employees || [], groups: data.groups || [] };
-      renderRail();
+    if (fresh.length || running !== state.running) {
+      state.running = running;
       updateHead();
-    }).catch(function () {});
-  }, 5000);
-})();
+      renderStream();
+    }
+  } catch {}
+}
+
+async function pollThreads() {
+  try {
+    const data = await api("threads", {});
+    state.threads = { employees: data.employees || [], groups: data.groups || [] };
+    if (!state.current) return;
+    renderRail();
+    updateHead();
+  } catch {}
+}
+
+// ── 发送 ────────────────────────────────────────────────
+async function send(text) {
+  const value = (text ?? el.input.value).trim();
+  if (!value || !state.current || state.busy) return;
+  state.busy = true;
+  el.send.disabled = true;
+  try {
+    await api("send", { thread: state.current, text: value });
+    if (text === undefined) { el.input.value = ""; grow(); }
+    state.running = true;
+    state.stick = true;
+    renderStream(true);
+    setTimeout(pollMessages, 300);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    state.busy = false;
+    el.send.disabled = !el.input.value.trim();
+  }
+}
+
+function grow() {
+  el.input.style.height = "auto";
+  el.input.style.height = Math.min(96, el.input.scrollHeight) + "px";
+  el.send.disabled = !el.input.value.trim() || !state.current;
+}
+
+// ── 事件 ────────────────────────────────────────────────
+el.input.addEventListener("input", grow);
+el.input.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); }
+});
+el.send.addEventListener("click", () => send());
+el.latest.addEventListener("click", scrollToEnd);
+el.stream.addEventListener("scroll", () => {
+  const gap = el.stream.scrollHeight - el.stream.scrollTop - el.stream.clientHeight;
+  state.stick = gap < 24;
+  el.latest.hidden = state.stick;
+});
+el.close.addEventListener("click", () => { fetch(API + "close", { method: "POST" }).catch(() => {}); });
+el.plus.addEventListener("click", (event) => {
+  event.stopPropagation();
+  el.menu.hidden = !el.menu.hidden;
+  el.plus.classList.toggle("open", !el.menu.hidden);
+});
+el.menu.addEventListener("click", (event) => {
+  const act = event.target.closest("button")?.dataset.act;
+  el.menu.hidden = true;
+  el.plus.classList.remove("open");
+  if (act === "new") send("/new");
+  if (act === "reload") { open(state.current); pollThreads(); }
+});
+document.addEventListener("click", () => { el.menu.hidden = true; el.plus.classList.remove("open"); });
+
+async function boot() {
+  try {
+    const data = await api("threads", {});
+    state.threads = { employees: data.employees || [], groups: data.groups || [] };
+    const wanted = decodeURIComponent((location.hash.match(/thread=([^&]+)/) || [])[1] || "") || localStorage.getItem("vega.assistant.thread") || "";
+    const all = [...state.threads.employees, ...state.threads.groups];
+    const first = all.find((item) => item.thread === wanted) || all[0];
+    renderRail();
+    if (first) await open(first.thread);
+  } catch (error) {
+    el.stream.innerHTML = `<div class="ta-welcome">连不上站点<small>${esc(error.message)}</small></div>`;
+    toast(error.message);
+  }
+}
+
+boot();
+setInterval(pollMessages, 1500);
+setInterval(pollThreads, 5000);
 </script>
 </body>
 </html>

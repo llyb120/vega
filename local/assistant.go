@@ -19,6 +19,9 @@ import (
 //go:embed assistant_page.html
 var assistantPage []byte
 
+//go:embed assistant_marked.js
+var assistantMarked []byte
+
 // assistantMount 把面板页面和它的几个接口挂到本地服务器上。
 func (a *Agent) assistantMount(mux *http.ServeMux) {
 	base := a.assistantPath()
@@ -36,6 +39,11 @@ func (a *Agent) assistantMount(mux *http.ServeMux) {
 			// 页面上的 × 只是把面板收回屏幕外（WebView2 留在内存里，下次点蝴蝶秒开）。
 			butterflyPanelPark()
 			assistantReply(w, http.StatusOK, map[string]any{"ok": true})
+		case strings.HasSuffix(r.URL.Path, "/marked.js"):
+			// markdown 渲染用 marked（MIT），面板里不带构建步骤，直接内嵌发出去。
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write(assistantMarked)
 		case r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
