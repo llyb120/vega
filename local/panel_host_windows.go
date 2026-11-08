@@ -153,6 +153,13 @@ func panelHostStart(url string) bool {
 	panelHost.Lock()
 	panelHost.browser = chromium
 	panelHost.Unlock()
+	// 透明背景：页面根是 background:transparent，让卡片之外透出桌面——这是 Nova 气泡的半透明感。
+	// 只是设 WebView2 的默认背景，不动窗口样式；WebView2 直绘，透明像素直接合成到桌面。
+	if c := chromium.GetController(); c != nil {
+		if c2 := c.GetICoreWebView2Controller2(); c2 != nil {
+			_ = c2.PutDefaultBackgroundColor(edge.COREWEBVIEW2_COLOR{A: 0, R: 0, G: 0, B: 0})
+		}
+	}
 	chromium.Resize()
 	chromium.Navigate(url)
 	go butterflyPanelBlurWatch(windows.Handle(hwnd))

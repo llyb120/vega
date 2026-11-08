@@ -25,7 +25,7 @@ import (
 const (
 	butterflyPanelTitle = "蝴蝶助理 · BOT 会话"
 	// Nova taskbar-bubble 是 560px 宽的气泡；vega 助理同样贴蝴蝶上方、失焦收起。
-	butterflyPanelWidth  = 560
+	butterflyPanelWidth  = 640
 	butterflyPanelHeight = 640
 	// Nova 靠窗口自带的透明边距当间隙；我们没有透明边，就留真实间隙，别贴住任务栏。
 	butterflyPanelMargin = 8

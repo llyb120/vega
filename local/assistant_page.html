@@ -64,8 +64,8 @@
     --gray: #707070;
   }
 
-  /* 透明 8px 边距留给卡片阴影，也是和任务栏之间的间隙。 */
-  .tb-shell { display: flex; flex-direction: column; height: 100vh; padding: 8px; }
+  /* 不透明窗口，不留那圈 8px 透明边——卡片直接顶满窗口。 */
+  .tb-shell { display: flex; flex-direction: column; height: 100vh; padding: 0; }
   .tb-card {
     --accent: var(--gray);
     position: relative; flex: 1; min-height: 0;
@@ -109,7 +109,7 @@
   .tb-panes { flex: 1; min-height: 0; display: flex; gap: 12px; }
   .tb-rail {
     flex: 0 0 172px; min-width: 0; display: flex; flex-direction: column;
-    padding-right: 10px; border-right: 1px solid rgb(var(--ink) / 0.08);
+    padding-right: 8px; border-right: 1px solid rgb(var(--ink) / 0.08);
   }
   .ta-section-title {
     display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px;
@@ -162,8 +162,16 @@
   .ta-avatar {
     flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 9px;
     color: #fff; background: var(--brand-fill); box-shadow: 0 2px 6px color-mix(in srgb, var(--brand) 30%, transparent);
-    font-weight: 700; font-size: 12px;
+    font-weight: 700; font-size: 12px; overflow: hidden;
   }
+  /* 牛马 SVG 头像：容器放开 overflow，让 bot-avatar 的呼吸动画与阴影溢出可见（网页同 .employee-picture.is-bot）。 */
+  .ta-avatar.bot { overflow: visible; background: none; box-shadow: none; }
+  .ta-avatar.bot .bot-avatar { display: block; width: 100%; height: 100%; overflow: visible; }
+  .ta-avatar.bot .bot-eye { fill: #fff; }
+  .ta-avatar.bot .bot-body { transform-origin: 50% 90%; }
+  .ta-avatar.bot .animate .bot-body { animation: bot-bob 1.8s ease-in-out infinite; }
+  @keyframes bot-bob { 0%, 100% { transform: translateY(0) scale(1, 1); } 45% { transform: translateY(-2px) scale(.99, 1.015); } }
+  @media (prefers-reduced-motion: reduce) { .ta-avatar.bot .animate .bot-body { animation: none; } }
   .ta-message.user .ta-avatar { display: none; }
   .ta-message-content { min-width: 0; max-width: calc(100% - 44px); }
   .ta-message.user .ta-message-content { max-width: 82%; }
@@ -310,10 +318,10 @@
   }
   .ta-menu > button:hover { background: color-mix(in srgb, var(--brand) 10%, transparent); }
 
-  /* 滚动条也照 Nova：6px，thumb 是 16% 的墨色。 */
-  *::-webkit-scrollbar { width: 6px; height: 6px; }
-  *::-webkit-scrollbar-thumb { border-radius: 3px; background: rgb(var(--ink) / 0.16); }
-  *::-webkit-scrollbar-track { background: transparent; }
+  /* 滚动条也照 Nova：6px，只限定卡片内（Nova 是 .tb-card ::-webkit-scrollbar）。 */
+  .tb-card ::-webkit-scrollbar { width: 6px; height: 6px; }
+  .tb-card ::-webkit-scrollbar-thumb { border-radius: 3px; background: rgb(var(--ink) / 0.16); }
+  .tb-card ::-webkit-scrollbar-track { background: transparent; }
 </style>
 </head>
 <body>
@@ -364,6 +372,166 @@
   </div>
 </div>
 
+<script>
+/* 牛马头像：从 web/src/bot-avatar.js 与 shared/employee-avatars.ts 原样移植（geometry/poses/projectFace/shade/
+   parseBotAvatar/defaultBotAvatar/员工预设色形表），改为非模块暴露 window.BotAvatar，面板用它渲染 SVG 头像与运行动画。 */
+(function () {
+const TAU = Math.PI * 2;
+const f = value => Math.round(value * 100) / 100;
+function smooth(points) {
+  const n = points.length, at = i => points[(i + n) % n];
+  let d = `M${f(points[0][0])} ${f(points[0][1])}`;
+  for (let i = 0; i < n; i++) {
+    const [p0, p1, p2, p3] = [at(i - 1), at(i), at(i + 1), at(i + 2)];
+    d += `C${f(p1[0] + (p2[0] - p0[0]) / 6)} ${f(p1[1] + (p2[1] - p0[1]) / 6)} ${f(p2[0] - (p3[0] - p1[0]) / 6)} ${f(p2[1] - (p3[1] - p1[1]) / 6)} ${f(p2[0])} ${f(p2[1])}`;
+  }
+  return d + "Z";
+}
+function polar(radius, cx = 50, cy = 50, samples = 96) {
+  return smooth(Array.from({ length: samples }, (_, i) => { const t = (i / samples) * TAU; const r = radius(t); return [cx + r * Math.cos(t), cy + r * Math.sin(t)]; }));
+}
+function superellipse(a, b, n, cx = 50, cy = 50, rotate = 0, samples = 72) {
+  const rot = rotate * Math.PI / 180, c = Math.cos(rot), s = Math.sin(rot);
+  return smooth(Array.from({ length: samples }, (_, i) => {
+    const t = (i / samples) * TAU, ct = Math.cos(t), st = Math.sin(t);
+    const x = a * Math.sign(ct) * Math.abs(ct) ** (2 / n), y = b * Math.sign(st) * Math.abs(st) ** (2 / n);
+    return [cx + x * c - y * s, cy + x * s + y * c];
+  }));
+}
+function rounded(points, radius) {
+  const n = points.length, toward = (a, b, distance) => { const dx = b[0] - a[0], dy = b[1] - a[1], length = Math.hypot(dx, dy); const k = Math.min(distance, length / 2) / length; return [a[0] + dx * k, a[1] + dy * k]; };
+  let d = "";
+  for (let i = 0; i < n; i++) {
+    const prev = points[(i - 1 + n) % n], point = points[i], next = points[(i + 1) % n];
+    const start = toward(point, prev, radius), end = toward(point, next, radius);
+    d += `${i ? "L" : "M"}${f(start[0])} ${f(start[1])}Q${f(point[0])} ${f(point[1])} ${f(end[0])} ${f(end[1])}`;
+  }
+  return d + "Z";
+}
+const regular = (sides, radius, cx = 50, cy = 50, start = -90) => Array.from({ length: sides }, (_, i) => { const t = (start + (360 / sides) * i) * Math.PI / 180; return [cx + radius * Math.cos(t), cy + radius * Math.sin(t)]; });
+const circle = (cx, cy, r) => `M${f(cx - r)} ${cy}A${r} ${r} 0 1 1 ${f(cx + r)} ${cy}A${r} ${r} 0 1 1 ${f(cx - r)} ${cy}Z`;
+function ghost() {
+  const points = [];
+  for (let i = 0; i <= 24; i++) { const t = Math.PI + (i / 24) * Math.PI; points.push([50 + 32 * Math.cos(t), 44 + 32 * Math.sin(t)]); }
+  for (let y = 52; y < 80; y += 7) points.push([82, y]);
+  for (let i = 0; i <= 36; i++) { const u = i / 36; points.push([82 - u * 64, 76 + 9 * Math.abs(Math.sin(3 * Math.PI * u)) ** 0.8]); }
+  for (let y = 76; y > 46; y -= 7) points.push([18, y]);
+  return smooth(points);
+}
+function heart() {
+  return smooth(Array.from({ length: 90 }, (_, i) => {
+    const t = (i / 90) * TAU;
+    return [50 + 2.55 * 16 * Math.sin(t) ** 3, 47 - 2.55 * (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t))];
+  }));
+}
+const BOT_SHAPE_GEOMETRY = {
+  round: { d: polar(t => 39 + 1.6 * Math.sin(2 * t + 0.6), 50, 51), eyes: { x: 50, y: 50 } },
+  cloud: { center: [50, 56], d: [circle(30, 60, 18), circle(50, 45, 23), circle(71, 59, 18), circle(50, 63, 20)].join(""), eyes: { x: 50, y: 55 } },
+  tile: { d: rounded(regular(4, 42, 50, 50, -31), 15), eyes: { x: 50, y: 50 } },
+  sparkle: { d: polar(t => 24 + 21 * Math.abs(Math.cos(2 * t)) ** 2.6, 50, 50, 160), eyes: { x: 50, y: 50, gap: 7.5, rx: 4.4, ry: 6.6 }, center: [50, 50], radius: 28 },
+  clover: { d: [circle(50, 32, 17), circle(68, 50, 17), circle(50, 68, 17), circle(32, 50, 17), circle(50, 50, 20)].join(""), eyes: { x: 50, y: 50 } },
+  chonk: { d: superellipse(42, 31, 2.6, 50, 55), eyes: { x: 50, y: 53, gap: 11 }, center: [50, 55] },
+  flower: { d: polar(t => 32 + 8 * Math.cos(6 * t), 50, 50, 144), eyes: { x: 50, y: 50, gap: 8.5 }, center: [50, 50], radius: 30 },
+  drop: { center: [53, 55], d: polar(t => 32 + 15 * Math.max(0, Math.cos(t + 2.36)) ** 5, 53, 54, 120), eyes: { x: 52, y: 55 } },
+  bean: { d: superellipse(41, 26, 2.3, 50, 52, -12), eyes: { x: 52, y: 51, gap: 10 } },
+  triangle: { d: rounded([[22, 14], [90, 50], [22, 86]], 16), eyes: { x: 44, y: 50 }, center: [44, 50], radius: 32 },
+  gem: { d: rounded([[17, 24], [83, 24], [85, 56], [50, 89], [15, 56]], 13), eyes: { x: 50, y: 46 }, center: [50, 50] },
+  cog: { d: polar(t => 35 + 4.5 * Math.tanh(3 * Math.cos(8 * t)) / Math.tanh(3), 50, 50, 192), eyes: { x: 50, y: 50 } },
+  hexagon: { d: rounded(regular(6, 42, 50, 50, 0), 11), eyes: { x: 50, y: 50 } },
+  apple: { center: [50, 57], d: polar(t => 36 - 8 * Math.max(0, -Math.sin(t)) ** 14, 50, 56, 120) + "M47.5 10Q50 8 52.5 10L53.5 31Q50 33 46.5 31Z" + "M53 15Q64 6 70 14Q60 22 53 15Z", eyes: { x: 50, y: 58 } },
+  star: { center: [50, 55], radius: 30, d: rounded(Array.from({ length: 10 }, (_, i) => { const t = (-90 + 36 * i) * Math.PI / 180, r = i % 2 ? 23 : 45; return [50 + r * Math.cos(t), 54 + r * Math.sin(t)]; }), 7), eyes: { x: 50, y: 55, gap: 7.5, rx: 4.4, ry: 6.6 } },
+  heart: { d: heart(), eyes: { x: 50, y: 48 } },
+  blob: { d: polar(t => 36 + 4 * Math.sin(2 * t + 1) + 3 * Math.cos(3 * t) + 2 * Math.sin(5 * t + 2), 50, 51, 120), eyes: { x: 50, y: 50 } },
+  ghost: { d: ghost(), eyes: { x: 50, y: 48 } },
+};
+const DEFAULT_EYES = { gap: 9.5, rx: 5.2, ry: 7.8 };
+const BOT_POSES = {
+  center: { yaw: 0, pitch: 0 },
+  left: { yaw: -30, pitch: 0 }, right: { yaw: 30, pitch: 0 },
+  slightLeft: { yaw: -16, pitch: 4 }, slightRight: { yaw: 16, pitch: 4 },
+  up: { yaw: 0, pitch: 24 }, down: { yaw: 0, pitch: -20 },
+  upLeft: { yaw: -26, pitch: 20 }, upRight: { yaw: 26, pitch: 18 },
+  downLeft: { yaw: -26, pitch: -16 }, downRight: { yaw: 26, pitch: -16 },
+  farLeft: { yaw: -36, pitch: 6 }, farRight: { yaw: 36, pitch: 6 },
+  lowLeft: { yaw: -14, pitch: -22 }, lowRight: { yaw: 14, pitch: -22 },
+  highLeft: { yaw: -12, pitch: 26 }, highRight: { yaw: 12, pitch: 26 },
+};
+const LOOK_POSES = Object.keys(BOT_POSES);
+const MESSAGE_POSE = "upRight";
+const RAD = Math.PI / 180, clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+function shade(hex, amount) {
+  const n = parseInt(hex.slice(1), 16), t = amount < 0 ? 0 : 255, k = Math.abs(amount);
+  const c = [n >> 16, (n >> 8) & 255, n & 255].map((v) => Math.round(v + (t - v) * k));
+  return "#" + c.map((v) => v.toString(16).padStart(2, "0")).join("");
+}
+function projectFace(geometry, yaw = 0, pitch = 0, lid = 1) {
+  const e = { ...DEFAULT_EYES, ...geometry.eyes };
+  const [cx, cy] = geometry.center || [e.x, 51], R = geometry.radius || 38, F = 120;
+  const Y = yaw * RAD, P = pitch * RAD, cY = Math.cos(Y), sY = Math.sin(Y), cP = Math.cos(P), sP = Math.sin(P);
+  const point = (lx, ly) => {
+    const a = Math.asin(clamp(lx / R, -0.95, 0.95)), b = Math.asin(clamp(ly / R, -0.95, 0.95));
+    let x = R * Math.sin(a) * Math.cos(b), y = R * Math.sin(b), z = R * Math.cos(a) * Math.cos(b);
+    [x, z] = [x * cY + z * sY, -x * sY + z * cY];
+    [y, z] = [y * cP - z * sP, y * sP + z * cP];
+    const s = F / (F - (z - R * Math.cos(a) * Math.cos(b)));
+    return { x: cx + x * s, y: cy + y * s, nx: x / R, ny: y / R, nz: z / R, s };
+  };
+  const eye = (side) => {
+    const p = point(side * e.gap + (e.x - cx), e.y - cy);
+    p.s *= 1 - 0.2 * side * sY;
+    const ry = e.ry * p.s * Math.sqrt(Math.max(0.02, 1 - p.ny * p.ny));
+    return {
+      cx: p.x, cy: p.y + ry * (1 - lid) * 0.45,
+      rx: e.rx * p.s * Math.sqrt(Math.max(0.02, 1 - p.nx * p.nx)),
+      ry: Math.max(0.35, ry * lid),
+      opacity: clamp((p.nz - 0.12) / 0.22, 0, 1),
+    };
+  };
+  const facing = point(0, 0);
+  return {
+    left: eye(-1), right: eye(1),
+    light: { x: facing.x - 9, y: facing.y - 11 },
+    highlight: { x: cx - 13 + (facing.x - cx) * 0.45, y: cy - 17 + (facing.y - cy) * 0.4 },
+    body: `translate(${(sY * 3.2).toFixed(2)} ${(-sP * 2.6).toFixed(2)}) translate(${cx} ${cy}) scale(${(1 - 0.06 * Math.abs(sY)).toFixed(3)} ${(1 - 0.05 * Math.abs(sP)).toFixed(3)}) rotate(${(yaw * 0.06).toFixed(2)}) translate(${-cx} ${-cy})`,
+    shadow: { x: cx + sY * 2, rx: 27 * (1 - 0.18 * Math.max(0, sP)), opacity: 1 - 0.3 * Math.max(0, sP) },
+  };
+}
+function nextPose(current, previous, random = Math.random) {
+  if (current !== "center" && previous !== "center" && random() < 0.08) return "center";
+  const options = LOOK_POSES.filter(id => id !== current && id !== previous);
+  return options[Math.floor(random() * options.length)];
+}
+function holdDuration(random = Math.random) {
+  return random() < 0.2 ? 1000 + random() * 900 : 380 + random() * 620;
+}
+function blinkPlan(random = Math.random) {
+  return { delay: 700 + random() * 2600, double: random() < 0.25 };
+}
+/* 预设字符串 bot:<shape>:<color> 解析与兜底（shared/employee-avatars.ts）。 */
+const BOT_AVATAR_SHAPES = Object.keys(BOT_SHAPE_GEOMETRY);
+const BOT_AVATAR_COLORS = [
+  ["black", "#1d1d21"], ["brown", "#94603d"], ["red", "#f2374a"], ["orange", "#ff6b25"],
+  ["amber", "#ffa424"], ["green", "#1cc46f"], ["teal", "#0fb4a3"], ["blue", "#3878fb"],
+  ["purple", "#9b4ff0"], ["pink", "#f2389d"], ["gray", "#7c7c84"], ["sky", "#30b4f0"],
+];
+function parseBotAvatar(value) {
+  if (typeof value !== "string") return undefined;
+  const m = /^bot:([a-z]+):([a-z]+)$/.exec(value);
+  if (!m || !BOT_AVATAR_SHAPES.includes(m[1])) return undefined;
+  const color = BOT_AVATAR_COLORS.find(c => c[0] === m[2]);
+  return color && { shape: m[1], hex: color[1] };
+}
+function defaultBotAvatar(seed = "") {
+  let hash = 2166136261;
+  for (const ch of seed) hash = Math.imul(hash ^ ch.charCodeAt(0), 16777619) >>> 0;
+  const shape = BOT_AVATAR_SHAPES[hash % BOT_AVATAR_SHAPES.length];
+  const color = BOT_AVATAR_COLORS[(hash >>> 8) % BOT_AVATAR_COLORS.length];
+  return { shape, hex: color[1] };
+}
+window.BotAvatar = { BOT_POSES, BOT_SHAPE_GEOMETRY, LOOK_POSES, MESSAGE_POSE, projectFace, shade, nextPose, holdDuration, blinkPlan, parseBotAvatar, defaultBotAvatar };
+})();
+</script>
+
 <script type="module">
 import { marked } from "./marked.js";
 
@@ -388,7 +556,7 @@ const el = {
   close: document.getElementById("close")
 };
 
-const state = { threads: { employees: [], groups: [] }, current: "", title: "", messages: [], lastSeq: 0, running: false, busy: false, stick: true };
+const state = { threads: { employees: [], groups: [] }, current: "", title: "", avatar: "", authors: {}, messages: [], lastSeq: 0, running: false, busy: false, stick: true };
 
 // 跟随任务栏明暗（WebView2 跟随应用主题）。
 const scheme = matchMedia("(prefers-color-scheme: dark)");
@@ -398,6 +566,108 @@ scheme.addEventListener("change", applyScheme);
 
 const esc = (text) => String(text ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const initials = (name) => (String(name || "").trim().slice(0, 1) || "·");
+
+// ── 牛马头像（bot-avatar）────────────────────────────────
+// state.avatar = 当前线程牛马的预设字符串；state.authors = 群聊各成员 kind:id → {avatar}。
+function botFor(preset, seed) {
+  const bot = BotAvatar.parseBotAvatar(preset) || BotAvatar.defaultBotAvatar(seed || "");
+  return bot;
+}
+/** 一个头像的 SVG 标记。employee 头像用预设（bot 形/色），用户头像仍是字母块。
+    animate=true 的头像渲染后由 driveAvatars() 挂上转头/眨眼/呼吸动画。 */
+function avatarHTML(preset, seed, animate) {
+  const bot = botFor(preset, seed);
+  const geo = BotAvatar.BOT_SHAPE_GEOMETRY[bot.shape] || BotAvatar.BOT_SHAPE_GEOMETRY.round;
+  const uid = "b" + Math.random().toString(36).slice(2, 8);
+  const pose = BotAvatar.BOT_POSES[animate ? "center" : BotAvatar.MESSAGE_POSE] || BotAvatar.BOT_POSES.center;
+  const face = BotAvatar.projectFace(geo, pose.yaw, pose.pitch, 1);
+  const svg = `<svg class="bot-avatar" data-bot="1" ${animate ? 'data-animate="1" ' : ""}data-shape="${esc(bot.shape)}" viewBox="0 0 100 100" role="img" aria-hidden="true">
+    <defs>
+      <radialGradient id="${uid}b" gradientUnits="userSpaceOnUse" cx="${face.light.x}" cy="${face.light.y}" r="62" fx="${face.light.x}" fy="${face.light.y}">
+        <stop offset="0" stop-color="${BotAvatar.shade(bot.hex, 0.32)}"/><stop offset="0.42" stop-color="${bot.hex}"/><stop offset="0.8" stop-color="${BotAvatar.shade(bot.hex, -0.22)}"/><stop offset="1" stop-color="${BotAvatar.shade(bot.hex, -0.42)}"/>
+      </radialGradient>
+      <radialGradient id="${uid}h"><stop offset="0" stop-color="#fff" stop-opacity=".55"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+      <radialGradient id="${uid}s"><stop offset="0" stop-color="#000" stop-opacity=".32"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+      <clipPath id="${uid}c"><path d="${geo.d}"/></clipPath>
+    </defs>
+    <ellipse class="bot-shadow" cx="${face.shadow.x}" cy="93.5" rx="${face.shadow.rx}" ry="4.5" fill="url(#${uid}s)" opacity="${face.shadow.opacity}"/>
+    <g class="bot-body"><g transform="translate(50 50) scale(.9) translate(-50 -50)"><g data-face="1" transform="${face.body}">
+      <path d="${geo.d}" fill="url(#${uid}b)"/>
+      <g clip-path="url(#${uid}c)"><ellipse cx="${face.highlight.x}" cy="${face.highlight.y}" rx="17" ry="12" fill="url(#${uid}h)" transform-origin="50 50"/></g>
+      <ellipse class="bot-eye" data-eye="l" cx="${face.left.cx}" cy="${face.left.cy}" rx="${face.left.rx}" ry="${face.left.ry}" opacity="${face.left.opacity}"/>
+      <ellipse class="bot-eye" data-eye="r" cx="${face.right.cx}" cy="${face.right.cy}" rx="${face.right.rx}" ry="${face.right.ry}" opacity="${face.right.opacity}"/>
+    </g></g></g>
+  </svg>`;
+  return `<span class="ta-avatar bot">${svg}</span>`;
+}
+
+/* 让 data-animate 的 SVG 头像动起来：照 BotAvatar.vue 的弹簧转头 + 眨眼 + 呼吸，定时轮换。
+   每次 renderStream 之后调一次：动画元素重建会丢定时器，所以统一在这里重挂。 */
+const avatarAnim = { timer: 0, blink: 0, raf: 0, nodes: [] };
+function driveAvatars() {
+  clearTimeout(avatarAnim.timer); clearTimeout(avatarAnim.blink);
+  if (avatarAnim.raf) cancelAnimationFrame(avatarAnim.raf);
+  avatarAnim.raf = 0; avatarAnim.nodes = [];
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  for (const svg of el.stream.querySelectorAll("svg.bot-avatar[data-animate]")) {
+    const node = { svg, head: { ...BotAvatar.BOT_POSES.center, lid: 1 }, target: { ...BotAvatar.BOT_POSES.center }, vel: { yaw: 0, pitch: 0 }, anticipate: 0, last: 0, look: "center", prev: undefined, blinkAt: [], playing: !reduced };
+    node.svg.classList.add("animate");
+    avatarAnim.nodes.push(node);
+  }
+  if (!avatarAnim.nodes.length) return;
+  const paint = (n) => {
+    const face = BotAvatar.projectFace(BotAvatar.BOT_SHAPE_GEOMETRY[n.svg.dataset.shape] || BotAvatar.BOT_SHAPE_GEOMETRY.round, n.head.yaw, n.head.pitch, n.head.lid);
+    const g = n.svg.querySelector("[data-face]"), l = n.svg.querySelector('[data-eye="l"]'), r = n.svg.querySelector('[data-eye="r"]');
+    if (g) g.setAttribute("transform", face.body);
+    for (const [el2, e] of [[l, face.left], [r, face.right]]) if (el2) { el2.setAttribute("cx", e.cx); el2.setAttribute("cy", e.cy); el2.setAttribute("rx", e.rx); el2.setAttribute("ry", e.ry); el2.setAttribute("opacity", e.opacity); }
+  };
+  const lidAt = (n, now) => {
+    while (n.blinkAt.length && now - n.blinkAt[0] > 205) n.blinkAt.shift();
+    if (!n.blinkAt.length || now < n.blinkAt[0]) return 1;
+    const t = now - n.blinkAt[0];
+    return t < 70 ? 1 - (t / 70) ** 2 * 0.95 : t < 95 ? 0.05 : 0.05 + 0.95 * (1 - (1 - (t - 95) / 110) ** 2);
+  };
+  const tick = (now) => {
+    avatarAnim.raf = 0;
+    let live = false;
+    for (const n of avatarAnim.nodes) {
+      if (!n.svg.isConnected) continue;
+      live = true;
+      const dt = Math.min(0.05, (now - (n.last || now)) / 1000); n.last = now;
+      const goal = n.anticipate > 0 ? { yaw: n.head.yaw - (n.target.yaw - n.head.yaw) * 0.12, pitch: n.head.pitch - (n.target.pitch - n.head.pitch) * 0.12 } : n.target;
+      n.anticipate -= dt * 1000;
+      for (const key of ["yaw", "pitch"]) { const accel = 150 * (goal[key] - n.head[key]) - 15 * n.vel[key]; n.vel[key] += accel * dt; n.head[key] += n.vel[key] * dt; }
+      n.head.lid = lidAt(n, now);
+      paint(n);
+    }
+    if (live) avatarAnim.raf = requestAnimationFrame(tick);
+  };
+  const startRaf = () => { if (!avatarAnim.raf) avatarAnim.raf = requestAnimationFrame(tick); };
+  const glance = () => {
+    if (!avatarAnim.nodes.length) return;
+    for (const n of avatarAnim.nodes) {
+      if (!n.playing) continue;
+      const next = BotAvatar.nextPose(n.look, n.prev); n.prev = n.look; n.look = next;
+      const base = BotAvatar.BOT_POSES[next] || BotAvatar.BOT_POSES.center, j = 0.35;
+      n.target = { yaw: base.yaw * (1 + (Math.random() - 0.5) * j) + (Math.random() - 0.5) * j * 8, pitch: base.pitch * (1 + (Math.random() - 0.5) * j) + (Math.random() - 0.5) * j * 6 };
+      if (Math.random() < 0.7) n.anticipate = 90;
+    }
+    startRaf();
+    avatarAnim.timer = setTimeout(glance, BotAvatar.holdDuration());
+  };
+  const blink = () => {
+    if (!avatarAnim.nodes.length) return;
+    const { delay, double } = BotAvatar.blinkPlan();
+    avatarAnim.blink = setTimeout(() => {
+      const now = performance.now();
+      for (const n of avatarAnim.nodes) { n.blinkAt.push(now); if (double) n.blinkAt.push(now + 260); }
+      startRaf(); blink();
+    }, delay);
+  };
+  avatarAnim.timer = setTimeout(glance, 200 + Math.random() * 300);
+  blink();
+  startRaf();
+}
 
 /** 交付气泡里的任务行：delivery=true 的 assistant 消息带 tasks:[{id,title,status}]。 */
 const askTask = (message) => (message?.delivery && Array.isArray(message.tasks) && message.tasks[0]) || undefined;
@@ -495,9 +765,9 @@ function threadOf(thread) {
 }
 
 // ── 会话 ────────────────────────────────────────────────
-const clockOf = (message) => (message?.at ? new Date(message.at).toTimeString().slice(0, 5) : "");
+// Nova 的 ta-message-meta 只放会话状态/打开会话按钮，没有消息时间戳。
 
-function messageHTML(message, prev) {
+function messageHTML(message) {
   if (message.notice) return `<div class="ta-notice"><span>${esc(message.text || "")}</span></div>`;
   if (message.role !== "user" && message.role !== "assistant") return "";
   const text = message.displayText || message.text || "";
@@ -509,33 +779,46 @@ function messageHTML(message, prev) {
   if (message.images?.length) chips.push(`${message.images.length} 张图片`);
   if (message.files?.length) chips.push(`${message.files.length} 个文件`);
   const chipHTML = !ask && chips.length ? `<div class="ta-chips">${chips.map((c) => `<span class="ta-chip">${esc(c)}</span>`).join("")}</div>` : "";
-  const avatars = message.role === "user"
-    ? (other ? `<span class="ta-avatar">${esc(initials(message.author.name))}</span>` : "")
-    : `<span class="ta-avatar">${esc(initials(state.title))}</span>`;
+  // 牛马头像用预设 SVG（员工线程 = 当前牛马，群聊 = 作者本人），正在工作的那个给转头动画；用户作者仍是字母块。
+  const isEmployeeThread = state.current.startsWith("employee:");
+  let avatars;
+  if (message.role === "user") {
+    avatars = other ? `<span class="ta-avatar">${esc(initials(message.author.name))}</span>` : "";
+  } else if (isEmployeeThread) {
+    // 员工线程里消息头像都静止在 upRight；只有正在工作的那一行动画（由 typing 行驱动）。
+    avatars = avatarHTML(state.avatar, state.current.slice(9), false);
+  } else {
+    const key = message.author ? message.author.kind + ":" + message.author.id : "";
+    const preset = state.authors[key]?.avatar;
+    // 群聊里只给最近发言的那个牛马上运行动画（网页是“正在回复的那个”动）。
+    const latestSpeaker = [...state.messages].reverse().find((m) => m.role === "assistant" && m.author?.kind === "employee");
+    const animate = state.running && latestSpeaker === message;
+    avatars = message.author?.kind === "employee" && preset
+      ? avatarHTML(preset, message.author.id, animate)
+      : `<span class="ta-avatar">${esc(initials(message.author?.name || state.title))}</span>`;
+  }
   const author = other ? `<div class="ta-author">${esc(message.author.name)}</div>` : "";
   const classes = ["ta-bubble"];
   if (ask) classes.push("ask");
   else if (message.role === "assistant") classes.push(body ? "md" : "");
   if (message.error) classes.push("error");
   if (message.progress) classes.push("progress");
-  const clock = clockOf(message);
-  // 连着几条同一分钟的回复不重复写时间。
-  const showClock = clock && clock !== clockOf(prev);
-  const meta = showClock || message.error ? `<div class="ta-message-meta">${showClock ? esc(clock) : ""}</div>` : "";
   return `<div class="ta-message ${message.role === "user" ? "user" : "bot"}">${avatars}
-    <div class="ta-message-content">${author}<div class="${classes.join(" ")}">${body}${chipHTML}</div>${meta}</div>
+    <div class="ta-message-content">${author}<div class="${classes.join(" ")}">${body}${chipHTML}</div></div>
   </div>`;
 }
 
 function renderStream(scroll = false) {
   const thread = state.current;
   if (!thread) return;
-  let html = state.messages.map((message, index) => messageHTML(message, state.messages[index - 1])).join("");
+  let html = state.messages.map((message) => messageHTML(message)).join("");
   if (state.running) {
-    html += `<div class="ta-message bot"><span class="ta-avatar">${esc(initials(state.title))}</span>
+    const typingAvatar = state.current.startsWith("employee:") ? avatarHTML(state.avatar, state.current.slice(9), true) : `<span class="ta-avatar">${esc(initials(state.title))}</span>`;
+    html += `<div class="ta-message bot">${typingAvatar}
       <div class="ta-message-content"><div class="ta-bubble typing">正在工作<span class="ta-dots"><i></i><i></i><i></i></span></div></div></div>`;
   }
   el.stream.innerHTML = html || `<div class="ta-welcome">还没有消息<small>说一句话就能开工</small></div>`;
+  driveAvatars();
   if (scroll || state.stick) scrollToEnd();
   el.latest.hidden = state.stick;
 }
@@ -591,6 +874,8 @@ async function open(thread) {
   state.lastSeq = 0;
   state.running = false;
   state.stick = true;
+  state.avatar = "";
+  state.authors = {};
   state.title = threadOf(thread)?.name || "";
   try { localStorage.setItem("vega.assistant.thread", thread); } catch {}
   updateHead();
@@ -603,6 +888,8 @@ async function open(thread) {
     state.lastSeq = data.lastSeq || (state.messages.at(-1)?.seq ?? 0);
     state.running = !!data.running;
     state.title = data.title || state.title;
+    if (data.avatar !== undefined) state.avatar = data.avatar;
+    if (data.authors !== undefined) state.authors = data.authors;
     updateHead();
     renderStream(true);
     api("read", { thread }).then(() => {
@@ -623,6 +910,8 @@ async function pollMessages() {
     if (state.current !== thread) return;
     const fresh = (data.messages || []).filter((m) => m.seq > state.lastSeq);
     const running = !!data.running;
+    if (data.avatar !== undefined) state.avatar = data.avatar;
+    if (data.authors !== undefined) state.authors = data.authors;
     if (fresh.length) {
       state.messages.push(...fresh);
       state.lastSeq = data.lastSeq || fresh.at(-1).seq;
