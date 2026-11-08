@@ -94,12 +94,11 @@ func main() {
 			fmt.Println(butterflyPanelOpen(url))
 			return
 		case "--butterfly-panel":
-			// 由托盘/气泡拉起的面板子进程：go run . --butterfly-panel <bot-chat-url>
+			// 由客户端拉起的面板子进程：go run . --butterfly-panel <assistant-url>
 			url := "http://127.0.0.1:8080/"
 			if len(os.Args) > 2 {
 				url = os.Args[2]
 			}
-			butterflySetOpen(func() { openBrowser(url) })
 			if !butterflyPanelRun(url) {
 				fmt.Fprintln(os.Stderr, "vega-local: WebView2 不可用，无法打开蝴蝶面板")
 			}
@@ -131,6 +130,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent", a.serveWS)
 	mux.HandleFunc("/config/"+a.configToken, a.configure)
+	a.assistantMount(mux) // 蝴蝶面板的本地页面与数据接口
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(lis) }()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -147,6 +147,11 @@ func main() {
 		}()
 	}
 	configure := func() { openBrowser("http://" + localAddress + "/config/" + a.configToken) }
+	// 面板在启动时就预热好（窗口停屏幕外、页面先加载），点蝴蝶秒开，没有初始化白框。
+	go func() {
+		time.Sleep(2 * time.Second)
+		butterflyPanelWarm(a.assistantURL())
+	}()
 	butterflySetOpen(func() {
 		url := a.assistantURL()
 		if url == "" {

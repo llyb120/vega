@@ -81,6 +81,17 @@ export default defineEventHandler(async (event) => {
     try { return await app().clientSockets.upload(request, body); }
     catch (e: any) { throw createError({ statusCode: 409, statusMessage: e.message }); }
   }
+  if (path[0] === "local-agent" && path[1] === "chat" && method === "POST") {
+    // 蝴蝶面板（原生客户端）：设备凭据自己验，不用网站 cookie，只碰它自己的牛马/群聊。
+    setHeader(event, "Cache-Control", "no-store");
+    const request = { headers: new Headers(getRequestHeaders(event) as Record<string, string>), url: getRequestURL(event).href } as unknown as Request;
+    let grant: { userId: string };
+    try { grant = await app().clientSockets.authorize(request); }
+    catch { throw createError({ statusCode: 403, statusMessage: "Client credential invalid or revoked" }); }
+    const body = await bodyJSON(event, 1 << 20);
+    try { return await clientChat(path[2], body, grant.userId); }
+    catch (e: any) { throw createError({ statusCode: e.statusCode || 400, statusMessage: String(e.message || e).slice(0, 500) }); }
+  }
   const who = principal(event),
     user = who.user;
   let a: Obj = {};
@@ -638,6 +649,73 @@ export default defineEventHandler(async (event) => {
     });
   }
 });
+
+/**
+ * 蝴蝶面板（原生客户端凭据）的聊天接口：thread = "employee:<id>" | "group:<id>"。
+ * 只做三件事：列会话、读历史（after/limit）、发一条用户消息。
+ */
+async function clientChat(op: string, a: Obj, userId: string) {
+  const { engine, store } = app(), user = await app().auth.user(userId);
+  assert(user, "User not found");
+  if (op === "threads") {
+    const employees = await Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
+      const s = await employee.state(), last = s.chatSession ? await store.lastMessage(s.chatSession) : undefined;
+      return {
+        thread: "employee:" + s.id, kind: "employee", id: s.id, name: s.name, mine: s.ownerId === user.id,
+        unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0,
+        running: !!s.chatSession && engine.active.has(s.chatSession),
+        attention: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length,
+        lastText: last ? String(last.text || "").slice(0, 60) : "", lastAt: last?.at || 0,
+      };
+    }));
+    const groups = (await engine.groups.list(user)).map((g) => ({
+      thread: "group:" + g.id, kind: "group", id: g.id, name: g.name,
+      users: g.users?.length || 0, employees: g.employees?.length || 0,
+      unread: g.unread, running: Array.isArray(g.running) && g.running.length > 0,
+      lastText: g.lastText || "", lastAt: g.lastAt || 0,
+    }));
+    return { employees, groups };
+  }
+  const thread = String(a.thread || ""), colon = thread.indexOf(":"), kind = thread.slice(0, colon), id = thread.slice(colon + 1);
+  assert(colon > 0 && id, "Invalid thread");
+  if (op === "messages") {
+    const query = new URLSearchParams();
+    if (typeof a.after === "number") query.set("after", String(Math.max(0, Math.floor(a.after))));
+    else query.set("limit", String(Math.min(200, Math.max(1, Number(a.limit) || 100))));
+    if (kind === "employee") {
+      const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
+      assert(employee && await employee.accessible(user), "Employee not found");
+      const session = await employee.chat(user.id);
+      return { thread, title: (await employee.state()).name, running: engine.active.has(session.id), ...await chatHistory(store, session.id, query) };
+    }
+    const group = await engine.groups.mine(user, id);
+    return { thread, title: group.name, running: Object.values(group.memberSessions || {}).some((s) => engine.active.has(String(s))), ...await chatHistory(store, group.session, query) };
+  }
+  if (op === "read") {
+    if (kind === "employee") {
+      const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
+      assert(employee && await employee.accessible(user), "Employee not found");
+      const session = await employee.chat(user.id);
+      return { seq: await store.markRead(user.id, session.id) };
+    }
+    const group = await engine.groups.mine(user, id);
+    return { seq: await store.markRead(user.id, group.session) };
+  }
+  if (op === "send") {
+    const text = String(a.text || "").trim();
+    assert(text && text.length <= 2 << 20, "Message required");
+    if (kind === "employee") {
+      const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
+      assert(employee && await employee.accessible(user), "Employee not found");
+      const session = await employee.chat(user.id);
+      await engine.submitChat(session.id, { role: "user", text, actorId: user.id });
+      return { ok: true };
+    }
+    await engine.groups.send(user, id, { text });
+    return { ok: true };
+  }
+  throw createError({ statusCode: 404, statusMessage: "Chat route not found" });
+}
 
 /** 群聊 (groups.ts). Reading is open to every user in the group; changing anything needs a non-viewer account. */
 async function groupRoute(path: string[], method: string, a: Obj, user: { id: string; role: string }, query: URLSearchParams) {

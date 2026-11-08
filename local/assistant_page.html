@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vega 助理</title>
+<style>
+  :root {
+    --bg: #f1f2f5;
+    --card: #ffffff;
+    --rail: #fafafc;
+    --line: #ebecf1;
+    --ink: #1b1c20;
+    --muted: #8b8f9c;
+    --brand: #4b57d6;
+    --brand-soft: #eef0fe;
+    --ok: #2f9e6b;
+    --warn: #c2410c;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.6 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    user-select: none;
+  }
+  .app {
+    position: absolute; inset: 8px;
+    display: flex;
+    background: var(--card);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 12px 40px rgba(16, 18, 40, .16), 0 2px 8px rgba(16, 18, 40, .06);
+  }
+
+  /* ── 左栏：牛马 / 群聊 ─────────────────────────────── */
+  .rail {
+    width: 156px; flex: 0 0 156px;
+    background: var(--rail);
+    border-right: 1px solid var(--line);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 8px;
+    padding: 14px 14px 10px;
+    font-weight: 700; font-size: 15px;
+  }
+  .brand svg { width: 18px; height: 18px; color: var(--brand); }
+  .rail-scroll { flex: 1; overflow-y: auto; padding: 0 8px 10px; }
+  .rail-scroll::-webkit-scrollbar { width: 6px; }
+  .rail-scroll::-webkit-scrollbar-thumb { background: #dcdde4; border-radius: 3px; }
+  .group-title {
+    padding: 12px 8px 6px;
+    font-size: 11px; letter-spacing: .08em; color: var(--muted);
+  }
+  .item {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%; padding: 7px 8px; margin-bottom: 2px;
+    border: 0; border-radius: 11px; background: transparent;
+    font: inherit; color: inherit; text-align: left; cursor: pointer;
+  }
+  .item:hover { background: #f2f3f8; }
+  .item.on { background: var(--card); box-shadow: 0 1px 3px rgba(20, 22, 50, .12); }
+  .face {
+    flex: 0 0 30px; width: 30px; height: 30px; border-radius: 10px;
+    display: grid; place-items: center;
+    background: var(--brand-soft); color: var(--brand);
+    font-size: 12px; font-weight: 700;
+    position: relative; overflow: hidden;
+  }
+  .face img { width: 100%; height: 100%; object-fit: cover; }
+  .item.on .face { background: var(--brand); color: #fff; }
+  .item .text { flex: 1; min-width: 0; }
+  .item .name {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .item .hint {
+    display: block; font-size: 11px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: 0 0 6px; }
+  .dot.warn { background: var(--warn); }
+  .badge {
+    flex: 0 0 auto; min-width: 17px; height: 17px; padding: 0 5px;
+    border-radius: 9px; background: var(--brand); color: #fff;
+    font-size: 10px; font-weight: 700; line-height: 17px; text-align: center;
+  }
+
+  /* ── 右侧：会话 ───────────────────────────────────── */
+  .chat { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--card); }
+  .head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+  }
+  .head svg { width: 18px; height: 18px; color: var(--brand); }
+  .head .who { font-weight: 700; font-size: 15px; }
+  .head .sub { font-size: 11px; color: var(--muted); }
+  .head .spacer { flex: 1; }
+  .icon-btn {
+    width: 26px; height: 26px; border: 0; border-radius: 8px;
+    background: transparent; color: var(--muted); cursor: pointer;
+    font-size: 16px; line-height: 1;
+  }
+  .icon-btn:hover { background: #f2f3f8; color: var(--ink); }
+
+  .stream { flex: 1; overflow-y: auto; padding: 14px 14px 6px; }
+  .stream::-webkit-scrollbar { width: 8px; }
+  .stream::-webkit-scrollbar-thumb { background: #dcdde4; border-radius: 4px; }
+
+  .row { display: flex; gap: 8px; margin-bottom: 12px; align-items: flex-start; }
+  .row.user { flex-direction: row-reverse; }
+  .avatar {
+    flex: 0 0 26px; width: 26px; height: 26px; border-radius: 50%;
+    display: grid; place-items: center; margin-top: 2px;
+    background: var(--brand); color: #fff; font-size: 11px; font-weight: 700;
+  }
+  .row.user .avatar { background: #eceefb; color: var(--brand); }
+  .body { max-width: 78%; min-width: 0; }
+  .author { font-size: 11px; color: var(--muted); margin: 0 2px 3px; }
+  .bubble {
+    padding: 9px 12px; border-radius: 14px;
+    background: var(--card); border: 1px solid var(--line);
+    box-shadow: 0 1px 2px rgba(20, 22, 50, .04);
+    white-space: pre-wrap; word-break: break-word; user-select: text;
+  }
+  .row.user .bubble {
+    background: var(--brand); color: #fff; border-color: transparent;
+    border-bottom-right-radius: 5px;
+  }
+  .row.bot .bubble { border-bottom-left-radius: 5px; }
+  .bubble.error { border-color: #f3c9b8; background: #fff7f3; color: var(--warn); }
+  .bubble.progress { background: #f6f7fb; color: #4a4d59; }
+  .bubble .chips { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .chip {
+    font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    background: rgba(75, 87, 214, .1); color: var(--brand);
+  }
+  .row.user .chip { background: rgba(255, 255, 255, .22); color: #fff; }
+
+  .divider {
+    margin: 6px 0 12px; text-align: center;
+    font-size: 11px; color: var(--muted);
+  }
+  .divider span { background: #f4f5f9; padding: 2px 10px; border-radius: 999px; }
+
+  .typing { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin: 2px 0 10px 34px; }
+  .typing i {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--brand);
+    display: inline-block; animation: blink 1.2s infinite ease-in-out;
+  }
+  .typing i:nth-child(2) { animation-delay: .2s; }
+  .typing i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+
+  .empty { height: 100%; display: grid; place-items: center; text-align: center; color: var(--muted); font-size: 13px; }
+  .empty b { display: block; color: var(--ink); font-size: 14px; margin-bottom: 4px; }
+
+  .composer {
+    display: flex; align-items: flex-end; gap: 8px;
+    margin: 8px 12px 12px; padding: 6px 6px 6px 10px;
+    border: 1px solid #e3e4ec; border-radius: 16px; background: #fff;
+    box-shadow: 0 2px 10px rgba(20, 22, 50, .05);
+  }
+  .composer textarea {
+    flex: 1; border: 0; outline: 0; resize: none;
+    font: inherit; color: inherit; background: transparent;
+    max-height: 96px; padding: 6px 0; user-select: text;
+  }
+  .composer textarea::placeholder { color: #a6a9b6; }
+  .send {
+    flex: 0 0 30px; width: 30px; height: 30px; border: 0; border-radius: 10px;
+    background: var(--brand); color: #fff; font-size: 15px; cursor: pointer;
+  }
+  .send:disabled { background: #c9cdf3; cursor: default; }
+
+  .toast {
+    position: absolute; left: 50%; bottom: 74px; transform: translateX(-50%);
+    max-width: 90%; padding: 7px 12px; border-radius: 10px;
+    background: #2b2c33; color: #fff; font-size: 12px;
+    opacity: 0; pointer-events: none; transition: opacity .18s;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3c1.6 2.3 2.6 4.6 3 6.9 1.6-1 3.2-1.5 4.7-1.6-1 2.6-2.6 4.7-4.8 6.2l1 3.8c.1.6-.4 1.2-1 1.2-.4 0-.8-.2-.9-.6L12 14.6l-2 4.3c-.1.4-.5.6-.9.6-.6 0-1.1-.6-1-1.2l1-3.8C6.9 13 5.3 10.9 4.3 8.3c1.5.1 3.1.6 4.7 1.6.4-2.3 1.4-4.6 3-6.9z"/></svg>
+      Vega 助理
+    </div>
+    <div class="rail-scroll" id="rail"></div>
+  </aside>
+
+  <main class="chat">
+    <header class="head">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3c1.6 2.3 2.6 4.6 3 6.9 1.6-1 3.2-1.5 4.7-1.6-1 2.6-2.6 4.7-4.8 6.2l1 3.8c.1.6-.4 1.2-1 1.2-.4 0-.8-.2-.9-.6L12 14.6l-2 4.3c-.1.4-.5.6-.9.6-.6 0-1.1-.6-1-1.2l1-3.8C6.9 13 5.3 10.9 4.3 8.3c1.5.1 3.1.6 4.7 1.6.4-2.3 1.4-4.6 3-6.9z"/></svg>
+      <div>
+        <div class="who" id="who">Vega 助理</div>
+        <div class="sub" id="sub">选一个牛马或群聊开始</div>
+      </div>
+      <span class="spacer"></span>
+      <button class="icon-btn" id="close" title="关闭">×</button>
+    </header>
+    <div class="stream" id="stream"><div class="empty"><div><b>还没有会话</b>左栏选一个牛马或群聊</div></div></div>
+    <div class="composer">
+      <textarea id="input" rows="1" placeholder="告诉牛马要做什么…"></textarea>
+      <button class="send" id="send" title="发送" disabled>↑</button>
+    </div>
+    <div class="toast" id="toast"></div>
+  </main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var API = location.pathname.replace(/\/?$/, "/") + "api/";
+  var state = { threads: null, current: "", messages: [], lastSeq: 0, running: false, timer: 0, busy: false };
+  var el = {
+    rail: document.getElementById("rail"),
+    stream: document.getElementById("stream"),
+    who: document.getElementById("who"),
+    sub: document.getElementById("sub"),
+    input: document.getElementById("input"),
+    send: document.getElementById("send"),
+    close: document.getElementById("close"),
+    toast: document.getElementById("toast")
+  };
+
+  function esc(text) {
+    return String(text == null ? "" : text).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  function api(op, body) {
+    return fetch(API + op, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) throw new Error(data.statusMessage || data.error || ("HTTP " + response.status));
+        return data;
+      });
+    });
+  }
+  function toast(message) {
+    el.toast.textContent = message;
+    el.toast.classList.add("show");
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(function () { el.toast.classList.remove("show"); }, 2600);
+  }
+  function initials(name) {
+    var text = String(name || "").trim();
+    return text ? text.slice(0, 1) : "·";
+  }
+  function clock(at) {
+    if (!at) return "";
+    var date = new Date(at);
+    if (isNaN(date)) return "";
+    return ("0" + date.getHours()).slice(-2) + ":" + ("0" + date.getMinutes()).slice(-2);
+  }
+
+  // ── 左栏 ────────────────────────────────────────────
+  function renderRail() {
+    var data = state.threads || { employees: [], groups: [] };
+    var html = "";
+    function card(item) {
+      var on = item.thread === state.current ? " on" : "";
+      var face = '<span class="face">' + esc(initials(item.name)) + '</span>';
+      var flags = item.running ? '<span class="dot" title="正在工作"></span>' : (item.attention ? '<span class="dot warn" title="等你处理"></span>' : "");
+      var badge = item.unread ? '<span class="badge">' + (item.unread > 99 ? "99+" : item.unread) + "</span>" : "";
+      var hint = item.kind === "group"
+        ? (item.users + " 位用户 · " + item.employees + " 个牛马")
+        : (item.lastText || "还没有对话");
+      return '<button class="item' + on + '" data-thread="' + esc(item.thread) + '">' + face +
+        '<span class="text"><span class="name">' + esc(item.name) + flags + '</span>' +
+        '<span class="hint">' + esc(hint) + '</span></span>' + badge + "</button>";
+    }
+    if (data.employees.length) {
+      html += '<div class="group-title">牛马</div>' + data.employees.map(card).join("");
+    }
+    if (data.groups.length) {
+      html += '<div class="group-title">群聊</div>' + data.groups.map(card).join("");
+    }
+    if (!html) html = '<div class="group-title">还没有牛马或群聊</div>';
+    el.rail.innerHTML = html;
+    Array.prototype.forEach.call(el.rail.querySelectorAll(".item"), function (node) {
+      node.addEventListener("click", function () { open(node.getAttribute("data-thread")); });
+    });
+  }
+
+  // ── 聊天区 ──────────────────────────────────────────
+  function messageHTML(message, mine, botName) {
+    if (message.notice) {
+      return '<div class="divider"><span>' + esc(message.text || "") + "</span></div>";
+    }
+    if (message.role === "tool" || message.role === "call" || message.thinking) return "";
+    var text = message.displayText || message.text || "";
+    var author = message.author && message.author.name;
+    var fromMe = message.role === "user" && (!author || message.author.kind === "user" && message.author.me);
+    var user = message.role === "user" && !author;
+    var right = user || fromMe;
+    if (!text && !message.images && !message.files) return "";
+    var chips = "";
+    var extras = [];
+    if (message.images && message.images.length) extras.push({ kind: "images", label: message.images.length + " 张图片" });
+    if (message.files && message.files.length) extras.push({ kind: "files", label: message.files.length + " 个文件" });
+    if (extras.length) {
+      chips = '<div class="chips">' + extras.map(function (item) {
+        return '<span class="chip">' + esc(item.label) + "</span>";
+      }).join("") + "</div>";
+    }
+    var cls = "row " + (right ? "user" : "bot");
+    var bubble = "bubble" + (message.error ? " error" : "") + (message.progress ? " progress" : "");
+    var head = "";
+    if (!right) {
+      head = '<span class="avatar">' + esc(initials(botName)) + "</span>";
+    }
+    var name = (author && !fromMe) ? '<div class="author">' + esc(author.name) + "</div>" : "";
+    return '<div class="' + cls + '">' + head + '<div class="body">' + name +
+      '<div class="' + bubble + '">' + esc(text) + chips + "</div></div></div>";
+  }
+
+  function renderStream() {
+    var node = el.stream;
+    if (!state.current) {
+      node.innerHTML = '<div class="empty"><div><b>还没有选会话</b>左栏选一个牛马或群聊</div></div>';
+      return;
+    }
+    var html = state.messages.map(function (message) {
+      return messageHTML(message, false, state.title || "牛马");
+    }).join("");
+    if (state.running) {
+      html += '<div class="typing"><i></i><i></i><i></i><span>正在工作…</span></div>';
+    }
+    if (!html) html = '<div class="empty"><div><b>还没有消息</b>说一句话就能开工</div></div>';
+    node.innerHTML = html;
+    node.scrollTop = node.scrollHeight;
+  }
+
+  function updateHead() {
+    var data = state.threads || { employees: [], groups: [] };
+    var all = (data.employees || []).concat(data.groups || []);
+    var found = null;
+    for (var i = 0; i < all.length; i++) if (all[i].thread === state.current) found = all[i];
+    el.who.textContent = found ? found.name : "Vega 助理";
+    if (found) {
+      el.sub.textContent = found.kind === "group"
+        ? found.users + " 位用户 · " + found.employees + " 个牛马"
+        : (found.running ? "正在工作…" : "牛马");
+    } else {
+      el.sub.textContent = "选一个牛马或群聊开始";
+    }
+    state.title = found ? found.name : "牛马";
+  }
+
+  function open(thread) {
+    if (!thread) return;
+    state.current = thread;
+    state.messages = [];
+    state.lastSeq = 0;
+    state.running = false;
+    try { localStorage.setItem("vega.assistant.thread", thread); } catch (e) {}
+    updateHead();
+    renderRail();
+    renderStream();
+    api("messages", { thread: thread, limit: 100 }).then(function (data) {
+      if (state.current !== thread) return;
+      state.messages = data.messages || [];
+      state.lastSeq = data.lastSeq || (state.messages.length ? state.messages[state.messages.length - 1].seq : 0);
+      state.running = !!data.running;
+      state.title = data.title || state.title;
+      updateHead();
+      renderStream();
+      schedule();
+      // 打开即已读：不然后面那颗未读数永远不消失。
+      api("read", { thread: thread }).then(function () {
+        var data = state.threads || { employees: [], groups: [] };
+        (data.employees || []).concat(data.groups || []).forEach(function (item) {
+          if (item.thread === thread) item.unread = 0;
+        });
+        renderRail();
+      }).catch(function () {});
+    }).catch(function (error) {
+      toast(error.message);
+    });
+  }
+
+  function poll() {
+    if (!state.current || document.visibilityState === "hidden") return;
+    var thread = state.current;
+    api("messages", { thread: thread, after: state.lastSeq }).then(function (data) {
+      if (state.current !== thread) return;
+      var fresh = (data.messages || []).filter(function (message) { return message.seq > state.lastSeq; });
+      var running = !!data.running;
+      if (fresh.length) {
+        state.messages = state.messages.concat(fresh);
+        state.lastSeq = data.lastSeq || fresh[fresh.length - 1].seq;
+      }
+      if (fresh.length || running !== state.running) {
+        state.running = running;
+        updateHead();
+        renderStream();
+      }
+    }).catch(function () {});
+  }
+
+  function schedule() {
+    clearInterval(state.timer);
+    state.timer = setInterval(poll, 1500);
+  }
+
+  function send() {
+    var text = el.input.value.trim();
+    if (!text || !state.current || state.busy) return;
+    state.busy = true;
+    el.send.disabled = true;
+    api("send", { thread: state.current, text: text }).then(function () {
+      el.input.value = "";
+      grow();
+      state.running = true;
+      renderStream();
+      setTimeout(poll, 350);
+    }).catch(function (error) {
+      toast(error.message);
+    }).then(function () {
+      state.busy = false;
+      el.send.disabled = !el.input.value.trim();
+    });
+  }
+
+  function grow() {
+    el.input.style.height = "auto";
+    el.input.style.height = Math.min(96, el.input.scrollHeight) + "px";
+    el.send.disabled = !el.input.value.trim() || !state.current;
+  }
+
+  // ── 启动 ────────────────────────────────────────────
+  el.input.addEventListener("input", grow);
+  el.input.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      send();
+    }
+  });
+  el.send.addEventListener("click", send);
+  el.close.addEventListener("click", function () {
+    fetch(API + "close", { method: "POST" }).catch(function () {});
+  });
+
+  function boot() {
+    api("threads", {}).then(function (data) {
+      state.threads = { employees: data.employees || [], groups: data.groups || [] };
+      var wanted = (location.hash.match(/thread=([^&]+)/) || [])[1];
+      if (wanted) wanted = decodeURIComponent(wanted);
+      if (!wanted) { try { wanted = localStorage.getItem("vega.assistant.thread"); } catch (e) {} }
+      var all = state.threads.employees.concat(state.threads.groups);
+      var found = false;
+      for (var i = 0; i < all.length; i++) if (all[i].thread === wanted) found = true;
+      if (!found) wanted = all.length ? all[0].thread : "";
+      renderRail();
+      if (wanted) open(wanted);
+      else renderStream();
+    }).catch(function (error) {
+      el.rail.innerHTML = '<div class="group-title">牛马 / 群聊加载失败</div>';
+      el.stream.innerHTML = '<div class="empty"><div><b>连不上站点</b>' + esc(error.message) + "</div></div>";
+      toast(error.message);
+    });
+  }
+
+  boot();
+  setInterval(function () {
+    if (document.visibilityState === "hidden") return;
+    api("threads", {}).then(function (data) {
+      state.threads = { employees: data.employees || [], groups: data.groups || [] };
+      renderRail();
+      updateHead();
+    }).catch(function () {});
+  }, 5000);
+})();
+</script>
+</body>
+</html>

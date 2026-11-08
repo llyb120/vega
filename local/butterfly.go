@@ -4,7 +4,6 @@ package main
 // 真实鼠标键盘在动、操作可能已经部分执行时，用户必须在自己电脑上看得见，而不是只写在会话记录里。
 
 import (
-	"strings"
 	"sync"
 	"time"
 )
@@ -14,6 +13,8 @@ type butterflyNotice struct {
 	Text string
 	At   time.Time
 }
+
+// butterflyDetail 当前服务端五档的 detail（气泡卡副标题/待确认正文）；客户端不另存。
 
 var butterflyState struct {
 	sync.Mutex
@@ -47,9 +48,26 @@ func butterflyOpen() {
 	}
 }
 
-// assistantURL 面板打开的地址：本站点的对话页（蝴蝶里该是 BOT 会话，不是站点首页）。
+// assistantURL 蝴蝶面板打开的地址：本地内置的助理界面（不用登录网站，也不加载站点前端）。
 func (a *Agent) assistantURL() string {
-	return strings.TrimRight(a.pinnedOrigin, "/") + "/chat"
+	return a.assistantBase()
+}
+
+// threadURL 面板里直达某条会话：界面自己记得上次看的那条，这里仍然回到面板。
+func (a *Agent) threadURL(session string) string {
+	return a.assistantBase()
+}
+
+// butterflyOpenThread 双击直达某条会话；没拿到 agent 时退回普通打开。
+func butterflyOpenThread(thread string) {
+	if runningAgent != nil && thread != "" {
+		url := runningAgent.threadURL(thread)
+		if !butterflyPanelOpen(url) {
+			openBrowser(url)
+		}
+		return
+	}
+	butterflyOpen()
 }
 
 // butterflyNotify 更新提示并显示气泡；同一条内容不反复弹。
