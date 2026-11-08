@@ -661,7 +661,7 @@ async function clientChat(op: string, a: Obj, userId: string) {
     const employees = await Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
       const s = await employee.state(), last = s.chatSession ? await store.lastMessage(s.chatSession) : undefined;
       return {
-        thread: "employee:" + s.id, kind: "employee", id: s.id, name: s.name, mine: s.ownerId === user.id,
+        thread: "employee:" + s.id, kind: "employee", id: s.id, name: s.name, avatar: s.avatar || "", mine: s.ownerId === user.id,
         unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0,
         running: !!s.chatSession && engine.active.has(s.chatSession),
         attention: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length,
@@ -692,10 +692,17 @@ async function clientChat(op: string, a: Obj, userId: string) {
       for (const message of page.messages || [])
         for (const task of message.tasks || [])
           if (live.has(task.id)) task.status = live.get(task.id)!;
-      return { thread, title: (await employee.state()).name, running: engine.active.has(session.id), ...page };
+      const state = await employee.state();
+      return { thread, title: state.name, avatar: state.avatar || "", running: engine.active.has(session.id), ...page };
     }
     const group = await engine.groups.mine(user, id);
-    return { thread, title: group.name, running: Object.values(group.memberSessions || {}).some((s) => engine.active.has(String(s))), ...await chatHistory(store, group.session, query) };
+    // 群聊作者头像是预设字符串（bot:shape:color），给面板解析成 BotAvatar；key 为 kind:id。
+    const view = await engine.groups.view(group, user);
+    const authors = Object.fromEntries([
+      ...(view.employees || []).map((p) => ["employee:" + p.id, { avatar: p.avatar || "" }]),
+      ...(view.users || []).map((p) => ["user:" + p.id, { avatar: p.avatar || "" }]),
+    ]);
+    return { thread, title: group.name, authors, running: Object.values(group.memberSessions || {}).some((s) => engine.active.has(String(s))), ...await chatHistory(store, group.session, query) };
   }
   if (op === "read") {
     if (kind === "employee") {
