@@ -132,6 +132,13 @@
   .ta-session.on { border-color: color-mix(in srgb, var(--brand) 55%, transparent); background: color-mix(in srgb, var(--brand) 10%, var(--surface)); }
   .ta-session-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .ta-session-heading strong { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }
+  /* 左栏卡片头像：22px 小圆角，正在工作的牛马在左栏也动（driveAvatars 连左栏一起扫描）。 */
+  .ta-session-face { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; color: #fff; background: var(--brand-fill); font-weight: 700; font-size: 10px; overflow: hidden; }
+  .ta-session-face.bot { overflow: visible; background: none; box-shadow: none; }
+  .ta-session-face.bot .bot-avatar { display: block; width: 100%; height: 100%; overflow: visible; }
+  .ta-session-face.bot .bot-eye { fill: #fff; }
+  .ta-session-face.bot .bot-body { transform-origin: 50% 90%; }
+  .ta-session-face.bot .animate .bot-body { animation: bot-bob 1.8s ease-in-out infinite; }
   .ta-status { flex: none; color: var(--fg-3); font-size: 10px; }
   .ta-status.running { color: var(--blue); }
   .ta-status.waiting { color: var(--orange); }
@@ -575,7 +582,7 @@ function botFor(preset, seed) {
 }
 /** 一个头像的 SVG 标记。employee 头像用预设（bot 形/色），用户头像仍是字母块。
     animate=true 的头像渲染后由 driveAvatars() 挂上转头/眨眼/呼吸动画。 */
-function avatarHTML(preset, seed, animate) {
+function avatarHTML(preset, seed, animate, wrap = "ta-avatar") {
   const bot = botFor(preset, seed);
   const geo = BotAvatar.BOT_SHAPE_GEOMETRY[bot.shape] || BotAvatar.BOT_SHAPE_GEOMETRY.round;
   const uid = "b" + Math.random().toString(36).slice(2, 8);
@@ -598,7 +605,7 @@ function avatarHTML(preset, seed, animate) {
       <ellipse class="bot-eye" data-eye="r" cx="${face.right.cx}" cy="${face.right.cy}" rx="${face.right.rx}" ry="${face.right.ry}" opacity="${face.right.opacity}"/>
     </g></g></g>
   </svg>`;
-  return `<span class="ta-avatar bot">${svg}</span>`;
+  return `<span class="${wrap} bot">${svg}</span>`;
 }
 
 /* 让 data-animate 的 SVG 头像动起来：照 BotAvatar.vue 的弹簧转头 + 眨眼 + 呼吸，定时轮换。
@@ -609,7 +616,7 @@ function driveAvatars() {
   if (avatarAnim.raf) cancelAnimationFrame(avatarAnim.raf);
   avatarAnim.raf = 0; avatarAnim.nodes = [];
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  for (const svg of el.stream.querySelectorAll("svg.bot-avatar[data-animate]")) {
+  for (const svg of document.querySelectorAll("svg.bot-avatar[data-animate]")) {
     const node = { svg, head: { ...BotAvatar.BOT_POSES.center, lid: 1 }, target: { ...BotAvatar.BOT_POSES.center }, vel: { yaw: 0, pitch: 0 }, anticipate: 0, last: 0, look: "center", prev: undefined, blinkAt: [], playing: !reduced };
     node.svg.classList.add("animate");
     avatarAnim.nodes.push(node);
@@ -743,8 +750,14 @@ function sessionCard(item) {
   const on = item.thread === state.current ? " on" : "";
   const status = item.waiting ? ['waiting', "待确认"] : item.running ? ["running", "正在工作"] : item.kind === "group" ? ["", `${item.users} 人 · ${item.employees} 个牛马`] : ["", item.mine ? "我的牛马" : "共享牛马"];
   const badge = item.unread ? `<span class="ta-badge">${item.unread > 99 ? "99+" : item.unread}</span>` : "";
+  // 牛马用预设 SVG 头像，正在工作的那个在左栏也动；群聊没有单头像就用首字母块。
+  const isEmployee = item.kind !== "group" && item.thread?.startsWith("employee:");
+  const seed = isEmployee ? item.thread.slice(9) : "";
+  const face = isEmployee
+    ? avatarHTML(item.avatar, seed, !!item.running, "ta-session-face")
+    : `<span class="ta-session-face">${esc(initials(item.name))}</span>`;
   return `<button class="ta-session${on}" data-thread="${esc(item.thread)}">
-    <span class="ta-session-heading"><strong>${esc(item.name)}</strong>${badge}<span class="ta-status ${status[0]}">${esc(status[1])}</span></span>
+    <span class="ta-session-heading">${face}<strong>${esc(item.name)}</strong>${badge}<span class="ta-status ${status[0]}">${esc(status[1])}</span></span>
     <span class="ta-session-text">${esc(plain(item.lastText) || "还没有对话")}</span>
   </button>`;
 }
@@ -758,6 +771,8 @@ function renderRail() {
   for (const node of document.querySelectorAll(".ta-session")) {
     node.addEventListener("click", () => open(node.dataset.thread));
   }
+  // 左栏重建后动起来的头像要重挂定时器。
+  driveAvatars();
 }
 
 function threadOf(thread) {
