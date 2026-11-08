@@ -12,6 +12,15 @@ export default defineWebSocketHandler({
     catch { peer.close(4403, "Client authorization failed"); }
   },
   async message(peer, message) { await app().clientSockets.message(peer, message.text()); },
-  close(peer) { app().clientSockets.close(peer.id); },
-  error(peer) { app().clientSockets.close(peer.id); },
+  close(peer, details) {
+    // 1009 means a frame was over CLIENT_SOCKET_LIMIT; without this line the only symptom is a silent
+    // drop-and-reconnect that never finishes its task.
+    if (details?.code && details.code !== 1000 && details.code !== 1005)
+      console.warn(`[Vega client] socket closed ${details.code}${details.reason ? " " + details.reason : ""}`);
+    app().clientSockets.close(peer.id);
+  },
+  error(peer, err) {
+    console.warn(`[Vega client] socket error: ${err?.message || err}`);
+    app().clientSockets.close(peer.id);
+  },
 });

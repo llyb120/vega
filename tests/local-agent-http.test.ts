@@ -30,7 +30,8 @@ test("native client pairs once, runs with every webpage closed, survives restart
   await new Promise<void>((yes) => reserve.close(() => yes()));
   const base = "http://127.0.0.1:" + port, setupToken = randomBytes(32).toString("base64url");
   await writeFile(join(configDir, "vega-local", "trusted-sites.json"), JSON.stringify({ trustedOrigins: [base] }));
-  await writeFile(join(clientDir, "large.txt"), "x".repeat(300000));
+  // >1 MiB once base64-encoded, so the client must post it to /api/local-agent/result instead of the socket.
+  await writeFile(join(clientDir, "large.txt"), "x".repeat(900000));
   let modelCalls = 0;
   const mock = createServer(async (req, res) => {
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);

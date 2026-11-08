@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -215,5 +216,79 @@ func TestLargeResultFallsBackToSocketWhenUploadFails(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("failed upload did not settle on the WebSocket; server would time out while the link stays healthy")
+	}
+}
+
+// A resent result must not go back frame-for-frame: when the server refused the first copy as too large
+// (1009), resending the identical frame just gets the connection closed again, forever. The second
+// delivery takes HTTP instead, even though this result is small enough to inline.
+func TestResentResultGoesOverHTTP(t *testing.T) {
+	clientID, token := strings.Repeat("c", 32), strings.Repeat("t", 43)
+	inline := make(chan map[string]any, 8)
+	uploaded := make(chan map[string]any, 2)
+	accepted := make(chan *backendPeer, 4)
+	var mu sync.Mutex
+	var pending []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/local-agent/result", func(w http.ResponseWriter, r *http.Request) {
+		var value map[string]any
+		if json.NewDecoder(r.Body).Decode(&value) != nil {
+			http.Error(w, "bad", 400)
+			return
+		}
+		uploaded <- value
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	mux.HandleFunc("/api/local-agent/socket", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var hello struct{ Type, ClientID string }
+		if conn.ReadJSON(&hello) != nil || hello.Type != "hello" {
+			return
+		}
+		peer := &backendPeer{conn: conn}
+		mu.Lock()
+		wanted := append([]string{}, pending...)
+		mu.Unlock()
+		_ = peer.send(map[string]any{"type": "ready", "userId": "alice", "clientId": clientID, "resume": true, "pending": wanted})
+		accepted <- peer
+		for {
+			var value map[string]any
+			if conn.ReadJSON(&value) != nil {
+				return
+			}
+			if value["type"] == "ping" {
+				_ = peer.send(map[string]string{"type": "pong"})
+				continue
+			}
+			inline <- value
+			return // drop the connection without acking, like the server does for an oversized frame
+		}
+	})
+	backend := httptest.NewServer(mux)
+	defer backend.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{}), context: ctx}
+	if agent.startConnection(ServerCredential{Origin: backend.URL, UserID: "alice"}, token) == nil {
+		t.Fatal("connection did not start")
+	}
+	peer := receive(t, accepted)
+	dir := t.TempDir()
+	id := "01234567-0123-0123-0123-0123456789dd"
+	mu.Lock()
+	pending = []string{id}
+	mu.Unlock()
+	if err := peer.send(map[string]any{"id": id, "op": "exec", "args": map[string]any{"cwd": dir, "command": "echo hi", "timeout": 10}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := receive(t, inline); got["id"] != id {
+		t.Fatalf("the first delivery is inline: %v", got["id"])
+	}
+	if got := receive(t, uploaded); got["id"] != id {
+		t.Fatalf("the resent result should go over HTTP, got %v", got)
 	}
 }

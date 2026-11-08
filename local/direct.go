@@ -331,6 +331,9 @@ type localJob struct {
 	cancel context.CancelFunc
 	result []byte
 	owner  string
+	// Deliveries so far. A result that went out and came back unacknowledged must stop trusting the
+	// socket: if the server refused it as too large (1009), resending the same frame loops forever.
+	attempts int
 }
 
 // Results larger than this go over HTTP so a big file read never holds the socket (and its heartbeat) for seconds.
@@ -430,7 +433,8 @@ func (runner *jobRunner) writeRaw(data []byte) {
 
 // deliver sends a finished result; the caller holds runner.mu. Large results are posted outside the lock.
 func (runner *jobRunner) deliver(id string, task *localJob) {
-	if len(task.result) <= inlineResultLimit || runner.upload == nil {
+	task.attempts++
+	if (task.attempts == 1 && len(task.result) <= inlineResultLimit) || runner.upload == nil {
 		runner.writeRaw(task.result)
 		return
 	}
@@ -523,7 +527,10 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		var request job
-		if conn.ReadJSON(&request) != nil {
+		if err := conn.ReadJSON(&request); err != nil {
+			if websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+				fmt.Fprintln(os.Stderr, "vega-local: server refused a frame as too large (1009); results retry over HTTP")
+			}
 			return
 		}
 		if request.Type == "relay" {
