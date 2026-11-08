@@ -1,0 +1,6 @@
+// 应用清单：让系统按真实 Windows 版本识别进程（supportedOS），并从一开始就是 permonitorv2 DPI。
+// Win11 的任务栏跨进程子窗口只有在分层子窗口得到自己的表面时才可见；没有清单时该表面拿不到。
+// 生成：windres -i vega-local.rc --input-format=rc --output-format=coff -o rsrc_windows_amd64.syso
+// （windres 来自 mingw-w64；.syso 进仓库，Docker/CI 的交叉编译因此不需要 Windows 工具链）
+#include <winuser.h>
+1 RT_MANIFEST "vega-local.manifest"

@@ -10,4 +10,6 @@ web/public/clients/
 *.db-shm
 *.log
 local/vega-local*
+!local/vega-local.rc
+!local/vega-local.manifest
 .env

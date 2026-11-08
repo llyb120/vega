@@ -31,7 +31,7 @@ export class ClientSockets {
   private connections = new Map<string, Connection>();
   private timer: ReturnType<typeof setInterval>;
   private onRevoke = async (userId: string) => await this.revoke(userId);
-  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>, private relay?: NetworkRelay) {
+  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>, private relay?: NetworkRelay, private userStop?: (session: string, reason: string) => boolean, private statusFor?: (userId: string, clientId: string) => Promise<Obj>) {
     auth.events.on("revoke", this.onRevoke);
     this.timer = setInterval(async () => {
       for (const [id, connection] of this.connections) {
@@ -119,6 +119,7 @@ export class ClientSockets {
         const agent = this.hub.active(grant.userId, grant.clientId)!;
         accepted = true;
         socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) }));
+        void this.pushStatus(grant.userId, grant.clientId);
         return;
       }
       if (value.type === "update_prepare") {
@@ -154,8 +155,15 @@ export class ClientSockets {
         if (!connection.updating) this.hub.connect(grant.userId, connection.details);
         accepted = true;
         socket.send(JSON.stringify({ type: "pong", ...(connection.details.autoUpdate ? { busy: await this.clientInUse(grant.clientId) } : {}) }));
+        void this.pushStatus(grant.userId, grant.clientId);
+      } else if (value.type === "user_stop") {
+        // 用户在自己电脑上按了 Esc：只停他正在看得到的那个会话，不接受停止任意会话。
+        assert(typeof value.session === "string" && value.session, "user_stop requires a session");
+        const stopped = this.userStop?.(value.session, typeof value.reason === "string" && value.reason ? value.reason.slice(0, 200) : "用户在自己电脑上按了 Esc 叫停") === true;
+        accepted = true;
+        socket.send(JSON.stringify({ type: "user_stop", session: value.session, stopped }));
       } else {
-        assert(value.type === "result", "Client may only send heartbeats and job results");
+        assert(value.type === "result", "Client may only send heartbeats, job results and user stops");
         this.hub.result(grant.userId, { id: value.id, result: value.result, instance: connection.details.instance });
         // Results also prove the control channel is alive; refresh the agent heartbeat so a burst of
         // results without an interleaved ping cannot expire the LocalAgents timer and suspend the client.
@@ -194,6 +202,16 @@ export class ClientSockets {
       else this.hub.suspend(connection.grant.userId, connection.details.instance, connection.transport);
     }
     connection.socket.close(1000, "Client connection closed");
+  }
+
+  /** 任务栏状态推送：engine 任务/会话状态一变就调，把五档算好的 Status 下发给这台客户端。 */
+  async pushStatus(userId: string, clientId?: string) {
+    if (!this.statusFor) return;
+    for (const connection of this.connections.values()) {
+      if (connection.grant.userId !== userId || (clientId && connection.grant.clientId !== clientId)) continue;
+      const status = await this.statusFor(connection.grant.userId, connection.grant.clientId).catch(() => undefined);
+      if (status) connection.socket.send(JSON.stringify({ type: "task_status", status }));
+    }
   }
   closeAll() {
     clearInterval(this.timer);

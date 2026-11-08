@@ -47,6 +47,14 @@ const PROMPT = `你是 Vega，谨慎、简洁地完成用户授权的工作。�
 export function redactCall(call: Call, redact: Redactor): Call {
   return { ...call, arguments: redact.value(call.arguments) };
 }
+// 任务栏文案：单行截断与 "3 分钟前"/"已 12 分" 这类时间尾巴。
+const excerptText = (value: unknown, n: number) => {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return [...text].length > n ? [...text].slice(0, n).join("") + "…" : text;
+};
+const ago = (ms: number) =>
+  ms < 60_000 ? "刚刚" : ms < 3_600_000 ? `${Math.floor(ms / 60_000)} 分钟前` : ms < 86_400_000 ? `${Math.floor(ms / 3_600_000)} 小时前` : `${Math.floor(ms / 86_400_000)} 天前`;
+const elapsedLabel = (ms: number) => (ms < 60_000 ? "已 1 分" : ms < 3_600_000 ? `已 ${Math.floor(ms / 60_000)} 分` : `已 ${Math.floor(ms / 3_600_000)} 时`);
 export function redactMessage(message: Message, redact: Redactor): Message {
   const safe = redact.value(message);
   safe.role = message.role;
@@ -122,6 +130,8 @@ export class Engine {
     }
   });
   closing = false;
+  /** 任务栏状态推送（application 注入 clientSockets.pushStatus）：任务/会话状态一变就下发给在线客户端。 */
+  statusPush?: (userId: string, clientId?: string) => void;
   executionSwitches = new Set<string>();
   mcpSessions = new Map<string, { key: string; client: MCP }>();
   async mcpFor(session: Session, config: Config) {
@@ -143,6 +153,77 @@ export class Engine {
       if (session.localAgent && session.clientId === clientId) return true;
     }
     return false;
+  }
+
+  /**
+   * 任务栏蝴蝶的五档状态（对齐 Nova taskbar_status::snapshot）：
+   * 待确认 > 桌面操作/运行中任务 > 未读结论/错误 > 空闲。客户端只负责画。
+   * kind: idle | running | waiting | done | error；text 主文案，trailing 右上角徽标，
+   * detail 气泡卡副标题，thread 双击要打开的会话。
+   */
+  async taskStatusFor(userId: string, clientId: string): Promise<Obj> {
+    const employees = await this.employee.all();
+    // 这台 client 上正在跑的会话 -> 所属牛马任务。
+    const runningOnClient = new Set<string>();
+    for (const key of [...this.active.keys(), ...this.fire.running.keys()]) {
+      const session = await this.store.session(key);
+      if (session.localAgent && session.clientId === clientId && session.employeeId) runningOnClient.add(session.employeeId);
+    }
+    let waiting: Obj | undefined, running: Obj | undefined, done: Obj | undefined;
+    const now = Date.now();
+    for (const employee of employees) {
+      let state;
+      try {
+        state = await employee.state({ runs: false });
+      } catch { continue; }
+      if (state.ownerId !== userId) continue;
+      for (const task of state.tasks) {
+        // 待确认（approval/waiting）优先级最高。
+        if ((task.status === "approval" || task.status === "waiting") && !waiting) {
+          waiting = {
+            kind: "waiting",
+            text: task.approval ? "等待你确认" : "需要你的输入",
+            trailing: undefined,
+            detail: task.approval || task.waiting || excerptText(task.text, 80),
+            thread: task.workSession || task.computerSession || state.chatSession,
+            employee: state.name,
+            task: task.id,
+          };
+        }
+        // 在这台 client 上运行中的任务。
+        if (!ended(task.status) && runningOnClient.has(state.id) && !running) {
+          const elapsed = now - (task.startedAt || task.createdAt || now);
+          running = {
+            kind: "running",
+            text: task.progress?.current || excerptText(task.text, 60),
+            trailing: elapsed > 0 ? elapsedLabel(elapsed) : undefined,
+            detail: task.approval || task.waiting,
+            thread: task.workSession || task.computerSession || state.chatSession,
+            employee: state.name,
+            task: task.id,
+          };
+        }
+        // 最近结束（未读结论）：done 成功 / error 失败。
+        if (ended(task.status) && task.finishedAt && !done) {
+          const ok = task.status === "done";
+          done = {
+            kind: ok ? "done" : "error",
+            text: ok ? "完成了一项工作" : "一项工作中断",
+            trailing: ago(now - task.finishedAt),
+            detail: excerptText(task.summary || task.result || task.text, 100),
+            thread: task.workSession || task.computerSession || state.chatSession,
+            employee: state.name,
+            task: task.id,
+            at: task.finishedAt,
+          };
+        }
+      }
+    }
+    // 五档只取一条：waiting > running > done/error > idle。
+    if (waiting) return waiting;
+    if (running) return running;
+    if (done) return done;
+    return { kind: "idle", text: "空闲" };
   }
   async releaseSession(key: string) {
     const entry = this.mcpSessions.get(key);
@@ -363,6 +444,7 @@ export class Engine {
       return;
     if (!redact) {
       this.events.emit("event", e);
+      this.notifyTaskbar(e);
       return;
     }
     let data = redact.value(e.data);
@@ -375,9 +457,30 @@ export class Engine {
         outcome: { ...data.outcome, images: e.data.outcome.images },
       };
     this.events.emit("event", { ...e, data });
+    this.notifyTaskbar(e);
   }
-  cancel(session: string) {
-    this.active.get(session)?.control.abort(Error("Cancelled by user"));
+
+  /** 任务栏蝴蝶要跟着任务/会话状态走：只对状态迁移事件重算并下发，不在 text_delta 这类高频事件上查库。 */
+  private notifyTaskbar(e: AgentEvent) {
+    if (!this.statusPush) return;
+    const push = (userId?: string, clientId?: string) => userId && this.statusPush?.(userId, clientId);
+    if (e.type === "employee_changed") {
+      const data = e.data as Obj | undefined;
+      void this.employee?.for(String(data?.employeeId || "")).then((employee) => employee.state({ runs: false })).then((state) => push(state.ownerId)).catch(() => {});
+      return;
+    }
+    if (e.type === "clients_changed") {
+      const data = e.data as Obj | undefined;
+      push(String(data?.userId || data?.user || ""), data?.clientId ? String(data.clientId) : undefined);
+      return;
+    }
+    // 会话级状态迁移：started/message_end/compacted/execution_changed/cancel 都会改变 running 档。
+    if (["started", "message_end", "compacted", "execution_changed", "finished"].includes(e.type) && e.session) {
+      void this.store.session(e.session).then((session) => push(session.ownerId, session.clientId)).catch(() => {});
+    }
+  }
+  cancel(session: string, reason = "Cancelled by user") {
+    this.active.get(session)?.control.abort(Error(reason));
   }
   steer(session: string, m: Message) {
     const run = this.active.get(session);

@@ -57,8 +57,13 @@ func main() {
 			must(applyUpdate(os.Args[2:]))
 			return
 		case "--butterfly-preview":
-			// 只为看气泡长什么样：真实提示来自 appuse（第二个参数 running 看“正在操作”态）。
+			// 只为看气泡与任务栏蝴蚋长什么样：真实提示来自 appuse（第二个参数 running/needs_review 看两种态）。
+			kind := "needs_review"
 			if len(os.Args) > 2 && os.Args[2] == "running" {
+				kind = "running"
+			}
+			butterflyChipStart()
+			if kind == "running" {
 				butterflyNotify("running", "正在用鼠标键盘操作这台电脑（appuse act），期间请不要抢鼠标")
 			} else {
 				butterflyNotify("needs_review", "appuse 可能已经部分执行：点击后输入文字可能已发出；请核对屏幕上的实际结果")
@@ -189,6 +194,16 @@ type job struct {
 	ID   string          `json:"id"`
 	Op   string          `json:"op"`
 	Args json.RawMessage `json:"args"`
+	// task_status 推送：服务端算好的任务栏五档（对齐 Nova taskbar_status）。
+	Status *jobStatus    `json:"status"`
+}
+
+type jobStatus struct {
+	Kind     string `json:"kind"`
+	Text     string `json:"text"`
+	Trailing string `json:"trailing"`
+	Detail   string `json:"detail"`
+	Thread   string `json:"thread"`
 }
 
 func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
