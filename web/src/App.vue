@@ -1310,9 +1310,11 @@ async function employeeTaskAction(task, action, text) {
   return attempt(async () => {
     if (action === "handoff-cloud" || action === "handoff-local") {
       const to = action === "handoff-cloud" ? "to-cloud" : "to-local";
-      await api(`/employees/${selectedEmployee.value}/tasks/${task.id}/handoff`, "POST", { action: to });
+      const record = await api(`/employees/${selectedEmployee.value}/tasks/${task.id}/handoff`, "POST", { action: to });
       await refreshEmployee();
-      toast(to === "to-cloud" ? "已交接：本机工作文件已同步，任务改为在云端继续；浏览器始终在云端。" : "已接回本机继续；云端成果已回传到本机。");
+      toast(to === "to-cloud"
+        ? (record?.base?.length ? "已交接：本机工作文件已同步，任务改为在云端继续；浏览器始终在云端。" : "已交接：没有可同步的本机文件，云端按恢复点续做（缺什么先核对，核验不了会问你）。")
+        : "已接回本机继续；云端成果已回传到本机。");
       return true;
     }
     if (action === "remove" && !confirm("永久删除此任务记录？")) return;

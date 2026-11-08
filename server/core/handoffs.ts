@@ -173,7 +173,8 @@ export class TaskHandoffs {
         files = scanned.files;
         for (const [path, data] of scanned.contents) contents.set(path, data);
       } else {
-        assert(false, "本地客户端已离线且没有云端副本；等客户端回连后再交接");
+        // 本机拿不到、又没云端副本：不发明文件，也不拒绝；按恢复点（历史、计划、检查点）在云端开工，缺什么现场核对。
+        notes.push("本地客户端已离线且没有云端副本：按恢复点续做，本机文件没有带过来，动手前先核对现场；缺少必要文件或无法核验时用 task_ask_user 问用户，不凭空补写");
       }
 
       const cloudCwd = record.cloudCwd || (await this.cloudRoot(cloud, taskId));
@@ -305,6 +306,25 @@ export class TaskHandoffs {
     });
   }
 
+  /** 设备回连：自动接到云端执行的任务搬回本机继续（手动交接的仍由用户决定，运行中的等这一轮结束）。 */
+  async backHome(ownerId?: string) {
+    for (const employee of await this.deps.employees()) {
+      const state = await employee.state({ runs: false });
+      if (ownerId && state.ownerId !== ownerId) continue;
+      for (const task of state.tasks) {
+        if (ended(task.status)) continue;
+        const record = await this.record(task.id);
+        if (!record || record.where !== "cloud" || record.phase !== "ready" || record.source !== "auto" || !record.clientId) continue;
+        if (this.running(task)) continue;
+        const agent = this.deps.agents.active(record.ownerId, record.clientId);
+        // 设备不在线、或设备自己选了服务端优先：继续留在云端。
+        if (!agent || agent.prefer === "cloud") continue;
+        try { await this.toLocal(employee.employeeId, task.id, { source: "auto", clientId: agent.clientId }); }
+        catch { /* 没接住就留在云端，下次回连或手动接回 */ }
+      }
+    }
+  }
+
   /** The client came back: merge cloud progress into its workspace without taking the execution right back. */
   async syncBack(clientId: string, ownerId?: string) {
     const employees = await this.deps.employees();
@@ -315,6 +335,7 @@ export class TaskHandoffs {
         if (ended(task.status)) continue;
         const record = await this.record(task.id);
         if (!record || record.where !== "cloud" || record.phase !== "ready") continue;
+        if (record.source === "auto") continue; // 自动接管的由 backHome 搬回本机，不单独回传
         if (!record.clientId || record.clientId !== clientId) continue;
         const agent = this.deps.agents.active(state.ownerId, clientId);
         const cloud = this.deps.cloud(state.ownerId || "");
@@ -432,6 +453,8 @@ export class TaskHandoffs {
       else if (agent) await this.syncBack(clientId, userId).catch(() => {});
       else await this.clientsGone(clientId, userId).catch(() => {});
     }
+    // 回来的设备可能就是自动接管前的执行位置：云端那一轮结束后搬回本机继续。
+    await this.backHome(userId).catch(() => {});
   }
 
   private running(task: Task) {

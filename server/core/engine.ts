@@ -115,7 +115,11 @@ export class Engine {
   localAgents = new LocalAgents((value) => {
     this.emit(value as AgentEvent);
     // 客户端离线/回连由调度器统一处理：自动接管与增量回传不依赖界面点击。
-    if ((value as Obj)?.type === "clients_changed") void this.handoffs?.clients(value as Obj).catch(() => {});
+    if ((value as Obj)?.type === "clients_changed") {
+      void this.handoffs?.clients(value as Obj).catch(() => {});
+      // 回连的可能正是某个任务在等的设备：交回调度器，由它核对 waitClient 后继续。
+      void this.employee?.all().then((all) => all.forEach((employee) => employee.schedule())).catch(() => {});
+    }
   });
   closing = false;
   executionSwitches = new Set<string>();
@@ -246,8 +250,8 @@ export class Engine {
       config: () => this.config(),
       isolated: true,
       // “客户端”就是当前开着 vega-local 的那台机器（最新登录生效），不是用户手里的手机/浏览器。
-      client: (ownerId) => {
-        const agent = this.localAgents.active(ownerId);
+      client: (ownerId, clientId) => {
+        const agent = clientId ? this.localAgents.active(ownerId, clientId) : this.localAgents.active(ownerId);
         return agent ? { clientId: agent.clientId, clientName: agent.name, localPlatform: agent.platform, cwd: agent.cwd, browser: agent.browser, prefer: agent.prefer } : undefined;
       },
       groups: {
@@ -720,6 +724,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     let session: Session | undefined,
       original: { model?: string; scene?: string } | undefined,
       tools: Tools | undefined,
+      clientAway: { clientId: string; ownerId: string } | undefined,
       error: any;
     // A member's turn in a group chat: its latest text goes to the group when the turn ends.
     let said = "", hop = input?.hop || 0, answered = false;
@@ -1191,16 +1196,27 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         }
         const pauses = [...new Set(outcomes.map((outcome) => outcome.pause).filter(Boolean))];
         if (pauses.length) {
-          const message = await this.store.append(key, { role: "assistant", text: pauses.join("\n") });
+          const reason = pauses.join("\n"),
+            ownerId = session.ownerId,
+            clientId = session.clientId;
+          // 这台设备断连（不是被另一台接管）：任务按恢复点等它回连后自动续做；普通会话仍停下来等用户确认。
+          const away = !!clientId && !!ownerId && !this.localAgents.list(ownerId).some((client) => client.id === clientId);
+          if (away && clientId && ownerId) clientAway = { clientId, ownerId };
+          const message = await this.store.append(key, {
+            role: "assistant",
+            text: away ? reason + "\n已进入自动恢复：云端可用时先在云端接着做，否则等这台客户端回连后继续；都不重放中断的操作。" : reason,
+          });
           emit("message_end", message);
           await this.fire.pause(key);
           if (session.taskId) {
-            const employee = await this.employeeFor(session);
+            const employee = await this.employeeFor(session), taskId = session.taskId;
             await employee.update((state) => {
-                            const task = employee.task(state, session!.taskId!);
-                            if (task.status === "running") {
+                            const task = employee.task(state, taskId);
+                            if (task.status !== "running") return;
+                            if (away) employee.recover(task, reason, Date.now(), clientId);
+                            else {
                               task.status = "waiting";
-                              task.waiting = pauses.join("\n");
+                              task.waiting = reason;
                             }
                           });
           }
@@ -1261,6 +1277,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         this.active.delete(key);
         this.redactors.delete(key);
         emit("done", { error: !!error });
+        // 云端这边收尾后：设备已回连的自动接管任务搬回本机（跑着的时候不能切，只能在这里补一次）。
+        if (session?.employeeId && session.taskId && !session.localAgent && !this.closing) void this.handoffs.backHome(session.ownerId).catch(() => {});
+        // 掉线的那一轮刚结束：确认接到云端（clients_changed 可能早于本轮收尾，那次会因仍在执行而放弃）。
+        if (clientAway && cloudFor({ ownerId: clientAway.ownerId }) && !this.closing) void this.handoffs.clientsGone(clientAway.clientId, clientAway.ownerId).catch(() => {});
         if (continued.length && !this.closing) {
           // History already holds the steered messages; a fresh run picks them up as context.
           void this.run(key).catch(() => {});

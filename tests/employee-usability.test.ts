@@ -13,6 +13,7 @@ import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Auth } from "../server/core/auth";
 import { Tools } from "../server/core/tools";
+import { LocalAgentUnavailable } from "../server/core/local-agent";
 import { employeeCall } from "./public-call";
 
 async function fixture() {
@@ -249,4 +250,40 @@ test("one update changes several aspects together, with the old executor's seman
     await assert.rejects(tools.execute({ id: "past", name: "employee_task_manage", arguments: { taskId: job.id, request: { command: "update", instructions: "zzz", runAt: "2001-01-01 09:00" } } }, {} as any), /未来/);
     assert.equal(employee.task(await employee.state(), job.id).text, "new task", "the executor applies all parts or none");
   } finally { await engine.close(); await store.close(); }
+});
+
+test("a task whose client drops recovers on that same device instead of asking the user, and never elsewhere", async () => {
+  const { store, engine } = await fixture();
+  const client = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Office PC", cwd: "C:\\client-only", platform: "windows" };
+  try {
+    engine.localAgents.connect("alice", client);
+    const employee = await engine.employee.for((await engine.employee.create({ name: "Recover" }, "alice")).id);
+    const job = await add(employee, "client work");
+    assert.equal(job.execution?.clientId, client.clientId);
+    const session = await store.newSession({ taskId: job.id, employeeId: employee.employeeId, ownerId: "alice", cwd: job.cwd, localAgent: true, clientId: client.clientId, scene: "lightweight", model: "fixture/model" });
+    await employee.update((state) => { const task = employee.task(state, job.id); task.workSession = session.id; task.status = "running"; });
+    engine.localAgents.disconnect("alice");
+    let operations = 0;
+    engine.localAgents.request = async () => { operations++; throw new LocalAgentUnavailable(); };
+    engine.catalog.resolve = async () => ({ selection: "fixture/model", contextWindow: 128000, maxOutputTokens: 1024 }) as any;
+    engine.providers.chat = async () => ({ role: "assistant", calls: [{ id: "first", name: "bash", arguments: { command: "fixture" } }] });
+    await engine.run(session.id, { role: "user", text: "run fixture" });
+    const paused = employee.task(await employee.state(), job.id);
+    assert.equal(operations, 0, "an offline device gets no operations, not even a probe");
+    assert.equal(paused.status, "recovering");
+    assert.equal(paused.recovery.attempts, 1);
+    assert.equal(paused.recovery.waitClient, client.clientId);
+    assert(!paused.waiting, "a dropped device is not a question for the user");
+    assert.match((await store.messages(session.id)).at(-1)!.text!, /已进入自动恢复/);
+    // 离线期间不派发，也不白白花掉恢复次数
+    await employee.tick();
+    assert.equal(employee.busy.size, 0);
+    assert.equal(employee.task(await employee.state(), job.id).recovery.attempts, 1);
+    // 回连后回到调度器，在同一台设备续做
+    let resumed = 0;
+    employee.run = async () => { resumed++; };
+    engine.localAgents.connect("alice", client);
+    await employee.tick();
+    assert.equal(resumed, 1);
+  } finally { engine.active.clear(); (await engine.employee.all()).forEach((member) => member.busy.clear()); await engine.close(); await store.close(); }
 });

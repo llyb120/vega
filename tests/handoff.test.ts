@@ -91,8 +91,30 @@ test("handoff refuses instead of pretending when the cloud or the client is unav
   await assert.rejects(new TaskHandoffs(running.deps).toCloud("e1", "t1"), /还在执行/);
 
   const gone = world({ clientOnline: false });
-  await assert.rejects(new TaskHandoffs(gone.deps).toCloud("e1", "t1"), /离线且没有云端副本/);
-  assert.equal(gone.state.tasks[0].execution.localAgent, true, "执行权不得被悄悄改掉");
+  // 本机拿不到、又没云端副本：不编造文件也不拒绝，按恢复点先在云端开工，缺什么现场核对（核验不了就停下问用户）。
+  const resumed = await new TaskHandoffs(gone.deps).toCloud("e1", "t1");
+  assert.equal(gone.state.tasks[0].execution.localAgent, false);
+  assert.deepEqual(resumed.base, [], "没有本机副本就不假装有基线");
+  assert.match(resumed.note!, /没有云端副本.*按恢复点续做.*task_ask_user/);
+});
+
+test("a cloud restart without the local copy never overwrites the device's files when it comes back", async () => {
+  const options: any = { clientOnline: true };
+  const w = world(options);
+  w.local.put("/local/work/a.ts", "mine");
+  options.clientOnline = false;
+  const handoffs = new TaskHandoffs(w.deps);
+  await handoffs.clientsGone("c1", "u1");
+  const record = (await handoffs.record("t1"))!;
+  assert.deepEqual(record.base, [], "没有本机副本就没有基线");
+  w.remote.put(record.cloudCwd + "/a.ts", "guessed by cloud");
+  w.remote.put(record.cloudCwd + "/b.ts", "made in cloud");
+  options.clientOnline = true;
+  await handoffs.backHome("u1");
+  assert.equal(w.state.tasks[0].execution.localAgent, true);
+  assert.equal(w.local.text("/local/work/a.ts"), "mine", "本机原文件保留");
+  assert.equal(w.local.text("/local/work/a.ts.vega-conflict-cloud"), "guessed by cloud", "云端同名版本另存，不覆盖");
+  assert.equal(w.local.text("/local/work/b.ts"), "made in cloud", "云端新做的交给本机");
 });
 
 test("to cloud copies the workspace, moves the task and bumps the epoch", async () => {
@@ -206,4 +228,37 @@ test("a client that switches itself to server-first hands its tasks to the cloud
   await handoffs.clients({ type: "clients_changed", targetUser: "u1" });
   assert.equal(w.state.tasks[0].execution.localAgent, false, "客户端在线但选了服务端优先后自动接力");
   assert.equal((await handoffs.record("t1"))!.source, "auto");
+});
+
+test("a task taken over automatically comes back to its device once that device returns", async () => {
+  const options: any = { clientOnline: true };
+  const w = world(options);
+  w.local.put("/local/work/a.ts", "v1");
+  const handoffs = new TaskHandoffs(w.deps);
+  await handoffs.toCloud("e1", "t1");
+  await handoffs.toLocal("e1", "t1");
+  options.clientOnline = false;
+  await handoffs.clientsGone("c1", "u1");
+  assert.equal(w.state.tasks[0].execution.localAgent, false, "设备掉了先在云端续做");
+
+  w.remote.put((await handoffs.record("t1"))!.cloudCwd + "/b.ts", "made in cloud");
+  options.clientOnline = true;
+  options.running = true;
+  await handoffs.clients({ type: "clients_changed", targetUser: "u1" });
+  assert.equal(w.state.tasks[0].execution.localAgent, false, "云端这一轮还在跑，不硬切执行权");
+
+  options.running = false;
+  await handoffs.backHome("u1");
+  assert.equal(w.state.tasks[0].execution.localAgent, true, "设备回连后切回本机续做");
+  assert.equal(w.state.tasks[0].execution.clientId, "c1");
+  assert.equal(w.local.text("/local/work/b.ts"), "made in cloud", "云端做的那部分先回本机");
+  assert.equal(w.local.text("/local/work/a.ts"), "v1");
+
+  // 手动交接到云端的任务不自动搬回，仍由用户决定。
+  const manual = world({ clientOnline: true });
+  manual.local.put("/local/work/a.ts", "v1");
+  const byHand = new TaskHandoffs(manual.deps);
+  await byHand.toCloud("e1", "t1");
+  await byHand.backHome("u1");
+  assert.equal(manual.state.tasks[0].execution.localAgent, false);
 });
