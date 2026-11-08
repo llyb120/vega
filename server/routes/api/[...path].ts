@@ -686,7 +686,13 @@ async function clientChat(op: string, a: Obj, userId: string) {
       const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
       assert(employee && await employee.accessible(user), "Employee not found");
       const session = await employee.chat(user.id);
-      return { thread, title: (await employee.state()).name, running: engine.active.has(session.id), ...await chatHistory(store, session.id, query) };
+      const page = await chatHistory(store, session.id, query);
+      // 待确认气泡里的任务状态会随作答翻转：返回前把它刷成当前值，面板按它决定还能不能点。
+      const live = new Map((await employee.state()).tasks.map((task) => [task.id, task.status]));
+      for (const message of page.messages || [])
+        for (const task of message.tasks || [])
+          if (live.has(task.id)) task.status = live.get(task.id)!;
+      return { thread, title: (await employee.state()).name, running: engine.active.has(session.id), ...page };
     }
     const group = await engine.groups.mine(user, id);
     return { thread, title: group.name, running: Object.values(group.memberSessions || {}).some((s) => engine.active.has(String(s))), ...await chatHistory(store, group.session, query) };
@@ -700,6 +706,14 @@ async function clientChat(op: string, a: Obj, userId: string) {
     }
     const group = await engine.groups.mine(user, id);
     return { seq: await store.markRead(user.id, group.session) };
+  }
+  if (op === "control") {
+    // 面板上的待确认气泡：只允许对自己的牛马发 approve/answer（群聊任务不在这里控制）。
+    assert(kind === "employee", "Panel control only applies to an employee thread");
+    const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
+    assert(employee && await employee.accessible(user), "Employee not found");
+    assert(["approve", "answer", "stop"].includes(String(a.action || "")), "Unsupported control action");
+    return await employee.control({ id: a.id, action: a.action, approved: a.approved, text: a.text }, { token: "", name: user.username || "用户" });
   }
   if (op === "send") {
     const text = String(a.text || "").trim();

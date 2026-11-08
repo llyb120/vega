@@ -35,6 +35,9 @@ func (a *Agent) assistantMount(mux *http.ServeMux) {
 			a.assistantProxy(w, r, "send")
 		case strings.HasSuffix(r.URL.Path, "/api/read"):
 			a.assistantProxy(w, r, "read")
+		case strings.HasSuffix(r.URL.Path, "/api/control"):
+			// 待确认气泡上的「允许 / 拒绝 / 回答」：透传给牛马的 employee.control。
+			a.assistantProxy(w, r, "control")
 		case strings.HasSuffix(r.URL.Path, "/api/close"):
 			// 页面上的 × 只是把面板收回屏幕外（WebView2 留在内存里，下次点蝴蝶秒开）。
 			butterflyPanelPark()
