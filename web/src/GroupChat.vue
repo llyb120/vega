@@ -35,8 +35,8 @@ const invitable = computed(() => directory.value.filter((u) => !group.value?.use
 // Both add rows always show, so users find them; when empty they say why.
 const noUsersHint = computed(() => props.user?.role === "admin" ? "没有可邀请的用户（在左下角「账号与安全」→ 成员里新建账号）" : "没有可邀请的用户（请管理员在「账号与安全」里新建账号）");
 const noEmployeesHint = computed(() => props.myEmployees?.length ? "你的牛马都已在群里" : "你还没有牛马（先在左侧「数字牛马」里新建）");
-// A member employee's avatar and name open its chat for whoever may open it: its owner, or an admin.
-const canOpen = (author) => author?.kind === "employee" && (props.user?.role === "admin" || !!group.value?.employees.find((e) => e.id === author.id)?.mine);
+// A member employee's avatar and name open its chat only for its owner.
+const canOpen = (author) => author?.kind === "employee" && !!group.value?.employees.find((e) => e.id === author.id)?.mine;
 const canStop = (e) => e.mine || group.value?.isCreator;
 // Long-press a member's avatar: "@name " goes into the composer (the same mention the picker inserts).
 function mentionMember(name) { if (!readonly.value && name) input.value?.mention(name); }

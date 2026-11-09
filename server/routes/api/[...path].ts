@@ -114,15 +114,19 @@ export default defineEventHandler(async (event) => {
     if (path[0] === "debug") {
       check(user.role === "admin", 403, "Administrator permission required");
       check(method === "GET" && path[1] === "sessions" && path.length === 2, 404, "Debug route not found");
-      const names = new Map(await Promise.all((await engine.employee.all()).map(async (employee) => { const s = await employee.profile(); return [s.id, s.name] as const; })));
+      const mine = await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user));
+      const names = new Map(await Promise.all(mine.map(async (employee) => { const s = await employee.profile(); return [s.id, s.name] as const; })));
+      const own = new Set(mine.map((employee) => employee.employeeId));
       // Each group's 旁白 session too (it belongs to no employee).
       const narrators = (await engine.groups.all()).filter((g) => g.narrator?.session).map((g) => [g.narrator!.session, g.name] as const);
       const narratorSessions = (await Promise.all(narrators.map(async ([id, name]) => await store.hasSession(id) ? { ...await store.session(id), employeeId: "", employeeName: "旁白 · " + name, taskText: "", kind: "narrator", running: false } : undefined))).filter(Boolean);
-      return [...narratorSessions, ...await Promise.all((await store.employeeSessions()).map(async (session) => {
+      return [...narratorSessions, ...(await Promise.all((await store.employeeSessions()).map(async (session) => {
         const linked = session.taskId ? await store.employeeTask(session.taskId) : undefined;
         const employeeId = session.employeeId || linked?.employee || "";
+        // Each administrator's debug view covers only their own employees.
+        if (employeeId && !own.has(employeeId)) return undefined;
         return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联牛马", taskText: linked?.task.text || "", kind: !session.taskId ? (session.groupId ? "group" : "chat") : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
-      }))];
+      }))).filter(Boolean)];
     }
     if (path[0] === "bootstrap" && method === "GET") {
       let cwd = "", cloudError = "";

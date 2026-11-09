@@ -323,16 +323,14 @@ export class Auth {
     // A group chat's own session: everyone in the group (groups.ts).
     if (session.groupId && !session.employeeId)
       return !!(await this.store.object<{ users: string[] }>("group", session.groupId))?.users.includes(user.id);
+    // An employee's chat and task sessions belong to that employee's owner alone.
     if (session.employeeId) {
       const employee = session.employeeId === "default"
         ? await this.store.get<any>("employee", {})
         : await this.store.object<any>("employee", session.employeeId);
-      if (employee && (user.role === "admin" || employee.ownerId === user.id)) return true;
+      return !!employee && (employee.ownerId === user.id || (user.role === "admin" && !employee.ownerId));
     }
-    return (
-      session.ownerId === user.id ||
-      (user.role === "admin" && (!session.ownerId || !!session.taskId))
-    );
+    return session.ownerId === user.id || (user.role === "admin" && !session.ownerId);
   }
   canWrite(user: User, session: Session) {
     return (

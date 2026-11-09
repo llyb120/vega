@@ -46,7 +46,7 @@ test("browser extension is resolved from source or packaged assets, never the wo
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("employees belong to their owner: only the owner and administrators see or manage them", async () => {
+test("employees belong to their owner: nobody else, not even an administrator, sees or manages them", async () => {
   const { store, engine } = await fixture(), auth = new Auth(store, "test-token-at-least-16-characters");
   try {
     const mine = await engine.employee.for((await engine.employee.create({ name: "Admin's" }, "admin")).id);
@@ -54,11 +54,12 @@ test("employees belong to their owner: only the owner and administrators see or 
     const alice = { id: "alice", role: "operator" } as any, bob = { id: "bob", role: "operator" } as any, viewer = { id: "viewer", role: "viewer" } as any, admin = { id: "admin", role: "admin" } as any;
     for (const user of [alice, bob, viewer]) assert(!await mine.accessible(user) && !await mine.manageable(user));
     assert(await mine.manageable(admin));
-    assert(await personal.accessible(alice) && await personal.manageable(alice) && await personal.accessible(admin));
+    assert(await personal.accessible(alice) && await personal.manageable(alice));
+    assert(!await personal.accessible(admin) && !await personal.manageable(admin));
     assert(!await personal.accessible(bob) && !await personal.accessible(viewer));
     const privateSession = await personal.chat("alice");
-    assert(await auth.canRead(alice, privateSession) && await auth.canRead(admin, privateSession));
-    assert(!await auth.canRead(bob, privateSession) && !await auth.canRead(viewer, privateSession));
+    assert(await auth.canRead(alice, privateSession));
+    assert(!await auth.canRead(admin, privateSession) && !await auth.canRead(bob, privateSession) && !await auth.canRead(viewer, privateSession));
     assert.equal("scope" in await engine.employee.state(), false, "there is no team scope any more");
   } finally { await engine.close(); await store.close(); }
 });

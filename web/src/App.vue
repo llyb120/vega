@@ -384,8 +384,8 @@ function showTasks(filter = "active") {
   workRailOpen.value = false;
   employeeTab.value = "tasks";
 }
-// Every employee belongs to its owner; administrators also see everyone else's (to oversee them).
-const employeeGroups = computed(() => [['mine', '我的牛马', true], ['others', '其他用户的牛马', false]].map(([key, label, mine]) => ({ key, label, entries: employees.value.filter((employee) => !!employee.mine === mine) })).filter((group) => group.entries.length));
+// Each user sees only their own employees.
+const employeeGroups = computed(() => [{ key: 'mine', label: '我的牛马', entries: employees.value.filter((employee) => employee.mine) }].filter((group) => group.entries.length));
 const myEmployees = computed(() => employees.value.filter((employee) => employee.mine));
 const labels = {
   queued: "排队中",

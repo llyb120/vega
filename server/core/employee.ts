@@ -464,13 +464,14 @@ export class Employee {
     assert(member, "Employee not found");
     return member;
   }
+  /** An employee is private to its owner; administrators get no override. */
   async accessible(user: { id: string; role: string }) {
     const s = await this.state();
-    return user.role === "admin" || s.ownerId === user.id;
+    return s.ownerId === user.id;
   }
   async manageable(user: { id: string; role: string }) {
     const s = await this.state();
-    return user.role === "admin" || (user.role === "operator" && s.ownerId === user.id);
+    return user.role !== "viewer" && s.ownerId === user.id;
   }
   async create(a: Obj, ownerId: string) {
     assert(typeof a.name === "string" && a.name.trim() && a.name.length <= 80, "Employee name requires 1–80 characters");
