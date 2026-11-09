@@ -19,6 +19,8 @@ import { rm, stat } from "node:fs/promises";
 import { keyDir } from "./key-files";
 import { resolve } from "node:path";
 import type { Store, Session, Message, Call, SceneFrame } from "./store";
+import { LOCAL_BROWSER_REASONS, peekBrowser, usesLocalBrowser, usesPrivateBrowser } from "./store";
+import { Handoffs } from "./handoff";
 import type { Config, Model } from "./config";
 import type { Chrome } from "./chrome";
 import { Catalog } from "./catalog";
@@ -27,7 +29,7 @@ import { Tools, type Outcome } from "./tools";
 import { Context, estimate, ACP_GUIDE } from "./context";
 import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, followUpOpen, followUpSummary, type EmployeeRuntime } from "./employee";
 import { EmployeeBrowsers } from "./employee-browsers";
-import { NetworkRelay } from "./network-relay";
+import { NetworkRelay, previewOrigin } from "./network-relay";
 import { LocalBrowsers } from "./local-browsers";
 import { Vault } from "./vault";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
@@ -105,6 +107,7 @@ export class Engine {
   browsers: EmployeeBrowsers;
   relay: NetworkRelay;
   localBrowsers: LocalBrowsers;
+  handoffs = new Handoffs(this);
   vault: Vault;
   /** Group chats: users and their employees working together (groups.ts). */
   groups: Groups;
@@ -387,6 +390,7 @@ export class Engine {
   }
   async close() {
     this.closing = true;
+    this.handoffs.close();
     this.localAgents.close();
     await this.fire.close();
     this.employee.close();
@@ -501,12 +505,30 @@ export class Engine {
     if (session.employeeId || session.taskId) return (await (await this.employeeFor(session)).state()).ownerId;
     return "";
   }
+  localBrowser(session: Pick<Session, "localAgent" | "browserLocation">) { return usesLocalBrowser(session); }
   async chromeFor(session: Session, signal?: AbortSignal) {
-    if (session.localAgent) return this.localBrowsers.get(session, signal);
+    if (usesLocalBrowser(session)) return this.localBrowsers.get(session, signal);
     const ownerId = await this.browserOwnerId(session);
-    // Employee/task work and cloud sessions use the owner's shared private profile.
-    if (session.employeeId || session.taskId || cloudFor(session)) return this.browsers.get(this.browserProfileKey(ownerId));
+    // Employee/task work, client-workspace and cloud sessions use the owner's shared private profile.
+    if (usesPrivateBrowser(session, !!cloudFor(session))) return this.browsers.get(this.browserProfileKey(ownerId));
     return this.chrome;
+  }
+  peekBrowser(session: Session) { return peekBrowser(this, session); }
+  async previewPrompt(session: Session) {
+    const previews = await this.relay.previews(session.id);
+    return previews.length ? `\n[稳定预览地址] ${previews.map((preview) => `${previewOrigin(preview)}（当前后端：${preview.backend.kind === "client" ? "客户端中继 " + preview.backend.host + ":" + preview.backend.port : "云端服务"}）`).join("；")}。浏览器访问开发服务用这个地址，不写 localhost 或中继域名；后端在本机与云端之间切换时地址不变。` : "";
+  }
+  async setBrowserLocation(key: string, location: unknown, reason: unknown) {
+    assert(location === "local" || location === "cloud", "浏览器位置只能是 local 或 cloud");
+    assert(location === "cloud" || LOCAL_BROWSER_REASONS.includes(reason as string), "本地浏览器只用于例外：existing_page（用户本机已有页面）、hardware、certificate 或 extension");
+    assert(!this.active.has(key) && !this.executionSwitches.has(key), "请先停止或等待当前轮执行结束，再切换浏览器位置");
+    const session = await this.store.session(key);
+    assert(location === "cloud" || session.localAgent, "本地浏览器需要会话在客户端执行；工作区在服务端时浏览器保持云端");
+    if (location === "cloud") { session.browserLocation = undefined; session.browserReason = undefined; await this.localBrowsers.release(key, true); }
+    else { session.browserLocation = "local"; session.browserReason = reason as string; }
+    await this.store.saveSession(session);
+    this.emit({ type: "execution_changed", session: key, data: session });
+    return session;
   }
   async compact(tools: Tools, model: Model, system: string, force = false) {
     const ctx = tools.context;
@@ -850,7 +872,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const memories = employeeState ? formatMemoriesForPrompt(recallMemory(employeeState, memoryQuery, Date.now(), false) as any) : "";
         const taskIndex = employeeState ? "\n当前任务索引（内容已节选；完整内容、进度和结果用employee_status传taskId查看）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: [...task.text].slice(0, 120).join(""), status: task.status, ...(task.key ? { dedupeKey: task.key } : {}) }))) : "";
         let system =
-          stable + memories + taskIndex + "\n" + (await sessionPrompt(session, config, this.store, session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : ""));
+          stable + memories + taskIndex + "\n" + (await sessionPrompt(session, config, this.store, session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : "")) + (await this.previewPrompt(session));
         // Scene model edited while this run is in progress: switch on the next provider request.
         const latest = await this.config(session), primary = sceneModels(latest, session.scene!)[0];
         const seen = scenePrimaries.get(session.scene!);
@@ -1210,7 +1232,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
           await this.store.saveSession(session);
         }
-        const browser = session?.localAgent ? this.localBrowsers.peek(key) : session?.ownerId && (session.employeeId || session.taskId || cloudFor(session)) ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : session?.employeeId ? undefined : this.chrome;
+        const browser = session ? this.peekBrowser(session) : undefined;
         await browser?.experiences.finish(key, !error);
       } catch (cleanupError: any) {
         error ||= new Error(String(redact.value(cleanupError?.message || cleanupError)));
@@ -1233,10 +1255,13 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         this.active.delete(key);
         this.redactors.delete(key);
         emit("done", { error: !!error });
-        if (continued.length && !this.closing) {
-          // History already holds the steered messages; a fresh run picks them up as context.
+        // Scene return to the caller already continued inside this run. A follow-up run must start
+        // before boundary: boundary moves ownership and takes the execution lock, so it only runs when nothing else will.
+        const followUp = continued.length > 0;
+        if (followUp && !this.closing) {
           void this.run(key).catch(() => {});
-        }
+        } else if (!this.closing) void this.handoffs.boundary(key).catch(() => {});
+        if (!this.closing && session?.localAgent) this.handoffs.scheduleCheckpoint(key);
         // A member turn that ended without a final reply (a tool stopped it) still reports what it did; either way
         // the group's "typing" state changes.
         if (session?.groupId && session.employeeId && !session.taskId) {

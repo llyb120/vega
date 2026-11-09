@@ -3,11 +3,13 @@ import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 import ConversationTimeline from "./ConversationTimeline.vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
+import WorkspaceHandoff from "./WorkspaceHandoff.vue";
 import { CHAT_PAGE_SIZE, mergeMessages } from "./chat-history.js";
 const props = defineProps({
   api: Function,
   sessionId: String,
   revision: Number,
+  handoffRevision: Number,
   debug: Boolean,
 });
 const emit = defineEmits(["back"]);
@@ -179,6 +181,7 @@ onBeforeUnmount(() => { version++; });
   >
     <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；补充、审批或续做请返回对应牛马，不能在这里输入或重放操作。<template v-if="debug">导出包含原始消息、工具参数与本地路径，分享前请脱敏；图片仅保留引用。</template></span></p>
     <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>牛马 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>模型 / 场景</dt><dd>{{ session.model || '未配置' }} / {{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
+    <WorkspaceHandoff v-if="session?.employeeId && session?.taskId" :api="api" :employee-id="session.employeeId" :task-id="session.taskId" :revision="handoffRevision" />
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-if="busy && !messages.length" class="context-note" role="status"><span class="spinner"></span>正在加载记录…</p>
     <div v-if="hasMore" class="load-older" :aria-busy="loadingOlder">

@@ -409,6 +409,7 @@ class LiveSession {
       return;
     }
     this.hub.controllers.set(this.tabTag, this);
+    this.hub.chrome.userControl?.add(this.tabTag);
     this.wantsControl = true;
     this.lastInput = Date.now();
     this.send({ type: "mode", mode: "waiting" });
@@ -431,8 +432,10 @@ class LiveSession {
       .finally(() => {
         this.claimTask = undefined;
         this.stopping = false;
-        if (this.hub.controllers.get(this.tabTag) === this)
+        if (this.hub.controllers.get(this.tabTag) === this) {
           this.hub.controllers.delete(this.tabTag);
+          this.hub.chrome.userControl?.delete(this.tabTag);
+        }
       });
   }
   releaseControl(reason?: string) {
@@ -441,8 +444,10 @@ class LiveSession {
     this.pointerPending = undefined;
     this.release?.();
     this.release = undefined;
-    if (this.hub.controllers.get(this.tabTag) === this && !this.locked)
+    if (this.hub.controllers.get(this.tabTag) === this && !this.locked) {
       this.hub.controllers.delete(this.tabTag);
+      this.hub.chrome.userControl?.delete(this.tabTag);
+    }
     this.send({ type: "mode", mode: "view", reason });
   }
   invalidate() {

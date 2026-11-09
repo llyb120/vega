@@ -6,6 +6,7 @@ import {
 import { BOT_AVATAR_COLORS, BOT_AVATAR_SHAPES, botAvatarPreset, defaultBotAvatar, isAvatarPreset, parseBotAvatar } from "../../shared/employee-avatars";
 import { systemPresence, type Presence } from "./presence";
 import type { Store, Session, Message } from "./store";
+import { LOCAL_BROWSER_REASONS } from "./store";
 import { outsideTransaction } from "./db";
 import { resolve, posix, win32 } from "node:path";
 import { realpath } from "node:fs/promises";
@@ -990,6 +991,10 @@ export class Employee {
               );
               const old = a.key ? s.tasks.find((t) => t.key === a.key) : undefined;
               if (old) return { id: old.id, exists: true, status: old.status };
+              const execution = t ? { ...(t.execution || {}) } : { ...(s.execution || {}) };
+              assert(a.localBrowser === undefined || LOCAL_BROWSER_REASONS.includes(a.localBrowser), "localBrowser 只用于 existing_page、hardware、certificate 或 extension");
+              assert(!a.localBrowser || execution.localAgent, "本地浏览器例外需要牛马在客户端执行；工作区在服务端时浏览器保持云端");
+              const browser = a.localBrowser ? { browserLocation: "local", browserReason: a.localBrowser } : t?.browserLocation ? { browserLocation: t.browserLocation, browserReason: t.browserReason } : {};
               assert(
                 s.tasks.filter((t) => !ended(t.status)).length < 100,
                 "Active task capacity reached",
@@ -1003,7 +1008,8 @@ export class Employee {
                 cwd: t?.cwd || a.cwd || s.cwd,
                 owner: t?.owner || owner,
                 employeeId: this.employeeId,
-                execution: t ? { ...(t.execution || {} ) } : { ...(s.execution || {}) },
+                execution,
+                ...browser,
                 key: a.key || "",
                 origin: t?.id || "",
                 fromDuty: t?.dutyId || t?.fromDuty || "",
@@ -1807,8 +1813,10 @@ export class Employee {
           assert(stored.taskId === planned.id && (!stored.employeeId || stored.employeeId === this.employeeId), "Execution session belongs to another task or employee");
           stored.employeeId = this.employeeId;
           if (computer && planned.execution?.localAgent && !stored.localAgent) {
-            Object.assign(stored, planned.execution, { cwd: planned.cwd });
-            notes.push("电脑会话已恢复到任务绑定的客户端；历史网页结果来自服务端，不得复用旧标签/ref。先用 chrome_tabs/chrome_inspect 核对本机现场，不重放已提交的操作。");
+            Object.assign(stored, planned.execution, { cwd: planned.cwd, browserLocation: planned.browserLocation, browserReason: planned.browserReason });
+            notes.push(planned.browserLocation === "local"
+              ? "电脑会话已恢复到任务绑定的客户端，按任务记录的例外使用本机浏览器；历史网页结果来自服务端，不得复用旧标签/ref。先用 chrome_tabs/chrome_inspect 核对本机现场，不重放已提交的操作。"
+              : "电脑会话已恢复到任务绑定的客户端（文件与命令）；浏览器仍是云端浏览器。先用 chrome_tabs/chrome_inspect 核对现场，不重放已提交的操作。");
           }
           stored.ownerId ||= planned.execution?.ownerId || initial.ownerId || undefined;
           stored.scene ||= scene;
@@ -1827,6 +1835,7 @@ export class Employee {
           title: initial.name + " · " + [...planned.text.split("\n")[0]].slice(0, 30).join(""),
           cwd: planned.cwd,
           ...planned.execution,
+          ...(planned.execution?.localAgent && planned.browserLocation === "local" ? { browserLocation: "local" as const, browserReason: planned.browserReason } : {}),
           scene,
           model,
           taskId: planned.id,

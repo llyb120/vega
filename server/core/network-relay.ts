@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer, connect, isIP, type Server, type Socket } from "node:net";
 import type { Peer } from "crossws";
 import type { Store } from "./store";
@@ -9,7 +9,13 @@ const FRAME = 32 << 10;
 type Grant = { userId: string; clientId: string; hash: string };
 type Record = Grant & { rules: string[] };
 type TunnelPeer = Pick<Peer, "id" | "send" | "close">;
-type Flow = { grant: Grant; transport: Agent["transport"]; socket: Socket; peer?: TunnelPeer; ready: boolean; sending: boolean; incoming: boolean; timer: ReturnType<typeof setTimeout>; finish: (reason?: string) => void };
+type Flow = { grant: Grant; transport: Agent["transport"]; socket: Socket; peer?: TunnelPeer; ready: boolean; sending: boolean; incoming: boolean; timer: ReturnType<typeof setTimeout>; finish: (reason?: string) => void; preview?: string };
+export type PreviewBackend = { kind: "client"; clientId: string; host: string; port: number } | { kind: "cloud"; port: number };
+/** A session's stable development origin; only its backend moves between the client relay and a cloud service. */
+export type Preview = { host: string; userId: string; sessionId: string; backend: PreviewBackend; updatedAt: number };
+export const PREVIEW_SUFFIX = ".preview.vega.internal";
+export const previewHost = (sessionId: string) => "s" + createHash("sha256").update(sessionId).digest("hex").slice(0, 20) + PREVIEW_SUFFIX;
+export const previewOrigin = (preview: Pick<Preview, "host">) => "http://" + preview.host;
 
 export function relayRules(value: unknown): string[] {
   assert(Array.isArray(value) && value.length <= 64, "最多配置 64 条中继规则");
@@ -66,8 +72,29 @@ export class NetworkRelay {
   private proxies = new Map<string, Promise<{ server: Server; port: number; sockets: Set<Socket> }>>();
   private flows = new Map<string, Flow>();
   private peers = new Map<string, string>();
+  private previewSockets = new Map<string, Set<Socket>>();
   private closed = false;
   constructor(private store: Store, private hub: LocalAgents) {}
+
+  async previews(sessionId: string) {
+    return (await this.store.objects<Preview>("preview")).filter((preview) => preview.sessionId === sessionId);
+  }
+  async preview(host: string) { return await this.store.object<Preview>("preview", host); }
+  /** Saving a new backend drops open connections to the origin so pages and WebSockets reconnect to it. */
+  async savePreview(preview: Preview) {
+    assert(preview.host.endsWith(PREVIEW_SUFFIX) && validRelayHost(preview.host), "Invalid preview host");
+    const backend = preview.backend;
+    assert(Number.isInteger(backend.port) && backend.port > 0 && backend.port <= 65535, "Invalid preview port");
+    if (backend.kind === "client") assert(/^[a-f0-9-]{32,36}$/.test(backend.clientId) && validRelayHost(backend.host), "预览的客户端后端必须是精确域名:端口，不能是 localhost 或 IP");
+    await this.store.save("preview", preview.host, { ...preview, updatedAt: Date.now() });
+    for (const flow of this.flows.values()) if (flow.preview === preview.host) flow.finish();
+    for (const socket of this.previewSockets.get(preview.host) || []) socket.destroy();
+  }
+  async removePreview(host: string) {
+    await this.store.remove("preview", host);
+    for (const flow of this.flows.values()) if (flow.preview === host) flow.finish();
+    for (const socket of this.previewSockets.get(host) || []) socket.destroy();
+  }
 
   async configure(grant: Grant, value: unknown) {
     const rules = relayRules(value), key = grant.userId + ":" + grant.clientId;
@@ -90,6 +117,14 @@ export class NetworkRelay {
     const agent = this.hub.active(userId, record.clientId);
     assert(agent?.transport && !agent.reconnecting, "中继客户端离线，不会回退直连");
     return { record, agent };
+  }
+  /** A preview bound to a client never falls back to a direct or cloud connection while that client is away. */
+  async client(userId: string, clientId: string, host: string, port: number) {
+    const record = (await this.store.objects<Record>("client-relay")).find((r) => r.userId === userId && r.clientId === clientId);
+    assert(record && record.rules.includes(`${host}:${port}`), "预览后端不在该客户端的流量中继规则中，未连接");
+    const agent = this.hub.active(userId, clientId);
+    assert(agent?.transport && !agent.reconnecting, "预览后端所在客户端离线，不会回退直连或改连云端");
+    return { record: record as Record, agent };
   }
   inUse(clientId: string) { return [...this.flows.values()].some((flow) => flow.grant.clientId === clientId); }
   disconnect(userId: string, clientId: string, transport?: Agent["transport"]) {
@@ -124,9 +159,25 @@ export class NetworkRelay {
     return `socks5://127.0.0.1:${(await starting).port}`;
   }
   private async accept(userId: string, socket: Socket) {
-    const { host, port } = await destination(socket);
-    const selected = await this.route(userId, host, port).catch((error) => {
-      throw Error(`${host}:${port}: ${error instanceof Error ? error.message : "Route rejected"}`);
+    const requested = await destination(socket);
+    let { host, port } = requested;
+    const preview = host.endsWith(PREVIEW_SUFFIX) ? await this.preview(host) : undefined;
+    if (host.endsWith(PREVIEW_SUFFIX)) assert(preview && preview.userId === userId && port === 80, `${host}:${port}: 预览地址未登记或不属于该用户`);
+    if (preview?.backend.kind === "cloud") {
+      const sockets = this.previewSockets.get(host) || new Set<Socket>(), origin = host;
+      this.previewSockets.set(origin, sockets);
+      sockets.add(socket);
+      socket.once("close", () => { sockets.delete(socket); if (!sockets.size) this.previewSockets.delete(origin); });
+      const remote = connect({ host: "127.0.0.1", port: preview.backend.port });
+      remote.on("error", () => { if (!socket.destroyed) try { reply(socket, 5); } catch {} socket.destroy(); });
+      socket.once("close", () => remote.destroy());
+      remote.once("close", () => socket.destroy());
+      remote.once("connect", () => { reply(socket); socket.setTimeout(300000); socket.pipe(remote).pipe(socket); });
+      return;
+    }
+    if (preview?.backend.kind === "client") ({ host, port } = preview.backend);
+    const selected = await (preview?.backend.kind === "client" ? this.client(userId, preview.backend.clientId, host, port) : this.route(userId, host, port)).catch((error) => {
+      throw Error(`${requested.host}:${requested.port}: ${error instanceof Error ? error.message : "Route rejected"}`);
     });
     if (socket.destroyed || this.closed) return;
     if (!selected) {
@@ -166,7 +217,7 @@ export class NetworkRelay {
       if (flow.peer) { this.peers.delete(flow.peer.id); flow.peer.close(1000, "Relay closed"); }
       socket.destroy();
     };
-    const flow: Flow = { grant: selected.record, transport: selected.agent.transport, socket, ready: false, sending: false, incoming: false, timer: setTimeout(() => finish("Client readiness timed out"), 15000), finish };
+    const flow: Flow = { grant: selected.record, transport: selected.agent.transport, socket, ready: false, sending: false, incoming: false, timer: setTimeout(() => finish("Client readiness timed out"), 15000), finish, preview: preview?.host };
     this.flows.set(id, flow);
     socket.once("close", () => finish(flow.ready ? undefined : "SOCKS connection closed before client readiness"));
     try { selected.agent.transport!.send({ type: "relay", id, args: { host, port } }); }
