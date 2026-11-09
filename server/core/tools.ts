@@ -105,7 +105,7 @@ export class Tools {
    * In a group chat, a message from anyone but the employee's owner (another user or another employee) is a guest
    * request: it may work with tasks only (see GUEST_RULES).
    */
-  /** Proxy env for server shells when this account has client relay rules (intranet git, curl and ssh). */
+  /** Proxy env for server shells when this account has an online relay client (intranet git, curl and ssh). */
   private async relayEnvironment() {
     const owner = this.session.ownerId;
     if (!owner || this.session.localAgent || !(await this.engine.relay.enabled(owner))) return undefined;

@@ -166,8 +166,10 @@ test("saving a changed policy flushes pooled sockets; invalid rules preserve the
   assert(!f.relay.inUse(grant.clientId));
 });
 
-test("without a matching domain rule SOCKS dials from the server and logs why relay did not apply", async (t) => {
-  const warn = t.mock.method(console, "warn", () => {}), f = await fixture(t);
+test("a host the server can reach stays on the server even when the client has rules", async (t) => {
+  const f = await fixture(t);
+  let relayed = false;
+  f.onCommand(() => { relayed = true; });
   await f.relay.configure(grant, ["git.internal:443"]);
   const server = createServer((s) => { s.write("ok"); s.end(); });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
@@ -175,15 +177,13 @@ test("without a matching domain rule SOCKS dials from the server and logs why re
   const port = (server.address() as any).port;
   const socket = await socks(await f.relay.proxy("alice"), "localhost", port, t);
   assert.equal((await read(socket, 10))[1], 0);
-  socket.write("ping");
   assert.equal((await read(socket, 2)).toString(), "ok");
-  const calls = warn.mock.calls.map(call => call.arguments);
-  assert(calls.some(([label, details]) => label === "[Vega relay] No matching client rule; dialing from server" && details.userId === "alice" && details.host === "localhost" && details.port === port && /未命中/.test(String(details.tip))), JSON.stringify(calls));
+  assert.equal(relayed, false, "直连成功时不动用客户端");
 });
 
-test("SOCKS CONNECT to an IP never matches domain relay rules and logs the IP tip", async (t) => {
-  const warn = t.mock.method(console, "warn", () => {}), f = await fixture(t);
-  await f.relay.configure(grant, ["git.internal:443"]);
+test("SOCKS CONNECT to an IP never matches domain relay rules nor the fallback", async (t) => {
+  const f = await fixture(t);
+  await f.relay.configure(grant, ["git.internal:443"], true);
   let routed: any;
   f.onCommand((job) => { routed = job; });
   const server = createServer((s) => { s.write("ip"); s.end(); });
@@ -203,8 +203,41 @@ test("SOCKS CONNECT to an IP never matches domain relay rules and logs the IP ti
   socket.write(request);
   assert.equal((await read(socket, 10))[1], 0);
   assert.equal(routed, undefined, "domain rules must not claim IP CONNECT");
-  const calls = warn.mock.calls.map(call => call.arguments);
-  assert(calls.some(([label, details]) => label === "[Vega relay] No matching client rule; dialing from server" && details.addressType === "ip" && /IP/.test(String(details.tip))), JSON.stringify(calls));
+});
+
+test("a failed direct dial falls back to the account client with no rule configured", async (t) => {
+  const f = await fixture(t);
+  await f.relay.configure(grant, [], true);
+  let command: any, peer: any;
+  const outbound: Buffer[] = [];
+  f.onCommand((job) => {
+    command = job;
+    peer = { id: job.id, send: (data: Uint8Array) => outbound.push(Buffer.from(data)), close() {} };
+    f.relay.open(peer, grant, job.id);
+    f.relay.message(peer, Buffer.from([2]));
+  });
+  assert.equal(await f.relay.enabled("alice"), true);
+  const socket = await socks(await f.relay.proxy("alice"), "only-client.internal", 22, t);
+  assert.equal((await read(socket, 10))[1], 0);
+  assert.deepEqual(command.args, { host: "only-client.internal", port: 22, fallback: true });
+  const until = async (check: () => boolean) => { for (let i = 0; i < 400 && !check(); i++) await new Promise((r) => setTimeout(r, 5)); assert(check()); };
+  socket.write("ssh");
+  await until(() => outbound.length > 0);
+  assert.equal(outbound[0].subarray(1).toString(), "ssh");
+  f.relay.message(peer, Buffer.concat([Buffer.from([0]), Buffer.from("SSH-2.0")]));
+  assert.equal((await read(socket, 7)).toString(), "SSH-2.0");
+});
+
+test("without an enabled client a failed direct dial reports the SOCKS error instead of stalling", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const f = await fixture(t);
+  let jobs = 0;
+  f.onCommand(() => { jobs++; });
+  await f.relay.configure(grant, [], false);
+  assert.equal(await f.relay.enabled("alice"), false);
+  const socket = await socks(await f.relay.proxy("alice"), "only-client.internal", 22, t);
+  assert.equal((await read(socket, 10))[1], 4);
+  assert.equal(jobs, 0);
 });
 
 test("matched domain rules still send the client a relay job with the hostname", async (t) => {

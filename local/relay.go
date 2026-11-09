@@ -104,6 +104,26 @@ func dialRelay(ctx context.Context, host string, port int) (net.Conn, error) {
 	return nil, err
 }
 
+// relayTarget is one server-requested TCP destination; Fallback means the server could not dial it itself.
+type relayTarget struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Fallback bool   `json:"fallback"`
+}
+
+// relayPermits: 规则里的域名永远接；其它域名只在开关允许、且服务端说明是直连失败后的兜底时才接。
+func relayPermits(rules []string, enabled bool, target relayTarget) bool {
+	if !enabled {
+		return false
+	}
+	for _, rule := range rules {
+		if rule == net.JoinHostPort(target.Host, strconv.Itoa(target.Port)) {
+			return true
+		}
+	}
+	return target.Fallback
+}
+
 // Called with a.mu held. Each account has its own policy epoch; saving cancels old tunnels.
 func (a *Agent) configureRelay(connection *directConnection, saved ServerCredential, parent context.Context) {
 	runner := connection.jobs
@@ -114,8 +134,11 @@ func (a *Agent) configureRelay(connection *directConnection, saved ServerCredent
 	}
 	ctx, cancel := context.WithCancel(parent)
 	runner.relayCancel = cancel
-	rules := saved.activeRelay()
-	runner.relayRules = append([]string{}, rules...)
+	rules := append([]string{}, saved.Relay...)
+	// 规则全量上报：开关关掉时服务端仍要按规则拒绝直连，只是不再当出口。
+	runner.relayRules = rules
+	runner.relayOn = saved.relayAllowed()
+	enabled := runner.relayOn
 	slots := make(chan struct{}, 64)
 	runner.relay = func(session context.Context, request job) {
 		select {
@@ -128,20 +151,14 @@ func (a *Agent) configureRelay(connection *directConnection, saved ServerCredent
 		defer stop()
 		release := context.AfterFunc(session, stop)
 		defer release()
-		var target struct {
-			Host string `json:"host"`
-			Port int    `json:"port"`
-		}
+		var target relayTarget
+		// 无效目标、规则外的域名和关闭的开关都只记一条日志，不让中继变成通用代理。
 		if len(request.ID) != 36 || json.Unmarshal(request.Args, &target) != nil || !validRelayHost(target.Host) {
 			fmt.Fprintln(os.Stderr, "vega-local: relay ignored invalid target")
 			return
 		}
-		allowed := false
-		for _, rule := range rules {
-			allowed = allowed || rule == net.JoinHostPort(target.Host, strconv.Itoa(target.Port))
-		}
-		if !allowed {
-			fmt.Fprintf(os.Stderr, "vega-local: relay denied %s (not in saved rules)\n", net.JoinHostPort(target.Host, strconv.Itoa(target.Port)))
+		if !relayPermits(rules, enabled, target) {
+			fmt.Fprintf(os.Stderr, "vega-local: relay denied %s (switch %v, fallback %v)\n", net.JoinHostPort(target.Host, strconv.Itoa(target.Port)), enabled, target.Fallback)
 			return
 		}
 		address, _ := url.Parse(saved.Origin + "/api/local-agent/relay")

@@ -115,8 +115,8 @@ func TestConnectionPageSavesAccountRelayAndSupplement(t *testing.T) {
 	if len(a.config.Servers[0].Relay) != 3 || a.config.Servers[0].RelayOn == nil || *a.config.Servers[0].RelayOn {
 		t.Fatal("relay switch off should keep rules but disable")
 	}
-	if len(a.config.Servers[0].activeRelay()) != 0 {
-		t.Fatal("activeRelay should be empty when switch is off")
+	if a.config.Servers[0].relayAllowed() {
+		t.Fatal("switch off must stop this client being an egress")
 	}
 	form.Set("relayRules", "")
 	form.Set("relayOn", "1")
@@ -200,23 +200,42 @@ func TestRelayPumpStreamsBinaryBothWaysWithAcknowledgements(t *testing.T) {
 	}
 }
 
-func TestActiveRelayRespectsSwitch(t *testing.T) {
+func TestRelaySwitchAndPermits(t *testing.T) {
 	off := false
 	on := true
-	withRules := ServerCredential{Relay: []string{"git.internal:443"}}
-	if len(withRules.activeRelay()) != 1 {
+	legacy := ServerCredential{Relay: []string{"git.internal:443"}}
+	if !legacy.relayAllowed() {
 		t.Fatal("legacy credentials with rules stay enabled")
 	}
-	withRules.RelayOn = &off
-	if len(withRules.activeRelay()) != 0 {
-		t.Fatal("switch off must disable without clearing rules")
+	legacy.RelayOn = &off
+	if legacy.relayAllowed() {
+		t.Fatal("switch off must stop relaying without clearing rules")
 	}
-	withRules.RelayOn = &on
-	if len(withRules.activeRelay()) != 1 {
+	legacy.RelayOn = &on
+	if !legacy.relayAllowed() {
 		t.Fatal("switch on should re-enable saved rules")
 	}
-	empty := ServerCredential{RelayOn: &on}
-	if len(empty.activeRelay()) != 0 {
-		t.Fatal("enabled switch with empty rules stays inactive")
+	if !(ServerCredential{RelayOn: &on}).relayAllowed() {
+		t.Fatal("an enabled switch with no rules still serves fallback traffic")
+	}
+	if !(ServerCredential{}).relayAllowed() {
+		t.Fatal("a never configured account counts as allowed")
+	}
+	rules := []string{"git.internal:443"}
+	for _, test := range []struct {
+		enabled  bool
+		target   relayTarget
+		expected bool
+	}{
+		{true, relayTarget{Host: "git.internal", Port: 443}, true},
+		{true, relayTarget{Host: "git.internal", Port: 22}, false},
+		{true, relayTarget{Host: "api.internal", Port: 443, Fallback: true}, true},
+		{true, relayTarget{Host: "api.internal", Port: 443}, false},
+		{false, relayTarget{Host: "git.internal", Port: 443}, false},
+		{false, relayTarget{Host: "api.internal", Port: 443, Fallback: true}, false},
+	} {
+		if relayPermits(rules, test.enabled, test.target) != test.expected {
+			t.Errorf("permits(%v) = %v", test, !test.expected)
+		}
 	}
 }

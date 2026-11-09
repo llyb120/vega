@@ -45,12 +45,14 @@ test("the shell environment points curl, git and ssh at the account gateway", as
   assert.equal(await relayProxyFile(f.root), file, "one file per files root");
 });
 
-test("a shell without relay rules gets no proxy and creates no gateway", async (t) => {
+test("server shells get the proxy whenever an enabled client is online, with or without rules", async (t) => {
   const f = await fixture(t);
   assert.equal(await f.relay.enabled("alice"), false);
-  await f.relay.configure(grant, ["git.internal:443"]);
+  await f.relay.configure(grant, [], true);
   assert.equal(await f.relay.enabled("alice"), true);
   assert.equal(await f.relay.enabled("bob"), false);
+  await f.relay.configure(grant, [], false);
+  assert.equal(await f.relay.enabled("alice"), false);
 });
 
 test("the ProxyCommand relays a TCP stream through the gateway", async (t) => {

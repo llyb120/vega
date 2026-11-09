@@ -7,7 +7,9 @@ import { assert } from "./util";
 
 const FRAME = 32 << 10;
 type Grant = { userId: string; clientId: string; hash: string };
-type Record = Grant & { rules: string[] };
+type Record = Grant & { rules: string[]; on?: boolean };
+/** 老记录没有 on：以是否报了规则为准；新客户端总是显式上报开关。 */
+const allowed = (record: Record) => record.on !== false;
 type TunnelPeer = Pick<Peer, "id" | "send" | "close">;
 type Flow = { grant: Grant; transport: Agent["transport"]; socket: Socket; peer?: TunnelPeer; ready: boolean; sending: boolean; incoming: boolean; timer: ReturnType<typeof setTimeout>; finish: (reason?: string) => void };
 
@@ -69,12 +71,13 @@ export class NetworkRelay {
   private closed = false;
   constructor(private store: Store, private hub: LocalAgents) {}
 
-  async configure(grant: Grant, value: unknown) {
+  async configure(grant: Grant, value: unknown, on?: unknown) {
     const rules = relayRules(value), key = grant.userId + ":" + grant.clientId;
+    const enabled = typeof on === "boolean" ? on : rules.length > 0;
     const previous = await this.store.object<Record>("client-relay", key);
-    if (previous?.hash === grant.hash && JSON.stringify(previous.rules) === JSON.stringify(rules)) return;
-    const changed = previous ? previous.hash !== grant.hash || JSON.stringify(previous.rules) !== JSON.stringify(rules) : rules.length > 0;
-    await this.store.save("client-relay", key, { ...grant, rules });
+    if (previous?.hash === grant.hash && previous.on === enabled && JSON.stringify(previous.rules) === JSON.stringify(rules)) return;
+    const changed = previous ? previous.hash !== grant.hash || previous.on !== enabled || JSON.stringify(previous.rules) !== JSON.stringify(rules) : rules.length > 0;
+    await this.store.save("client-relay", key, { ...grant, rules, on: enabled });
     if (!changed) return;
     for (const flow of this.flows.values()) if (flow.grant.userId === grant.userId) flow.finish();
     // Flush pooled direct connections too: a newly protected domain must not keep its old route.
@@ -86,6 +89,7 @@ export class NetworkRelay {
     if (!records.length) return;
     assert(records.length === 1, "多个客户端配置了同一中继域名，请在客户端消除冲突");
     const record = records[0];
+    assert(allowed(record), "客户端已关闭该账户的流量中继，不会回退直连");
     assert(record.rules.includes(`${host}:${port}`), "客户端未授权该域名端口");
     const agent = this.hub.active(userId, record.clientId);
     // 区分“这台在线但待命”和“真的离线”：两者都不回退，但用户要看到不同原因。
@@ -95,8 +99,19 @@ export class NetworkRelay {
       : "中继客户端离线，不会回退直连");
     return { record, agent };
   }
+  /**
+   * 没有规则命中的目标也会在服务端直连失败后走这台在线客户端：它是否有规则不影响兜底，
+   * 只要该账号的中继开关没关。
+   */
+  async fallback(userId: string) {
+    const agent = this.hub.active(userId);
+    if (!agent?.transport || agent.reconnecting) return;
+    const record = (await this.store.objects<Record>("client-relay")).find((item) => item.userId === userId && item.clientId === agent.clientId);
+    return record && allowed(record) ? { record, agent } : undefined;
+  }
+  /** 服务端命令要不要带上中继代理：有在线且开启中继的客户端就够了，不需要先写规则。 */
   async enabled(userId: string) {
-    return (await this.store.objects<Record>("client-relay")).some((record) => record.userId === userId && record.rules.length > 0);
+    return !!(await this.fallback(userId));
   }
   inUse(clientId: string) { return [...this.flows.values()].some((flow) => flow.grant.clientId === clientId); }
   disconnect(userId: string, clientId: string, transport?: Agent["transport"]) {
@@ -136,47 +151,66 @@ export class NetworkRelay {
       throw Error(`${host}:${port}: ${error instanceof Error ? error.message : "Route rejected"}`);
     });
     if (socket.destroyed || this.closed) return;
-    if (!selected) {
-      // Unmatched hosts dial from the server. Domain rules never match IP literals — employee
-      // browsers send hostnames via host-resolver-rules; an IP here means those rules cannot apply.
-      void this.store.objects<Record>("client-relay").then((rows) => {
-        const ruled = rows.some((r) => r.userId === userId && r.rules.length > 0);
-        console.warn("[Vega relay] No matching client rule; dialing from server", {
-          userId, host, port, addressType: isIP(host) ? "ip" : "hostname",
-          tip: isIP(host) && ruled
-            ? "SOCKS 目标是 IP，域名中继规则无法匹配；服务端浏览器应通过域名访问。若反代未转发 /api/local-agent/relay，中继隧道也会失败并表现为 SOCKS 错误。"
-            : ruled
-              ? "已配置中继规则但未命中此域名:端口；未匹配时不会走客户端。请在客户端「流量中继」填写精确域名（裸域名自动含 80/443），并确认反代转发 /api/local-agent/relay 与 X-Vega-Relay。"
-              : "未配置客户端中继规则；仅客户端可达的目标会失败。",
-        });
-      }).catch(() => {});
-      const remote = connect({ host, port });
-      remote.on("error", (error: NodeJS.ErrnoException) => {
-        console.warn("[Vega relay] Direct connection failed", { userId, host, port, code: error.code });
-        if (!socket.destroyed) try { reply(socket, 4); } catch {}
-        socket.destroy();
-      });
-      socket.once("close", () => remote.destroy());
+    if (selected) return this.tunnel(socket, selected.record, selected.agent, host, port);
+    this.direct(userId, socket, host, port);
+  }
+  /**
+   * 没有规则命中时先由服务端直连：失败或 5 秒没连上，再让该账号的在线客户端试一次（反向永不发生）。
+   * 域名为准：IP 字面量和 localhost 客户端不接受，直接失败。
+   */
+  private direct(userId: string, socket: Socket, host: string, port: number) {
+    let settled = false;
+    const remote = connect({ host, port });
+    const stop = () => (settled ? true : (settled = true, false));
+    socket.once("close", () => remote.destroy());
+    const timer = setTimeout(() => { if (!stop()) { remote.destroy(); this.retry(userId, socket, host, port, "连接超时"); } }, 5000);
+    remote.once("error", (error: NodeJS.ErrnoException) => {
+      if (stop()) return;
+      clearTimeout(timer);
+      remote.destroy();
+      this.retry(userId, socket, host, port, error.code || error.message);
+    });
+    remote.once("connect", () => {
+      if (settled) { remote.destroy(); return; }
+      stop();
+      clearTimeout(timer);
       remote.once("close", () => socket.destroy());
-      remote.once("connect", () => { reply(socket); socket.setTimeout(300000); socket.pipe(remote).pipe(socket); });
-      return;
-    }
-    assert(this.flows.size < 512 && [...this.flows.values()].filter((f) => f.grant.userId === userId && f.grant.clientId === selected.record.clientId).length < 64, "Too many relay connections");
+      reply(socket);
+      socket.setTimeout(300000);
+      socket.pipe(remote).pipe(socket);
+    });
+  }
+  private retry(userId: string, socket: Socket, host: string, port: number, reason: string) {
+    const fail = (tip: string) => {
+      console.warn("[Vega relay] Direct connection failed", { userId, host, port, reason, tip });
+      if (!socket.destroyed) try { reply(socket, 4); } catch {}
+      socket.destroy();
+    };
+    if (!validRelayHost(host)) return fail("目标是 IP 或 localhost，域名中继无法匹配；请用域名访问，并确认反代转发 /api/local-agent/relay 与 X-Vega-Relay。");
+    void this.fallback(userId).then((selected) => {
+      if (socket.destroyed || this.closed) return;
+      if (!selected) return fail("该账号没有在线且开启流量中继的客户端；请在客户端「连接授权 → 流量中继」启用（写不写规则都可以）。");
+      console.warn("[Vega relay] Direct dial failed; retrying through the account client", { userId, clientId: selected.record.clientId, host, port, reason });
+      this.tunnel(socket, selected.record, selected.agent, host, port, true);
+    }).catch(() => socket.destroy());
+  }
+  private tunnel(socket: Socket, record: Record, agent: Agent, host: string, port: number, fallback = false) {
+    assert(this.flows.size < 512 && [...this.flows.values()].filter((f) => f.grant.userId === record.userId && f.grant.clientId === record.clientId).length < 64, "Too many relay connections");
     const id = randomUUID();
     const finish = (reason?: string) => {
       const flow = this.flows.get(id);
       if (!flow) return;
-      if (reason) console.warn("[Vega relay] Tunnel failed", { userId, clientId: flow.grant.clientId, id, host, port, stage: flow.ready ? "stream" : flow.peer ? "target_connect" : "websocket_upgrade", reason,
+      if (reason) console.warn("[Vega relay] Tunnel failed", { userId: record.userId, clientId: flow.grant.clientId, id, host, port, stage: flow.ready ? "stream" : flow.peer ? "target_connect" : "websocket_upgrade", reason,
         tip: flow.ready ? undefined : "客户端未在时限内就绪：检查本机客户端在线、目标是否在流量中继规则中、反代是否转发 /api/local-agent/relay 与 X-Vega-Relay，以及客户端日志中的 relay 失败原因。" });
       this.flows.delete(id);
       clearTimeout(flow.timer);
       if (flow.peer) { this.peers.delete(flow.peer.id); flow.peer.close(1000, "Relay closed"); }
       socket.destroy();
     };
-    const flow: Flow = { grant: selected.record, transport: selected.agent.transport, socket, ready: false, sending: false, incoming: false, timer: setTimeout(() => finish("Client readiness timed out"), 15000), finish };
+    const flow: Flow = { grant: record, transport: agent.transport, socket, ready: false, sending: false, incoming: false, timer: setTimeout(() => finish("Client readiness timed out"), 15000), finish };
     this.flows.set(id, flow);
     socket.once("close", () => finish(flow.ready ? undefined : "SOCKS connection closed before client readiness"));
-    try { selected.agent.transport!.send({ type: "relay", id, args: { host, port } }); }
+    try { agent.transport!.send({ type: "relay", id, args: { host, port, ...(fallback ? { fallback: true } : {}) } }); }
     catch { finish("Control channel send failed"); }
   }
   open(peer: TunnelPeer, grant: Grant, id: string) {

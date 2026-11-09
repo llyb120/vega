@@ -108,7 +108,7 @@ export class ClientSockets {
           this.close(socket.id, true);
           return;
         }
-        if (value.relay !== undefined) await this.relay?.configure(grant, value.relay);
+        if (value.relay !== undefined) await this.relay?.configure(grant, value.relay, value.relayOn);
         // Read before connecting, so nothing awaits between connect and "ready" (queued jobs follow "ready").
         const busy = value.autoUpdate === true && value.resume === true && !!value.version ? await this.clientInUse(grant.clientId) : false;
         const previous = this.hub.active(grant.userId, grant.clientId);
@@ -143,7 +143,7 @@ export class ClientSockets {
         void this.offline(socket, connection);
         return;
       } else if (value.type === "ping") {
-        if (value.relay !== undefined) await this.relay?.configure(grant, value.relay);
+        if (value.relay !== undefined) await this.relay?.configure(grant, value.relay, value.relayOn);
         if ("supplement" in value) {
           validateClient({ ...connection.details, supplement: value.supplement });
           connection.details.supplement = value.supplement;

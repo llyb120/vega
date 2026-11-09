@@ -27,15 +27,13 @@ type ServerCredential struct {
 	UserID  string   `json:"userId"`
 	Token   string   `json:"token"`
 	Relay   []string `json:"relay,omitempty"`
-	RelayOn *bool    `json:"relayOn,omitempty"` // nil = legacy: on when Relay is non-empty
+	RelayOn *bool    `json:"relayOn,omitempty"` // nil = never configured: this computer may relay
 }
 
-// activeRelay returns the rules that should be advertised and used right now.
-func (s ServerCredential) activeRelay() []string {
-	if s.RelayOn != nil && !*s.RelayOn {
-		return nil
-	}
-	return append([]string{}, s.Relay...)
+// relayAllowed: the switch is the only thing that stops this computer being an egress; rules just force a host
+// through it. Nil means never configured, which counts as allowed (the fallback needs no configuration).
+func (s ServerCredential) relayAllowed() bool {
+	return s.RelayOn == nil || *s.RelayOn
 }
 
 type connectionStatus struct {
@@ -286,9 +284,10 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	a.mu.Unlock()
 	connection.jobs.mu.Lock()
 	rules := append([]string{}, connection.jobs.relayRules...)
+	relayOn := connection.jobs.relayOn
 	connection.jobs.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "relayOn": relayOn, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true, false
 	}
@@ -373,6 +372,7 @@ type jobRunner struct {
 	recovery     *time.Timer
 	upload       func(context.Context, []byte) error
 	relayRules   []string
+	relayOn      bool
 	relay        func(context.Context, job)
 	relayCancel  context.CancelFunc
 }
@@ -531,6 +531,7 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 					}
 					if runner.relay != nil {
 						message["relay"] = runner.relayRules
+						message["relayOn"] = runner.relayOn
 					}
 					runner.write(message)
 				}

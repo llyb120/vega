@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ type Config struct {
 	Prefer         string             `json:"prefer,omitempty"`  // client = 客户端优先（默认），cloud = 服务端优先
 	Offline        bool               `json:"offline,omitempty"` // 手动下线：不连站点、不接任务
 	Butterfly      bool               `json:"butterfly,omitempty"` // 显示任务栏蝴蝶与提示气泡；默认关
+	ConfirmSeconds int                `json:"confirmSeconds,omitempty"` // 动鼠标键盘前等几秒（0 = 用默认 15）
 	TrustedOrigins []string           `json:"trustedOrigins"`
 	Servers        []ServerCredential `json:"servers,omitempty"`
 }
@@ -260,6 +262,7 @@ code{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#
 label{display:block;font-weight:600;margin:8px 0 6px}
 textarea{width:100%;font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:12px 14px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;resize:vertical;min-height:96px}
 textarea:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #292177;outline-offset:2px}
+input[type=number]{width:96px;padding:9px 12px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;font:inherit}
 .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
 button{font:inherit;padding:10px 16px;border:0;border-radius:10px;background:var(--brand);color:var(--brand-ink);cursor:pointer;font-weight:600}
 button.secondary{background:#eef0f8;color:var(--ink)}button.danger{background:#fff1f0;color:var(--danger)}
@@ -348,6 +351,16 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   </section>
 
   <section class="card">
+    <h2>操作电脑前的确认</h2>
+    <form method="post">
+      <label for="confirmSeconds">等多少秒（不选就开始）</label>
+      <input id="confirmSeconds" name="confirmSeconds" type="number" min="{{.ConfirmMin}}" max="{{.ConfirmMax}}" value="{{.ConfirmSeconds}}">
+      <small>牛马要动你电脑的鼠标键盘前，蝴蝶上方会弹一张「现在接管 / 我在用」的卡，这段时间内不选就当作同意；选「我在用」后 5 分钟内不再问也不操作。可填 {{.ConfirmMin}}–{{.ConfirmMax}} 秒；关掉上面蝴蝶就不会问。</small>
+      <div class="row"><button name="saveConfirm" value="1">保存确认时间</button></div>
+    </form>
+  </section>
+
+  <section class="card">
     <h2>接单状态</h2>
     <p>{{if .Offline}}当前<b>已下线</b>：不连接站点、不接任务；已在跑的任务由服务端接续。{{else}}当前<b>在线</b>：可以接任务。{{end}}</p>
     <form method="post">
@@ -372,8 +385,8 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
 
   <section class="card">
     <h2>流量中继</h2>
-    <p>按配对账户授权内网域名，该账户的服务端牛马浏览器自动使用本机网络，不改变任务执行位置。</p>
-    <small>每行填写一个精确域名或域名:端口，省略端口表示 80 和 443，最多 64 条。不支持通配符、IP、localhost 或 URL。命令行的 git over SSH 和 ssh 访问要另写域名:22。关闭开关可保留规则但停止中继。请使用 HTTPS 站点保护隧道。</small>
+    <p>按配对账户授权内网域名，该账户的服务端牛马浏览器和命令行自动使用本机网络，不改变任务执行位置。</p>
+    <small>每行填写一个精确域名或域名:端口，省略端口表示 80 和 443，最多 64 条。不支持通配符、IP、localhost 或 URL。命令行的 git over SSH 和 ssh 访问要另写域名:22。不写规则也可以：服务端连不上的域名会在直连失败后经本机重试一次；关闭开关则完全不做出口。请使用 HTTPS 站点保护隧道。</small>
     {{range .Accounts}}
     <form method="post" class="account">
       <p>所属服务器地址：<strong><code>{{.Origin}}</code></strong><br>账户 ID：<code>{{.UserID}}</code><br>
@@ -383,7 +396,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
       <input type="hidden" name="relayUser" value="{{.UserID}}">
       <label class="switch"><input type="checkbox" name="relayOn" value="1"{{if .Enabled}} checked{{end}}>启用流量中继</label>
       <label>允许中继的域名和端口<textarea name="relayRules" rows="5" placeholder="git.company.internal&#10;dev.company.internal:8080">{{.Rules}}</textarea></label>
-      <small>命中域名但客户端离线、端口未授权或多个客户端配置冲突时拒绝连接，不回退公网。保存会断开受影响账户的现有浏览器网络连接，不自动重放请求。</small>
+      <small>规则内的域名但客户端离线、端口未授权或多个客户端配置冲突时拒绝连接，不回退公网；规则外目标只在服务端直连失败时经本机重试一次。保存会断开受影响账户的现有浏览器网络连接，不自动重放请求。</small>
       <div class="row"><button name="saveRelay" value="1">保存此账户的中继配置</button></div>
       <details><summary>移除此账户配对</summary>
         <p>仅移除服务器 <code>{{.Origin}}</code> 下账户 <code>{{.UserID}}</code> 的本地配对和中继配置，并断开其连接；不会删除服务端账户，不影响其他配对或站点授权。</p>
@@ -417,7 +430,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid form", 400)
 			return
 		}
-		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" || r.FormValue("saveBrowser") == "1" || r.FormValue("saveExecution") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("setOnline") == "1" || r.FormValue("setOffline") == "1" {
+		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" || r.FormValue("saveBrowser") == "1" || r.FormValue("saveExecution") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" || r.FormValue("setOnline") == "1" || r.FormValue("setOffline") == "1" {
 			var err error
 			tab := "client"
 			if r.FormValue("saveBrowser") == "1" {
@@ -434,6 +447,13 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 				err = a.saveExecutionPlace(place)
 			} else if r.FormValue("saveButterfly") == "1" {
 				err = a.saveButterfly(r.FormValue("butterflyOn") == "1")
+			} else if r.FormValue("saveConfirm") == "1" {
+				seconds, convErr := strconv.Atoi(strings.TrimSpace(r.FormValue("confirmSeconds")))
+				if convErr != nil {
+					http.Error(w, "确认时间要填秒数", http.StatusBadRequest)
+					return
+				}
+				err = a.saveConfirmSeconds(seconds)
 			} else if r.FormValue("setOnline") == "1" {
 				err = a.setOnline(true)
 			} else if r.FormValue("setOffline") == "1" {
@@ -556,7 +576,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 				status = "已连接"
 			}
 		}
-		enabled := (saved.RelayOn == nil && len(saved.Relay) > 0) || (saved.RelayOn != nil && *saved.RelayOn)
+		enabled := saved.relayAllowed()
 		accounts = append(accounts, account{saved.Origin, saved.UserID, strings.Join(saved.Relay, "\n"), status, enabled})
 	}
 	supplement := a.config.Supplement
@@ -580,9 +600,11 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		ExecutionCloud                     bool
 		Offline                            bool
 		Butterfly                          bool
+		ConfirmSeconds                     int
+		ConfirmMin, ConfirmMax             int
 		Tab                                string
 		Accounts                           []account
-	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, browserLocal, executionCloud, offline, butterfly, tab, accounts})
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, browserLocal, executionCloud, offline, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts})
 }
 
 type loginProof struct {
