@@ -8,3 +8,6 @@ func butterflyTrayNotice(*butterflyNotice) {}
 func butterflyShowNotice(*butterflyNotice) {}
 
 func butterflyHideNotice() {}
+
+// 没有可点的确认卡：appuse 按「不拒绝默认视为同意」直接开始（与 Windows 上蝴蝶关掉时一致）。
+func butterflyConfirm() bool { return false }

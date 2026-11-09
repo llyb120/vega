@@ -172,6 +172,14 @@ func appuseExecute(raw json.RawMessage) map[string]any {
 	}
 	appuseDisplayOnly(&request)
 	appuseInit()
+	// 动鼠标键盘前先请用户点头：15 秒内不选就当作同意（与 Nova 数字员工操作电脑同一套）。
+	// 放在拿全局锁之前：等用户点的那十几秒不能把截图和别路操作一起堵住。
+	if request.Operation == "act" || request.Operation == "activate" {
+		if reason := appuseConfirmInput(request.Owner); reason != "" {
+			return map[string]any{"status": "not_executed", "completedActions": 0, "inputAttempted": false,
+				"errorCode": "desktop_declined", "error": reason}
+		}
+	}
 	appuseMu.Lock()
 	defer appuseMu.Unlock()
 	// 只有会动鼠标键盘、会抢焦点的操作才提醒；纯截图不该打扰用户。

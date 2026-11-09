@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -90,9 +91,6 @@ func bubbleWebViewReady() bool {
 
 // butterflyBubbleShow 用 WebView2 弹提示卡；WebView2 不可用时返回 false，调用方退回 GDI 卡片。
 func butterflyBubbleShow(notice *butterflyNotice) bool {
-	if !bubbleWebViewReady() {
-		return false
-	}
 	card := bubbleCard{Kind: "running", Title: "正在操作这台电脑", Light: chipLightTheme()}
 	clickThrough := false
 	if notice != nil {
@@ -105,6 +103,23 @@ func butterflyBubbleShow(notice *butterflyNotice) bool {
 		}
 	} else {
 		card.Title = "蝴蝶助理"
+	}
+	return butterflyBubblePush(card, clickThrough)
+}
+
+// butterflyConfirm 弹一张要用户作答的卡（现在接管 / 我在用）；没有 WebView2 就没有可点的按钮，
+// 返回 false，调用方按「不拒绝默认视为同意」直接开始。
+func butterflyConfirm() bool {
+	if butterflyQuiet || butterflyDisabled() {
+		return false
+	}
+	return butterflyBubblePush(bubbleCard{Kind: "confirm", Title: "要操作这台电脑了", Body: appuseConfirmText, Light: chipLightTheme()}, false)
+}
+
+// butterflyBubblePush 把这张卡交给 WebView2 画；WebView2 不可用时返回 false。
+func butterflyBubblePush(card bubbleCard, clickThrough bool) bool {
+	if !bubbleWebViewReady() {
+		return false
 	}
 	bubbleState.Lock()
 	if bubbleState.failed {
@@ -263,7 +278,7 @@ func butterflyBubbleProcedure(hwnd windows.Handle, message uint32, wparam, lpara
 	return result
 }
 
-// butterflyBubbleMessage 收页面的消息：ready / h:高度 / open（点了卡片）。
+// butterflyBubbleMessage 收页面的消息：ready / h:高度 / open（点了卡片）/ answer:确认卡上的选择。
 func butterflyBubbleMessage(text string) {
 	hwnd := func() windows.Handle {
 		bubbleState.Lock()
@@ -282,6 +297,8 @@ func butterflyBubbleMessage(text string) {
 	case text == "open":
 		_, _, _ = procButterflyPost.Call(uintptr(hwnd), bubbleParkMsg, 0, 0)
 		butterflyOpen()
+	case strings.HasPrefix(text, "answer:"):
+		appuseConfirmAnswer(strings.TrimPrefix(text, "answer:"))
 	case len(text) > 2 && text[:2] == "h:":
 		if css, ok := atoi32(text[2:]); ok && css > 0 {
 			bubbleState.Lock()
@@ -427,6 +444,15 @@ const butterflyBubbleHTML = `<!doctype html>
   @keyframes flap { 50% { transform: scaleX(0.2); } }
   #state { font-size: 13.5px; font-weight: 600; letter-spacing: .01em; }
   #body { margin-top: 10px; color: var(--body); overflow-wrap: anywhere; }
+  #actions { display: none; gap: 8px; margin-top: 12px; }
+  #actions button {
+    flex: 1; padding: 7px 10px; border-radius: 9px; font: inherit; font-weight: 600; cursor: pointer;
+    border: 1px solid rgb(255 255 255 / .14); background: rgb(255 255 255 / .08); color: inherit;
+  }
+  #actions button:disabled { opacity: .6; cursor: default; }
+  #actions button[data-a="allow"] { background: var(--accent); border-color: transparent; color: #fff; }
+  html.light #actions button { border-color: rgb(0 0 0 / .12); background: rgb(0 0 0 / .05); }
+  html.light #actions button[data-a="allow"] { background: var(--accent); color: #fff; }
 </style></head>
 <body class="running"><div id="card">
   <div id="head">
@@ -437,16 +463,22 @@ const butterflyBubbleHTML = `<!doctype html>
     <span id="state"></span>
   </div>
   <div id="body"></div>
+  <div id="actions"><button data-a="allow">现在接管</button><button data-a="reject">我在用，过会再问</button></div>
 </div>
 <script>
   const post = m => { try { window.chrome.webview.postMessage(m); } catch (e) {} };
   const card = document.getElementById('card');
+  const actions = document.getElementById('actions');
+  let kind = 'running';
   window.butterflyBubble = d => {
+    kind = d.kind || 'running';
     document.documentElement.classList.toggle('light', !!d.light);
-    document.body.className = d.kind === 'needs_review' ? 'waiting' : 'running';
+    document.body.className = kind === 'running' ? 'running' : 'waiting';
     document.getElementById('state').textContent = d.title || '';
     document.getElementById('body').textContent = d.body || '';
     document.getElementById('body').style.display = d.body ? '' : 'none';
+    actions.style.display = kind === 'confirm' ? 'flex' : 'none';
+    for (const button of actions.querySelectorAll('button')) button.disabled = false;
     report();
   };
   let last = 0;
@@ -454,7 +486,14 @@ const butterflyBubbleHTML = `<!doctype html>
     const h = Math.ceil(card.getBoundingClientRect().height) + 16;
     if (h > 0 && h !== last) { last = h; post('h:' + h); }
   });
-  card.addEventListener('click', () => post('open'));
+  // 确认卡上的两个选择回给 Go；卡片本身不当作“点开面板”。
+  actions.addEventListener('click', ev => {
+    const button = ev.target.closest('button');
+    if (!button || button.disabled) return;
+    for (const other of actions.querySelectorAll('button')) other.disabled = true;
+    post('answer:' + button.dataset.a);
+  });
+  card.addEventListener('click', () => { if (kind !== 'confirm') post('open'); });
   window.addEventListener('resize', report);
   post('ready');
 </script>
