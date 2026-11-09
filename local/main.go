@@ -59,8 +59,13 @@ func main() {
 		case "--butterfly-preview":
 			// 只为看气泡与任务栏蝴蚋长什么样：真实提示来自 appuse（第二个参数 running/needs_review 看两种态）。
 			kind := "needs_review"
-			if len(os.Args) > 2 && os.Args[2] == "running" {
-				kind = "running"
+			if len(os.Args) > 2 {
+				kind = os.Args[2]
+			}
+			if kind == "confirm" {
+				// 走 appuse 真正那条路：卡上点了什么、倒计时到了没有，都看最后这行输出。
+				fmt.Println("confirm:", appuseConfirmInput("preview"))
+				return
 			}
 			butterflyChipStart()
 			if kind == "running" {
@@ -146,6 +151,7 @@ func main() {
 	setSiteLabel(a.siteLabel())
 	setTrayOffline(a.config.Offline)
 	butterflySetEnabled(a.config.Butterfly)
+	setAppuseConfirmSeconds(a.config.ConfirmSeconds)
 	if needsPairing {
 		go func() {
 			time.Sleep(1 * time.Second)
