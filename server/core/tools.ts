@@ -23,6 +23,7 @@ import { credentialValues, vaultSite, type CredentialBinding } from "./credentia
 import { verifyVaultUse } from "./vault-use";
 import { VAULT_USAGE } from "./vault";
 import { KeyFiles, gitSshCommand, keyDir } from "./key-files";
+import { relayShellEnvironment } from "./relay-proxy";
 import { AttachmentFiles } from "./attachments";
 import { isDeepStrictEqual } from "node:util";
 import { sceneModels, maskedConfig, mergeSecrets } from "./config";
@@ -104,6 +105,12 @@ export class Tools {
    * In a group chat, a message from anyone but the employee's owner (another user or another employee) is a guest
    * request: it may work with tasks only (see GUEST_RULES).
    */
+  /** Proxy env for server shells when this account has client relay rules (intranet git, curl and ssh). */
+  private async relayEnvironment() {
+    const owner = this.session.ownerId;
+    if (!owner || this.session.localAgent || !(await this.engine.relay.enabled(owner))) return undefined;
+    return await relayShellEnvironment(await this.engine.relay.proxy(owner), this.engine.store.files.root, this.cloud);
+  }
   async guestRequest() {
     if (!this.session.groupId || this.session.taskId) return undefined;
     const last = await this.engine.store.lastMessage(this.session.id, "user");
@@ -500,9 +507,8 @@ export class Tools {
         if (side && side !== where)
           throw new Error(`这条命令固定在${side === "local" ? "本机" : "云端"}执行，而任务当前执行权在${where === "local" ? "本机" : "云端"}；本步未执行。请先交接执行权，不把同一命令放到另一端跑。`);
       }
-      return agent
-        ? localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal)
-        : shell(this.session.cwd, a, this.signal, this.emit, this.cloud);
+      if (agent) return localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal);
+      return shell(this.session.cwd, a, this.signal, this.emit, this.cloud, await this.relayEnvironment());
     }
     if (call.name === "change_working_directory") {
       assert(typeof a.path === "string" && a.path, "path required");
@@ -928,6 +934,7 @@ export async function shell(
   parent: AbortSignal,
   emit: (type: string, data: any) => void,
   cloud?: CloudRuntime,
+  env?: Record<string, string>,
 ): Promise<Outcome> {
   assert(typeof a.command === "string" && a.command.trim(), "command required");
   assertShellCommand(a.command);
@@ -942,13 +949,13 @@ export async function shell(
     bin = win ? windowsShell() : "/bin/sh";
   return await new Promise((resolve) => {
     const args = win ? ["-NoProfile", "-NonInteractive", "-Command", a.command] : ["-c", a.command];
-    const launch = cloud?.launch(bin, args, cwd);
+    const launch = cloud?.launch(bin, args, cwd, env);
     const child = spawn(
       launch?.command || bin,
       launch?.args || args,
       {
         cwd: launch?.cwd || cwd,
-        ...(launch ? { env: launch.env } : {}),
+        env: launch ? launch.env : env ? { ...process.env, ...env } : undefined,
         windowsHide: true,
         detached: !win,
         stdio: ["ignore", "pipe", "pipe"],

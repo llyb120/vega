@@ -95,6 +95,9 @@ export class NetworkRelay {
       : "中继客户端离线，不会回退直连");
     return { record, agent };
   }
+  async enabled(userId: string) {
+    return (await this.store.objects<Record>("client-relay")).some((record) => record.userId === userId && record.rules.length > 0);
+  }
   inUse(clientId: string) { return [...this.flows.values()].some((flow) => flow.grant.clientId === clientId); }
   disconnect(userId: string, clientId: string, transport?: Agent["transport"]) {
     for (const flow of this.flows.values())

@@ -373,7 +373,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   <section class="card">
     <h2>流量中继</h2>
     <p>按配对账户授权内网域名，该账户的服务端牛马浏览器自动使用本机网络，不改变任务执行位置。</p>
-    <small>每行填写一个精确域名或域名:端口，省略端口表示 80 和 443，最多 64 条。不支持通配符、IP、localhost 或 URL。关闭开关可保留规则但停止中继。请使用 HTTPS 站点保护隧道。</small>
+    <small>每行填写一个精确域名或域名:端口，省略端口表示 80 和 443，最多 64 条。不支持通配符、IP、localhost 或 URL。命令行的 git over SSH 和 ssh 访问要另写域名:22。关闭开关可保留规则但停止中继。请使用 HTTPS 站点保护隧道。</small>
     {{range .Accounts}}
     <form method="post" class="account">
       <p>所属服务器地址：<strong><code>{{.Origin}}</code></strong><br>账户 ID：<code>{{.UserID}}</code><br>
