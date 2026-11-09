@@ -287,22 +287,6 @@ export class Engine {
     }
   }
 
-  /** 只选“客户端优先 / 服务端优先”；具体哪台客户端由当前生效的客户端决定，浏览器位置由客户端自己配置。 */
-  async switchEmployeeExecution(key: string, prefer: unknown, userId: string) {
-    assert(prefer === "client" || prefer === "cloud", "执行位置只有「客户端优先」或「服务端优先」");
-    const employee = await this.employee.for(key), state = await employee.state({ runs: false }), lock = "employee:" + key;
-    assert(!this.executionSwitches.has(lock) && !employee.deleting && !this.closing, "执行位置正在切换或牛马正在删除");
-    this.executionSwitches.add(lock);
-    try {
-      const ownerId = state.ownerId || userId;
-      const clientOnline = prefer === "client" ? !!this.localAgents.active(ownerId) : undefined;
-      await employee.update((next) => {
-        next.execution = { prefer: prefer as "client" | "cloud" };
-        return next.execution;
-      });
-      return { execution: { prefer }, clientOnline };
-    } finally { this.executionSwitches.delete(lock); }
-  }
   /**
    * A ready engine: the vault key is loaded (once, before any transaction may need them) and
    * fire sessions interrupted by a restart are resumed.
@@ -530,7 +514,7 @@ export class Engine {
   async removeEmployee(key: string, beforeRemove: () => Promise<void> = async () => {}) {
     const employee = await this.employee.for(key);
     const sessions = await this.store.sessionsBy("employee", key);
-    assert(!employee.deleting && !this.executionSwitches.has("employee:" + key), "牛马正在删除或切换执行位置，请勿重复操作");
+    assert(!employee.deleting, "牛马正在删除，请勿重复操作");
     assert(!employee.busy.size && !sessions.some((session) => this.active.has(session.id)), "牛马仍在执行，请先停止任务和当前对话，再删除牛马");
     employee.deleting = true;
     try {
@@ -558,7 +542,7 @@ export class Engine {
    */
   async resetEmployee(key: string) {
     const employee = await this.employee.for(key);
-    assert(!employee.deleting && !employee.resetting && !this.closing && !this.executionSwitches.has("employee:" + key), "牛马正在删除、重置或切换执行位置，请稍候");
+    assert(!employee.deleting && !employee.resetting && !this.closing, "牛马正在删除或重置，请稍候");
     employee.resetting = true;
     try {
       // Every chat and task session of an employee carries its employeeId.

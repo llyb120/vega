@@ -331,6 +331,13 @@ func chipHwnd() windows.Handle {
 	return chipState.hwnd
 }
 
+// butterflyChipHide 收起任务栏蝴蝶；位置定时器每 250ms 会把窗口放回来，所以 chipPlace 也看开关。
+func butterflyChipHide() {
+	if hwnd := chipHwnd(); hwnd != 0 {
+		_, _, _ = procShowWindow.Call(uintptr(hwnd), 0) // SW_HIDE
+	}
+}
+
 // chipCreate 在任务栏里建一个跨进程子窗口（像 Nova 一样不 SetParent，创建时就带上任务栏当父窗口）。
 func chipCreate() bool {
 	taskbar, _, _ := procChipFindWindow.Call(uintptr(unsafe.Pointer(butterflyUTF16("Shell_TrayWnd"))), 0)
@@ -431,6 +438,10 @@ func chipEnsure() {
 func chipPlace() {
 	hwnd := chipHwnd()
 	if hwnd == 0 {
+		return
+	}
+	if butterflyDisabled() {
+		_, _, _ = procShowWindow.Call(uintptr(hwnd), 0) // SW_HIDE
 		return
 	}
 	taskbar, _, _ := procChipFindWindow.Call(uintptr(unsafe.Pointer(butterflyUTF16("Shell_TrayWnd"))), 0)

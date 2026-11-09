@@ -192,8 +192,8 @@ test("employee chat bubbles, citations and task jumps work on mobile while debug
     await until(`!document.querySelector('.duty-form') && !![...(${dutyCard}).querySelectorAll('button')].find(button=>button.textContent==='启用')`);
     assert.equal(providerRequests.filter(request => request.tools?.some((tool: any) => tool.function?.name === 'compile_duty_trigger')).length, triggerCalls);
     await evaluate("document.querySelector('[aria-label=\"牛马更多操作\"]').click();[...document.querySelectorAll('.popover-panel button')].find(button=>button.textContent==='牛马设置').click()");
-    await until("!!document.querySelector('[role=\"radiogroup\"][aria-label=\"新任务执行位置\"]')");
-    assert.equal(await evaluate("document.querySelectorAll('.place-options [role=radio]').length>0 && document.querySelector('.place-options').getBoundingClientRect().width<=innerWidth"), true);
+    await until("!!document.querySelector('.settings-page form.profile')");
+    assert.equal(await evaluate("document.querySelectorAll('.place-options [role=radio]').length"), 0, "执行位置只在客户端配，网页不再提供这个开关");
     await evaluate("[...document.querySelectorAll('.employee-tabs button')].find(button=>button.textContent==='对话').click()");
     await until("!!document.querySelector('.employee-composer')");
     await evaluate("[...document.querySelectorAll('.chat-message.assistant')].find(element=>element.textContent.includes('Nova fixture final result')).querySelector('.chat-reply').click();const textarea=document.querySelector('.employee-composer textarea');textarea.value='quote-ui-fixture: 请解释这条结论';textarea.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.employee-composer').requestSubmit()");

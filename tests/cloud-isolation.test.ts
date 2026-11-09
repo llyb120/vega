@@ -154,7 +154,6 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
     employee.closed = true;
     await employee.update((state) => {
       state.cwd = "C:\\client-only";
-      state.execution = { prefer: "client" };
       state.executionCwds = { server: process.cwd() };
     });
     const clientChat = await employee.chat("alice");
@@ -162,10 +161,9 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
     assert(!clientChat.localAgent);
     const client = await employee.profile();
     assert.equal(client.cwd, "C:\\client-only");
-    assert.equal(client.execution?.prefer, "client");
     assert.equal(client.executionCwds?.server, ids.alice.cwd);
     const custom = join(process.cwd(), "custom-project");
-    await employee.update((state) => { state.execution = { prefer: "cloud" }; state.cwd = custom; state.executionCwds = { server: custom }; });
+    await employee.update((state) => { state.cwd = custom; state.executionCwds = { server: custom }; });
     assert.equal((await employee.profile()).cwd, custom, "an explicitly selected legacy project is not silently migrated");
   });
   assert.equal(await fs.readFile(protectedFile, "utf8"), "must not be read directly");

@@ -87,22 +87,32 @@ func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredentia
 	defer a.mu.Unlock()
 	next := a.config
 	next.Servers = nil
+	// 同一站点只保留当前登录的账户：换号前配对过的账户否则会一直连着，等于让别人也能用这台电脑。
+	var replaced []string
 	for _, item := range a.config.Servers {
-		if item.Origin != origin || item.UserID != proof.UserID {
+		if item.Origin != origin {
 			next.Servers = append(next.Servers, item)
-		} else {
-			saved.Relay = item.Relay
-			saved.RelayOn = item.RelayOn
+			continue
 		}
-	}
-	if len(next.Servers) >= 8 {
-		return saved, fmt.Errorf("Too many paired accounts")
+		if item.UserID != proof.UserID {
+			replaced = append(replaced, item.UserID)
+			continue
+		}
+		saved.Relay = item.Relay
+		saved.RelayOn = item.RelayOn
 	}
 	next.Servers = append(next.Servers, saved)
 	if err = a.saveConfig(next); err != nil {
 		return saved, err
 	}
 	a.config = next
+	for _, userID := range replaced {
+		key := origin + "\x00" + userID
+		if connection := a.direct[key]; connection != nil {
+			connection.cancel()
+			delete(a.direct, key)
+		}
+	}
 	return saved, nil
 }
 
@@ -157,7 +167,8 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	}
 	key := saved.Origin + "\x00" + saved.UserID
 	if old := a.direct[key]; old != nil {
-		if old.token == token {
+		// 已取消的连接（下线交接超时、凭据被移除）留着也重连不回来，换一条新的。
+		if old.token == token && old.jobs.ctx.Err() == nil {
 			return old
 		}
 		old.cancel()
@@ -221,10 +232,14 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 }
 func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, connection *directConnection) (bool, bool) {
 	a.mu.Lock()
-	updating := a.updating
+	updating, offline := a.updating, a.config.Offline
 	a.mu.Unlock()
 	if updating {
 		return true, false
+	}
+	if offline {
+		// 已下线：不再重连。下线那一刻的连接留给站点交接，交接完由站点断开，这里只收尾。
+		return false, false
 	}
 	u, _ := url.Parse(saved.Origin + "/api/local-agent/socket")
 	if u.Scheme == "https" {
@@ -561,6 +576,10 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 				}
 			}
 			runner.mu.Unlock()
+			continue
+		}
+		if request.Type == "offline_ready" {
+			// 站点已完成下线交接，接着会断开这条连接；不再重连由 connectBackend 的下线判断负责。
 			continue
 		}
 		if request.Type == "task_status" {

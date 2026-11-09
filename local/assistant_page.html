@@ -943,8 +943,9 @@ async function pollThreads() {
   try {
     const data = await api("threads", {});
     state.threads = { employees: data.employees || [], groups: data.groups || [] };
-    if (!state.current) return;
+    // 左栏永远跟着刷新：还没选中会话时也要重画，否则一旦空过一次就一直是「还没有牛马」。
     renderRail();
+    if (!state.current) return;
     updateHead();
   } catch {}
 }

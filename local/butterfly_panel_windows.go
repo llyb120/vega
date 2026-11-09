@@ -335,15 +335,7 @@ func butterflyPanelFrame(anchor, work appuseWinRect, dpi uint32) (x, y, width, h
 // butterflyPanelPlace 贴在任务栏蝴蝶上方：找不到蝴蝶就退到鼠标所在屏幕的右下角。
 // 顺手把前台抢过来——面板是新进程，没有输入记录，得借当前前台的输入状态才抢得到。
 func butterflyPanelPlace(hwnd windows.Handle) {
-	anchor := appuseWinRect{}
-	chip := uintptr(0)
-	// 任务栏蝴蝶是 Shell_TrayWnd 的子窗口，FindWindowW 找顶层窗口，得用 FindWindowExW。
-	if taskbar, _, _ := procPanelFind.Call(uintptr(unsafe.Pointer(butterflyUTF16("Shell_TrayWnd"))), 0); taskbar != 0 {
-		if child, _, _ := procPanelFindChild.Call(taskbar, 0, uintptr(unsafe.Pointer(butterflyUTF16(butterflyChipClass))), 0); child != 0 {
-			chip = child
-			_, _, _ = procWindowRect.Call(chip, uintptr(unsafe.Pointer(&anchor)))
-		}
-	}
+	anchor, chip := butterflyAnchor()
 	var point appuseWinPoint
 	_, _, _ = procPanelCursor.Call(uintptr(unsafe.Pointer(&point)))
 	dpi := butterflyDPI()
@@ -370,7 +362,7 @@ func butterflyPanelPlace(hwnd windows.Handle) {
 		}
 	}
 	if work.Right == 0 && work.Bottom == 0 {
-		_, _, _ = procButterflyParams.Call(0x0030, uintptr(unsafe.Pointer(&work)), 0, 0) // SPI_GETWORKAREA
+		_, _, _ = procButterflyParams.Call(0x0030, 0, uintptr(unsafe.Pointer(&work)), 0) // SPI_GETWORKAREA
 	}
 	x, y, width, height := butterflyPanelFrame(anchor, work, dpi)
 	_, _, _ = procPanelPlace.Call(uintptr(hwnd), ^uintptr(0), uintptr(x), uintptr(y), uintptr(width), uintptr(height), 0x0040|0x0020|0x0004) // SHOWWINDOW|FRAMECHANGED|NOZORDER（尺寸变了要重建 DWM 表面）

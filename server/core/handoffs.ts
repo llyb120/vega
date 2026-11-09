@@ -402,7 +402,16 @@ export class TaskHandoffs {
     if (!this.deps.agents.active(ownerId || "", clientId)) return;
     await this.takeOver(clientId, ownerId);
   }
+  /**
+   * 用户在自己电脑上按了「下线」：连接还在就软交接（现读工作区与登录态），
+   * 已经不在线就没东西可搬，服务端按最近还原点硬交接。
+   */
+  async offline(clientId: string, ownerId?: string) {
+    const soft = !!this.deps.agents.active(ownerId || "", clientId);
+    return { mode: soft ? "soft" : "hard", ...(await this.takeOver(clientId, ownerId)) };
+  }
   private async takeOver(clientId: string, ownerId?: string) {
+    const done = { tasks: 0, failed: [] as { taskId: string; error: string }[] };
     const employees = await this.deps.employees();
     for (const employee of employees) {
       const state = await employee.state({ runs: false });
@@ -416,18 +425,22 @@ export class TaskHandoffs {
         if (record?.where === "cloud") continue;
         try {
           await this.toCloud(employee.employeeId, task.id, { source: "auto" });
+          done.tasks++;
         } catch (error: any) {
+          const message = String(error?.message || error).slice(0, 300);
+          done.failed.push({ taskId: task.id, error: message });
           const failed: HandoffRecord = {
             ...(record || this.fresh(task.id, employee.employeeId, state.ownerId || "", "auto")),
             where: "local",
             phase: "failed",
             at: Date.now(),
-            error: String(error?.message || error).slice(0, 300),
+            error: message,
           };
           await this.deps.store.save(RECORD, task.id, failed);
         }
       }
     }
+    return done;
   }
 
   /** One entry point for clients_changed: take over tasks whose client is gone, merge progress on those back. */

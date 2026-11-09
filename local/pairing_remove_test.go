@@ -84,7 +84,7 @@ func TestRemovePairingIsScopedToServerAndAccount(t *testing.T) {
 						expected.Servers = append(expected.Servers, saved)
 					}
 				}
-				if response.Header().Get("Location") != "/config/test?unpaired=1" {
+				if response.Header().Get("Location") != "/config/test?unpaired=1&tab=relay" {
 					t.Fatal("missing removal confirmation")
 				}
 			}

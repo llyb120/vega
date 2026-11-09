@@ -157,3 +157,39 @@ func TestPersistentCredentialOriginsAcceptHTTPAndHTTPSWithoutWeakeningValidation
 		}
 	}
 }
+
+// 本机客户端只服务当前登录的账户：换号前配对过的账户不能继续留着、连上。
+func TestPairingKeepsOnlyTheCurrentAccount(t *testing.T) {
+	const origin = "https://vega.example"
+	protected, err := protectToken(strings.Repeat("s", 43))
+	if err != nil {
+		t.Skipf("token protection unavailable on this platform: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	agent := &Agent{configPath: path, pinnedOrigin: origin, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{origin},
+		Servers: []ServerCredential{{Origin: origin, UserID: "old", Token: protected, Relay: []string{"git.internal:443"}}}}, direct: make(map[string]*directConnection)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	old := origin + "\x00old"
+	agent.direct[old] = &directConnection{origin: origin, cancel: cancel, status: connectionStatus{Code: "connected"}}
+	saved, err := agent.saveCredential(origin, loginProof{UserID: "alice", DeviceToken: strings.Repeat("s", 43)})
+	if err != nil || saved.UserID != "alice" || len(saved.Relay) != 0 {
+		t.Fatalf("pairing did not take the current account: %+v %v", saved, err)
+	}
+	if len(agent.config.Servers) != 1 || agent.config.Servers[0].UserID != "alice" || agent.direct[old] != nil || ctx.Err() == nil {
+		t.Fatal("an account paired before this login is still stored or connected")
+	}
+	data, err := os.ReadFile(path)
+	var stored Config
+	if err != nil || json.Unmarshal(data, &stored) != nil || len(stored.Servers) != 1 || stored.Servers[0].UserID != "alice" {
+		t.Fatal("previous account still on disk")
+	}
+}
+
+func TestCurrentAccountsDropsEarlierPairings(t *testing.T) {
+	const origin = "https://vega.example"
+	kept := currentAccounts([]ServerCredential{{Origin: origin, UserID: "first"}, {Origin: "https://other.example", UserID: "first"}, {Origin: origin, UserID: "second"}}, origin)
+	if len(kept) != 1 || kept[0].UserID != "second" {
+		t.Fatalf("wrong account kept: %+v", kept)
+	}
+}

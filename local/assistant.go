@@ -126,8 +126,11 @@ func (a *Agent) assistantCredential() (string, string, bool) {
 	servers := append([]ServerCredential{}, a.config.Servers...)
 	pinned := a.pinnedOrigin
 	a.mu.Unlock()
+	// 同一站点可以配多个账号，配对时新的追加在末尾：面板跟最近配对的账号走，
+	// 否则会一直用最早那个（往往早已不用的空账号，左栏永远「还没有牛马」）。
 	for _, liked := range []bool{true, false} {
-		for _, saved := range servers {
+		for i := len(servers) - 1; i >= 0; i-- {
+			saved := servers[i]
 			if liked != (saved.Origin == pinned) || !validOrigin(saved.Origin) {
 				continue
 			}

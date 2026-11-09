@@ -10,7 +10,8 @@ import type { NetworkRelay } from "./network-relay";
 export const CLIENT_BODY_LIMIT = 48 << 20, CLIENT_SOCKET_LIMIT = 1 << 20;
 /** Node-level compatibility gate: this deployment refuses older clients instead of failing mid-job. */
 // 与 local/VERSION 同步：发布新客户端时一并抬高。环境变量覆盖；设成空串表示不限制。
-export const MIN_CLIENT_VERSION = "0.4.0";
+// 0.5.0：下线改为软交接，服务端需先交接再断开连接，旧客户端会立即拆连接所以必须拒绝。
+export const MIN_CLIENT_VERSION = "0.5.0";
 export const minClientVersion = () => process.env.VEGA_MIN_CLIENT_VERSION ?? MIN_CLIENT_VERSION;
 const triple = (value?: string) => (/^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(value || "") ? value!.split(".").map(Number) : undefined);
 /** Clients that never reported a version predate the gate, so they count as outdated. */
@@ -30,8 +31,10 @@ type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj;
 export class ClientSockets {
   private connections = new Map<string, Connection>();
   private timer: ReturnType<typeof setInterval>;
+  /** 正在做下线交接的连接：同一条连接只交接一次。 */
+  private goingOffline = new Set<string>();
   private onRevoke = async (userId: string) => await this.revoke(userId);
-  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>, private relay?: NetworkRelay, private userStop?: (session: string, reason: string) => boolean, private statusFor?: (userId: string, clientId: string) => Promise<Obj>) {
+  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>, private relay?: NetworkRelay, private userStop?: (session: string, reason: string) => boolean, private statusFor?: (userId: string, clientId: string) => Promise<Obj>, private offlineHandoff?: (userId: string, clientId: string) => Promise<Obj>) {
     auth.events.on("revoke", this.onRevoke);
     this.timer = setInterval(async () => {
       for (const [id, connection] of this.connections) {
@@ -134,9 +137,10 @@ export class ClientSockets {
         accepted = true;
         socket.send(JSON.stringify({ type: idle ? "update_ready" : "update_busy" }));
       } else if (value.type === "offline" && !connection.updating) {
-        // 客户端主动下线：立即下线，不等心跳和重连宽限。
+        // 客户端主动下线：趁连接还在先做软交接（现读工作区与登录态），交接完才断开。
+        // 不在这里等：心跳还要照常回 pong，否则客户端读超时会把这条连接拆掉，交接就被截断。
         accepted = true;
-        this.close(socket.id, true);
+        void this.offline(socket, connection);
         return;
       } else if (value.type === "ping") {
         if (value.relay !== undefined) await this.relay?.configure(grant, value.relay);
@@ -152,7 +156,7 @@ export class ClientSockets {
           validateClient({ ...connection.details, prefer: value.prefer });
           connection.details.prefer = value.prefer;
         }
-        if (!connection.updating) this.hub.connect(grant.userId, connection.details);
+        if (!connection.updating) this.hub.connect(grant.userId, connection.details, this.liveTransport(grant.userId, connection));
         accepted = true;
         socket.send(JSON.stringify({ type: "pong", ...(connection.details.autoUpdate ? { busy: await this.clientInUse(grant.clientId) } : {}) }));
         void this.pushStatus(grant.userId, grant.clientId);
@@ -167,12 +171,39 @@ export class ClientSockets {
         this.hub.result(grant.userId, { id: value.id, result: value.result, instance: connection.details.instance });
         // Results also prove the control channel is alive; refresh the agent heartbeat so a burst of
         // results without an interleaved ping cannot expire the LocalAgents timer and suspend the client.
-        if (!connection.updating) this.hub.connect(grant.userId, connection.details);
+        if (!connection.updating) this.hub.connect(grant.userId, connection.details, this.liveTransport(grant.userId, connection));
         accepted = true;
         if (connection.details.resume) socket.send(JSON.stringify({ type: "ack", id: value.id }));
       }
     } catch { this.close(socket.id, !accepted); }
   }
+  /**
+   * 心跳/结果证明这条 socket 还活着：设备当前没有 transport（心跳过期被挂起、更新预留没收尾）时用它
+   * 接回来，否则设备一直显示在线，而每个操作都抛出「所选客户端连接未能自动恢复」。已有 transport
+   * （另一条连接的活）时不抢，交给那条连接。
+   */
+  private liveTransport(userId: string, connection: Connection) {
+    return this.hub.active(userId, connection.grant.clientId)?.transport ? undefined : connection.transport;
+  }
+
+  /**
+   * 下线交接：客户端还连着时由它现读工作区与登录态交接到服务端，交接完（或失败）才断开这条连接。
+   * 连接已经不在时 offline() 会按服务端还原点硬交接，这里只负责收尾。
+   */
+  private async offline(socket: Socket, connection: Connection) {
+    if (this.goingOffline.has(socket.id)) return;
+    this.goingOffline.add(socket.id);
+    const { userId, clientId } = connection.grant;
+    try {
+      const result = await this.offlineHandoff?.(userId, clientId) || {};
+      try { socket.send(JSON.stringify({ type: "offline_ready", ...result })); } catch {}
+    } catch (error: any) {
+      try { socket.send(JSON.stringify({ type: "offline_ready", error: String(error?.message || error).slice(0, 300) })); } catch {}
+    }
+    this.goingOffline.delete(socket.id);
+    this.close(socket.id, true);
+  }
+
   /** A result posted over HTTP; the response is its acknowledgement. */
   async upload(request: Socket["request"], value: Obj) {
     const grant = await this.authorize(request), instance = request.headers.get("x-vega-instance");

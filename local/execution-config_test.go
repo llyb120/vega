@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"net/url"
@@ -45,6 +46,24 @@ func TestExecutionPlaceDefaultsToClientAndSavesCloud(t *testing.T) {
 	}
 	if w := post(url.Values{"saveExecution": {"1"}}); w.Code != 303 || a.config.Prefer != "cloud" {
 		t.Fatalf("unchecked box must mean server-first execution: %d", w.Code)
+	}
+}
+
+func TestOfflineLeavesTheConnectionToTheHandoff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trusted-sites.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := &Agent{configPath: path, config: Config{ClientID: strings.Repeat("a", 32)}, direct: map[string]*directConnection{}}
+	if err := a.saveConfig(a.config); err != nil {
+		t.Fatal(err)
+	}
+	connectionCtx, stop := context.WithCancel(ctx)
+	a.direct["https://vega.example\x00u1"] = &directConnection{jobs: newJobRunner(connectionCtx, true), cancel: stop}
+	if err := a.setOnline(false); err != nil {
+		t.Fatal(err)
+	}
+	if connectionCtx.Err() != nil {
+		t.Fatal("下线要先把连接留给站点交接，交接完由站点断开；立刻断开只能硬交接")
 	}
 }
 

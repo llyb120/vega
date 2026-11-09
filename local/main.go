@@ -144,7 +144,8 @@ func main() {
 	needsPairing := len(a.config.Servers) == 0
 	a.startConnections(ctx)
 	setSiteLabel(a.siteLabel())
-	butterflyChipStart()
+	setTrayOffline(a.config.Offline)
+	butterflySetEnabled(a.config.Butterfly)
 	if needsPairing {
 		go func() {
 			time.Sleep(1 * time.Second)
@@ -185,7 +186,11 @@ func main() {
 		os.Exit(0)
 	}
 	go a.autoUpdate(ctx, quit)
-	systrayRun(configure, quit)
+	systrayRun(configure, quit, func(online bool) {
+		if err := a.setOnline(online); err != nil {
+			a.clientLog("上下线失败：%v", err)
+		}
+	})
 }
 
 type job struct {

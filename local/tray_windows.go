@@ -17,16 +17,19 @@ var iconData []byte
 //go:embed icon-connected.ico
 var iconConnectedData []byte
 
-func systrayRun(configure, onQuit func()) {
+func systrayRun(configure, onQuit func(), setOnline func(bool)) {
 	systray.Run(func() {
 		systray.SetTitle("牵牛星")
 		// 蝴蝶：打开网页里的 BOT 会话；有提示时标题会跟着变。
 		mAssistant := systray.AddMenuItem("蝴蝶助理", "在蝴蝶面板里打开 BOT 会话")
+		// 上线/下线：下线是软交接，交接完由服务端接着做；本机这期间不接任务。
+		mOnline := systray.AddMenuItem("下线", "暂停接单：先把变动与登录态交接给服务端")
 		mConfigure := systray.AddMenuItem("连接授权", "管理站点授权、补充内容和流量中继")
 		mQuit := systray.AddMenuItem("退出", "Stop local agent")
 		trayState.Lock()
 		trayState.ready = true
 		trayState.assistant = mAssistant
+		trayState.online = mOnline
 		applyTrayAppearance(trayState.connected)
 		trayState.Unlock()
 		go func() {
@@ -34,6 +37,11 @@ func systrayRun(configure, onQuit func()) {
 				select {
 				case <-mAssistant.ClickedCh:
 					butterflyOpen()
+				case <-mOnline.ClickedCh:
+					trayState.Lock()
+					online := trayState.offline // 已下线就是点上线
+					trayState.Unlock()
+					go setOnline(online)
 				case <-mConfigure.ClickedCh:
 					configure()
 				case <-mQuit.ClickedCh:
@@ -49,8 +57,10 @@ var trayState struct {
 	sync.Mutex
 	ready     bool
 	connected bool
+	offline   bool
 	site      string
 	assistant *systray.MenuItem
+	online    *systray.MenuItem
 	// 蝴蝶提示："" 无、running 正在操作电脑、needs_review 待用户核对。
 	notice     string
 	noticeText string
@@ -71,10 +81,23 @@ func connectionTooltip(connected bool) string {
 	if trayState.site != "" {
 		base += " · " + trayState.site
 	}
+	if trayState.offline {
+		return base + " · 已下线"
+	}
 	if connected {
 		return base + " · 已连接"
 	}
 	return base + " · 未连接"
+}
+
+// setTrayOffline 让托盘菜单显示「下线/上线」的当前状态；连接授权页和托盘菜单共用它。
+func setTrayOffline(offline bool) {
+	trayState.Lock()
+	defer trayState.Unlock()
+	trayState.offline = offline
+	if trayState.ready {
+		applyTrayAppearance(trayState.connected)
+	}
 }
 
 // trayTooltip 把蝴蝶提示叠在连接状态上，鼠标停在托盘图标上就能看到。
@@ -95,6 +118,15 @@ func applyTrayAppearance(connected bool) {
 		systray.SetIcon(iconData)
 	}
 	systray.SetTooltip(trayTooltip(connected, trayState.notice, trayState.noticeText))
+	if trayState.online != nil {
+		if trayState.offline {
+			trayState.online.SetTitle("上线")
+			trayState.online.SetTooltip("恢复接单：重新连接站点并接新任务")
+		} else {
+			trayState.online.SetTitle("下线")
+			trayState.online.SetTooltip("暂停接单：先把变动与登录态交接给服务端")
+		}
+	}
 	if trayState.assistant != nil {
 		if trayState.notice == "needs_review" {
 			trayState.assistant.SetTitle("蝴蝶助理 · 待你核对")

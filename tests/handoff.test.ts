@@ -83,6 +83,20 @@ function world(options: { clientOnline?: boolean; running?: boolean; cloud?: boo
   return { deps, local, remote, state, task, sessions };
 }
 
+test("下线交接：客户端还连着就按本机现读的变动同步，没连着就按服务端还原点续做", async () => {
+  const soft = world();
+  soft.local.put("/local/work/a.txt", "本机的变动");
+  const done = await new TaskHandoffs(soft.deps).offline("c1", "u1");
+  assert.deepEqual(done, { mode: "soft", tasks: 1, failed: [] });
+  assert.equal(soft.remote.text("/cloud/.vega/handoffs/t1/a.txt"), "本机的变动", "在线时按本机当前内容同步");
+  assert.equal(soft.state.tasks[0].execution.localAgent, false);
+
+  const hard = world({ clientOnline: false });
+  const resumed = await new TaskHandoffs(hard.deps).offline("c1", "u1");
+  assert.deepEqual(resumed, { mode: "hard", tasks: 1, failed: [] });
+  assert.match((await new TaskHandoffs(hard.deps).record("t1"))!.note!, /按恢复点续做/);
+});
+
 test("handoff refuses instead of pretending when the cloud or the client is unavailable", async () => {
   const offlineWithCopy = world({ cloud: false });
   await assert.rejects(new TaskHandoffs(offlineWithCopy.deps).toCloud("e1", "t1"), /未启用云端隔离/);

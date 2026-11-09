@@ -220,10 +220,6 @@ export default defineEventHandler(async (event) => {
         }
         check(false, 405, "Method not allowed");
       }
-      if (path[2] === "execution" && method === "POST") {
-        check(await employee.manageable(user), 403, "只有牛马管理者可以切换默认执行位置");
-        return engine.switchEmployeeExecution(employee.employeeId, a.prefer, user.id);
-      }
       // 任务执行权：同一个任务同一时刻只在一个位置跑，交接是唯一改变它的方式。
       if (path[2] === "tasks" && path[4] === "handoff" && method === "POST") {
         check(await employee.manageable(user), 403, "只有牛马管理者可以交接执行权");

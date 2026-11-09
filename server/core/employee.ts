@@ -17,11 +17,6 @@ import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
 
 export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
-/** 员工级策略：只能在“客户端优先 / 服务端优先”之间选；具体哪台机器由当前生效的客户端决定。 */
-export type ExecutionPolicy = { prefer: "client" | "cloud" };
-/** 旧数据存的是具体设备，统一映射成优先策略；未标记的新记录默认客户端优先。 */
-export const executionPolicy = (value: any): ExecutionPolicy =>
-  value?.prefer === "client" || value?.prefer === "cloud" ? { prefer: value.prefer } : { prefer: value?.localAgent === false ? "cloud" : "client" };
 export type Owner = { token: string; name: string };
 export type Task = Obj & {
   id: string;
@@ -46,7 +41,6 @@ export type EmployeeState = {
   avatar?: string;
   instruction: string;
   ownerId: string;
-  execution?: ExecutionPolicy;
   executionCwds?: Record<string, string>;
   /** 任务接力：本地客户端与云端之间的交接策略（handoffs.ts）。 */
   handoffPolicy?: Obj;
@@ -737,8 +731,6 @@ export class Employee {
       const creator = await this.store.one("SELECT id FROM web_users WHERE role='admin' ORDER BY createdAt,id LIMIT 1");
       if (creator) { state.ownerId = creator.id; await this.save(state); }
     }
-    // 执行位置改成优先策略：旧数据里的具体设备归约成 client/cloud。
-    state.execution = executionPolicy(state.execution);
     // 未指定或等于服务端启动目录的 cwd 视为旧默认值：云模式下迁到用户私有工作区（客户端优先不改变这个基准）。
     const defaultCwd = !state.cwd || state.cwd === process.cwd();
     const savedDefaultCwd = state.executionCwds?.server === process.cwd();
@@ -772,20 +764,18 @@ export class Employee {
     if (migrated.changed || pruned.changed) await this.save(state);
     return state;
   }
-  /** 按执行策略给新任务绑定执行位置：客户端本地选了服务端优先就落云端；否则客户端优先绑当前生效的机器，没有就落服务端并说明。 */
+  /** 绑定新任务的执行位置：只看客户端自己的选择——客户端优先绑那台机器，服务端优先或没在线客户端就落云端。 */
   private bindExecution(state: EmployeeState): { execution: Execution; cwd?: string; note?: string } {
-    const prefer = state.execution?.prefer || "client";
     const client = this.runtime.client?.(state.ownerId);
-    // 客户端本地选“服务端优先”时不再看牛马策略：任务在云端执行，本地文件由接力同步。
     if (client?.prefer === "cloud")
       return { execution: { localAgent: false, localBrowser: false, ownerId: state.ownerId }, note: "客户端设置了服务端优先，任务在云端执行；本地文件通过接力同步。" };
-    if (prefer === "client" && client) {
+    if (client) {
       // 浏览器位置由客户端自己的配置决定（客户端连接授权页），服务端不另行选择。
       return { execution: { localAgent: true, localBrowser: client.browser !== "cloud", ...client, ownerId: state.ownerId }, cwd: client.cwd };
     }
     return {
       execution: { localAgent: false, localBrowser: false, ownerId: state.ownerId },
-      note: prefer === "client" ? "客户端优先，但当前没有在线的客户端，先在服务端执行；客户端上线后可「接回本机」。" : undefined,
+      note: "当前没有在线的客户端，先在服务端执行；客户端上线后可「接回本机」。",
     };
   }
   /** Read-modify-write of the whole employee (record, tasks, runs) in one transaction. */

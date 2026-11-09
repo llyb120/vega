@@ -18,8 +18,9 @@ type butterflyNotice struct {
 
 var butterflyState struct {
 	sync.Mutex
-	notice *butterflyNotice
-	open   func()
+	notice   *butterflyNotice
+	disabled bool // 设置里关掉蝴蝶：不再弹气泡、不画任务栏蝴蝶
+	open     func()
 }
 
 // butterflyQuiet 让测试只验证提示状态，不真的弹窗。
@@ -72,6 +73,9 @@ func butterflyOpenThread(thread string) {
 
 // butterflyNotify 更新提示并显示气泡；同一条内容不反复弹。
 func butterflyNotify(kind, text string) {
+	if butterflyDisabled() {
+		return
+	}
 	butterflyState.Lock()
 	previous := butterflyState.notice
 	notice := &butterflyNotice{Kind: kind, Text: text, At: time.Now()}
@@ -110,4 +114,29 @@ func butterflyClearIfKind(kind string) {
 	if current != nil && current.Kind == kind {
 		butterflyClear()
 	}
+}
+
+// butterflyDisabled 设置里关掉蝴蝶后为 true：提示与任务栏蝴蝶都不再出现。
+func butterflyDisabled() bool {
+	butterflyState.Lock()
+	defer butterflyState.Unlock()
+	return butterflyState.disabled
+}
+
+// butterflySetEnabled 打开/关掉蝴蝶：关掉时收起当前气泡和任务栏蝴蝶，并忽略后续提示。
+func butterflySetEnabled(on bool) {
+	butterflyState.Lock()
+	butterflyState.disabled = !on
+	quiet := butterflyQuiet
+	butterflyState.Unlock()
+	// 测试里不碰真实窗口（butterflyQuiet 只跑状态）。
+	if quiet {
+		return
+	}
+	if on {
+		butterflyChipStart()
+		return
+	}
+	butterflyClear()
+	butterflyChipHide()
 }

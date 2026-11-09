@@ -231,8 +231,6 @@ const employee = ref({
   employeeTaskFocus = ref(""),
   employeeSaving = ref(false),
   employeeDeleting = ref(false), employeeResetting = ref(""),
-  employeeExecutionBusy = ref(false),
-  employeeExecutionOpen = ref(false),
   workRailOpen = ref(false),
   employeeMenu = ref(null),
   debugRevision = ref(0),
@@ -1243,7 +1241,6 @@ async function chooseEmployee(id) {
   employeeSession.value = "";
   employeeEvent.value = null;
   employeeTab.value = "chat";
-  employeeExecutionOpen.value = false;
   employeeTaskFilter.value = "active";
   employeeTaskFocus.value = "";
   dutyOpen.value = false;
@@ -1323,22 +1320,6 @@ async function employeeTaskAction(task, action, text) {
     await control({ id: task.id, action: action === "reject" ? "approve" : action, ...(action === "approve" || action === "reject" ? { approved: action === "approve" } : {}), ...(text ? { text } : {}), ...(action === "redispatch" ? { confirmed: true } : {}), ...(action === "seal" ? { manual: true } : {}) });
     return true;
   });
-}
-async function changeEmployeeExecution(prefer) {
-  if (employeeExecutionBusy.value) return;
-  const id = selectedEmployee.value;
-  employeeExecutionBusy.value = true;
-  try {
-    const result = await api(`/employees/${id}/execution`, "POST", { prefer });
-    const updated = await api(`/employees/${id}`);
-    if (selectedEmployee.value === id) employee.value = updated;
-    toast(prefer === "client"
-      ? (result?.clientOnline === false
-        ? "已设为客户端优先；当前没有在线客户端，新任务先在服务端执行。"
-        : "已设为客户端优先：新任务在开着客户端的机器上执行；浏览器位置按那台客户端的本地配置。")
-      : "已设为服务端优先：新任务在 Vega 服务端执行。");
-  } catch (error) { employeeError.value = error.message; }
-  finally { employeeExecutionBusy.value = false; }
 }
 async function openEmployeeTask(id) {
   const owner = selectedEmployee.value;
@@ -1660,13 +1641,11 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             :tab="employeeTab"
             :counts="employeeCounts"
             :deleting="employeeDeleting"
-            :busy="employeeExecutionBusy"
             :show-work="employeeTab === 'chat'"
             :work-open="workPanelVisible"
             :work-count="attentionTasks.length || activeTasks.length"
             @tab="employeeTabChanged"
             @delete="deleteEmployee"
-            @execution="changeEmployeeExecution"
             @menu="openNavigation"
           />
           <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭牛马错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
@@ -1709,11 +1688,9 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             :saving="employeeSaving"
             :deleting="employeeDeleting"
             :resetting="employeeResetting"
-            :busy="employeeExecutionBusy"
             @save="saveEmployeeSettings"
             @delete="deleteEmployee"
             @reset="resetEmployee"
-            @execution="changeEmployeeExecution"
             @avatar="selectedEmployee === $event.employeeId && (employee.avatar = $event.avatar)"
             @cancel="employeeTab = 'chat'"
           />

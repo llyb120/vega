@@ -7,14 +7,14 @@ import { ClientSockets } from "../server/core/client-socket";
 import { NetworkRelay } from "../server/core/network-relay";
 
 const details = { clientId: "d".repeat(32), instance: "a".repeat(32), name: "Office PC", cwd: "C:\\work", platform: "windows" };
-async function fixture(t: any, clientInUse: (clientId: string) => boolean = () => false) {
+async function fixture(t: any, clientInUse: (clientId: string) => boolean = () => false, offlineHandoff?: (userId: string, clientId: string) => Promise<any>) {
   // 多数用例用旧版本号或省略版本模拟历史客户端；版本门槛单独测，这里先关掉。
   const minimum = process.env.VEGA_MIN_CLIENT_VERSION;
   process.env.VEGA_MIN_CLIENT_VERSION = "";
   t.after(() => { if (minimum === undefined) delete process.env.VEGA_MIN_CLIENT_VERSION; else process.env.VEGA_MIN_CLIENT_VERSION = minimum; });
   const store = await Store.open(":memory:"), auth = new Auth(store, "client-pairing-fixture-token");
   const login = await auth.setup({ setupToken: "client-pairing-fixture-token", username: "admin", password: "Long pairing fixture password" });
-  const events: any[] = [], hub = new LocalAgents((event) => events.push(event)), relay = new NetworkRelay(store, hub), sockets = new ClientSockets(store, auth, hub, clientInUse, relay);
+  const events: any[] = [], hub = new LocalAgents((event) => events.push(event)), relay = new NetworkRelay(store, hub), sockets = new ClientSockets(store, auth, hub, clientInUse, relay, undefined, undefined, offlineHandoff);
   t.after(async () => { sockets.closeAll(); hub.close(); await relay.close(); await store.close(); });
   const ticket = () => hub.ticket(login.principal, details.instance).ticket;
   const peer = (token: string, id = "native") => {
@@ -161,6 +161,37 @@ test("automatic update drains only idle clients and queues new work across a sam
   const resumed = second.messages.at(-1);
   await f.sockets.message(second, JSON.stringify({ type: "result", id: resumed.id, result: { updated: true } }));
   assert.deepEqual(await queued, { updated: true });
+});
+
+test("a live socket's heartbeat rebinds a suspended device instead of leaving it online but unusable", async (t) => {
+  const f = await fixture(t), paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
+  const socket = f.peer(paired.deviceToken), owner = f.login.principal.user.id;
+  await f.sockets.open(socket); await f.sockets.message(socket, JSON.stringify({ type: "hello", ...details }));
+  const agent = f.hub.active(owner, details.clientId)!;
+  // 更新预留 / 心跳过期会清掉 transport 但留着 socket：此时设备仍列在线，只是发不出任何操作。
+  f.hub.suspend(owner, agent.instance, agent.transport, true);
+  assert.equal(f.hub.active(owner, details.clientId)!.transport, undefined);
+  await f.sockets.message(socket, JSON.stringify({ type: "ping" }));
+  const revived = f.hub.active(owner, details.clientId)!;
+  assert.equal(revived.reconnecting, false);
+  assert(revived.transport, "活着的 socket 必须在心跳时接回来，否则设备在线而每个操作都失败");
+  const pending = f.hub.request(revived, "file", { op: "read" }, new AbortController().signal);
+  const job = socket.messages.at(-1);
+  assert.equal(job.op, "file");
+  await f.sockets.message(socket, JSON.stringify({ type: "result", id: job.id, result: { ok: true } }));
+  assert.deepEqual(await pending, { ok: true });
+  // 宽限到期被断开（transport 已丢，socket 关不掉）后，同样的心跳要能重建一条可派发的记录。
+  f.hub.suspend(owner, agent.instance, revived.transport, true);
+  revived.onlineUntil = 0;
+  f.hub.active(owner, details.clientId);
+  assert.deepEqual(f.hub.list(owner), []);
+  await f.sockets.message(socket, JSON.stringify({ type: "ping" }));
+  const back = f.hub.active(owner, details.clientId)!;
+  assert(back.transport);
+  const again = f.hub.request(back, "file", { op: "read" }, new AbortController().signal), next = socket.messages.at(-1);
+  assert.equal(next.op, "file");
+  await f.sockets.message(socket, JSON.stringify({ type: "result", id: next.id, result: { ok: 2 } }));
+  assert.deepEqual(await again, { ok: 2 });
 });
 
 test("a running session blocks updates during model thinking even without local operations", async (t) => {
@@ -453,13 +484,13 @@ test("a node minimum client version refuses older clients with a visible reason"
     await f.sockets.message(socket, JSON.stringify({ type: "hello", ...details, version }));
     assert.equal(socket.messages[0]?.type, "error", "older and version-less clients are refused before any job");
     assert.equal(socket.messages[0]?.code, "client_outdated");
-    assert.match(socket.messages[0]?.message, /0\.4\.0/);
+    assert.match(socket.messages[0]?.message, /0\.5\.0/);
     assert.equal(f.hub.active(owner, details.clientId), undefined);
     assert.equal(socket.closed.length, 1);
   }
   const current = f.peer(paired.deviceToken, "current");
   await f.sockets.open(current);
-  await f.sockets.message(current, JSON.stringify({ type: "hello", ...details, version: "0.4.0" }));
+  await f.sockets.message(current, JSON.stringify({ type: "hello", ...details, version: "0.5.0" }));
   assert.equal(current.messages[0]?.type, "ready");
   assert(f.hub.active(owner, details.clientId));
 });
@@ -472,8 +503,36 @@ test("client execution preference and an explicit offline request are honoured",
   assert.equal(f.hub.active(owner, details.clientId)?.prefer, "cloud");
   await f.sockets.message(socket, JSON.stringify({ type: "ping", prefer: "client" }));
   assert.equal(f.hub.active(owner, details.clientId)?.prefer, "client");
-  // 主动下线要立刻生效，不能等心跳和重连宽限。
+  // 主动下线要很快生效，不能等心跳和重连宽限；交接是异步做的，给它一拍收尾。
   await f.sockets.message(socket, JSON.stringify({ type: "offline" }));
+  await new Promise((yes) => setTimeout(yes, 0));
   assert.equal(f.hub.active(owner, details.clientId), undefined);
   assert.equal(socket.closed.length, 1);
+});
+
+test("going offline hands over while the client is still connected, then closes", async (t) => {
+  const seen: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((yes) => (release = yes));
+  const f = await fixture(t, () => false, async (userId, clientId) => {
+    // 软交接要现读工作区和登录态：这一刻客户端必须还在线。
+    seen.push(f.hub.active(userId, clientId) ? "online" : "gone");
+    await gate;
+    return { mode: "soft", tasks: 2, failed: [] };
+  });
+  const paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId }), owner = f.login.principal.user.id;
+  const socket = f.peer(paired.deviceToken);
+  await f.sockets.open(socket);
+  await f.sockets.message(socket, JSON.stringify({ type: "hello", ...details }));
+  await f.sockets.message(socket, JSON.stringify({ type: "offline" }));
+  assert.deepEqual(seen, ["online"]);
+  assert.equal(socket.closed.length, 0, "交接结束前不能断开这条连接");
+  // 交接期间心跳照常回 pong，否则客户端读超时会把连接拆掉、交接被截断。
+  await f.sockets.message(socket, JSON.stringify({ type: "ping" }));
+  assert.equal(socket.messages.at(-1).type, "pong");
+  release();
+  await new Promise((yes) => setTimeout(yes, 0));
+  assert.equal(socket.messages.at(-1).type, "offline_ready");
+  assert.equal(socket.closed.length, 1);
+  assert.equal(f.hub.active(owner, details.clientId), undefined);
 });

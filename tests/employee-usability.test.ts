@@ -81,7 +81,7 @@ test("employees are immediately available even with legacy disabled hours; duty 
   } finally { await engine.close(); await store.close(); }
 });
 
-test("switching employee execution defaults never changes old, running, resumed or child tasks", async () => {
+test("the client's own execution preference never changes old, running, resumed or child tasks", async () => {
   const { store, engine } = await fixture();
   const client = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Office PC", cwd: "C:\\client-only", platform: "windows" };
   try {
@@ -93,8 +93,6 @@ test("switching employee execution defaults never changes old, running, resumed 
     engine.active.set(session.id, { control: new AbortController(), steer: [] });
     engine.localAgents.connect("alice", client);
     engine.localAgents.request = async (_agent, op, args) => { assert.equal(op, "file"); assert.equal(args.op, "stat"); return { isDir: true, path: args.path }; };
-    const preferClient = await engine.switchEmployeeExecution(employee.employeeId, "client", "alice");
-    assert.equal(preferClient.clientOnline, true);
     assert.equal((await store.session(session.id)).localAgent, undefined);
     assert.equal(engine.active.has(session.id), true);
     assert.equal((await employee.state()).tasks[0].execution?.localAgent, false);
@@ -113,9 +111,13 @@ test("switching employee execution defaults never changes old, running, resumed 
     engine.localAgents.connect("alice", { ...client, browser: "local" });
     const child = await employee.execute(original.id, { action: "add", kind: "todo", text: "child inherits server" });
     assert.equal(employee.task(await employee.state(), child.value.id).execution?.localAgent, false);
-    await engine.switchEmployeeExecution(employee.employeeId, "cloud", "alice");
+    // 执行位置只由客户端自己上报：客户端改成服务端优先后，新任务落云端，已有任务的绑定不动。
+    engine.localAgents.connect("alice", { ...client, prefer: "cloud" });
+    const cloudTask = await add(employee, "client prefers the server");
+    assert.equal(cloudTask.execution?.localAgent, false);
     assert.equal(employee.task(await employee.state(), local.id).execution?.clientId, client.clientId);
     assert.equal(employee.task(await employee.state(), local.id).cwd, client.cwd);
+    engine.localAgents.connect("alice", { ...client, prefer: "client" });
     engine.active.delete(session.id); employee.busy.clear();
     await employee.update((state) => { state.tasks.find((task) => task.id === local.id)!.status = "stopped"; });
     await employee.control({ action: "resume", id: local.id });
@@ -135,12 +137,10 @@ test("switching employee execution defaults never changes old, running, resumed 
     await employee.run(localTask);
     employee.runtime.run = originalRun;
     engine.localAgents.disconnect("alice");
-    // 客户端离线也能改策略（策略不是设备绑定）；新任务落到服务端并说明原因。
-    const offline = await engine.switchEmployeeExecution(employee.employeeId, "client", "alice");
-    assert.equal(offline.clientOnline, false);
+    // 客户端不在线：新任务落服务端并说明原因，客户端回来后可接回本机。
     const offlineTask = await add(employee, "client prefer without client");
     assert.equal(offlineTask.execution?.localAgent, false);
-    assert.match(offlineTask.checkpoint || "", /客户端优先，但当前没有在线的客户端/);
+    assert.match(offlineTask.checkpoint || "", /当前没有在线的客户端/);
   } finally { engine.active.clear(); (await engine.employee.all()).forEach((employee) => employee.busy.clear()); await engine.close(); await store.close(); }
 });
 

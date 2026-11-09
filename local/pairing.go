@@ -26,6 +26,7 @@ type Config struct {
 	Browser        string             `json:"browser,omitempty"` // local = 本机浏览器（默认），cloud = 服务端浏览器
 	Prefer         string             `json:"prefer,omitempty"`  // client = 客户端优先（默认），cloud = 服务端优先
 	Offline        bool               `json:"offline,omitempty"` // 手动下线：不连站点、不接任务
+	Butterfly      bool               `json:"butterfly,omitempty"` // 显示任务栏蝴蝶与提示气泡；默认关
 	TrustedOrigins []string           `json:"trustedOrigins"`
 	Servers        []ServerCredential `json:"servers,omitempty"`
 }
@@ -83,13 +84,13 @@ func newAgentAt(exeDir string) (*Agent, error) {
 			}
 		}
 	}
-	kept := a.config.Servers[:0]
-	for _, saved := range a.config.Servers {
-		if saved.Origin == a.pinnedOrigin {
-			kept = append(kept, saved)
-		}
-	}
+	kept := currentAccounts(a.config.Servers, a.pinnedOrigin)
+	dropped := len(a.config.Servers) - len(kept)
 	a.config.Servers = kept
+	if dropped > 0 {
+		a.clientLog("站点 %s 只保留最近配对的账户，丢弃 %d 个旧配对", a.pinnedOrigin, dropped)
+		_ = a.saveConfig(a.config) // 旧账户的凭据不再留在本机
+	}
 	if err = validateSupplement(a.config.Supplement); err != nil {
 		return nil, err
 	}
@@ -199,6 +200,24 @@ func legacyServers(origin string) ([]ServerCredential, string) {
 	return imported, legacy.ClientID
 }
 
+// currentAccounts 只留安装包站点下最近配对的账户：客户端只服务当前登录的账号，
+// 换号前留下的别人账户的配对不能再连上来操作同一台电脑。
+func currentAccounts(servers []ServerCredential, origin string) []ServerCredential {
+	latest := make(map[string]int, len(servers))
+	for i, saved := range servers {
+		if saved.Origin == origin {
+			latest[saved.Origin] = i
+		}
+	}
+	kept := []ServerCredential{}
+	for i, saved := range servers {
+		if index, ok := latest[saved.Origin]; ok && index == i {
+			kept = append(kept, saved)
+		}
+	}
+	return kept
+}
+
 // noteSite 记下最近一次站点连接：图形方式启动时 stderr 看不到，配置页和 client.log 是唯一线索。
 func (a *Agent) noteSite(origin, result string) {
 	line := time.Now().Format("15:04:05") + " · " + result
@@ -254,6 +273,15 @@ button.secondary{background:#eef0f8;color:var(--ink)}button.danger{background:#f
 .switch input:checked{background:var(--brand)}.switch input:checked::after{left:21px}
 details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-weight:600}
 .empty{color:var(--muted);margin:0}
+/* 分区用 tab：纯 CSS，CSP 不开内联脚本；radio 隐藏但仍可键盘切换。 */
+.tab{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
+.tabs label{margin:0;padding:8px 16px;border-radius:999px;background:#eef0f8;color:var(--muted);font-size:.92rem;cursor:pointer}
+.tabs label:hover{background:#e6e9f5}
+#tab-site:checked~.tabs label[for=tab-site],#tab-client:checked~.tabs label[for=tab-client],#tab-relay:checked~.tabs label[for=tab-relay]{background:var(--brand);color:var(--brand-ink)}
+#tab-site:focus-visible~.tabs label[for=tab-site],#tab-client:focus-visible~.tabs label[for=tab-client],#tab-relay:focus-visible~.tabs label[for=tab-relay]{outline:3px solid #292177;outline-offset:2px}
+.panel{display:none}
+#tab-site:checked~.panels #panel-site,#tab-client:checked~.panels #panel-client,#tab-relay:checked~.panels #panel-relay{display:block}
 </style>
 <main>
   <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p></div></div>
@@ -261,7 +289,18 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   {{if .Approved}}<div class="flash ok" role="status"><strong>站点权限已保存。</strong>请回到 Vega 查看登录验证与后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输。</div>{{end}}
   {{if .Revoked}}<div class="flash warn" role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</div>{{end}}
   {{if .Saved}}<div class="flash ok" role="status">本地配置已保存，将同步到已连接的后端；离线时请等待客户端重新连接。</div>{{end}}
-  {{if .Unpaired}}<div class="flash warn" role="status">指定账户的本地配对已移除，其他账户和站点授权不变。若该账户仍在 Vega 网页中登录，网页可能再次发起配对。</div>{{end}}
+  {{if .Unpaired}}<div class="flash warn" role="status">指定账户的本地配对已移除，站点授权不变。若该账户仍在 Vega 网页中登录，网页可能再次发起配对。</div>{{end}}
+
+  <input type="radio" name="tab" id="tab-site" class="tab"{{if eq .Tab "site"}} checked{{end}}>
+  <input type="radio" name="tab" id="tab-client" class="tab"{{if eq .Tab "client"}} checked{{end}}>
+  <input type="radio" name="tab" id="tab-relay" class="tab"{{if eq .Tab "relay"}} checked{{end}}>
+  <nav class="tabs" aria-label="连接授权分区">
+    <label for="tab-site">站点</label>
+    <label for="tab-client">本机</label>
+    <label for="tab-relay">中继与账户</label>
+  </nav>
+  <div class="panels">
+  <section class="panel" id="panel-site">
 
   <section class="card">
     <h2>站点连接</h2>
@@ -278,11 +317,14 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   </section>
   {{end}}
 
+  </section>
+  <section class="panel" id="panel-client">
+
   <section class="card">
     <h2>浏览器位置</h2>
     <form method="post">
       <label class="switch"><input type="checkbox" name="browserLocal" value="1"{{if .BrowserLocal}} checked{{end}}>在本机执行时用本机浏览器</label>
-      <small>默认用本机 Chrome（需装 Nova Chrome 扩展）。取消后改用服务端浏览器，访问本机内网服务靠下方流量中继；新任务生效，已有任务不变。</small>
+      <small>默认用本机 Chrome（需装 Nova Chrome 扩展）。取消后改用服务端浏览器，访问本机内网服务靠「中继与账户」里的流量中继；新任务生效，已有任务不变。</small>
       <div class="row"><button name="saveBrowser" value="1">保存浏览器位置</button></div>
     </form>
   </section>
@@ -293,6 +335,15 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
       <label class="switch"><input type="checkbox" name="executionClient" value="1"{{if not .ExecutionCloud}} checked{{end}}>客户端优先：任务在本机执行</label>
       <small>默认客户端优先。取消后改为服务端优先：新任务在云端执行，本机正在跑的任务会自动接力到云端继续，本机文件通过接力同步。</small>
       <div class="row"><button name="saveExecution" value="1">保存执行位置</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>蝴蝶提示</h2>
+    <form method="post">
+      <label class="switch"><input type="checkbox" name="butterflyOn" value="1"{{if .Butterfly}} checked{{end}}>显示任务栏蝴蝶与提示气泡</label>
+      <small>默认关闭：任务栏不显示蝴蝶，也不弹「正在操作这台电脑」「需要你核对」的气泡；打开后立即生效。托盘菜单「蝴蝶助理」始终可以手动打开面板。</small>
+      <div class="row"><button name="saveButterfly" value="1">保存蝴蝶设置</button></div>
     </form>
   </section>
 
@@ -315,6 +366,9 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
       <div class="row"><button name="saveSupplement" value="1">保存补充内容</button></div>
     </form>
   </section>
+
+  </section>
+  <section class="panel" id="panel-relay">
 
   <section class="card">
     <h2>流量中继</h2>
@@ -339,6 +393,9 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
     </form>
     {{else}}<p class="empty">尚无配对账户。允许站点后，请回到 Vega 完成连接。</p>{{end}}
   </section>
+
+  </section>
+  </div>
 </main></html>`))
 
 func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
@@ -360,8 +417,9 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid form", 400)
 			return
 		}
-		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" || r.FormValue("saveBrowser") == "1" || r.FormValue("saveExecution") == "1" || r.FormValue("setOnline") == "1" || r.FormValue("setOffline") == "1" {
+		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" || r.FormValue("saveBrowser") == "1" || r.FormValue("saveExecution") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("setOnline") == "1" || r.FormValue("setOffline") == "1" {
 			var err error
+			tab := "client"
 			if r.FormValue("saveBrowser") == "1" {
 				place := "cloud"
 				if r.FormValue("browserLocal") == "1" {
@@ -374,6 +432,8 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 					place = "client"
 				}
 				err = a.saveExecutionPlace(place)
+			} else if r.FormValue("saveButterfly") == "1" {
+				err = a.saveButterfly(r.FormValue("butterflyOn") == "1")
 			} else if r.FormValue("setOnline") == "1" {
 				err = a.setOnline(true)
 			} else if r.FormValue("setOffline") == "1" {
@@ -381,13 +441,14 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			} else if r.FormValue("saveSupplement") == "1" {
 				err = a.editSupplement(func(string) (string, bool, error) { return r.FormValue("supplement"), true, nil })
 			} else {
+				tab = "relay"
 				err = a.saveRelay(r.FormValue("relayOrigin"), r.FormValue("relayUser"), r.FormValue("relayRules"), r.FormValue("relayOn") == "1")
 			}
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			http.Redirect(w, r, r.URL.Path+"?saved=1", http.StatusSeeOther)
+			http.Redirect(w, r, r.URL.Path+"?saved=1&tab="+tab, http.StatusSeeOther)
 			return
 		}
 		origin, remove := r.FormValue("origin"), r.FormValue("remove")
@@ -466,12 +527,13 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		}
 		a.mu.Unlock()
 		result := "approved"
+		tab := "site"
 		if unpair {
-			result = "unpaired"
+			result, tab = "unpaired", "relay"
 		} else if remove != "" {
 			result = "revoked"
 		}
-		http.Redirect(w, r, r.URL.Path+"?"+result+"=1", http.StatusSeeOther)
+		http.Redirect(w, r, r.URL.Path+"?"+result+"=1&tab="+tab, http.StatusSeeOther)
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -501,7 +563,12 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	browserLocal := browserPlace(a.config.Browser) == "local"
 	executionCloud := executionPlace(a.config.Prefer) == "cloud"
 	offline := a.config.Offline
+	butterfly := a.config.Butterfly
 	a.mu.Unlock()
+	tab := r.URL.Query().Get("tab")
+	if tab != "client" && tab != "relay" {
+		tab = "site"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pairingPage.Execute(w, struct {
 		Pending, Trusted                   []string
@@ -512,8 +579,10 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		BrowserLocal                       bool
 		ExecutionCloud                     bool
 		Offline                            bool
+		Butterfly                          bool
+		Tab                                string
 		Accounts                           []account
-	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, browserLocal, executionCloud, offline, accounts})
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, browserLocal, executionCloud, offline, butterfly, tab, accounts})
 }
 
 type loginProof struct {

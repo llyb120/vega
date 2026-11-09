@@ -14,8 +14,8 @@ func TestButterflyPanelFrameHugsTheChipAndKeepsOffTheTaskbar(t *testing.T) {
 	work := appuseWinRect{Left: 0, Top: 0, Right: 2880, Bottom: 1704}
 	chip := appuseWinRect{Left: 1808, Top: 1724, Right: 2128, Bottom: 1780}
 	x, y, width, height := butterflyPanelFrame(chip, work, 192)
-	if width != 1120 || height != 1280 {
-		t.Fatalf("面板尺寸应是 560x640 逻辑像素：%dx%d", width, height)
+	if width != 1280 || height != 1280 {
+		t.Fatalf("面板尺寸应是 640x640 逻辑像素：%dx%d", width, height)
 	}
 	if x+width/2 != (chip.Left+chip.Right)/2 {
 		t.Fatalf("水平方向要居中在蝴蝶上：x=%d", x)
