@@ -32,7 +32,7 @@ func TestConfirmSecondsSettingAppliesAndPersists(t *testing.T) {
 		a.configure(w, r)
 		return w
 	}
-	if w := post(url.Values{"saveConfirm": {"1"}, "confirmSeconds": {"45"}}); w.Code != 303 || appuseConfirmSeconds() != 45 || w.Header().Get("Location") != "/config/test?saved=1&tab=client" {
+	if w := post(url.Values{"saveConfirm": {"1"}, "confirmSeconds": {"45"}}); w.Code != 303 || appuseConfirmSeconds() != 45 || w.Header().Get("Location") != "/config/test?saved=1&tab=computer" {
 		t.Fatalf("保存确认时间应立即生效：%d / %d 秒", w.Code, appuseConfirmSeconds())
 	}
 	if !strings.Contains(appuseConfirmText, "45 秒") {

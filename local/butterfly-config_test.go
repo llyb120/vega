@@ -49,7 +49,7 @@ func TestButterflySettingDefaultsOffAndPersists(t *testing.T) {
 		t.Fatal("保存后应停在「本机」页签")
 	}
 
-	if w := post(url.Values{"saveButterfly": {"1"}, "butterflyOn": {"1"}}); w.Code != 303 || !a.config.Butterfly || w.Header().Get("Location") != "/config/test?saved=1&tab=client" {
+	if w := post(url.Values{"saveButterfly": {"1"}, "butterflyOn": {"1"}}); w.Code != 303 || !a.config.Butterfly || w.Header().Get("Location") != "/config/test?saved=1&tab=computer" {
 		t.Fatalf("勾选必须打开蝴蝶：%d", w.Code)
 	}
 	butterflyNotify("needs_review", "需要核对")

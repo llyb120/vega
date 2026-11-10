@@ -24,11 +24,11 @@ import (
 type Config struct {
 	ClientID       string             `json:"clientId"`
 	Supplement     string             `json:"supplement,omitempty"`
-	Browser        string             `json:"browser,omitempty"` // cloud = 服务端浏览器（默认），local = 本机 Chrome 扩展
-	LoginState     *bool              `json:"loginState,omitempty"` // nil = 允许把本机登录态搬到服务端浏览器
-	Prefer         string             `json:"prefer,omitempty"`  // client = 客户端优先（默认），cloud = 服务端优先
-	Offline        bool               `json:"offline,omitempty"` // 手动下线：不连站点、不接任务
-	Butterfly      bool               `json:"butterfly,omitempty"` // 显示任务栏蝴蝶与提示气泡；默认关
+	Browser        string             `json:"browser,omitempty"`        // cloud = 服务端浏览器（默认），local = 本机 Chrome 扩展
+	LoginState     *bool              `json:"loginState,omitempty"`     // nil = 允许把本机登录态搬到服务端浏览器
+	Prefer         string             `json:"prefer,omitempty"`         // client = 客户端优先（默认），cloud = 服务端优先
+	Offline        bool               `json:"offline,omitempty"`        // 手动下线：不连站点、不接任务
+	Butterfly      bool               `json:"butterfly,omitempty"`      // 显示任务栏蝴蝶与提示气泡；默认关
 	ConfirmSeconds int                `json:"confirmSeconds,omitempty"` // 动鼠标键盘前等几秒（0 = 用默认 15）
 	TrustedOrigins []string           `json:"trustedOrigins"`
 	Servers        []ServerCredential `json:"servers,omitempty"`
@@ -282,10 +282,10 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
 .tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
 .tabs label{margin:0;padding:8px 16px;border-radius:999px;background:#eef0f8;color:var(--muted);font-size:.92rem;cursor:pointer}
 .tabs label:hover{background:#e6e9f5}
-#tab-site:checked~.tabs label[for=tab-site],#tab-client:checked~.tabs label[for=tab-client],#tab-relay:checked~.tabs label[for=tab-relay]{background:var(--brand);color:var(--brand-ink)}
-#tab-site:focus-visible~.tabs label[for=tab-site],#tab-client:focus-visible~.tabs label[for=tab-client],#tab-relay:focus-visible~.tabs label[for=tab-relay]{outline:3px solid #292177;outline-offset:2px}
+#tab-site:checked~.tabs label[for=tab-site],#tab-client:checked~.tabs label[for=tab-client],#tab-access:checked~.tabs label[for=tab-access],#tab-computer:checked~.tabs label[for=tab-computer],#tab-relay:checked~.tabs label[for=tab-relay]{background:var(--brand);color:var(--brand-ink)}
+#tab-site:focus-visible~.tabs label[for=tab-site],#tab-client:focus-visible~.tabs label[for=tab-client],#tab-access:focus-visible~.tabs label[for=tab-access],#tab-computer:focus-visible~.tabs label[for=tab-computer],#tab-relay:focus-visible~.tabs label[for=tab-relay]{outline:3px solid #292177;outline-offset:2px}
 .panel{display:none}
-#tab-site:checked~.panels #panel-site,#tab-client:checked~.panels #panel-client,#tab-relay:checked~.panels #panel-relay{display:block}
+#tab-site:checked~.panels #panel-site,#tab-client:checked~.panels #panel-client,#tab-access:checked~.panels #panel-access,#tab-computer:checked~.panels #panel-computer,#tab-relay:checked~.panels #panel-relay{display:block}
 </style>
 <main>
   <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p></div></div>
@@ -297,10 +297,14 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
 
   <input type="radio" name="tab" id="tab-site" class="tab"{{if eq .Tab "site"}} checked{{end}}>
   <input type="radio" name="tab" id="tab-client" class="tab"{{if eq .Tab "client"}} checked{{end}}>
+  <input type="radio" name="tab" id="tab-access" class="tab"{{if eq .Tab "access"}} checked{{end}}>
+  <input type="radio" name="tab" id="tab-computer" class="tab"{{if eq .Tab "computer"}} checked{{end}}>
   <input type="radio" name="tab" id="tab-relay" class="tab"{{if eq .Tab "relay"}} checked{{end}}>
   <nav class="tabs" aria-label="连接授权分区">
     <label for="tab-site">站点</label>
     <label for="tab-client">本机</label>
+    <label for="tab-access">授权</label>
+    <label for="tab-computer">电脑</label>
     <label for="tab-relay">中继与账户</label>
   </nav>
   <div class="panels">
@@ -322,7 +326,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   {{end}}
 
   </section>
-  <section class="panel" id="panel-client">
+  <section class="panel" id="panel-access">
 
   <section class="card">
     <h2>浏览器优先</h2>
@@ -342,31 +346,15 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
     </form>
   </section>
 
+  </section>
+  <section class="panel" id="panel-client">
+
   <section class="card">
     <h2>执行位置</h2>
     <form method="post">
       <label class="switch"><input type="checkbox" name="executionClient" value="1"{{if not .ExecutionCloud}} checked{{end}}>客户端优先：任务在本机执行</label>
       <small>默认客户端优先。取消后改为服务端优先：新任务在云端执行，本机正在跑的任务会自动接力到云端继续，本机文件通过接力同步。</small>
       <div class="row"><button name="saveExecution" value="1">保存执行位置</button></div>
-    </form>
-  </section>
-
-  <section class="card">
-    <h2>蝴蝶提示</h2>
-    <form method="post">
-      <label class="switch"><input type="checkbox" name="butterflyOn" value="1"{{if .Butterfly}} checked{{end}}>显示任务栏蝴蝶与提示气泡</label>
-      <small>默认关闭：任务栏不显示蝴蝶，也不弹「正在操作这台电脑」「需要你核对」的气泡；打开后立即生效。托盘菜单「蝴蝶助理」始终可以手动打开面板。</small>
-      <div class="row"><button name="saveButterfly" value="1">保存蝴蝶设置</button></div>
-    </form>
-  </section>
-
-  <section class="card">
-    <h2>操作电脑前的确认</h2>
-    <form method="post">
-      <label for="confirmSeconds">等多少秒（不选就开始）</label>
-      <input id="confirmSeconds" name="confirmSeconds" type="number" min="{{.ConfirmMin}}" max="{{.ConfirmMax}}" value="{{.ConfirmSeconds}}">
-      <small>牛马要动你电脑的鼠标键盘前，蝴蝶上方会弹一张「现在接管 / 我在用」的卡，这段时间内不选就当作同意；选「我在用」后 5 分钟内不再问也不操作。可填 {{.ConfirmMin}}–{{.ConfirmMax}} 秒；关掉上面蝴蝶就不会问。</small>
-      <div class="row"><button name="saveConfirm" value="1">保存确认时间</button></div>
     </form>
   </section>
 
@@ -387,6 +375,28 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
       <small id="supplement-help">最多 8192 UTF-8 字节。同步到此客户端授权的站点，仅供绑定本机的会话参考。不要填写密码或密钥；清空后保存可移除。</small>
       <textarea id="supplement" name="supplement" rows="6" aria-describedby="supplement-help">{{.Supplement}}</textarea>
       <div class="row"><button name="saveSupplement" value="1">保存补充内容</button></div>
+    </form>
+  </section>
+
+  </section>
+  <section class="panel" id="panel-computer">
+
+  <section class="card">
+    <h2>蝴蝶提示</h2>
+    <form method="post">
+      <label class="switch"><input type="checkbox" name="butterflyOn" value="1"{{if .Butterfly}} checked{{end}}>显示任务栏蝴蝶与提示气泡</label>
+      <small>默认关闭：任务栏不显示蝴蝶，也不弹「正在操作这台电脑」「需要你核对」的气泡；打开后立即生效。托盘菜单「蝴蝶助理」始终可以手动打开面板。</small>
+      <div class="row"><button name="saveButterfly" value="1">保存蝴蝶设置</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>操作电脑前的确认</h2>
+    <form method="post">
+      <label for="confirmSeconds">等多少秒（不选就开始）</label>
+      <input id="confirmSeconds" name="confirmSeconds" type="number" min="{{.ConfirmMin}}" max="{{.ConfirmMax}}" value="{{.ConfirmSeconds}}">
+      <small>牛马要动你电脑的鼠标键盘前，蝴蝶上方会弹一张「现在接管 / 我在用」的卡，这段时间内不选就当作同意；选「我在用」后 5 分钟内不再问也不操作。可填 {{.ConfirmMin}}–{{.ConfirmMax}} 秒；关掉上面蝴蝶就不会问。</small>
+      <div class="row"><button name="saveConfirm" value="1">保存确认时间</button></div>
     </form>
   </section>
 
@@ -443,12 +453,14 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			var err error
 			tab := "client"
 			if r.FormValue("saveBrowser") == "1" {
+				tab = "access"
 				place := "cloud"
 				if r.FormValue("browserLocal") == "1" {
 					place = "local"
 				}
 				err = a.saveBrowserPlace(place)
 			} else if r.FormValue("saveLogin") == "1" {
+				tab = "access"
 				err = a.saveLoginState(r.FormValue("loginState") == "1")
 			} else if r.FormValue("saveExecution") == "1" {
 				place := "cloud"
@@ -457,8 +469,10 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 				}
 				err = a.saveExecutionPlace(place)
 			} else if r.FormValue("saveButterfly") == "1" {
+				tab = "computer"
 				err = a.saveButterfly(r.FormValue("butterflyOn") == "1")
 			} else if r.FormValue("saveConfirm") == "1" {
+				tab = "computer"
 				seconds, convErr := strconv.Atoi(strings.TrimSpace(r.FormValue("confirmSeconds")))
 				if convErr != nil {
 					http.Error(w, "确认时间要填秒数", http.StatusBadRequest)
@@ -598,7 +612,9 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	butterfly := a.config.Butterfly
 	a.mu.Unlock()
 	tab := r.URL.Query().Get("tab")
-	if tab != "client" && tab != "relay" {
+	switch tab {
+	case "site", "client", "access", "computer", "relay":
+	default:
 		tab = "site"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
