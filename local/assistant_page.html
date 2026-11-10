@@ -923,6 +923,9 @@ async function pollMessages() {
   try {
     const data = await api("messages", { thread, after: state.lastSeq });
     if (state.current !== thread) return;
+    // 清空聊天/重置牛马会删掉历史，新的 seq 从 1 重新数：服务器序号比本地还小就整段重开，
+    // 否则一直拿旧的 lastSeq 等新消息，对话永远停在被删掉的旧内容上。
+    if (typeof data.lastSeq === "number" && data.lastSeq < state.lastSeq) { await open(thread); return; }
     const fresh = (data.messages || []).filter((m) => m.seq > state.lastSeq);
     const running = !!data.running;
     if (data.avatar !== undefined) state.avatar = data.avatar;
