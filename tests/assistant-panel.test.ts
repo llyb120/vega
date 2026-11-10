@@ -45,3 +45,11 @@ test("刚清空的空会话不会被反复重开", async () => {
   await p.pollMessages();
   assert.deepEqual(p.opened, []);
 });
+
+// 头像的动静：只有左栏卡片在任务执行中动；本地输入中（这一轮还在跑）与聊天气泡里的头像都静止。
+test("左栏头像只在任务执行中动，输入中与聊天气泡头像保持静止", () => {
+  assert(source.includes('avatarHTML(item.avatar, seed, !!item.runningTasks, "ta-session-face")'), "左栏卡片看任务状态");
+  assert(!/avatarHTML\([^)]*,\s*true\s*\)/.test(source), "没有头像写死开动画");
+  const route = readFileSync("server/routes/api/[...path].ts", "utf8");
+  assert(route.includes('runningTasks: s.tasks.filter((task) => task.status === "running").length'), "左栏动画跟着任务，而不是聊天这一轮");
+});

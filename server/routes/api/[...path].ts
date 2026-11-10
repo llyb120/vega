@@ -664,6 +664,7 @@ async function clientChat(op: string, a: Obj, userId: string) {
         thread: "employee:" + s.id, kind: "employee", id: s.id, name: s.name, avatar: s.avatar || "", mine: s.ownerId === user.id,
         unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0,
         running: !!s.chatSession && engine.active.has(s.chatSession),
+        runningTasks: s.tasks.filter((task) => task.status === "running").length,
         attention: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length,
         lastText: last ? String(last.text || "").slice(0, 60) : "", lastAt: last?.at || 0,
       };

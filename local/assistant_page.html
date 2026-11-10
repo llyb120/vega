@@ -132,7 +132,7 @@
   .ta-session.on { border-color: color-mix(in srgb, var(--brand) 55%, transparent); background: color-mix(in srgb, var(--brand) 10%, var(--surface)); }
   .ta-session-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .ta-session-heading strong { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }
-  /* 左栏卡片头像：22px 小圆角，正在工作的牛马在左栏也动（driveAvatars 连左栏一起扫描）。 */
+  /* 左栏卡片头像：22px 小圆角，任务执行中的牛马在左栏动（driveAvatars 连左栏一起扫描；输入中不动）。 */
   .ta-session-face { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; color: #fff; background: var(--brand-fill); font-weight: 700; font-size: 10px; overflow: hidden; }
   .ta-session-face.bot { overflow: visible; background: none; box-shadow: none; }
   .ta-session-face.bot .bot-avatar { display: block; width: 100%; height: 100%; overflow: visible; }
@@ -178,7 +178,7 @@
   .ta-avatar.bot .bot-body { transform-origin: 50% 90%; }
   .ta-avatar.bot .animate .bot-body { animation: bot-bob 1.8s ease-in-out infinite; }
   @keyframes bot-bob { 0%, 100% { transform: translateY(0) scale(1, 1); } 45% { transform: translateY(-2px) scale(.99, 1.015); } }
-  @media (prefers-reduced-motion: reduce) { .ta-avatar.bot .animate .bot-body { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .ta-avatar.bot .animate .bot-body, .ta-session-face.bot .animate .bot-body { animation: none; } }
   .ta-message.user .ta-avatar { display: none; }
   .ta-message-content { min-width: 0; max-width: calc(100% - 44px); }
   .ta-message.user .ta-message-content { max-width: 82%; }
@@ -750,11 +750,11 @@ function sessionCard(item) {
   const on = item.thread === state.current ? " on" : "";
   const status = item.waiting ? ['waiting', "待确认"] : item.running ? ["running", "正在工作"] : item.kind === "group" ? ["", `${item.users} 人 · ${item.employees} 个牛马`] : ["", item.mine ? "我的牛马" : "共享牛马"];
   const badge = item.unread ? `<span class="ta-badge">${item.unread > 99 ? "99+" : item.unread}</span>` : "";
-  // 牛马用预设 SVG 头像，正在工作的那个在左栏也动；群聊没有单头像就用首字母块。
+  // 牛马用预设 SVG 头像，任务执行中的那个在左栏动；群聊没有单头像就用首字母块。
   const isEmployee = item.kind !== "group" && item.thread?.startsWith("employee:");
   const seed = isEmployee ? item.thread.slice(9) : "";
   const face = isEmployee
-    ? avatarHTML(item.avatar, seed, !!item.running, "ta-session-face")
+    ? avatarHTML(item.avatar, seed, !!item.runningTasks, "ta-session-face")
     : `<span class="ta-session-face">${esc(initials(item.name))}</span>`;
   return `<button class="ta-session${on}" data-thread="${esc(item.thread)}">
     <span class="ta-session-heading">${face}<strong>${esc(item.name)}</strong>${badge}<span class="ta-status ${status[0]}">${esc(status[1])}</span></span>
@@ -794,22 +794,18 @@ function messageHTML(message) {
   if (message.images?.length) chips.push(`${message.images.length} 张图片`);
   if (message.files?.length) chips.push(`${message.files.length} 个文件`);
   const chipHTML = !ask && chips.length ? `<div class="ta-chips">${chips.map((c) => `<span class="ta-chip">${esc(c)}</span>`).join("")}</div>` : "";
-  // 牛马头像用预设 SVG（员工线程 = 当前牛马，群聊 = 作者本人），正在工作的那个给转头动画；用户作者仍是字母块。
+  // 牛马头像用预设 SVG（员工线程 = 当前牛马，群聊 = 作者本人），一律静止看向右上；只有左栏任务执行中的头像会动。
   const isEmployeeThread = state.current.startsWith("employee:");
   let avatars;
   if (message.role === "user") {
     avatars = other ? `<span class="ta-avatar">${esc(initials(message.author.name))}</span>` : "";
   } else if (isEmployeeThread) {
-    // 员工线程里消息头像都静止在 upRight；只有正在工作的那一行动画（由 typing 行驱动）。
-    avatars = avatarHTML(state.avatar, state.current.slice(9), false);
+    avatars = avatarHTML(state.avatar, state.current.slice(9));
   } else {
     const key = message.author ? message.author.kind + ":" + message.author.id : "";
     const preset = state.authors[key]?.avatar;
-    // 群聊里只给最近发言的那个牛马上运行动画（网页是“正在回复的那个”动）。
-    const latestSpeaker = [...state.messages].reverse().find((m) => m.role === "assistant" && m.author?.kind === "employee");
-    const animate = state.running && latestSpeaker === message;
     avatars = message.author?.kind === "employee" && preset
-      ? avatarHTML(preset, message.author.id, animate)
+      ? avatarHTML(preset, message.author.id)
       : `<span class="ta-avatar">${esc(initials(message.author?.name || state.title))}</span>`;
   }
   const author = other ? `<div class="ta-author">${esc(message.author.name)}</div>` : "";
@@ -828,7 +824,7 @@ function renderStream(scroll = false) {
   if (!thread) return;
   let html = state.messages.map((message) => messageHTML(message)).join("");
   if (state.running) {
-    const typingAvatar = state.current.startsWith("employee:") ? avatarHTML(state.avatar, state.current.slice(9), true) : `<span class="ta-avatar">${esc(initials(state.title))}</span>`;
+    const typingAvatar = state.current.startsWith("employee:") ? avatarHTML(state.avatar, state.current.slice(9)) : `<span class="ta-avatar">${esc(initials(state.title))}</span>`;
     html += `<div class="ta-message bot">${typingAvatar}
       <div class="ta-message-content"><div class="ta-bubble typing">正在工作<span class="ta-dots"><i></i><i></i><i></i></span></div></div></div>`;
   }
