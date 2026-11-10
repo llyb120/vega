@@ -405,9 +405,8 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
       <input type="hidden" name="relayOrigin" value="{{.Origin}}">
       <input type="hidden" name="relayUser" value="{{.UserID}}">
       <label class="switch"><input type="checkbox" name="relayOn" value="1"{{if .Enabled}} checked{{end}}>启用流量中继</label>
-      <label>允许中继的域名和端口<textarea name="relayRules" rows="5" placeholder="git.company.internal&#10;dev.company.internal:8080">{{.Rules}}</textarea></label>
-      <small>规则内的域名但客户端离线、端口未授权或多个客户端配置冲突时拒绝连接，不回退公网；规则外目标只在服务端直连失败时经本机重试一次。保存会断开受影响账户的现有浏览器网络连接，不自动重放请求。</small>
-      <div class="row"><button name="saveRelay" value="1">保存此账户的中继配置</button></div>
+      <small>开启后服务端连不上的地址自动经这台电脑重试，同一个地址不会每次先探一遍，不需要再填域名。客户端离线、端口不通或多个客户端配置冲突时拒绝连接，不回退公网。保存会断开受影响账户的现有浏览器网络连接，不自动重放请求。</small>
+      <div class="row"><button name="saveRelay" value="1">保存此账户的中继开关</button></div>
       <details><summary>移除此账户配对</summary>
         <p>仅移除服务器 <code>{{.Origin}}</code> 下账户 <code>{{.UserID}}</code> 的本地配对和中继配置，并断开其连接；不会删除服务端账户，不影响其他配对或站点授权。</p>
         <small>移除后，该账户已配置的服务端中继域名仍会拒绝直连；若只是关闭中继，请关掉上方开关后保存。网页仍登录此账户时可能再次配对。</small>
@@ -474,7 +473,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 				err = a.editSupplement(func(string) (string, bool, error) { return r.FormValue("supplement"), true, nil })
 			} else {
 				tab = "relay"
-				err = a.saveRelay(r.FormValue("relayOrigin"), r.FormValue("relayUser"), r.FormValue("relayRules"), r.FormValue("relayOn") == "1")
+				err = a.saveRelay(r.FormValue("relayOrigin"), r.FormValue("relayUser"), "", r.FormValue("relayOn") == "1")
 			}
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -576,8 +575,8 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	trusted := append([]string{}, a.config.TrustedOrigins...)
 	lastSite := a.lastSite
 	type account struct {
-		Origin, UserID, Rules, Status string
-		Enabled                       bool
+		Origin, UserID, Status string
+		Enabled                bool
 	}
 	accounts := []account{}
 	for _, saved := range a.config.Servers {
@@ -589,7 +588,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		enabled := saved.relayAllowed()
-		accounts = append(accounts, account{saved.Origin, saved.UserID, strings.Join(saved.Relay, "\n"), status, enabled})
+		accounts = append(accounts, account{saved.Origin, saved.UserID, status, enabled})
 	}
 	supplement := a.config.Supplement
 	browserLocal := browserPlace(a.config.Browser) == "local"

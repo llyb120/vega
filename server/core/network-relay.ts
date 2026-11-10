@@ -69,7 +69,15 @@ export class NetworkRelay {
   private flows = new Map<string, Flow>();
   private peers = new Map<string, string>();
   private closed = false;
+  // 同一个地址最近从客户端走通过就不用再探：否则每个连接都要先直连失败或超时一次。
+  private routes = new Map<string, number>();
+  static ROUTE_TTL_MS = 10 * 60_000;
   constructor(private store: Store, private hub: LocalAgents) {}
+  private routeKey(userId: string, host: string, port: number) { return `${userId}:${host}:${port}`; }
+  private viaClient(userId: string, host: string, port: number) {
+    const at = this.routes.get(this.routeKey(userId, host, port));
+    return at !== undefined && Date.now() - at < NetworkRelay.ROUTE_TTL_MS;
+  }
 
   async configure(grant: Grant, value: unknown, on?: unknown) {
     const rules = relayRules(value), key = grant.userId + ":" + grant.clientId;
@@ -79,6 +87,7 @@ export class NetworkRelay {
     const changed = previous ? previous.hash !== grant.hash || previous.on !== enabled || JSON.stringify(previous.rules) !== JSON.stringify(rules) : rules.length > 0;
     await this.store.save("client-relay", key, { ...grant, rules, on: enabled });
     if (!changed) return;
+    for (const key of this.routes.keys()) if (key.startsWith(grant.userId + ":")) this.routes.delete(key);
     for (const flow of this.flows.values()) if (flow.grant.userId === grant.userId) flow.finish();
     // Flush pooled direct connections too: a newly protected domain must not keep its old route.
     const proxy = this.proxies.get(grant.userId);
@@ -152,6 +161,12 @@ export class NetworkRelay {
     });
     if (socket.destroyed || this.closed) return;
     if (selected) return this.tunnel(socket, selected.record, selected.agent, host, port);
+    if (this.viaClient(userId, host, port)) {
+      const fallback = await this.fallback(userId);
+      if (socket.destroyed || this.closed) return;
+      if (fallback) return this.tunnel(socket, fallback.record, fallback.agent, host, port, true);
+      this.routes.delete(this.routeKey(userId, host, port));
+    }
     this.direct(userId, socket, host, port);
   }
   /**
@@ -189,8 +204,9 @@ export class NetworkRelay {
     if (!validRelayHost(host)) return fail("目标是 IP 或 localhost，域名中继无法匹配；请用域名访问，并确认反代转发 /api/local-agent/relay 与 X-Vega-Relay。");
     void this.fallback(userId).then((selected) => {
       if (socket.destroyed || this.closed) return;
-      if (!selected) return fail("该账号没有在线且开启流量中继的客户端；请在客户端「连接授权 → 流量中继」启用（写不写规则都可以）。");
+      if (!selected) return fail("该账号没有在线且开启流量中继的客户端；请在客户端「连接授权 → 流量中继」打开开关后重试。");
       console.warn("[Vega relay] Direct dial failed; retrying through the account client", { userId, clientId: selected.record.clientId, host, port, reason });
+      this.routes.set(this.routeKey(userId, host, port), Date.now());
       this.tunnel(socket, selected.record, selected.agent, host, port, true);
     }).catch(() => socket.destroy());
   }
@@ -204,6 +220,8 @@ export class NetworkRelay {
         tip: flow.ready ? undefined : "客户端未在时限内就绪：检查本机客户端在线、目标是否在流量中继规则中、反代是否转发 /api/local-agent/relay 与 X-Vega-Relay，以及客户端日志中的 relay 失败原因。" });
       this.flows.delete(id);
       clearTimeout(flow.timer);
+      // 没就绪就断了，说明这条客户端路由此刻走不通：下次重新判断这个地址。
+      if (!flow.ready) this.routes.delete(this.routeKey(record.userId, host, port));
       if (flow.peer) { this.peers.delete(flow.peer.id); flow.peer.close(1000, "Relay closed"); }
       socket.destroy();
     };

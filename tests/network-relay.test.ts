@@ -228,6 +228,31 @@ test("a failed direct dial falls back to the account client with no rule configu
   assert.equal((await read(socket, 7)).toString(), "SSH-2.0");
 });
 
+test("one unreachable address is probed once, then reused until the relay policy changes", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {}), f = await fixture(t);
+  await f.relay.configure(grant, [], true);
+  let jobs = 0;
+  f.onCommand((job) => {
+    jobs++;
+    const peer = { id: job.id, send() {}, close() {} };
+    f.relay.open(peer, grant, job.id);
+    f.relay.message(peer, Buffer.from([2]));
+  });
+  const proxy = await f.relay.proxy("alice"), probes = () => warn.mock.calls.map((call) => String(call.arguments[0]))
+    .filter((label) => label.startsWith("[Vega relay] Direct")).length;
+  for (let i = 0; i < 2; i++) {
+    const socket = await socks(proxy, "only-client.internal", 22, t);
+    assert.equal((await read(socket, 10))[1], 0);
+    socket.destroy();
+  }
+  assert.equal(jobs, 2, "两个连接都由客户端承载");
+  assert.equal(probes(), 1, "第二个连接直接复用记住的客户端路由，不再探测直连");
+  await f.relay.configure(grant, [], false);
+  const socket = await socks(proxy, "only-client.internal", 22, t);
+  assert.equal((await read(socket, 10))[1], 4, "关掉中继后不再记着客户端路由");
+  assert.equal(jobs, 2);
+});
+
 test("without an enabled client a failed direct dial reports the SOCKS error instead of stalling", async (t) => {
   t.mock.method(console, "warn", () => {});
   const f = await fixture(t);

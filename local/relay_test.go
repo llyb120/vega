@@ -58,36 +58,33 @@ func TestConnectionPageSavesAccountRelayAndSupplement(t *testing.T) {
 		a.configure(w, r)
 		return w
 	}
-	form := url.Values{"saveRelay": {"1"}, "relayOrigin": {origin}, "relayUser": {"alice"}, "relayRules": {"git.internal\napi.internal:8080"}, "relayOn": {"1"}}
+	form := url.Values{"saveRelay": {"1"}, "relayOrigin": {origin}, "relayUser": {"alice"}, "relayOn": {"1"}}
 	if w := post(form, "https://evil.test"); w.Code != 403 {
 		t.Fatal(w.Code)
 	}
 	if w := post(form, "http://"+localAddress); w.Code != 303 {
 		t.Fatal(w.Body.String())
 	}
-	if len(a.config.Servers[0].Relay) != 3 || len(a.config.Servers[1].Relay) != 0 || a.config.Servers[0].Token != "secret-a" {
+	if a.config.Servers[0].RelayOn == nil || !*a.config.Servers[0].RelayOn || a.config.Servers[0].Token != "secret-a" {
 		t.Fatal("account isolation or credentials changed")
 	}
-	if a.config.Servers[0].RelayOn == nil || !*a.config.Servers[0].RelayOn {
-		t.Fatal("relay switch should be on after saving rules with relayOn")
+	// 页面只剩开关：路由自动判断，保存开关不再留手写规则。
+	if len(a.config.Servers[0].Relay) != 0 || len(a.config.Servers[1].Relay) != 0 {
+		t.Fatal("hand-written rules must not survive the switch-only page")
 	}
 	data, _ := os.ReadFile(a.configPath)
 	var saved Config
-	if json.Unmarshal(data, &saved) != nil || len(saved.Servers[0].Relay) != 3 {
-		t.Fatal("rules not persisted")
+	if json.Unmarshal(data, &saved) != nil || saved.Servers[0].RelayOn == nil || !*saved.Servers[0].RelayOn {
+		t.Fatal("relay switch not persisted")
 	}
 	form.Set("relayUser", "unknown")
 	if w := post(form, "http://"+localAddress); w.Code != 400 {
 		t.Fatal("unknown account accepted")
 	}
 	form.Set("relayUser", "alice")
-	form.Set("relayRules", "*.internal")
-	if w := post(form, "http://"+localAddress); w.Code != 400 || len(a.config.Servers[0].Relay) != 3 {
-		t.Fatal("invalid rules replaced saved policy")
-	}
 	w := httptest.NewRecorder()
 	a.configure(w, httptest.NewRequest("GET", "http://"+localAddress+"/config/test", nil))
-	for _, text := range []string{"补充内容", "流量中继", "启用流量中继", "git.internal:443", "alice", "bob", "&lt;/textarea&gt;"} {
+	for _, text := range []string{"补充内容", "流量中继", "启用流量中继", "alice", "bob", "&lt;/textarea&gt;"} {
 		if !strings.Contains(w.Body.String(), text) {
 			t.Errorf("missing %s", text)
 		}
@@ -107,21 +104,16 @@ func TestConnectionPageSavesAccountRelayAndSupplement(t *testing.T) {
 	if w := post(supplement, "http://"+localAddress); w.Code != 303 || a.config.Supplement != "" {
 		t.Fatal("supplement not cleared")
 	}
-	form.Set("relayRules", "git.internal\napi.internal:8080")
 	form.Del("relayOn")
 	if w := post(form, "http://"+localAddress); w.Code != 303 {
 		t.Fatal(w.Body.String())
 	}
-	if len(a.config.Servers[0].Relay) != 3 || a.config.Servers[0].RelayOn == nil || *a.config.Servers[0].RelayOn {
-		t.Fatal("relay switch off should keep rules but disable")
-	}
 	if a.config.Servers[0].relayAllowed() {
 		t.Fatal("switch off must stop this client being an egress")
 	}
-	form.Set("relayRules", "")
-	form.Set("relayOn", "1")
-	if w := post(form, "http://"+localAddress); w.Code != 303 || len(a.config.Servers[0].Relay) != 0 {
-		t.Fatal("empty rules not saved")
+	// 旧配置里已有的规则仍能报给服务端，只是页面不再展示。
+	if err := a.saveRelay(origin, "alice", "git.internal\napi.internal:8080", true); err != nil || len(a.config.Servers[0].Relay) != 3 {
+		t.Fatal("saved rules must still reach the server")
 	}
 }
 
