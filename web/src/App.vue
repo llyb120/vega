@@ -1406,6 +1406,10 @@ function resolveMemory(data) {
 function pinMemory(m, pinned = true) {
   return attempt(() => employeeAction({ action: "memory_pin", id: m.id, pinned }));
 }
+/** Ranked server-side (relevance + usefulness + scope/scene); does not refetch the whole employee. */
+function memorySearch(data) {
+  return attempt(() => employeeApi("/employee", "POST", { action: "memory_search", ...data }));
+}
 async function saveEmployeeSettings() {
   if (employeeSaving.value) return;
   const id = employee.value.id;
@@ -1678,7 +1682,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             @chat="employeeTab = 'chat'"
           />
           <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
-          <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" /></div>
+          <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" :search="memorySearch" /></div>
           <EmployeeCapabilities v-if="employeeTab === 'capabilities'" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
           <EmployeeVault v-if="employeeTab === 'vault' && employee.canConfigure" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
           <EmployeeSettings

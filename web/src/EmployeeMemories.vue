@@ -1,5 +1,5 @@
 <script setup vapor>
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 const props = defineProps({
   memories: { type: Array, default: () => [] },
@@ -8,6 +8,7 @@ const props = defineProps({
   forget: Function,
   resolve: Function,
   pin: Function,
+  search: Function,
 });
 const claim = ref(""), id = ref(""), kind = ref("convention"), scene = ref("any"), scope = ref("global"), saving = ref(false), query = ref(""), tab = ref("active"), selected = ref([]);
 const kinds = [
@@ -51,15 +52,32 @@ async function submit() {
 }
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase();
+  // A ranked server hit list wins over local substring matching; ids are mapped back to the full records.
+  if (ranked.value) {
+    const byId = new Map((props.memories || []).map((m) => [m.id, m]));
+    return ranked.value.map((id) => byId.get(id)).filter(Boolean);
+  }
   return (props.memories || []).filter((m) => {
     const status = m.status || "active";
     if (tab.value === "active" && status !== "active") return false;
     if (tab.value === "pending" && !["draft", "conflict"].includes(status)) return false;
     if (tab.value === "archived" && status !== "archived") return false;
     if (!q) return true;
-    return [m.claim, m.text, m.kind, m.scope, m.scene, m.evidence].filter(Boolean).join(" ").toLowerCase().includes(q);
+    return [m.claim, m.text, m.kind, m.scope, m.scene, m.evidence, ...(m.tags || [])].filter(Boolean).join(" ").toLowerCase().includes(q);
   });
 });
+const ranked = ref(null);
+let timer;
+watch([query, tab], () => {
+  clearTimeout(timer);
+  const text = query.value.trim();
+  if (!props.search || text.length < 2) { ranked.value = null; return; }
+  timer = setTimeout(async () => {
+    const result = await props.search({ query: text, status: tab.value, limit: 50 });
+    if (query.value.trim() === text) ranked.value = (result?.memories || []).map((m) => m.id);
+  }, 250);
+});
+onBeforeUnmount(() => clearTimeout(timer));
 const counts = computed(() => {
   const all = props.memories || [];
   return {
@@ -86,7 +104,7 @@ function exportJson() {
 function exportMarkdown() {
   const lines = ["# 数字牛马记忆", ""];
   for (const m of props.memories || []) {
-    lines.push(`- **${kindLabel[m.kind] || m.kind || "记忆"}** (${m.status || "active"} · ${m.scene || "any"}/${m.scope || "global"}): ${m.claim || m.text || ""}`);
+    lines.push(`- **${kindLabel[m.kind] || m.kind || "记忆"}** (${m.status || "active"} · ${m.scene || "any"}/${m.scope || "global"}): ${m.claim || m.text || ""}${(m.tags || []).length ? "　" + m.tags.map((t) => "#" + t).join(" ") : ""}`);
   }
   const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
   const url = URL.createObjectURL(blob);
@@ -118,7 +136,7 @@ function pct(v) { return Math.round((Number(v) || 0) * 100); }
       </div>
 
       <form v-if="canManage" class="memory-form" :class="{ editing: id }" @submit.prevent="submit">
-        <input v-model="claim" required maxlength="200" :placeholder="id ? '修改这条主张' : '一条稳定、可跨任务复用的主张（≤200字）'" aria-label="记忆主张" />
+        <input v-model="claim" required maxlength="200" :placeholder="id ? '修改这条主张' : '一条稳定、可跨任务复用的主张（≤200字，可写 #标签）'" aria-label="记忆主张" />
         <select v-model="kind" aria-label="类型"><option v-for="[value, label] in kinds" :key="value" :value="value">{{ label }}</option></select>
         <select v-model="scene" aria-label="场景"><option value="any">任意场景</option><option value="chat">沟通</option><option value="coding">编码</option><option value="computer">电脑</option></select>
         <input v-model="scope" maxlength="200" placeholder="作用域 global / 路径 / 站点" aria-label="作用域" />
@@ -142,6 +160,7 @@ function pct(v) { return Math.round((Number(v) || 0) * 100); }
             <div class="meta">
               <span>{{ statusLabel[m.status || 'active'] }}</span>
               <span>{{ m.scene || 'any' }} · {{ m.scope || 'global' }}</span>
+              <span v-for="t in (m.tags || [])" :key="t" class="tag">#{{ t }}</span>
               <span title="可信度">可信 {{ pct(m.confidence) }}%</span>
               <span title="有用度">有用 {{ pct(m.usefulness) }}%</span>
               <span v-if="m.pinned">已钉选</span>
@@ -184,6 +203,7 @@ function pct(v) { return Math.round((Number(v) || 0) * 100); }
 .body { flex: 1; min-width: 0; }
 .body p { margin: 0; line-height: 1.55; overflow-wrap: anywhere; }
 .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; color: var(--muted); font-size: 11px; }
+.meta .tag { padding: 0 6px; border-radius: 4px; background: var(--accent-softer); color: var(--accent-text); }
 .row-actions { display: flex; flex: none; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
 @media (max-width: 900px) {
   .memory-form { grid-template-columns: 1fr 1fr; }

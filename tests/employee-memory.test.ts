@@ -16,9 +16,12 @@ import {
   extractMemoryCandidates,
   pruneMemories,
   applyFeedback,
+  forgetMemory,
+  searchMemories,
   ACTIVE_MEMORY_CAP,
   type MemoryRecord,
 } from "../server/core/employee";
+import { parseTags } from "../server/core/memory";
 import { employeeCall } from "./public-call";
 
 async function fixture() {
@@ -374,4 +377,41 @@ test("legacy recallMemory wrapper migrates and respects read-only mode", () => {
   assert.equal(state.memories[0].lastUsedAt, used);
   recallMemory(state, "项目银河默认使用TypeScript", now + 20, true);
   assert((state.memories[0].lastUsedAt || 0) >= now);
+});
+
+test("tags land from an explicit list or an inline #tag and widen recall", () => {
+  const memories: MemoryRecord[] = [];
+  const a = proposeMemory(memories, { claim: "打包产物上传制品库 #构建", kind: "convention", source: "user" });
+  const b = proposeMemory(memories, { claim: "组件目录按功能拆分", kind: "convention", source: "user", tags: ["vue", "结构", "vue"] });
+  assert(a.ok && b.ok);
+  assert.deepEqual(a.memory.tags, ["构建"]);
+  assert.deepEqual(b.memory.tags, ["vue", "结构"]);
+  // The claim wording never matches the query here; the tag alone brings the memory in.
+  assert.deepEqual(recallMemories(memories, "接手一个 vue 项目先看什么").map((m) => m.id), [b.memory.id]);
+  assert.deepEqual(parseTags("构建 #42 完成，见 #backend/sec"), ["backend/sec"], "a hash before digits is a number, not a tag");
+  const draft = proposeMemory(memories, { claim: "新仓库默认用 pnpm", kind: "convention", source: "extract", tags: ["前端"] });
+  assert(draft.ok && draft.memory.status === "draft");
+  assert(!recallMemories(memories, "前端工具链").some((m) => m.id === draft.memory.id), "drafts stay out even on a tag hit");
+});
+
+test("near-duplicate claims link in both directions and are recalled one hop out", () => {
+  const memories: MemoryRecord[] = [];
+  const a = proposeMemory(memories, { claim: "发布前先跑 npm run check", kind: "procedure", source: "user" });
+  const b = proposeMemory(memories, { claim: "提交前先跑 npm run lint", kind: "procedure", source: "user" });
+  assert(a.ok && b.ok);
+  assert.equal(b.action, "created", "similar wording must not be merged away");
+  assert.deepEqual(a.memory.links.related, [b.memory.id]);
+  assert.deepEqual(b.memory.links.related, [a.memory.id]);
+  const hit = recallMemories(memories, "npm run check 该怎么跑").map((m) => m.id);
+  assert.deepEqual([...hit].sort(), [a.memory.id, b.memory.id].sort());
+  forgetMemory(memories, b.memory.id);
+  assert.deepEqual(a.memory.links.related, [], "deleting one side clears the link");
+});
+
+test("search ranks a tag hit above a memory that shares no wording", () => {
+  const memories: MemoryRecord[] = [];
+  const tag = proposeMemory(memories, { claim: "订单页筛选状态保存在 URL 里", kind: "convention", source: "user", tags: ["vue-router"] });
+  const plain = proposeMemory(memories, { claim: "构建脚本固定用 vite", kind: "convention", source: "user", tags: ["构建"] });
+  assert(tag.ok && plain.ok);
+  assert.deepEqual(searchMemories(memories, "vue-router").map((m) => m.id)[0], tag.memory.id, "the tag holder outranks the incidental bigram overlap");
 });
