@@ -22,8 +22,10 @@ export type Agent = {
   supplement?: string;
   /** 客户端本地选择的执行位置偏好：client = 客户端优先（默认），cloud = 服务端优先。 */
   prefer?: "client" | "cloud";
-  /** 浏览器位置由客户端自己配置：local（默认）= 用本机 Chrome 扩展，cloud = 用服务端浏览器。 */
+  /** 浏览器优先由客户端自己配置：cloud（默认）= 用服务端浏览器，local = 用本机 Chrome 扩展。 */
   browser?: "local" | "cloud";
+  /** 客户端是否允许把本机站点的登录态搬到服务端浏览器（旧客户端不报时默认允许）。 */
+  loginState?: boolean;
   pending: Map<string, Pending>;
   browserLeases: Set<string>;
   onlineUntil: number;
@@ -45,6 +47,7 @@ export function validateClient(a: Obj) {
   assert(a.supplement === undefined || (typeof a.supplement === "string" && Buffer.byteLength(a.supplement) <= 8192 && !a.supplement.includes("\0")), "Invalid client supplement");
   assert(a.prefer === undefined || a.prefer === "client" || a.prefer === "cloud", "Invalid client execution preference");
   assert(a.browser === undefined || a.browser === "local" || a.browser === "cloud", "Invalid client browser location");
+  assert(a.loginState === undefined || typeof a.loginState === "boolean", "Invalid client login state");
   return clientId;
 }
 
@@ -123,8 +126,9 @@ export class LocalAgents {
       this.emit({ type: "clients_changed", targetUser: userId });
     }
     agent.supplement = a.supplement || "";
-    // 客户端配置决定浏览器位置；旧客户端不上报时按本机浏览器处理。
+    // 客户端配置决定浏览器优先；旧客户端不上报时按本机浏览器处理。
     agent.browser = a.browser === "cloud" ? "cloud" : "local";
+    agent.loginState = a.loginState !== false;
     // 客户端本地的执行位置：切成服务端优先后立即安排接力，切回客户端优先时已有任务不动。
     const prefer = a.prefer === "cloud" ? "cloud" : "client";
     if (agent.prefer !== prefer) {

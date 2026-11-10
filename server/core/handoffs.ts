@@ -3,7 +3,7 @@
  * 交接是唯一改变它的方式；每次交接递增 epoch，旧端的结果不再推进任务。
  *
  * 规则（与产品约定一致）：
- * - 浏览器位置由客户端自己的配置决定（默认本机，可改成云端）；交接时接回本机按那台客户端的设置绑定，云端侧一律用云端浏览器。
+ * - 浏览器优先由客户端自己的配置决定（默认服务端，可改成本机）；交接时接回本机按那台客户端的设置绑定，云端侧一律用云端浏览器。
  * - 本地在线时必须现读工作区；本地离线只能用云端已有的副本，并如实说明"以检查点为准"。
  * - 只有目标端真的拿到工作区，才切换执行权；否则保持原样并记失败原因。
  * - 回传只写文件、不抢执行权；冲突两边都留，不覆盖任何一方。
@@ -368,6 +368,8 @@ export class TaskHandoffs {
   async ensureBrowserState(session: Session) {
     const employeeId = session.employeeId, taskId = session.taskId;
     if (!employeeId || !taskId || session.localBrowser || !session.localAgent) return;
+    // 客户端关掉「登录态」开关就不动它的 Cookie 和页面存储。
+    if (this.deps.agents.active(session.ownerId || "", session.clientId || "")?.loginState === false) return;
     const employee = await this.deps.employeeFor(employeeId);
     const task = employee.task(await employee.state({ runs: false }), taskId);
     if (task.browserSyncedAt) return;

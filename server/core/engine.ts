@@ -272,7 +272,7 @@ export class Engine {
       session.executionCwds = { ...session.executionCwds, [previous]: session.cwd, [target]: cwd };
       session.cwd = cwd;
       session.localAgent = localAgent;
-      // 浏览器位置由客户端自己的配置决定：切到本机就按那台客户端的设置，切到服务端则一定用云端浏览器。
+      // 浏览器优先由客户端自己的配置决定：切到本机就按那台客户端的设置，切到服务端则一定用云端浏览器。
       session.localBrowser = !!agent && agent.browser !== "cloud";
       session.localPlatform = agent?.platform;
       session.clientId = agent?.clientId;
@@ -611,7 +611,7 @@ export class Engine {
     return "";
   }
   async chromeFor(session: Session, signal?: AbortSignal) {
-    // 浏览器位置不等同于执行位置：由客户端自己的配置决定（默认本机），只有它选了本机浏览器时才用客户端扩展。
+    // 浏览器优先不等同于执行位置：由客户端自己的配置决定（默认服务端），只有它选了本机浏览器时才用客户端扩展。
     if (session.localBrowser) {
       assert(session.localAgent && session.clientId, "本机浏览器只在任务执行位置为本机时可用；执行权在云端时请改用云端浏览器（或先接回本机）。");
       return this.localBrowsers.get(session, signal);

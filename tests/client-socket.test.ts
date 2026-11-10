@@ -101,7 +101,7 @@ test("client supplements update through heartbeats without replacing jobs, lease
   assert.equal(socket.closed.length, 0);
 });
 
-test("client browser location follows the client's own config on hello and heartbeat", async (t) => {
+test("client browser preference and login state follow the client's own config on hello and heartbeat", async (t) => {
   const f = await fixture(t), paired = await f.sockets.pair({ ticket: f.ticket(), clientId: details.clientId });
   const socket = f.peer(paired.deviceToken), owner = f.login.principal.user.id;
   await f.sockets.open(socket);
@@ -112,6 +112,10 @@ test("client browser location follows the client's own config on hello and heart
   await f.sockets.message(socket, JSON.stringify({ type: "ping", browser: "cloud" }));
   assert.equal(f.hub.active(owner, details.clientId)!.browser, "cloud");
   assert.equal(f.hub.list(owner)[0].browser, "cloud");
+  // 登录态开关：旧客户端不上报时默认允许，明确 false 才阻止迁移。
+  assert.equal(f.hub.active(owner, details.clientId)!.loginState, true);
+  await f.sockets.message(socket, JSON.stringify({ type: "ping", loginState: false }));
+  assert.equal(f.hub.active(owner, details.clientId)!.loginState, false);
   await f.sockets.message(socket, JSON.stringify({ type: "ping", browser: "bogus" }));
   assert.equal(socket.closed.length, 1, "无效位置不静默接受");
 });

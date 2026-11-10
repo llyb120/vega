@@ -194,6 +194,9 @@ test("a task on the local client with a cloud browser takes the local login stat
   const session: any = { id: "s1", taskId: "t1", employeeId: "e1", localAgent: true, localBrowser: false, ownerId: "u1" };
   assert.equal(await handoffs.ensureBrowserState(session), undefined, "未配置授权站点时不动本机登录态");
   await handoffs.configure("e1", { sites: ["https://a.test"] });
+  w.deps.agents.active().loginState = false;
+  assert.equal(await handoffs.ensureBrowserState(session), undefined, "客户端关掉登录态开关就不搬");
+  delete w.deps.agents.active().loginState;
   await assert.rejects(handoffs.ensureBrowserState(session), /浏览器不可用/);
   // 用本机浏览器、或在服务端执行时，不需要搬运登录态。
   assert.equal(await handoffs.ensureBrowserState({ ...session, localBrowser: true }), undefined);
