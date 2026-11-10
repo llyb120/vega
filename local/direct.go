@@ -192,6 +192,8 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	connection.jobs.browser = browserPlace(a.config.Browser)
 	allowed := a.config.loginAllowed()
 	connection.jobs.loginState = &allowed
+	keys := a.config.sshKeysAllowed()
+	connection.jobs.sshKeys = &keys
 	connection.jobs.prefer = executionPlace(a.config.Prefer)
 	a.configureRelay(connection, saved, ctx)
 	a.direct[key] = connection
@@ -284,13 +286,14 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	clientID, supplement := a.config.ClientID, a.config.Supplement
 	browser := browserPlace(a.config.Browser)
 	loginState := a.config.loginAllowed()
+	sshKeys := a.config.sshKeysAllowed()
 	a.mu.Unlock()
 	connection.jobs.mu.Lock()
 	rules := append([]string{}, connection.jobs.relayRules...)
 	relayOn := connection.jobs.relayOn
 	connection.jobs.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "loginState": loginState, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "relayOn": relayOn, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "loginState": loginState, "sshKeys": sshKeys, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "relayOn": relayOn, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true, false
 	}
@@ -370,6 +373,7 @@ type jobRunner struct {
 	supplement   string
 	browser      string
 	loginState   *bool
+	sshKeys      *bool
 	prefer       string
 	lastActivity time.Time
 	updateReady  chan bool
@@ -535,6 +539,9 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 					}
 					if runner.loginState != nil {
 						message["loginState"] = *runner.loginState
+					}
+					if runner.sshKeys != nil {
+						message["sshKeys"] = *runner.sshKeys
 					}
 					if runner.relay != nil {
 						message["relay"] = runner.relayRules

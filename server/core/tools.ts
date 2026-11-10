@@ -82,6 +82,8 @@ export class Tools {
   /** Message attachments put on disk for this run (see attachments.ts). */
   attachments: AttachmentFiles;
   private browserTab?: string;
+  /** 本机 SSH 密钥只取一次（每次运行）。 */
+  private localSsh?: Promise<string>;
   sceneStack: string[] = [];
   static async create(engine: Engine, session: Session, config: Config, signal: AbortSignal, emit: (type: string, data: any) => void) {
     const context = await Context.open(engine.store, session.id, config.contextMode === "acp" ? "acp" : "auto");
@@ -110,6 +112,24 @@ export class Tools {
     const owner = this.session.ownerId;
     if (!owner || this.session.localAgent || !(await this.engine.relay.enabled(owner))) return undefined;
     return await relayShellEnvironment(await this.engine.relay.proxy(owner), this.engine.store.files.root, this.cloud);
+  }
+  /**
+   * 服务端 git over SSH 的环境：账号客户端授权时加上它本机的密钥（本地 SSH 密钥授权，默认允许），
+   * 开了中继就同时保留 ProxyCommand。一次运行只取一次，客户端离线或没有 ssh 密钥时退回服务端自己的 ssh。
+   */
+  private async sshEnvironment(command: string) {
+    // shortcut: 只在命令里出现 git/ssh 时才取，脚本内部间接使用 ssh 时第一条命令仍走服务端自己的 ssh。
+    const relay = await this.relayEnvironment(), keys = /ssh|git/i.test(command) ? await this.localSshKeys() : "";
+    if (!keys) return relay;
+    return { ...relay, GIT_SSH_COMMAND: `${relay?.GIT_SSH_COMMAND || "ssh"} ${keys} -o StrictHostKeyChecking=accept-new -o BatchMode=yes` };
+  }
+  private localSshKeys(): Promise<string> {
+    if (!this.localSsh) {
+      const owner = this.session.ownerId,
+        agent = owner && !this.session.localAgent ? this.engine.localAgents.active(owner) : undefined;
+      this.localSsh = agent ? this.keys.localSshCommand(agent, this.signal).catch(() => "") : Promise.resolve("");
+    }
+    return this.localSsh;
   }
   async guestRequest() {
     if (!this.session.groupId || this.session.taskId) return undefined;
@@ -508,7 +528,7 @@ export class Tools {
           throw new Error(`这条命令固定在${side === "local" ? "本机" : "云端"}执行，而任务当前执行权在${where === "local" ? "本机" : "云端"}；本步未执行。请先交接执行权，不把同一命令放到另一端跑。`);
       }
       if (agent) return localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal);
-      return shell(this.session.cwd, a, this.signal, this.emit, this.cloud, await this.relayEnvironment());
+      return shell(this.session.cwd, a, this.signal, this.emit, this.cloud, await this.sshEnvironment(String(a.command)));
     }
     if (call.name === "change_working_directory") {
       assert(typeof a.path === "string" && a.path, "path required");

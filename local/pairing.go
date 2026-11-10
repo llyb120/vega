@@ -24,11 +24,12 @@ import (
 type Config struct {
 	ClientID       string             `json:"clientId"`
 	Supplement     string             `json:"supplement,omitempty"`
-	Browser        string             `json:"browser,omitempty"`        // cloud = 服务端浏览器（默认），local = 本机 Chrome 扩展
-	LoginState     *bool              `json:"loginState,omitempty"`     // nil = 允许把本机登录态搬到服务端浏览器
-	Prefer         string             `json:"prefer,omitempty"`         // client = 客户端优先（默认），cloud = 服务端优先
-	Offline        bool               `json:"offline,omitempty"`        // 手动下线：不连站点、不接任务
-	Butterfly      bool               `json:"butterfly,omitempty"`      // 显示任务栏蝴蝶与提示气泡；默认关
+	Browser        string             `json:"browser,omitempty"` // cloud = 服务端浏览器（默认），local = 本机 Chrome 扩展
+	LoginState     *bool              `json:"loginState,omitempty"` // nil = 允许把本机登录态搬到服务端浏览器
+	SSHKeys        *bool              `json:"sshKeys,omitempty"`    // nil = 允许服务端 git over SSH 用本机 SSH 密钥
+	Prefer         string             `json:"prefer,omitempty"`  // client = 客户端优先（默认），cloud = 服务端优先
+	Offline        bool               `json:"offline,omitempty"` // 手动下线：不连站点、不接任务
+	Butterfly      bool               `json:"butterfly,omitempty"` // 显示任务栏蝴蝶与提示气泡；默认关
 	ConfirmSeconds int                `json:"confirmSeconds,omitempty"` // 动鼠标键盘前等几秒（0 = 用默认 15）
 	TrustedOrigins []string           `json:"trustedOrigins"`
 	Servers        []ServerCredential `json:"servers,omitempty"`
@@ -346,6 +347,15 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
     </form>
   </section>
 
+  <section class="card">
+    <h2>本地 SSH 密钥授权</h2>
+    <form method="post">
+      <label class="switch"><input type="checkbox" name="sshKeys" value="1"{{if .SSHAllowed}} checked{{end}}>允许服务端 git 用本机 ~/.ssh 的密钥</label>
+      <small>默认允许。任务在服务端执行时，git 走 SSH 会用这台电脑 <code>~/.ssh</code> 里的 config 和私钥：临时写成只有本轮能读的文件，本轮结束即删除，不长期保存。在本机执行的任务本来就用本机密钥。关掉后密钥不出这台电脑，服务端 git 只能用密码本里的 SSH 私钥，遇到要密钥的地址会来问你。</small>
+      <div class="row"><button name="saveSSH" value="1">保存 SSH 密钥授权</button></div>
+    </form>
+  </section>
+
   </section>
   <section class="panel" id="panel-client">
 
@@ -449,7 +459,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid form", 400)
 			return
 		}
-		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" || r.FormValue("saveBrowser") == "1" || r.FormValue("saveLogin") == "1" || r.FormValue("saveExecution") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" || r.FormValue("setOnline") == "1" || r.FormValue("setOffline") == "1" {
+		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" || r.FormValue("saveBrowser") == "1" || r.FormValue("saveLogin") == "1" || r.FormValue("saveSSH") == "1" || r.FormValue("saveExecution") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" || r.FormValue("setOnline") == "1" || r.FormValue("setOffline") == "1" {
 			var err error
 			tab := "client"
 			if r.FormValue("saveBrowser") == "1" {
@@ -462,6 +472,9 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			} else if r.FormValue("saveLogin") == "1" {
 				tab = "access"
 				err = a.saveLoginState(r.FormValue("loginState") == "1")
+			} else if r.FormValue("saveSSH") == "1" {
+				tab = "access"
+				err = a.saveSshKeys(r.FormValue("sshKeys") == "1")
 			} else if r.FormValue("saveExecution") == "1" {
 				place := "cloud"
 				if r.FormValue("executionClient") == "1" {
@@ -607,6 +620,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	supplement := a.config.Supplement
 	browserLocal := browserPlace(a.config.Browser) == "local"
 	loginAllowed := a.config.loginAllowed()
+	sshAllowed := a.config.sshKeysAllowed()
 	executionCloud := executionPlace(a.config.Prefer) == "cloud"
 	offline := a.config.Offline
 	butterfly := a.config.Butterfly
@@ -626,6 +640,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		LastSite                           string
 		BrowserLocal                       bool
 		LoginAllowed                       bool
+		SSHAllowed                         bool
 		ExecutionCloud                     bool
 		Offline                            bool
 		Butterfly                          bool
@@ -633,7 +648,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		ConfirmMin, ConfirmMax             int
 		Tab                                string
 		Accounts                           []account
-	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, browserLocal, loginAllowed, executionCloud, offline, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts})
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, browserLocal, loginAllowed, sshAllowed, executionCloud, offline, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts})
 }
 
 type loginProof struct {

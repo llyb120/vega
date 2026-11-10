@@ -152,6 +152,7 @@ func main() {
 	setTrayOffline(a.config.Offline)
 	butterflySetEnabled(a.config.Butterfly)
 	setAppuseConfirmSeconds(a.config.ConfirmSeconds)
+	setSshKeysAllowed(a.config.sshKeysAllowed())
 	if needsPairing {
 		go func() {
 			time.Sleep(1 * time.Second)

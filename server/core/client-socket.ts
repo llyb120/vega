@@ -118,7 +118,7 @@ export class ClientSockets {
           close: () => this.close(socket.id),
         };
         this.hub.connect(grant.userId, value, connection.transport);
-        connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, supplement: value.supplement, browser: value.browser, loginState: value.loginState, prefer: value.prefer, resume: value.resume === true, autoUpdate: value.autoUpdate === true && value.resume === true && !!value.version };
+        connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, supplement: value.supplement, browser: value.browser, loginState: value.loginState, sshKeys: value.sshKeys, prefer: value.prefer, resume: value.resume === true, autoUpdate: value.autoUpdate === true && value.resume === true && !!value.version };
         const agent = this.hub.active(grant.userId, grant.clientId)!;
         accepted = true;
         socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) }));
@@ -155,6 +155,10 @@ export class ClientSockets {
         if ("loginState" in value) {
           validateClient({ ...connection.details, loginState: value.loginState });
           connection.details.loginState = value.loginState;
+        }
+        if ("sshKeys" in value) {
+          validateClient({ ...connection.details, sshKeys: value.sshKeys });
+          connection.details.sshKeys = value.sshKeys;
         }
         if ("prefer" in value) {
           validateClient({ ...connection.details, prefer: value.prefer });
