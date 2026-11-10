@@ -99,7 +99,8 @@ test("Resources is available in desktop and mobile navigation with same-origin d
   assert.match(resources, /<PageHeader title="资源"/);
   assert.match(readFileSync("web/src/PageHeader.vue", "utf8"), /aria-label="打开导航"/);
   assert.match(app, /<ResourcesView v-else-if="view === 'resources'" \/>/);
-  assert.match(resources, /:href="'\/clients\/' \+ client\.file" :download="client\.file"/);
+  assert.match(resources, /:href="'\/api\/clients\/' \+ client\.file \+ '\.zip'"/);
+  assert.match(resources, /instance\.json/, "downloads must explain the per-site install package");
   assert.match(resources, /:aria-label="'下载 '/);
   assert.match(resources, /chmod \+x/);
   assert.match(resources, /未签名/);

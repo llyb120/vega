@@ -231,8 +231,6 @@ const employee = ref({
   employeeTaskFocus = ref(""),
   employeeSaving = ref(false),
   employeeDeleting = ref(false), employeeResetting = ref(""),
-  employeeExecutionBusy = ref(false),
-  employeeExecutionOpen = ref(false),
   workRailOpen = ref(false),
   employeeMenu = ref(null),
   debugRevision = ref(0),
@@ -386,8 +384,8 @@ function showTasks(filter = "active") {
   workRailOpen.value = false;
   employeeTab.value = "tasks";
 }
-// Every employee belongs to its owner; administrators also see everyone else's (to oversee them).
-const employeeGroups = computed(() => [['mine', '我的牛马', true], ['others', '其他用户的牛马', false]].map(([key, label, mine]) => ({ key, label, entries: employees.value.filter((employee) => !!employee.mine === mine) })).filter((group) => group.entries.length));
+// Each user sees only their own employees.
+const employeeGroups = computed(() => [{ key: 'mine', label: '我的牛马', entries: employees.value.filter((employee) => employee.mine) }].filter((group) => group.entries.length));
 const myEmployees = computed(() => employees.value.filter((employee) => employee.mine));
 const labels = {
   queued: "排队中",
@@ -1243,7 +1241,6 @@ async function chooseEmployee(id) {
   employeeSession.value = "";
   employeeEvent.value = null;
   employeeTab.value = "chat";
-  employeeExecutionOpen.value = false;
   employeeTaskFilter.value = "active";
   employeeTaskFocus.value = "";
   dutyOpen.value = false;
@@ -1308,24 +1305,21 @@ async function resetEmployee(scope) {
 }
 async function employeeTaskAction(task, action, text) {
   return attempt(async () => {
+    if (action === "handoff-cloud" || action === "handoff-local") {
+      const to = action === "handoff-cloud" ? "to-cloud" : "to-local";
+      const record = await api(`/employees/${selectedEmployee.value}/tasks/${task.id}/handoff`, "POST", { action: to });
+      await refreshEmployee();
+      toast(to === "to-cloud"
+        ? (record?.base?.length ? "已交接：本机工作文件已同步，任务改为在云端继续；浏览器始终在云端。" : "已交接：没有可同步的本机文件，云端按恢复点续做（缺什么先核对，核验不了会问你）。")
+        : "已接回本机继续；云端成果已回传到本机。");
+      return true;
+    }
     if (action === "remove" && !confirm("永久删除此任务记录？")) return;
     if (action === "redispatch" && !confirm("重新派发为新任务？此前外部操作不会回滚。")) return;
     if (action === "seal" && !confirm("封存此任务？封存后不能再恢复、续做或重新派发，只能查看或删除。")) return;
     await control({ id: task.id, action: action === "reject" ? "approve" : action, ...(action === "approve" || action === "reject" ? { approved: action === "approve" } : {}), ...(text ? { text } : {}), ...(action === "redispatch" ? { confirmed: true } : {}), ...(action === "seal" ? { manual: true } : {}) });
     return true;
   });
-}
-async function changeEmployeeExecution(localAgent, clientId) {
-  if (employeeExecutionBusy.value) return;
-  const id = selectedEmployee.value;
-  employeeExecutionBusy.value = true;
-  try {
-    await api(`/employees/${id}/execution`, "POST", { localAgent, ...(localAgent ? { clientId: clientId || employee.value.executionClients?.[0]?.id } : {}) });
-    const updated = await api(`/employees/${id}`);
-    if (selectedEmployee.value === id) employee.value = updated;
-    toast("已切换新任务的默认执行位置；已有和正在进行的任务不变。");
-  } catch (error) { employeeError.value = error.message; }
-  finally { employeeExecutionBusy.value = false; }
 }
 async function openEmployeeTask(id) {
   const owner = selectedEmployee.value;
@@ -1412,6 +1406,10 @@ function resolveMemory(data) {
 function pinMemory(m, pinned = true) {
   return attempt(() => employeeAction({ action: "memory_pin", id: m.id, pinned }));
 }
+/** Ranked server-side (relevance + usefulness + scope/scene); does not refetch the whole employee. */
+function memorySearch(data) {
+  return attempt(() => employeeApi("/employee", "POST", { action: "memory_search", ...data }));
+}
 async function saveEmployeeSettings() {
   if (employeeSaving.value) return;
   const id = employee.value.id;
@@ -1421,7 +1419,6 @@ async function saveEmployeeSettings() {
       action: "settings",
       name: employee.value.name,
       instruction: employee.value.instruction,
-      cwd: employee.value.cwd,
     });
     toast("牛马设置已保存");
     const updated = await api(`/employees/${id}`);
@@ -1648,14 +1645,11 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             :tab="employeeTab"
             :counts="employeeCounts"
             :deleting="employeeDeleting"
-            :busy="employeeExecutionBusy"
             :show-work="employeeTab === 'chat'"
             :work-open="workPanelVisible"
             :work-count="attentionTasks.length || activeTasks.length"
             @tab="employeeTabChanged"
             @delete="deleteEmployee"
-            @execution="changeEmployeeExecution"
-            @toggle-work="toggleWorkPanel"
             @menu="openNavigation"
           />
           <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭牛马错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
@@ -1688,7 +1682,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             @chat="employeeTab = 'chat'"
           />
           <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
-          <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" /></div>
+          <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" :search="memorySearch" /></div>
           <EmployeeCapabilities v-if="employeeTab === 'capabilities'" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
           <EmployeeVault v-if="employeeTab === 'vault' && employee.canConfigure" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
           <EmployeeSettings
@@ -1698,11 +1692,9 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             :saving="employeeSaving"
             :deleting="employeeDeleting"
             :resetting="employeeResetting"
-            :busy="employeeExecutionBusy"
             @save="saveEmployeeSettings"
             @delete="deleteEmployee"
             @reset="resetEmployee"
-            @execution="changeEmployeeExecution"
             @avatar="selectedEmployee === $event.employeeId && (employee.avatar = $event.avatar)"
             @cancel="employeeTab = 'chat'"
           />

@@ -112,7 +112,7 @@ test("employee relay keeps its task-bound local Chrome for new and legacy comput
     await store.put("config", config);
     engine.catalog.resolve = async (_c, selection) => resolveModel(config, selection || config.scenes.lightweight[0]);
     const execution = { localAgent: true, clientId: client.clientId, clientName: client.name, localPlatform: client.platform, ownerId: "alice" };
-    await employee.update((state) => { state.cwd = client.cwd; state.execution = execution; });
+    await employee.update((state) => { state.cwd = client.cwd; });
     const added = await employee.execute("", { action: "add", kind: "todo", text: "Use the existing local Chrome tab" });
     const id = added.value.id;
     let turns = 0;
@@ -132,7 +132,6 @@ test("employee relay keeps its task-bound local Chrome for new and legacy comput
       await store.append(previous, { role: "assistant", text: "Previously observed a server tab; do not replay submissions" });
     }
     await employee.update((state) => {
-            state.execution = { localAgent: false };
             state.cwd = process.cwd();
             const job = employee.task(state, id);
             if (previous) job.computerSession = previous;

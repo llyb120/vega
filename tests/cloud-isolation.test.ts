@@ -128,6 +128,8 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
     const initial = await engine.employee.profile();
     assert.equal(initial.ownerId, "alice");
     assert.equal(initial.cwd, ids.alice.cwd, "the built-in employee bypasses create(), but still needs a private default");
+    const adopted = await engine.employee.create({ name: "外部目录新建", cwd: process.cwd() }, "alice");
+    assert.equal(adopted.cwd, ids.alice.cwd, "a new employee ignores any external cwd and starts in the private workspace");
     const freshJob = await engine.employee.execute("", { action: "add", kind: "todo", text: "use the private default" });
     assert.equal(engine.employee.task(await engine.employee.state(), freshJob.value.id).cwd, ids.alice.cwd);
     const job = await engine.employee.execute("", { action: "add", kind: "todo", text: "keep the original task binding", cwd: process.cwd() });
@@ -152,7 +154,6 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
     employee.closed = true;
     await employee.update((state) => {
       state.cwd = "C:\\client-only";
-      state.execution = { ownerId: "alice", localAgent: true, clientId: "d".repeat(32) };
       state.executionCwds = { server: process.cwd() };
     });
     const clientChat = await employee.chat("alice");
@@ -160,10 +161,9 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
     assert(!clientChat.localAgent);
     const client = await employee.profile();
     assert.equal(client.cwd, "C:\\client-only");
-    assert.equal(client.execution?.localAgent, true);
     assert.equal(client.executionCwds?.server, ids.alice.cwd);
     const custom = join(process.cwd(), "custom-project");
-    await employee.update((state) => { state.execution = { ownerId: "alice", localAgent: false }; state.cwd = custom; state.executionCwds = { server: custom }; });
+    await employee.update((state) => { state.cwd = custom; state.executionCwds = { server: custom }; });
     assert.equal((await employee.profile()).cwd, custom, "an explicitly selected legacy project is not silently migrated");
   });
   assert.equal(await fs.readFile(protectedFile, "utf8"), "must not be read directly");

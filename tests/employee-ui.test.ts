@@ -107,26 +107,6 @@ test("employee deletion requires confirmation, removes only its own draft and ch
   assert.deepEqual(cleared, [["alice", "ea"]]);
 });
 
-test("execution switch never overwrites a different employee selected while defaults are being validated", async () => {
-  let finish!: (value: any) => void;
-  const response = new Promise((resolve) => finish = resolve);
-  const calls: any[] = [];
-  const context: any = {
-    selectedEmployee: ref("ea"), employeeExecutionBusy: ref(false), employeeError: ref(""), employee: ref({ id: "ea", executionClients: [{ id: "client-a" }] }), toast() {},
-    api: async (path: string, method = "GET", data?: any) => { calls.push({ path, method, data }); return method === "POST" ? {} : response; },
-  };
-  const change = vm.runInNewContext(between("async function changeEmployeeExecution(", "async function employeeTabChanged") + "\nchangeEmployeeExecution", context);
-  const changing = change(true, "client-a");
-  await Promise.resolve();
-  context.selectedEmployee.value = "eb";
-  context.employee.value = { id: "eb", name: "Keep" };
-  finish({ id: "ea", execution: { localAgent: true } });
-  await changing;
-  assert.equal(context.employee.value.id, "eb");
-  assert.equal(calls[0].path, "/employees/ea/execution");
-  assert.equal(calls[0].data.localAgent, true);
-});
-
 test("chat task links reveal the matching task and refresh stale lists without jumping across employees", async () => {
   const card = { dataset: { taskId: "task" }, scrollIntoView() {}, focus() {} };
   const context: any = { selectedEmployee: ref("ea"), employee: ref({ tasks: [] }), employeeTaskFilter: ref("active"), employeeTaskFocus: ref(""), employeeTab: ref("chat"), ended: (status: string) => status === "done", nextTick: async () => {}, document: { querySelectorAll: () => [card] }, toast() {} };

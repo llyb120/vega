@@ -26,6 +26,7 @@ import { app, employeeLive } from "../../core/application";
 import { safeFileName, storeAttachments } from "../../core/attachments";
 import { cloudFor, cloudEnabled, cloudHealthy } from "../../core/cloud";
 import { newCommand } from "../../core/new-session";
+import { clientBaseName, clientPackage } from "../../core/client-package";
 import { CLIENT_BODY_LIMIT } from "../../core/client-socket";
 import { assert, filterAsync, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
@@ -53,6 +54,15 @@ export default defineEventHandler(async (event) => {
   if (path[0] === "health")
     return cloudEnabled() ? { connected: false, ready: await cloudHealthy() === true, isolated: true } : { connected: engine.chrome.bridge.status().connected, ready: true };
   if (["auth", "users"].includes(path[0])) return authRoute(event, path);
+  // 安装包下载：公开（和静态的 /clients 一样），不需要登录，但每个站点打出来的 ZIP 只指向自己。
+  if (path[0] === "clients" && path.length === 2) {
+    check(method === "GET", 405, "GET required");
+    const file = clientBaseName(path[1]), body = await clientPackage(file, publicOrigin(event));
+    setHeader(event, "Content-Type", "application/zip");
+    setHeader(event, "Content-Disposition", `attachment; filename="${file}.zip"`);
+    setHeader(event, "Cache-Control", "no-store");
+    return send(event, body);
+  }
   if (path[0] === "local-agent" && path[1] === "verify" && method === "POST") {
     const body = await bodyJSON(event, 4096);
     setHeader(event, "Cache-Control", "no-store");
@@ -70,6 +80,17 @@ export default defineEventHandler(async (event) => {
     const body = await bodyJSON(event, CLIENT_BODY_LIMIT);
     try { return await app().clientSockets.upload(request, body); }
     catch (e: any) { throw createError({ statusCode: 409, statusMessage: e.message }); }
+  }
+  if (path[0] === "local-agent" && path[1] === "chat" && method === "POST") {
+    // 蝴蝶面板（原生客户端）：设备凭据自己验，不用网站 cookie，只碰它自己的牛马/群聊。
+    setHeader(event, "Cache-Control", "no-store");
+    const request = { headers: new Headers(getRequestHeaders(event) as Record<string, string>), url: getRequestURL(event).href } as unknown as Request;
+    let grant: { userId: string };
+    try { grant = await app().clientSockets.authorize(request); }
+    catch { throw createError({ statusCode: 403, statusMessage: "Client credential invalid or revoked" }); }
+    const body = await bodyJSON(event, 1 << 20);
+    try { return await clientChat(path[2], body, grant.userId); }
+    catch (e: any) { throw createError({ statusCode: e.statusCode || 400, statusMessage: String(e.message || e).slice(0, 500) }); }
   }
   const who = principal(event),
     user = who.user;
@@ -93,15 +114,19 @@ export default defineEventHandler(async (event) => {
     if (path[0] === "debug") {
       check(user.role === "admin", 403, "Administrator permission required");
       check(method === "GET" && path[1] === "sessions" && path.length === 2, 404, "Debug route not found");
-      const names = new Map(await Promise.all((await engine.employee.all()).map(async (employee) => { const s = await employee.profile(); return [s.id, s.name] as const; })));
+      const mine = await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user));
+      const names = new Map(await Promise.all(mine.map(async (employee) => { const s = await employee.profile(); return [s.id, s.name] as const; })));
+      const own = new Set(mine.map((employee) => employee.employeeId));
       // Each group's 旁白 session too (it belongs to no employee).
       const narrators = (await engine.groups.all()).filter((g) => g.narrator?.session).map((g) => [g.narrator!.session, g.name] as const);
       const narratorSessions = (await Promise.all(narrators.map(async ([id, name]) => await store.hasSession(id) ? { ...await store.session(id), employeeId: "", employeeName: "旁白 · " + name, taskText: "", kind: "narrator", running: false } : undefined))).filter(Boolean);
-      return [...narratorSessions, ...await Promise.all((await store.employeeSessions()).map(async (session) => {
+      return [...narratorSessions, ...(await Promise.all((await store.employeeSessions()).map(async (session) => {
         const linked = session.taskId ? await store.employeeTask(session.taskId) : undefined;
         const employeeId = session.employeeId || linked?.employee || "";
+        // Each administrator's debug view covers only their own employees.
+        if (employeeId && !own.has(employeeId)) return undefined;
         return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联牛马", taskText: linked?.task.text || "", kind: !session.taskId ? (session.groupId ? "group" : "chat") : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
-      }))];
+      }))).filter(Boolean)];
     }
     if (path[0] === "bootstrap" && method === "GET") {
       let cwd = "", cloudError = "";
@@ -199,9 +224,18 @@ export default defineEventHandler(async (event) => {
         }
         check(false, 405, "Method not allowed");
       }
-      if (path[2] === "execution" && method === "POST") {
-        check(await employee.manageable(user), 403, "只有牛马管理者可以切换默认执行位置");
-        return engine.switchEmployeeExecution(employee.employeeId, a.localAgent, a.clientId, user.id);
+      // 任务执行权：同一个任务同一时刻只在一个位置跑，交接是唯一改变它的方式。
+      if (path[2] === "tasks" && path[4] === "handoff" && method === "POST") {
+        check(await employee.manageable(user), 403, "只有牛马管理者可以交接执行权");
+        const taskId = String(path[3] || "");
+        if (a.action === "status") return engine.handoffs.status(employee.employeeId, taskId);
+        if (a.action === "to-cloud") return engine.handoffs.toCloud(employee.employeeId, taskId, { source: "manual" });
+        if (a.action === "to-local") return engine.handoffs.toLocal(employee.employeeId, taskId, { clientId: a.clientId });
+        check(false, 400, "action 是 to-cloud、to-local 或 status");
+      }
+      if (path[2] === "handoff" && path.length === 3 && method === "POST") {
+        check(await employee.manageable(user), 403, "只有牛马管理者可以配置接力");
+        return engine.handoffs.configure(employee.employeeId, a);
       }
       if (path.length === 2 && method === "DELETE") {
         check(await employee.manageable(user), 403, "只有牛马管理者可以删除牛马");
@@ -286,7 +320,7 @@ export default defineEventHandler(async (event) => {
         return { ...visible, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
       }
       if (path.length === 2 && method === "POST") {
-        if (!await employee.manageable(user)) check(a.action === "list" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
+        if (!await employee.manageable(user)) check(a.action === "list" || a.action === "memory_search" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
         // Same owner-only rule as the vault page: managing an employee does not open its vault.
         if (typeof a.action === "string" && a.action.startsWith("vault_")) check(await canConfigureEmployee(employee, user), 403, "只有牛马创建者可以使用这个牛马的密码本");
         const result = await employee.execute("", await prepareDutyInput(engine, employee, a));
@@ -615,6 +649,95 @@ export default defineEventHandler(async (event) => {
     });
   }
 });
+
+/**
+ * 蝴蝶面板（原生客户端凭据）的聊天接口：thread = "employee:<id>" | "group:<id>"。
+ * 只做三件事：列会话、读历史（after/limit）、发一条用户消息。
+ */
+async function clientChat(op: string, a: Obj, userId: string) {
+  const { engine, store } = app(), user = await app().auth.user(userId);
+  assert(user, "User not found");
+  if (op === "threads") {
+    const employees = await Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
+      const s = await employee.state(), last = s.chatSession ? await store.lastMessage(s.chatSession) : undefined;
+      return {
+        thread: "employee:" + s.id, kind: "employee", id: s.id, name: s.name, avatar: s.avatar || "", mine: s.ownerId === user.id,
+        unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0,
+        running: !!s.chatSession && engine.active.has(s.chatSession),
+        runningTasks: s.tasks.filter((task) => task.status === "running").length,
+        attention: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length,
+        lastText: last ? String(last.text || "").slice(0, 60) : "", lastAt: last?.at || 0,
+      };
+    }));
+    const groups = (await engine.groups.list(user)).map((g) => ({
+      thread: "group:" + g.id, kind: "group", id: g.id, name: g.name,
+      users: g.users?.length || 0, employees: g.employees?.length || 0,
+      unread: g.unread, running: Array.isArray(g.running) && g.running.length > 0,
+      lastText: g.lastText || "", lastAt: g.lastAt || 0,
+    }));
+    return { employees, groups };
+  }
+  const thread = String(a.thread || ""), colon = thread.indexOf(":"), kind = thread.slice(0, colon), id = thread.slice(colon + 1);
+  assert(colon > 0 && id, "Invalid thread");
+  if (op === "messages") {
+    const query = new URLSearchParams();
+    if (typeof a.after === "number") query.set("after", String(Math.max(0, Math.floor(a.after))));
+    else query.set("limit", String(Math.min(200, Math.max(1, Number(a.limit) || 100))));
+    if (kind === "employee") {
+      const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
+      assert(employee && await employee.accessible(user), "Employee not found");
+      const session = await employee.chat(user.id);
+      const page = await chatHistory(store, session.id, query);
+      // 待确认气泡里的任务状态会随作答翻转：返回前把它刷成当前值，面板按它决定还能不能点。
+      const live = new Map((await employee.state()).tasks.map((task) => [task.id, task.status]));
+      for (const message of page.messages || [])
+        for (const task of message.tasks || [])
+          if (live.has(task.id)) task.status = live.get(task.id)!;
+      const state = await employee.state();
+      return { thread, title: state.name, avatar: state.avatar || "", running: engine.active.has(session.id), ...page };
+    }
+    const group = await engine.groups.mine(user, id);
+    // 群聊作者头像是预设字符串（bot:shape:color），给面板解析成 BotAvatar；key 为 kind:id。
+    const view = await engine.groups.view(group, user);
+    const authors = Object.fromEntries([
+      ...(view.employees || []).map((p) => ["employee:" + p.id, { avatar: p.avatar || "" }]),
+      ...(view.users || []).map((p) => ["user:" + p.id, { avatar: p.avatar || "" }]),
+    ]);
+    return { thread, title: group.name, authors, running: Object.values(group.memberSessions || {}).some((s) => engine.active.has(String(s))), ...await chatHistory(store, group.session, query) };
+  }
+  if (op === "read") {
+    if (kind === "employee") {
+      const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
+      assert(employee && await employee.accessible(user), "Employee not found");
+      const session = await employee.chat(user.id);
+      return { seq: await store.markRead(user.id, session.id) };
+    }
+    const group = await engine.groups.mine(user, id);
+    return { seq: await store.markRead(user.id, group.session) };
+  }
+  if (op === "control") {
+    // 面板上的待确认气泡：只允许对自己的牛马发 approve/answer（群聊任务不在这里控制）。
+    assert(kind === "employee", "Panel control only applies to an employee thread");
+    const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
+    assert(employee && await employee.accessible(user), "Employee not found");
+    assert(["approve", "answer", "stop"].includes(String(a.action || "")), "Unsupported control action");
+    return await employee.control({ id: a.id, action: a.action, approved: a.approved, text: a.text }, { token: "", name: user.username || "用户" });
+  }
+  if (op === "send") {
+    const text = String(a.text || "").trim();
+    assert(text && text.length <= 2 << 20, "Message required");
+    if (kind === "employee") {
+      const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
+      assert(employee && await employee.accessible(user), "Employee not found");
+      const session = await employee.chat(user.id);
+      await engine.submitChat(session.id, { role: "user", text, actorId: user.id });
+      return { ok: true };
+    }
+    await engine.groups.send(user, id, { text });
+    return { ok: true };
+  }
+  throw createError({ statusCode: 404, statusMessage: "Chat route not found" });
+}
 
 /** 群聊 (groups.ts). Reading is open to every user in the group; changing anything needs a non-viewer account. */
 async function groupRoute(path: string[], method: string, a: Obj, user: { id: string; role: string }, query: URLSearchParams) {

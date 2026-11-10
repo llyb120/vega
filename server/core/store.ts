@@ -61,6 +61,8 @@ export type Session = {
   taskId?: string;
   employeeId?: string;
   localAgent?: boolean;
+  /** 浏览器位置与执行位置解耦：由客户端自己的配置决定，只有用本机浏览器时才为 true。 */
+  localBrowser?: boolean;
   localPlatform?: string;
   clientId?: string;
   clientName?: string;
@@ -294,6 +296,8 @@ export class Store {
       await this.run("DELETE FROM messages WHERE session=?", key);
       await this.run("DELETE FROM folds WHERE session=?", key);
       await this.run("DELETE FROM blob_access WHERE session=?", key);
+      // 已读位置是按 seq 记的：新历史从 1 重新数，旧位置留着会让以后的未读永远算成 0。
+      await this.run("DELETE FROM objects WHERE kind='read' AND id LIKE ?", "%/" + key);
       await this.remove("context-state", key);
       await this.run("UPDATE sessions SET updated=? WHERE id=?", Date.now(), key);
     });

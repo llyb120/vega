@@ -23,34 +23,45 @@ async function fixture(t: TestContext) {
   return { engine, store };
 }
 
-test("client hints follow only the bound device and owner, refresh live and never change cwd", async (t) => {
+test("client hints follow only the working device and owner, refresh live and never change cwd", async (t) => {
   const { engine, store } = await fixture(t);
   const config = { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { baseURL: "https://unused.test", models: { model: { modalities: { input: ["text", "image"] } } } } } };
   await store.put("config", config);
   engine.catalog.resolve = async (_c, selection) => resolveModel(config, selection || config.scenes.lightweight[0]);
   const officeHint = "项目目录：D:\\code\\office\n辅助提示，不是切换工作目录。", homeHint = "Home-only hint", bobHint = "Bob-only hint";
-  engine.localAgents.connect("alice", { ...client, supplement: officeHint });
-  engine.localAgents.connect("alice", { ...client, clientId: "e".repeat(32), instance: "b".repeat(32), supplement: homeHint });
-  engine.localAgents.connect("bob", { ...client, supplement: bobHint });
+  const hints = [officeHint, homeHint, bobHint];
   let system = "";
   engine.providers.chat = async (_model, prompt) => { system = prompt; return { role: "assistant", text: "done" }; };
-  const office = await store.newSession({ cwd: client.cwd, ownerId: "alice", clientId: client.clientId, localAgent: true });
-  for (const [session, expected] of [
-    [office, officeHint],
-    [await store.newSession({ cwd: client.cwd, ownerId: "alice", clientId: "e".repeat(32), localAgent: true }), homeHint],
-    [await store.newSession({ cwd: client.cwd, ownerId: "bob", clientId: client.clientId, localAgent: true, scene: "computer" }), bobHint],
-    [await store.newSession({ cwd: process.cwd(), ownerId: "alice", clientId: client.clientId }), ""],
-  ] as const) {
+  const run = async (session: any, expected: string) => {
     await engine.run(session.id, { role: "user", text: "Describe the current environment" });
-    for (const hint of [officeHint, homeHint, bobHint]) assert.equal(system.includes(JSON.stringify(hint)), hint === expected);
+    for (const hint of hints) assert.equal(system.includes(JSON.stringify(hint)), hint === expected);
     assert.equal((await store.session(session.id)).cwd, session.cwd);
     if (expected) assert.match(system, /不自动切换工作目录/);
-  }
-  engine.localAgents.connect("alice", { ...client, supplement: "Updated local hint" });
-  await engine.run(office.id, { role: "user", text: "Use the updated hint" });
-  assert(system.includes("Updated local hint") && !system.includes(JSON.stringify(officeHint)));
-  engine.localAgents.connect("alice", { ...client, supplement: "" });
-  await engine.run(office.id, { role: "user", text: "The hint was cleared" });
+  };
+
+  // 只有一台设备时它生效。
+  engine.localAgents.connect("alice", { ...client, supplement: officeHint });
+  const office = await store.newSession({ cwd: client.cwd, ownerId: "alice", clientId: client.clientId, localAgent: true });
+  await run(office, officeHint);
+
+  // 同账号后登录的设备接管，用它自己的提示；待命设备的提示不再进入提示词。
+  engine.localAgents.connect("alice", { ...client, clientId: "e".repeat(32), instance: "b".repeat(32), supplement: homeHint });
+  const home = await store.newSession({ cwd: client.cwd, ownerId: "alice", clientId: "e".repeat(32), localAgent: true });
+  await run(home, homeHint);
+
+  // 换账号互不影响。
+  engine.localAgents.connect("bob", { ...client, supplement: bobHint });
+  const bob = await store.newSession({ cwd: client.cwd, ownerId: "bob", clientId: client.clientId, localAgent: true, scene: "computer" });
+  await run(bob, bobHint);
+
+  // 服务端会话没有客户端提示。
+  await run(await store.newSession({ cwd: process.cwd(), ownerId: "alice", clientId: client.clientId }), "");
+
+  // 提示可以刷新，也能清空。
+  engine.localAgents.connect("alice", { ...client, clientId: "e".repeat(32), instance: "b".repeat(32), supplement: "Updated local hint" });
+  await run(home, "Updated local hint");
+  engine.localAgents.connect("alice", { ...client, clientId: "e".repeat(32), instance: "b".repeat(32), supplement: "" });
+  await run(home, "");
   assert(!system.includes("[所选客户端补充内容]"));
   assert(!(await sessionPrompt({ ...office, localAgent: false }, config, store, officeHint)).includes(JSON.stringify(officeHint)));
 });
@@ -197,7 +208,7 @@ test("execution changes cannot overlap a running turn, Fire, another switch or e
   await assert.rejects(engine.switchExecution(session.id, "server" as any), /Invalid execution mode/);
 });
 
-test("switching between computers keeps independent paths and never substitutes an offline target", async (t) => {
+test("switching between computers keeps independent paths and never substitutes a standby target", async (t) => {
   const { engine, store } = await fixture(t), session = await store.newSession({ ownerId: "alice" });
   const home = { ...client, clientId: "e".repeat(32), instance: "b".repeat(32), cwd: "/home/project", name: "Home", platform: "linux" };
   engine.localAgents.connect("alice", client);
@@ -206,23 +217,27 @@ test("switching between computers keeps independent paths and never substitutes 
     assert.equal(args.cwd, agent.cwd);
     return { isDir: true, path: args.path };
   };
-  await assert.rejects(engine.switchExecution(session.id, true), /多个客户端/);
-  const office = await engine.switchExecution(session.id, true, client.clientId);
-  assert.equal(office.clientName, client.name);
-  office.cwd = client.cwd + "\\office-project";
-  await store.saveSession(office);
-  const switched = await engine.switchExecution(session.id, true, home.clientId);
-  assert.equal(switched.clientId, home.clientId);
-  assert.equal(switched.cwd, home.cwd);
-  assert.equal(switched.localPlatform, "linux");
-  assert.equal((await store.stage(session.id)).clientId, home.clientId);
-  assert.equal((await store.fork(session.id)).clientId, home.clientId);
-  const restored = await engine.switchExecution(session.id, true, client.clientId);
-  assert.equal(restored.cwd, office.cwd);
+  // 不指定设备时用最新登录的那台，而不是报“多个客户端”。
+  const primary = await engine.switchExecution(session.id, true);
+  assert.equal(primary.clientId, home.clientId);
+  // 待命设备不能接执行权：不会偷偷换到旧那台。
+  await assert.rejects(engine.switchExecution(session.id, true, client.clientId), /未连接/);
+  const onHome = await engine.switchExecution(session.id, true, home.clientId);
+  assert.equal(onHome.clientName, home.name);
+  onHome.cwd = "/home/office-project";
+  await store.saveSession(onHome);
+
+  // 生效设备退出后轮到旧设备，且两端路径各自保存。
   engine.localAgents.disconnect("alice", home.instance);
-  await assert.rejects(engine.switchExecution(session.id, true, home.clientId), /未连接/);
-  assert.equal((await store.session(session.id)).clientId, client.clientId);
-  assert.equal((await store.session(session.id)).cwd, office.cwd);
+  const onOffice = await engine.switchExecution(session.id, true);
+  assert.equal(onOffice.clientId, client.clientId);
+  assert.equal(onOffice.cwd, client.cwd);
+  engine.localAgents.connect("alice", home);
+  const back = await engine.switchExecution(session.id, true, home.clientId);
+  assert.equal(back.cwd, "/home/office-project");
+
+  await assert.rejects(engine.switchExecution(session.id, true, "f".repeat(32)), /未连接/);
+  assert.equal((await store.session(session.id)).clientId, home.clientId);
 });
 
 test("an authorized admin can bind a legacy ownerless session without guessing another account's device", async (t) => {

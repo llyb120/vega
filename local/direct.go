@@ -27,16 +27,15 @@ type ServerCredential struct {
 	UserID  string   `json:"userId"`
 	Token   string   `json:"token"`
 	Relay   []string `json:"relay,omitempty"`
-	RelayOn *bool    `json:"relayOn,omitempty"` // nil = legacy: on when Relay is non-empty
+	RelayOn *bool    `json:"relayOn,omitempty"` // nil = never configured: this computer may relay
 }
 
-// activeRelay returns the rules that should be advertised and used right now.
-func (s ServerCredential) activeRelay() []string {
-	if s.RelayOn != nil && !*s.RelayOn {
-		return nil
-	}
-	return append([]string{}, s.Relay...)
+// relayAllowed: the switch is the only thing that stops this computer being an egress; rules just force a host
+// through it. Nil means never configured, which counts as allowed (the fallback needs no configuration).
+func (s ServerCredential) relayAllowed() bool {
+	return s.RelayOn == nil || *s.RelayOn
 }
+
 type connectionStatus struct {
 	Code       string `json:"code"`
 	HTTPStatus int    `json:"httpStatus,omitempty"`
@@ -55,13 +54,28 @@ type directConnection struct {
 
 func (a *Agent) connectionStatus(connection *directConnection, status connectionStatus) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	previous := connection.status
 	connection.status = status
 	close(connection.changed)
 	connection.changed = make(chan struct{})
+	a.mu.Unlock()
+	// 连不上时日志里必须留下后端回的原话，不然只能看到“未连接”。
+	if previous.Code != status.Code || previous.Message != status.Message {
+		detail := status.Code
+		if status.HTTPStatus != 0 {
+			detail += fmt.Sprintf(" HTTP %d", status.HTTPStatus)
+		}
+		if status.Message != "" {
+			detail += "：" + status.Message
+		}
+		a.clientLog("后端 %s %s", connection.origin, detail)
+	}
 }
 
 func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredential, error) {
+	if origin != a.pinnedOrigin {
+		return ServerCredential{}, fmt.Errorf("此客户端属于 %s，不能保存 %s 的凭据", a.pinnedOrigin, origin)
+	}
 	protected, err := protectToken(proof.DeviceToken)
 	if err != nil {
 		return ServerCredential{}, err
@@ -69,33 +83,57 @@ func (a *Agent) saveCredential(origin string, proof loginProof) (ServerCredentia
 	saved := ServerCredential{Origin: origin, UserID: proof.UserID, Token: protected}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	trusted := false
-	for _, item := range a.config.TrustedOrigins {
-		trusted = trusted || item == origin
-	}
-	if !trusted {
-		return saved, fmt.Errorf("Site permission revoked during pairing")
-	}
 	next := a.config
 	next.Servers = nil
+	// 同一站点只保留当前登录的账户：换号前配对过的账户否则会一直连着，等于让别人也能用这台电脑。
+	var replaced []string
 	for _, item := range a.config.Servers {
-		if item.Origin != origin || item.UserID != proof.UserID {
+		if item.Origin != origin {
 			next.Servers = append(next.Servers, item)
-		} else {
-			saved.Relay = item.Relay
-			saved.RelayOn = item.RelayOn
+			continue
 		}
-	}
-	if len(next.Servers) >= 8 {
-		return saved, fmt.Errorf("Too many paired accounts")
+		if item.UserID != proof.UserID {
+			replaced = append(replaced, item.UserID)
+			continue
+		}
+		saved.Relay = item.Relay
+		saved.RelayOn = item.RelayOn
 	}
 	next.Servers = append(next.Servers, saved)
 	if err = a.saveConfig(next); err != nil {
 		return saved, err
 	}
 	a.config = next
+	for _, userID := range replaced {
+		key := origin + "\x00" + userID
+		if connection := a.direct[key]; connection != nil {
+			connection.cancel()
+			delete(a.direct, key)
+		}
+	}
 	return saved, nil
 }
+
+// removeCredential 删掉一个已被后端拒绝的配对凭据；TrustedOrigins 不变，网页可再次配对。
+func (a *Agent) removeCredential(origin, userID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	next := a.config
+	next.Servers = nil
+	for _, item := range a.config.Servers {
+		if item.Origin != origin || item.UserID != userID {
+			next.Servers = append(next.Servers, item)
+		}
+	}
+	if len(next.Servers) == len(a.config.Servers) {
+		return
+	}
+	if err := a.saveConfig(next); err == nil {
+		a.config = next
+		a.clientLog("已移除被后端拒绝的配对凭据 %s %s", origin, userID)
+	}
+}
+
 func (a *Agent) startConnections(ctx context.Context) {
 	a.mu.Lock()
 	a.context = ctx
@@ -112,7 +150,7 @@ func (a *Agent) startConnections(ctx context.Context) {
 func (a *Agent) startConnection(saved ServerCredential, token string) *directConnection {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.updating || !validOrigin(saved.Origin) {
+	if a.updating || a.config.Offline || !validOrigin(saved.Origin) {
 		return nil
 	}
 	trusted := false
@@ -127,7 +165,8 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	}
 	key := saved.Origin + "\x00" + saved.UserID
 	if old := a.direct[key]; old != nil {
-		if old.token == token {
+		// 已取消的连接（下线交接超时、凭据被移除）留着也重连不回来，换一条新的。
+		if old.token == token && old.jobs.ctx.Err() == nil {
 			return old
 		}
 		old.cancel()
@@ -150,6 +189,12 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	ctx, cancel := context.WithCancel(parent)
 	connection := &directConnection{origin: saved.Origin, token: token, instance: instance, jobs: newJobRunner(ctx, true), cancel: cancel, status: connectionStatus{Code: "backend_connecting"}, changed: make(chan struct{})}
 	connection.jobs.supplement = a.config.Supplement
+	connection.jobs.browser = browserPlace(a.config.Browser)
+	allowed := a.config.loginAllowed()
+	connection.jobs.loginState = &allowed
+	keys := a.config.sshKeysAllowed()
+	connection.jobs.sshKeys = &keys
+	connection.jobs.prefer = executionPlace(a.config.Prefer)
 	a.configureRelay(connection, saved, ctx)
 	a.direct[key] = connection
 	go func() {
@@ -189,10 +234,14 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 }
 func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, connection *directConnection) (bool, bool) {
 	a.mu.Lock()
-	updating := a.updating
+	updating, offline := a.updating, a.config.Offline
 	a.mu.Unlock()
 	if updating {
 		return true, false
+	}
+	if offline {
+		// 已下线：不再重连。下线那一刻的连接留给站点交接，交接完由站点断开，这里只收尾。
+		return false, false
 	}
 	u, _ := url.Parse(saved.Origin + "/api/local-agent/socket")
 	if u.Scheme == "https" {
@@ -215,6 +264,10 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 			}
 		}
 		a.connectionStatus(connection, status)
+		if response != nil && (response.StatusCode == 401 || response.StatusCode == 403) {
+			// deviceToken 已被服务端撤销：留着它只会每次启动都撞同一个 403，清掉让网页的下一次配对写入新凭据。
+			a.removeCredential(saved.Origin, saved.UserID)
+		}
 		return response == nil || (response.StatusCode != 401 && response.StatusCode != 403), false
 	}
 	defer conn.Close()
@@ -231,12 +284,16 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	}
 	a.mu.Lock()
 	clientID, supplement := a.config.ClientID, a.config.Supplement
+	browser := browserPlace(a.config.Browser)
+	loginState := a.config.loginAllowed()
+	sshKeys := a.config.sshKeysAllowed()
 	a.mu.Unlock()
 	connection.jobs.mu.Lock()
 	rules := append([]string{}, connection.jobs.relayRules...)
+	relayOn := connection.jobs.relayOn
 	connection.jobs.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "relay": rules, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "loginState": loginState, "sshKeys": sshKeys, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "relayOn": relayOn, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true, false
 	}
@@ -293,6 +350,10 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 type localJob struct {
 	cancel context.CancelFunc
 	result []byte
+	owner  string
+	// Deliveries so far. A result that went out and came back unacknowledged must stop trusting the
+	// socket: if the server refused it as too large (1009), resending the same frame loops forever.
+	attempts int
 }
 
 // Results larger than this go over HTTP so a big file read never holds the socket (and its heartbeat) for seconds.
@@ -310,11 +371,16 @@ type jobRunner struct {
 	resumable    bool
 	sessionBusy  bool
 	supplement   string
+	browser      string
+	loginState   *bool
+	sshKeys      *bool
+	prefer       string
 	lastActivity time.Time
 	updateReady  chan bool
 	recovery     *time.Timer
 	upload       func(context.Context, []byte) error
 	relayRules   []string
+	relayOn      bool
 	relay        func(context.Context, job)
 	relayCancel  context.CancelFunc
 }
@@ -390,7 +456,8 @@ func (runner *jobRunner) writeRaw(data []byte) {
 
 // deliver sends a finished result; the caller holds runner.mu. Large results are posted outside the lock.
 func (runner *jobRunner) deliver(id string, task *localJob) {
-	if len(task.result) <= inlineResultLimit || runner.upload == nil {
+	task.attempts++
+	if (task.attempts == 1 && len(task.result) <= inlineResultLimit) || runner.upload == nil {
 		runner.writeRaw(task.result)
 		return
 	}
@@ -466,9 +533,19 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 			case <-ticker.C:
 				runner.mu.Lock()
 				if runner.conn == conn {
-					message := map[string]any{"type": "ping", "supplement": runner.supplement}
+					message := map[string]any{"type": "ping", "supplement": runner.supplement, "prefer": executionPlace(runner.prefer)}
+					if runner.browser != "" {
+						message["browser"] = runner.browser
+					}
+					if runner.loginState != nil {
+						message["loginState"] = *runner.loginState
+					}
+					if runner.sshKeys != nil {
+						message["sshKeys"] = *runner.sshKeys
+					}
 					if runner.relay != nil {
 						message["relay"] = runner.relayRules
+						message["relayOn"] = runner.relayOn
 					}
 					runner.write(message)
 				}
@@ -480,7 +557,10 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		var request job
-		if conn.ReadJSON(&request) != nil {
+		if err := conn.ReadJSON(&request); err != nil {
+			if websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+				fmt.Fprintln(os.Stderr, "vega-local: server refused a frame as too large (1009); results retry over HTTP")
+			}
 			return
 		}
 		if request.Type == "relay" {
@@ -511,6 +591,17 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 				}
 			}
 			runner.mu.Unlock()
+			continue
+		}
+		if request.Type == "offline_ready" {
+			// 站点已完成下线交接，接着会断开这条连接；不再重连由 connectBackend 的下线判断负责。
+			continue
+		}
+		if request.Type == "task_status" {
+			// 服务端算好的任务栏五档（对齐 Nova taskbar_status）：本地 appuse 优先级更高。
+			if status := request.Status; status != nil {
+				butterflyChipStatus(status.Kind, status.Text, status.Trailing, status.Detail, status.Thread)
+			}
 			continue
 		}
 		if len(request.ID) != 36 {

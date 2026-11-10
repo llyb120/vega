@@ -203,6 +203,52 @@ test("private ownership covers session descendants and screenshot blob access", 
     await store.close();
   }
 });
+test("consecutive wrong passwords lock the account for 24 hours until it expires or an admin resets the password", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "vega-lock-")),
+    path = join(dir, "lock.db");
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  let store = await Store.open(path),
+    auth = new Auth(store, secret);
+  const wrong = () => auth.login({ username: "admin", password: "wrong-password" });
+  try {
+    const admin = (
+      await auth.setup({ setupToken: secret, username: "admin", password })
+    ).principal.user;
+    // Only failures in a row count: one successful sign-in clears the count.
+    for (let i = 0; i < 2; i++) await assert.rejects(wrong, { statusCode: 401 });
+    await auth.login({ username: "admin", password });
+    for (let i = 0; i < 2; i++) await assert.rejects(wrong, { statusCode: 401 });
+    await assert.rejects(wrong, { statusCode: 401 });
+    // The right password is refused too, before any password work is done.
+    await assert.rejects(() => auth.login({ username: "admin", password }), {
+      statusCode: 423,
+    });
+    // The lock is stored, so a restart does not hand out fresh guesses.
+    await store.close();
+    store = await Store.open(path);
+    auth = new Auth(store, secret);
+    now += 24 * 60 * 60 * 1000 - 1;
+    await assert.rejects(() => auth.login({ username: "admin", password }), {
+      statusCode: 423,
+    });
+    now++;
+    await auth.login({ username: "admin", password });
+    // A finished lock starts a fresh count; one more typo must not lock again.
+    await assert.rejects(wrong, { statusCode: 401 });
+    await auth.login({ username: "admin", password });
+    for (let i = 0; i < 3; i++) await assert.rejects(wrong, { statusCode: 401 });
+    await assert.rejects(() => auth.login({ username: "admin", password }), {
+      statusCode: 423,
+    });
+    // Resetting the password is how an admin lifts a lock.
+    await auth.update(admin.id, { password: "new-valid-fixture-password" });
+    await auth.login({ username: "admin", password: "new-valid-fixture-password" });
+  } finally {
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 test("cookie sessions survive restart but expire and disappear on password change; rate limiting is bounded", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-auth-")),
     path = join(dir, "auth.db");

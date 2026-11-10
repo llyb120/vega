@@ -10,9 +10,14 @@ export const keyDir = (filesRoot: string) => join(filesRoot, "keys");
 
 /** Host keys: trust a host on first contact, refuse one whose key changed; BatchMode so ssh never waits on a prompt. */
 export function gitSshCommand(path: string) {
-  const file = path.replaceAll("\\", "/"); // Git's sh (also on Windows) reads forward slashes
+  return `ssh -i ${sshQuote(path)} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes`;
+}
+
+/** Git's sh (also on Windows) reads forward slashes; a quote in the path is refused rather than guessed. */
+function sshQuote(path: string) {
+  const file = path.replaceAll("\\", "/");
   assert(!file.includes("'"), "私钥临时文件路径含单引号，无法组成 GIT_SSH_COMMAND");
-  return `ssh -i '${file}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes`;
+  return `'${file}'`;
 }
 
 /**
@@ -38,6 +43,22 @@ export class KeyFiles {
     }
     this.written.push({ path, agent });
     return path;
+  }
+  /**
+   * Git over SSH from the server on the paired client's ssh: while that client allows it (默认允许), its ~/.ssh config
+   * and private keys become 0600 files here for this run only. Returns ssh options ("" when unavailable).
+   */
+  async localSshCommand(agent: Agent, signal: AbortSignal) {
+    if (agent.sshKeys === false) return "";
+    const answer = await this.hub.request(agent, "key", { op: "ssh" }, signal);
+    const keys = Array.isArray(answer.keys) ? answer.keys : [];
+    if (answer.error || !keys.length) return "";
+    const written: { name: string; path: string }[] = [];
+    for (const key of keys) {
+      const content = Buffer.from(String(key.content || ""), "base64").toString();
+      written.push({ name: String(key.name || ""), path: await this.write(content, undefined, signal) });
+    }
+    return written.map(({ name, path }) => `${name === "config" ? "-F" : "-i"} ${sshQuote(path)}`).join(" ");
   }
   async clear() {
     const written = this.written.splice(0);

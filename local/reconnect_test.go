@@ -65,7 +65,7 @@ func TestNativeReconnectKeepsRunningJobsAndResendsOnlyUnacknowledgedResults(t *t
 	defer backend.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{}), context: ctx}
+	agent := &Agent{pinnedOrigin: backend.URL, config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{}), context: ctx}
 	connection := agent.startConnection(ServerCredential{Origin: backend.URL, UserID: "alice"}, token)
 	if connection == nil {
 		t.Fatal("connection did not start")

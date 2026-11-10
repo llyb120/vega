@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,26 +24,76 @@ import (
 type Config struct {
 	ClientID       string             `json:"clientId"`
 	Supplement     string             `json:"supplement,omitempty"`
+	Browser        string             `json:"browser,omitempty"` // cloud = 服务端浏览器（默认），local = 本机 Chrome 扩展
+	LoginState     *bool              `json:"loginState,omitempty"` // nil = 允许把本机登录态搬到服务端浏览器
+	SSHKeys        *bool              `json:"sshKeys,omitempty"`    // nil = 允许服务端 git over SSH 用本机 SSH 密钥
+	Prefer         string             `json:"prefer,omitempty"`  // client = 客户端优先（默认），cloud = 服务端优先
+	Offline        bool               `json:"offline,omitempty"` // 手动下线：不连站点、不接任务
+	Butterfly      bool               `json:"butterfly,omitempty"` // 显示任务栏蝴蝶与提示气泡；默认关
+	ConfirmSeconds int                `json:"confirmSeconds,omitempty"` // 动鼠标键盘前等几秒（0 = 用默认 15）
 	TrustedOrigins []string           `json:"trustedOrigins"`
 	Servers        []ServerCredential `json:"servers,omitempty"`
 }
 
+// pinnedOrigin 是安装包自带的站点（只允许连它）；dataDir 是它自己的数据目录。
+
 func newAgent() (*Agent, error) {
-	dir, err := os.UserConfigDir()
+	executable, err := os.Executable()
 	if err != nil {
+		return nil, err
+	}
+	return newAgentAt(filepath.Dir(executable))
+}
+
+// newAgentAt 以安装目录里的 instance.json 为准：它决定数据目录和唯一允许的站点。
+func newAgentAt(exeDir string) (*Agent, error) {
+	pin, err := readInstancePin(exeDir)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := siteDataDir(pin.Origin)
+	if err != nil {
+		return nil, err
+	}
+	if err = ensureInstanceFile(dir, pin); err != nil {
 		return nil, err
 	}
 	token := make([]byte, 24)
 	if _, err = rand.Read(token); err != nil {
 		return nil, err
 	}
-	a := &Agent{configPath: filepath.Join(dir, "vega-local", "trusted-sites.json"), configToken: hex.EncodeToString(token), connections: make(map[*websocket.Conn]struct{}), pendingOrigins: make(map[string]bool)}
+	a := &Agent{configPath: filepath.Join(dir, "trusted-sites.json"), dataDir: dir, pinnedOrigin: pin.Origin, configToken: hex.EncodeToString(token), connections: make(map[*websocket.Conn]struct{}), pendingOrigins: make(map[string]bool)}
 	data, err := os.ReadFile(a.configPath)
 	if err == nil {
 		err = json.Unmarshal(data, &a.config)
 	}
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
+	}
+	// 只认安装包里的站点，其它来源不参与白名单。
+	a.config.TrustedOrigins = []string{a.pinnedOrigin}
+	if len(a.config.Servers) == 0 {
+		// clientId 必须跟凭据一起搬：服务端的授权记录把它和 token 绑定，换成新 id 握手就过不了。
+		imported, importedClientID := legacyServers(a.pinnedOrigin)
+		a.config.Servers = imported
+		if len(imported) > 0 {
+			if importedClientID != "" {
+				a.config.ClientID = importedClientID
+			}
+			a.clientLog("沿用旧版配对凭据：%s", a.pinnedOrigin)
+			// 立刻落到自己的目录，别每次启动都去读旧配置（它随时可能被删除）。
+			if data, marshalErr := json.Marshal(a.config); marshalErr == nil {
+				_ = os.MkdirAll(dir, 0o700)
+				_ = os.WriteFile(a.configPath, data, 0o600)
+			}
+		}
+	}
+	kept := currentAccounts(a.config.Servers, a.pinnedOrigin)
+	dropped := len(a.config.Servers) - len(kept)
+	a.config.Servers = kept
+	if dropped > 0 {
+		a.clientLog("站点 %s 只保留最近配对的账户，丢弃 %d 个旧配对", a.pinnedOrigin, dropped)
+		_ = a.saveConfig(a.config) // 旧账户的凭据不再留在本机
 	}
 	if err = validateSupplement(a.config.Supplement); err != nil {
 		return nil, err
@@ -111,26 +162,89 @@ func validOrigin(origin string) bool {
 	}
 	return u.Scheme == "https" || u.Scheme == "http"
 }
+
+// allowOrigin 只放行安装包自带的站点；其它站点一律拒绝，也不弹窗请求授权。
 func (a *Agent) allowOrigin(origin string) bool {
 	if !validOrigin(origin) {
+		a.noteSite(origin, "拒绝：来源地址不合法")
 		return false
 	}
-	a.mu.Lock()
-	for _, trusted := range a.config.TrustedOrigins {
-		if trusted == origin {
-			a.mu.Unlock()
-			return true
+	if origin != a.pinnedOrigin {
+		a.noteSite(origin, "拒绝：本客户端只属于 "+a.pinnedOrigin)
+		fmt.Fprintf(os.Stderr, "vega-local: 拒绝站点 %s：此客户端只属于 %s\n", origin, a.pinnedOrigin)
+		return false
+	}
+	return true
+}
+
+// legacyServers 把旧版共用配置里属于本安装包站点的配对搬过来：数据目录一按站点分开，
+// 老用户的设备凭据不然就丢了，得重新让浏览器配对一次。
+func legacyServers(origin string) ([]ServerCredential, string) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, ""
+	}
+	data, err := os.ReadFile(filepath.Join(configDir, "vega-local", "trusted-sites.json"))
+	if err != nil {
+		return nil, ""
+	}
+	var legacy Config
+	if json.Unmarshal(data, &legacy) != nil {
+		return nil, ""
+	}
+	imported := []ServerCredential{}
+	for _, saved := range legacy.Servers {
+		if saved.Origin == origin {
+			imported = append(imported, saved)
 		}
 	}
-	show := !a.pendingOrigins[origin] && len(a.pendingOrigins) < 8
-	if show {
-		a.pendingOrigins[origin] = true
+	if len(imported) == 0 {
+		return nil, ""
 	}
+	return imported, legacy.ClientID
+}
+
+// currentAccounts 只留安装包站点下最近配对的账户：客户端只服务当前登录的账号，
+// 换号前留下的别人账户的配对不能再连上来操作同一台电脑。
+func currentAccounts(servers []ServerCredential, origin string) []ServerCredential {
+	latest := make(map[string]int, len(servers))
+	for i, saved := range servers {
+		if saved.Origin == origin {
+			latest[saved.Origin] = i
+		}
+	}
+	kept := []ServerCredential{}
+	for i, saved := range servers {
+		if index, ok := latest[saved.Origin]; ok && index == i {
+			kept = append(kept, saved)
+		}
+	}
+	return kept
+}
+
+// noteSite 记下最近一次站点连接：图形方式启动时 stderr 看不到，配置页和 client.log 是唯一线索。
+func (a *Agent) noteSite(origin, result string) {
+	line := time.Now().Format("15:04:05") + " · " + result
+	if origin != "" {
+		line = time.Now().Format("15:04:05") + " · " + origin + " · " + result
+	}
+	a.mu.Lock()
+	a.lastSite = line
 	a.mu.Unlock()
-	if show {
-		openBrowser("http://" + localAddress + "/config/" + a.configToken)
+	a.clientLog("站点 %s", line)
+}
+
+// clientLog 追加到 <数据目录>/client.log（双击启动时没有控制台）。
+func (a *Agent) clientLog(format string, args ...any) {
+	if a.dataDir == "" {
+		return
 	}
-	return false
+	file, err := os.OpenFile(filepath.Join(a.dataDir, "client.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	fmt.Fprintf(file, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
 }
 
 var pairingPage = template.Must(template.New("pairing").Parse(`<!doctype html>
@@ -150,6 +264,7 @@ code{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#
 label{display:block;font-weight:600;margin:8px 0 6px}
 textarea{width:100%;font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:12px 14px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;resize:vertical;min-height:96px}
 textarea:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #292177;outline-offset:2px}
+input[type=number]{width:96px;padding:9px 12px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;font:inherit}
 .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
 button{font:inherit;padding:10px 16px;border:0;border-radius:10px;background:var(--brand);color:var(--brand-ink);cursor:pointer;font-weight:600}
 button.secondary{background:#eef0f8;color:var(--ink)}button.danger{background:#fff1f0;color:var(--danger)}
@@ -163,20 +278,43 @@ button.secondary{background:#eef0f8;color:var(--ink)}button.danger{background:#f
 .switch input:checked{background:var(--brand)}.switch input:checked::after{left:21px}
 details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-weight:600}
 .empty{color:var(--muted);margin:0}
+/* 分区用 tab：纯 CSS，CSP 不开内联脚本；radio 隐藏但仍可键盘切换。 */
+.tab{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
+.tabs label{margin:0;padding:8px 16px;border-radius:999px;background:#eef0f8;color:var(--muted);font-size:.92rem;cursor:pointer}
+.tabs label:hover{background:#e6e9f5}
+#tab-site:checked~.tabs label[for=tab-site],#tab-client:checked~.tabs label[for=tab-client],#tab-access:checked~.tabs label[for=tab-access],#tab-computer:checked~.tabs label[for=tab-computer],#tab-relay:checked~.tabs label[for=tab-relay]{background:var(--brand);color:var(--brand-ink)}
+#tab-site:focus-visible~.tabs label[for=tab-site],#tab-client:focus-visible~.tabs label[for=tab-client],#tab-access:focus-visible~.tabs label[for=tab-access],#tab-computer:focus-visible~.tabs label[for=tab-computer],#tab-relay:focus-visible~.tabs label[for=tab-relay]{outline:3px solid #292177;outline-offset:2px}
+.panel{display:none}
+#tab-site:checked~.panels #panel-site,#tab-client:checked~.panels #panel-client,#tab-access:checked~.panels #panel-access,#tab-computer:checked~.panels #panel-computer,#tab-relay:checked~.panels #panel-relay{display:block}
 </style>
 <main>
-  <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>只允许你信任的 Vega 站点；允许后，该站点登录的账号可在本机读写文件、执行命令。</p></div></div>
+  <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p></div></div>
 
   {{if .Approved}}<div class="flash ok" role="status"><strong>站点权限已保存。</strong>请回到 Vega 查看登录验证与后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输。</div>{{end}}
   {{if .Revoked}}<div class="flash warn" role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</div>{{end}}
   {{if .Saved}}<div class="flash ok" role="status">本地配置已保存，将同步到已连接的后端；离线时请等待客户端重新连接。</div>{{end}}
-  {{if .Unpaired}}<div class="flash warn" role="status">指定账户的本地配对已移除，其他账户和站点授权不变。若该账户仍在 Vega 网页中登录，网页可能再次发起配对。</div>{{end}}
+  {{if .Unpaired}}<div class="flash warn" role="status">指定账户的本地配对已移除，站点授权不变。若该账户仍在 Vega 网页中登录，网页可能再次发起配对。</div>{{end}}
+
+  <input type="radio" name="tab" id="tab-site" class="tab"{{if eq .Tab "site"}} checked{{end}}>
+  <input type="radio" name="tab" id="tab-client" class="tab"{{if eq .Tab "client"}} checked{{end}}>
+  <input type="radio" name="tab" id="tab-access" class="tab"{{if eq .Tab "access"}} checked{{end}}>
+  <input type="radio" name="tab" id="tab-computer" class="tab"{{if eq .Tab "computer"}} checked{{end}}>
+  <input type="radio" name="tab" id="tab-relay" class="tab"{{if eq .Tab "relay"}} checked{{end}}>
+  <nav class="tabs" aria-label="连接授权分区">
+    <label for="tab-site">站点</label>
+    <label for="tab-client">本机</label>
+    <label for="tab-access">授权</label>
+    <label for="tab-computer">电脑</label>
+    <label for="tab-relay">中继与账户</label>
+  </nav>
+  <div class="panels">
+  <section class="panel" id="panel-site">
 
   <section class="card">
-    <h2>连接请求</h2>
-    {{range .Pending}}
-    <form method="post" class="site"><div>请求连接的站点<br><strong><code>{{.}}</code></strong></div><button name="origin" value="{{.}}">允许此站点</button></form>
-    {{else}}<p class="empty">当前没有新的连接请求。请保持客户端运行，并登录 Vega 网站。</p>{{end}}
+    <h2>站点连接</h2>
+    {{if .LastSite}}<p>{{.LastSite}}</p>{{else}}<p class="empty">还没有任何站点连到本机客户端。用<b>同一台电脑</b>的浏览器打开 <code>{{.Pin}}</code> 并登录，页面会自动发起配对。</p>{{end}}
+    <small>这个页面只说客户端看到了什么。如果一直为空：浏览器和客户端不在同一台电脑、浏览器在 https 页面上、或者浏览器拦住了到 127.0.0.1 的连接。详细记录在数据目录的 client.log。</small>
   </section>
 
   {{if .Trusted}}
@@ -188,6 +326,58 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   </section>
   {{end}}
 
+  </section>
+  <section class="panel" id="panel-access">
+
+  <section class="card">
+    <h2>浏览器优先</h2>
+    <form method="post">
+      <label class="switch"><input type="checkbox" name="browserLocal" value="1"{{if .BrowserLocal}} checked{{end}}>优先用本机 Chrome</label>
+      <small>默认用服务端浏览器：任务在云端也能操作网页；服务端访问不到的地址自动经这台电脑的流量中继（见「中继与账户」的开关），本机站点的登录态按下方开关搬到服务端浏览器。勾选后在本机执行的任务改用本机 Chrome（需装 Nova Chrome 扩展）；新任务生效，已有任务不变。</small>
+      <div class="row"><button name="saveBrowser" value="1">保存浏览器优先</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>登录态</h2>
+    <form method="post">
+      <label class="switch"><input type="checkbox" name="loginState" value="1"{{if .LoginAllowed}} checked{{end}}>允许把本机站点的登录态搬到服务端浏览器</label>
+      <small>只搬任务授权站点上的 Cookie 与页面存储，不复制整个浏览器；复制不等于登录成功，服务端会打开页面核对结果。关掉后服务端浏览器不读本机登录信息，遇到要登录的站点会来问你。</small>
+      <div class="row"><button name="saveLogin" value="1">保存登录态设置</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>本地 SSH 密钥授权</h2>
+    <form method="post">
+      <label class="switch"><input type="checkbox" name="sshKeys" value="1"{{if .SSHAllowed}} checked{{end}}>允许服务端 git 用本机 ~/.ssh 的密钥</label>
+      <small>默认允许。任务在服务端执行时，git 走 SSH 会用这台电脑 <code>~/.ssh</code> 里的 config 和私钥：临时写成只有本轮能读的文件，本轮结束即删除，不长期保存。在本机执行的任务本来就用本机密钥。关掉后密钥不出这台电脑，服务端 git 只能用密码本里的 SSH 私钥，遇到要密钥的地址会来问你。</small>
+      <div class="row"><button name="saveSSH" value="1">保存 SSH 密钥授权</button></div>
+    </form>
+  </section>
+
+  </section>
+  <section class="panel" id="panel-client">
+
+  <section class="card">
+    <h2>执行位置</h2>
+    <form method="post">
+      <label class="switch"><input type="checkbox" name="executionClient" value="1"{{if not .ExecutionCloud}} checked{{end}}>客户端优先：任务在本机执行</label>
+      <small>默认客户端优先。取消后改为服务端优先：新任务在云端执行，本机正在跑的任务会自动接力到云端继续，本机文件通过接力同步。</small>
+      <div class="row"><button name="saveExecution" value="1">保存执行位置</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>接单状态</h2>
+    <p>{{if .Offline}}当前<b>已下线</b>：不连接站点、不接任务；已在跑的任务由服务端接续。{{else}}当前<b>在线</b>：可以接任务。{{end}}</p>
+    <form method="post">
+      <div class="row">
+        {{if .Offline}}<button name="setOnline" value="1">上线（恢复接单）</button>{{else}}<button name="setOffline" value="1">下线（暂停接单）</button>{{end}}
+      </div>
+    </form>
+  </section>
+
   <section class="card">
     <h2>补充内容</h2>
     <form method="post">
@@ -198,10 +388,35 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
     </form>
   </section>
 
+  </section>
+  <section class="panel" id="panel-computer">
+
+  <section class="card">
+    <h2>蝴蝶提示</h2>
+    <form method="post">
+      <label class="switch"><input type="checkbox" name="butterflyOn" value="1"{{if .Butterfly}} checked{{end}}>显示任务栏蝴蝶与提示气泡</label>
+      <small>默认关闭：任务栏不显示蝴蝶，也不弹「正在操作这台电脑」「需要你核对」的气泡；打开后立即生效。托盘菜单「蝴蝶助理」始终可以手动打开面板。</small>
+      <div class="row"><button name="saveButterfly" value="1">保存蝴蝶设置</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>操作电脑前的确认</h2>
+    <form method="post">
+      <label for="confirmSeconds">等多少秒（不选就开始）</label>
+      <input id="confirmSeconds" name="confirmSeconds" type="number" min="{{.ConfirmMin}}" max="{{.ConfirmMax}}" value="{{.ConfirmSeconds}}">
+      <small>牛马要动你电脑的鼠标键盘前，蝴蝶上方会弹一张「现在接管 / 我在用」的卡，这段时间内不选就当作同意；选「我在用」后 5 分钟内不再问也不操作。可填 {{.ConfirmMin}}–{{.ConfirmMax}} 秒；关掉上面蝴蝶就不会问。</small>
+      <div class="row"><button name="saveConfirm" value="1">保存确认时间</button></div>
+    </form>
+  </section>
+
+  </section>
+  <section class="panel" id="panel-relay">
+
   <section class="card">
     <h2>流量中继</h2>
-    <p>按配对账户授权内网域名，该账户的服务端牛马浏览器自动使用本机网络，不改变任务执行位置。</p>
-    <small>每行填写一个精确域名或域名:端口，省略端口表示 80 和 443，最多 64 条。不支持通配符、IP、localhost 或 URL。关闭开关可保留规则但停止中继。请使用 HTTPS 站点保护隧道。</small>
+    <p>按配对账户授权内网域名，该账户的服务端牛马浏览器和命令行自动使用本机网络，不改变任务执行位置。</p>
+    <small>每行填写一个精确域名或域名:端口，省略端口表示 80 和 443，最多 64 条。不支持通配符、IP、localhost 或 URL。命令行的 git over SSH 和 ssh 访问要另写域名:22。不写规则也可以：服务端连不上的域名会在直连失败后经本机重试一次；关闭开关则完全不做出口。请使用 HTTPS 站点保护隧道。</small>
     {{range .Accounts}}
     <form method="post" class="account">
       <p>所属服务器地址：<strong><code>{{.Origin}}</code></strong><br>账户 ID：<code>{{.UserID}}</code><br>
@@ -210,9 +425,8 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
       <input type="hidden" name="relayOrigin" value="{{.Origin}}">
       <input type="hidden" name="relayUser" value="{{.UserID}}">
       <label class="switch"><input type="checkbox" name="relayOn" value="1"{{if .Enabled}} checked{{end}}>启用流量中继</label>
-      <label>允许中继的域名和端口<textarea name="relayRules" rows="5" placeholder="git.company.internal&#10;dev.company.internal:8080">{{.Rules}}</textarea></label>
-      <small>命中域名但客户端离线、端口未授权或多个客户端配置冲突时拒绝连接，不回退公网。保存会断开受影响账户的现有浏览器网络连接，不自动重放请求。</small>
-      <div class="row"><button name="saveRelay" value="1">保存此账户的中继配置</button></div>
+      <small>开启后服务端连不上的地址自动经这台电脑重试，同一个地址不会每次先探一遍，不需要再填域名。客户端离线、端口不通或多个客户端配置冲突时拒绝连接，不回退公网。保存会断开受影响账户的现有浏览器网络连接，不自动重放请求。</small>
+      <div class="row"><button name="saveRelay" value="1">保存此账户的中继开关</button></div>
       <details><summary>移除此账户配对</summary>
         <p>仅移除服务器 <code>{{.Origin}}</code> 下账户 <code>{{.UserID}}</code> 的本地配对和中继配置，并断开其连接；不会删除服务端账户，不影响其他配对或站点授权。</p>
         <small>移除后，该账户已配置的服务端中继域名仍会拒绝直连；若只是关闭中继，请关掉上方开关后保存。网页仍登录此账户时可能再次配对。</small>
@@ -221,8 +435,10 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
     </form>
     {{else}}<p class="empty">尚无配对账户。允许站点后，请回到 Vega 完成连接。</p>{{end}}
   </section>
-</main></html>`))
 
+  </section>
+  </div>
+</main></html>`))
 
 func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -243,18 +459,54 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid form", 400)
 			return
 		}
-		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" {
+		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" || r.FormValue("saveBrowser") == "1" || r.FormValue("saveLogin") == "1" || r.FormValue("saveSSH") == "1" || r.FormValue("saveExecution") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" || r.FormValue("setOnline") == "1" || r.FormValue("setOffline") == "1" {
 			var err error
-			if r.FormValue("saveSupplement") == "1" {
+			tab := "client"
+			if r.FormValue("saveBrowser") == "1" {
+				tab = "access"
+				place := "cloud"
+				if r.FormValue("browserLocal") == "1" {
+					place = "local"
+				}
+				err = a.saveBrowserPlace(place)
+			} else if r.FormValue("saveLogin") == "1" {
+				tab = "access"
+				err = a.saveLoginState(r.FormValue("loginState") == "1")
+			} else if r.FormValue("saveSSH") == "1" {
+				tab = "access"
+				err = a.saveSshKeys(r.FormValue("sshKeys") == "1")
+			} else if r.FormValue("saveExecution") == "1" {
+				place := "cloud"
+				if r.FormValue("executionClient") == "1" {
+					place = "client"
+				}
+				err = a.saveExecutionPlace(place)
+			} else if r.FormValue("saveButterfly") == "1" {
+				tab = "computer"
+				err = a.saveButterfly(r.FormValue("butterflyOn") == "1")
+			} else if r.FormValue("saveConfirm") == "1" {
+				tab = "computer"
+				seconds, convErr := strconv.Atoi(strings.TrimSpace(r.FormValue("confirmSeconds")))
+				if convErr != nil {
+					http.Error(w, "确认时间要填秒数", http.StatusBadRequest)
+					return
+				}
+				err = a.saveConfirmSeconds(seconds)
+			} else if r.FormValue("setOnline") == "1" {
+				err = a.setOnline(true)
+			} else if r.FormValue("setOffline") == "1" {
+				err = a.setOnline(false)
+			} else if r.FormValue("saveSupplement") == "1" {
 				err = a.editSupplement(func(string) (string, bool, error) { return r.FormValue("supplement"), true, nil })
 			} else {
-				err = a.saveRelay(r.FormValue("relayOrigin"), r.FormValue("relayUser"), r.FormValue("relayRules"), r.FormValue("relayOn") == "1")
+				tab = "relay"
+				err = a.saveRelay(r.FormValue("relayOrigin"), r.FormValue("relayUser"), "", r.FormValue("relayOn") == "1")
 			}
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			http.Redirect(w, r, r.URL.Path+"?saved=1", http.StatusSeeOther)
+			http.Redirect(w, r, r.URL.Path+"?saved=1&tab="+tab, http.StatusSeeOther)
 			return
 		}
 		origin, remove := r.FormValue("origin"), r.FormValue("remove")
@@ -286,6 +538,11 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		} else if origin != "" && a.pendingOrigins[origin] {
 			next.TrustedOrigins = append(next.TrustedOrigins, origin)
 		} else if remove != "" {
+			if remove == a.pinnedOrigin {
+				a.mu.Unlock()
+				http.Error(w, "本客户端固定属于安装包自带的站点，不能在此撤销；如需更换请重新下载对应站点的安装包", http.StatusBadRequest)
+				return
+			}
 			next.TrustedOrigins = nil
 			for _, item := range a.config.TrustedOrigins {
 				if item != remove {
@@ -328,12 +585,13 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		}
 		a.mu.Unlock()
 		result := "approved"
+		tab := "site"
 		if unpair {
-			result = "unpaired"
+			result, tab = "unpaired", "relay"
 		} else if remove != "" {
 			result = "revoked"
 		}
-		http.Redirect(w, r, r.URL.Path+"?"+result+"=1", http.StatusSeeOther)
+		http.Redirect(w, r, r.URL.Path+"?"+result+"=1&tab="+tab, http.StatusSeeOther)
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -341,14 +599,11 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
-	pending := []string{}
-	for origin := range a.pendingOrigins {
-		pending = append(pending, origin)
-	}
 	trusted := append([]string{}, a.config.TrustedOrigins...)
+	lastSite := a.lastSite
 	type account struct {
-		Origin, UserID, Rules, Status string
-		Enabled                      bool
+		Origin, UserID, Status string
+		Enabled                bool
 	}
 	accounts := []account{}
 	for _, saved := range a.config.Servers {
@@ -359,18 +614,41 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 				status = "已连接"
 			}
 		}
-		enabled := (saved.RelayOn == nil && len(saved.Relay) > 0) || (saved.RelayOn != nil && *saved.RelayOn)
-		accounts = append(accounts, account{saved.Origin, saved.UserID, strings.Join(saved.Relay, "\n"), status, enabled})
+		enabled := saved.relayAllowed()
+		accounts = append(accounts, account{saved.Origin, saved.UserID, status, enabled})
 	}
 	supplement := a.config.Supplement
+	browserLocal := browserPlace(a.config.Browser) == "local"
+	loginAllowed := a.config.loginAllowed()
+	sshAllowed := a.config.sshKeysAllowed()
+	executionCloud := executionPlace(a.config.Prefer) == "cloud"
+	offline := a.config.Offline
+	butterfly := a.config.Butterfly
 	a.mu.Unlock()
+	tab := r.URL.Query().Get("tab")
+	switch tab {
+	case "site", "client", "access", "computer", "relay":
+	default:
+		tab = "site"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pairingPage.Execute(w, struct {
 		Pending, Trusted                   []string
 		Approved, Revoked, Saved, Unpaired bool
 		Supplement                         string
+		Pin                                string
+		LastSite                           string
+		BrowserLocal                       bool
+		LoginAllowed                       bool
+		SSHAllowed                         bool
+		ExecutionCloud                     bool
+		Offline                            bool
+		Butterfly                          bool
+		ConfirmSeconds                     int
+		ConfirmMin, ConfirmMax             int
+		Tab                                string
 		Accounts                           []account
-	}{pending, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, accounts})
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, browserLocal, loginAllowed, sshAllowed, executionCloud, offline, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts})
 }
 
 type loginProof struct {

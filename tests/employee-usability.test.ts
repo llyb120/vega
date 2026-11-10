@@ -13,6 +13,7 @@ import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Auth } from "../server/core/auth";
 import { Tools } from "../server/core/tools";
+import { LocalAgentUnavailable } from "../server/core/local-agent";
 import { employeeCall } from "./public-call";
 
 async function fixture() {
@@ -45,7 +46,7 @@ test("browser extension is resolved from source or packaged assets, never the wo
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("employees belong to their owner: only the owner and administrators see or manage them", async () => {
+test("employees belong to their owner: nobody else, not even an administrator, sees or manages them", async () => {
   const { store, engine } = await fixture(), auth = new Auth(store, "test-token-at-least-16-characters");
   try {
     const mine = await engine.employee.for((await engine.employee.create({ name: "Admin's" }, "admin")).id);
@@ -53,11 +54,12 @@ test("employees belong to their owner: only the owner and administrators see or 
     const alice = { id: "alice", role: "operator" } as any, bob = { id: "bob", role: "operator" } as any, viewer = { id: "viewer", role: "viewer" } as any, admin = { id: "admin", role: "admin" } as any;
     for (const user of [alice, bob, viewer]) assert(!await mine.accessible(user) && !await mine.manageable(user));
     assert(await mine.manageable(admin));
-    assert(await personal.accessible(alice) && await personal.manageable(alice) && await personal.accessible(admin));
+    assert(await personal.accessible(alice) && await personal.manageable(alice));
+    assert(!await personal.accessible(admin) && !await personal.manageable(admin));
     assert(!await personal.accessible(bob) && !await personal.accessible(viewer));
     const privateSession = await personal.chat("alice");
-    assert(await auth.canRead(alice, privateSession) && await auth.canRead(admin, privateSession));
-    assert(!await auth.canRead(bob, privateSession) && !await auth.canRead(viewer, privateSession));
+    assert(await auth.canRead(alice, privateSession));
+    assert(!await auth.canRead(admin, privateSession) && !await auth.canRead(bob, privateSession) && !await auth.canRead(viewer, privateSession));
     assert.equal("scope" in await engine.employee.state(), false, "there is no team scope any more");
   } finally { await engine.close(); await store.close(); }
 });
@@ -80,7 +82,7 @@ test("employees are immediately available even with legacy disabled hours; duty 
   } finally { await engine.close(); await store.close(); }
 });
 
-test("switching employee execution defaults never changes old, running, resumed or child tasks", async () => {
+test("the client's own execution preference never changes old, running, resumed or child tasks", async () => {
   const { store, engine } = await fixture();
   const client = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Office PC", cwd: "C:\\client-only", platform: "windows" };
   try {
@@ -92,18 +94,31 @@ test("switching employee execution defaults never changes old, running, resumed 
     engine.active.set(session.id, { control: new AbortController(), steer: [] });
     engine.localAgents.connect("alice", client);
     engine.localAgents.request = async (_agent, op, args) => { assert.equal(op, "file"); assert.equal(args.op, "stat"); return { isDir: true, path: args.path }; };
-    await engine.switchEmployeeExecution(employee.employeeId, true, client.clientId, "alice");
     assert.equal((await store.session(session.id)).localAgent, undefined);
     assert.equal(engine.active.has(session.id), true);
-    assert.equal((await employee.state()).tasks[0].execution?.localAgent, undefined);
+    assert.equal((await employee.state()).tasks[0].execution?.localAgent, false);
     const local = await add(employee, "client work");
     assert.equal(local.execution?.clientId, client.clientId);
     assert.equal(local.cwd, client.cwd);
+    // 调用方会话（例如云端普通会话）会把自己的 cwd 带进来；客户端优先时仍必须落在客户端目录。
+    const injected = await employee.execute("", { action: "add", kind: "todo", text: "client work from a cloud chat", cwd: "/workspace/.vega-users/alice/workspace" });
+    assert.equal(employee.task(await employee.state(), injected.value.id).cwd, client.cwd, "客户端优先忽略调用方会话的云端目录");
+    assert.equal(local.execution?.localBrowser, true, "客户端未配置浏览器位置时默认用本机浏览器");
+    // 浏览器位置由客户端自己的配置决定：客户端上报 cloud 后，新任务仍在本机执行，但浏览器在云端。
+    engine.localAgents.connect("alice", { ...client, browser: "cloud" });
+    const cloudBrowserTask = await add(employee, "client work with cloud browser");
+    assert.equal(cloudBrowserTask.execution?.localAgent, true);
+    assert.equal(cloudBrowserTask.execution?.localBrowser, false);
+    engine.localAgents.connect("alice", { ...client, browser: "local" });
     const child = await employee.execute(original.id, { action: "add", kind: "todo", text: "child inherits server" });
-    assert.equal(employee.task(await employee.state(), child.value.id).execution?.localAgent, undefined);
-    await engine.switchEmployeeExecution(employee.employeeId, false, undefined, "alice");
+    assert.equal(employee.task(await employee.state(), child.value.id).execution?.localAgent, false);
+    // 执行位置只由客户端自己上报：客户端改成服务端优先后，新任务落云端，已有任务的绑定不动。
+    engine.localAgents.connect("alice", { ...client, prefer: "cloud" });
+    const cloudTask = await add(employee, "client prefers the server");
+    assert.equal(cloudTask.execution?.localAgent, false);
     assert.equal(employee.task(await employee.state(), local.id).execution?.clientId, client.clientId);
     assert.equal(employee.task(await employee.state(), local.id).cwd, client.cwd);
+    engine.localAgents.connect("alice", { ...client, prefer: "client" });
     engine.active.delete(session.id); employee.busy.clear();
     await employee.update((state) => { state.tasks.find((task) => task.id === local.id)!.status = "stopped"; });
     await employee.control({ action: "resume", id: local.id });
@@ -123,9 +138,10 @@ test("switching employee execution defaults never changes old, running, resumed 
     await employee.run(localTask);
     employee.runtime.run = originalRun;
     engine.localAgents.disconnect("alice");
-    const before = await employee.state();
-    await assert.rejects(engine.switchEmployeeExecution(employee.employeeId, true, client.clientId, "alice"), /未连接/);
-    assert.deepEqual(await employee.state(), before);
+    // 客户端不在线：新任务落服务端并说明原因，客户端回来后可接回本机。
+    const offlineTask = await add(employee, "client prefer without client");
+    assert.equal(offlineTask.execution?.localAgent, false);
+    assert.match(offlineTask.checkpoint || "", /当前没有在线的客户端/);
   } finally { engine.active.clear(); (await engine.employee.all()).forEach((employee) => employee.busy.clear()); await engine.close(); await store.close(); }
 });
 
@@ -235,4 +251,40 @@ test("one update changes several aspects together, with the old executor's seman
     await assert.rejects(tools.execute({ id: "past", name: "employee_task_manage", arguments: { taskId: job.id, request: { command: "update", instructions: "zzz", runAt: "2001-01-01 09:00" } } }, {} as any), /未来/);
     assert.equal(employee.task(await employee.state(), job.id).text, "new task", "the executor applies all parts or none");
   } finally { await engine.close(); await store.close(); }
+});
+
+test("a task whose client drops recovers on that same device instead of asking the user, and never elsewhere", async () => {
+  const { store, engine } = await fixture();
+  const client = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Office PC", cwd: "C:\\client-only", platform: "windows" };
+  try {
+    engine.localAgents.connect("alice", client);
+    const employee = await engine.employee.for((await engine.employee.create({ name: "Recover" }, "alice")).id);
+    const job = await add(employee, "client work");
+    assert.equal(job.execution?.clientId, client.clientId);
+    const session = await store.newSession({ taskId: job.id, employeeId: employee.employeeId, ownerId: "alice", cwd: job.cwd, localAgent: true, clientId: client.clientId, scene: "lightweight", model: "fixture/model" });
+    await employee.update((state) => { const task = employee.task(state, job.id); task.workSession = session.id; task.status = "running"; });
+    engine.localAgents.disconnect("alice");
+    let operations = 0;
+    engine.localAgents.request = async () => { operations++; throw new LocalAgentUnavailable(); };
+    engine.catalog.resolve = async () => ({ selection: "fixture/model", contextWindow: 128000, maxOutputTokens: 1024 }) as any;
+    engine.providers.chat = async () => ({ role: "assistant", calls: [{ id: "first", name: "bash", arguments: { command: "fixture" } }] });
+    await engine.run(session.id, { role: "user", text: "run fixture" });
+    const paused = employee.task(await employee.state(), job.id);
+    assert.equal(operations, 0, "an offline device gets no operations, not even a probe");
+    assert.equal(paused.status, "recovering");
+    assert.equal(paused.recovery.attempts, 1);
+    assert.equal(paused.recovery.waitClient, client.clientId);
+    assert(!paused.waiting, "a dropped device is not a question for the user");
+    assert.match((await store.messages(session.id)).at(-1)!.text!, /已进入自动恢复/);
+    // 离线期间不派发，也不白白花掉恢复次数
+    await employee.tick();
+    assert.equal(employee.busy.size, 0);
+    assert.equal(employee.task(await employee.state(), job.id).recovery.attempts, 1);
+    // 回连后回到调度器，在同一台设备续做
+    let resumed = 0;
+    employee.run = async () => { resumed++; };
+    engine.localAgents.connect("alice", client);
+    await employee.tick();
+    assert.equal(resumed, 1);
+  } finally { engine.active.clear(); (await engine.employee.all()).forEach((member) => member.busy.clear()); await engine.close(); await store.close(); }
 });

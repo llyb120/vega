@@ -945,8 +945,8 @@ test(
         assert.equal(response.ok, true, JSON.stringify(value));
         return value;
       };
-      const office = { clientId: "d".repeat(32), instance: "a".repeat(32), name: "Office PC", cwd: "C:\\office", platform: "windows" };
-      const home = { clientId: "e".repeat(32), instance: "b".repeat(32), name: "Home PC", cwd: "/home/project", platform: "linux" };
+      const office = { clientId: "d".repeat(32), instance: "a".repeat(32), name: "Office PC", cwd: "C:\\office", platform: "windows", version: "0.3.5" };
+      const home = { clientId: "e".repeat(32), instance: "b".repeat(32), name: "Home PC", cwd: "/home/project", platform: "linux", version: "0.3.5" };
       const nativePeers: WebSocket[] = [];
       const connectNative = async (details: any) => {
         const { ticket } = await remoteApi("/local-agent/ticket", { instance: details.instance });

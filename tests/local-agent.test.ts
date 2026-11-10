@@ -50,44 +50,45 @@ test("browser bridge routes only to its owner and instance, never another user o
   hub.close();
 });
 
-test("multiple owned clients route by device and expire independently without falling back", async (t) => {
+test("one account works on one device: the newest login wins and the older takes over when it leaves", async (t) => {
   const events: any[] = [], hub = new LocalAgents();
   t.after(() => hub.close());
   const other = { ...details, clientId: "e".repeat(32), instance: "b".repeat(32), name: "Home PC" };
   hub.connect("alice", details, wire(events));
   hub.connect("alice", other, wire(events, other.instance));
   hub.connect("bob", { ...details, instance: "c".repeat(32) }, wire(events, "c".repeat(32)));
-  assert.deepEqual(hub.list("alice").map((c) => c.name), ["Office PC", "Home PC"]);
+  assert.deepEqual(hub.list("alice").map((c) => [c.name, c.active]), [["Office PC", false], ["Home PC", true]]);
   assert.equal(hub.list("bob").length, 1);
-  assert.equal(hub.active("alice"), undefined, "multiple clients require an explicit selection");
+  assert.equal(hub.active("alice")!.clientId, other.clientId, "以最新登录的设备为准");
+  assert.equal(hub.active("alice", details.clientId), undefined, "旧设备待命，不派发任何操作");
   assert.throws(() => hub.connect("alice", { ...details, instance: "f".repeat(32) }));
   assert.throws(() => hub.connect("alice", { ...other, clientId: "0".repeat(32) }), /instance already registered/);
-  const office = hub.active("alice", details.clientId)!, home = hub.active("alice", other.clientId)!;
-  const first = hub.request(office, "file", { op: "read" }, idle());
-  const second = hub.request(home, "file", { op: "read" }, idle());
-  assert.equal(events[0].data.instance, details.instance);
-  assert.equal(events[1].data.instance, other.instance);
-  hub.result("alice", { ...events[0].data, instance: other.instance, result: { content: "wrong client" } });
-  assert.equal(office.pending.size, 1, "another client's result must not satisfy the selected client's job");
-  hub.result("alice", { ...events[1].data, result: { content: "home" } });
-  assert.deepEqual(await second, { content: "home" });
-  const lost = assert.rejects(first, LocalAgentUnavailable);
-  office.onlineUntil = Date.now() - 1;
-  assert.deepEqual(hub.list("alice").map((c) => c.id), [details.clientId, other.clientId]);
-  assert.equal(office.reconnecting, true, "a missed heartbeat starts recovery rather than failing work");
-  assert.equal(office.pending.size, 1);
-  office.onlineUntil = Date.now() - 1;
-  assert.deepEqual(hub.list("alice").map((c) => c.id), [other.clientId]);
-  await lost;
-  assert.equal(hub.active("alice", details.clientId), undefined);
-  hub.connect("alice", { ...details, instance: "f".repeat(32) });
-  assert.equal(hub.active("alice", details.clientId)!.instance, "f".repeat(32));
-  assert.throws(() => hub.result("alice", { ...events[0].data, result: { content: "stale" } }), /disconnected/);
+
+  const office = (hub as any).agents.get("alice:" + details.clientId);
+  assert.throws(() => hub.request(office, "file", { op: "read" }, idle()), /待命/);
+  const home = hub.active("alice", other.clientId)!;
+  const job = hub.request(home, "file", { op: "read" }, idle());
+  assert.equal(events[0].data.instance, other.instance, "操作只发给最新登录的设备");
+  // 待命设备已发出的操作，结果仍要能回传：只停新派发，不丢掉在途结果。
+  let lateResult = "";
+  office.pending.set("late", { resolve: (r: any) => { lateResult = r.content; }, reject() {}, suspend() {}, resume() {} } as any);
+  hub.result("alice", { id: "late", instance: details.instance, result: { content: "late" } });
+  assert.equal(lateResult, "late");
+  hub.result("alice", { ...events[0].data, result: { content: "home" } });
+  assert.deepEqual(await job, { content: "home" });
+
+  // 新设备退出后，旧设备（最后登录的那台）继续工作。
   hub.disconnect("alice", other.instance);
   assert.equal(hub.list("alice").length, 1);
-  assert.equal(hub.list("bob").length, 1);
+  assert.equal(hub.active("alice")!.clientId, details.clientId);
+  const again = hub.request(hub.active("alice", details.clientId)!, "file", { op: "read" }, idle());
+  assert.equal(events.at(-1).data.instance, details.instance);
+  hub.result("alice", { ...events.at(-1).data, result: { content: "office" } });
+  assert.deepEqual(await again, { content: "office" });
+
   hub.disconnect("alice");
   assert.deepEqual(hub.list("alice"), []);
+  assert.equal(hub.list("bob").length, 1);
 });
 
 test("unbound historical local sessions pause instead of guessing which computer to use", async () => {

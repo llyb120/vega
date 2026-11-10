@@ -23,6 +23,7 @@ import { credentialValues, vaultSite, type CredentialBinding } from "./credentia
 import { verifyVaultUse } from "./vault-use";
 import { VAULT_USAGE } from "./vault";
 import { KeyFiles, gitSshCommand, keyDir } from "./key-files";
+import { relayShellEnvironment } from "./relay-proxy";
 import { AttachmentFiles } from "./attachments";
 import { isDeepStrictEqual } from "node:util";
 import { sceneModels, maskedConfig, mergeSecrets } from "./config";
@@ -30,12 +31,15 @@ import { omitPlaceholders } from "./tool-args";
 import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type Internal, type ToolContext } from "./public-tools";
 import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
-import { CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
+import { APPUSE_RULES, CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
+import { appuseTools, appuseArguments, APPUSE_TOOLS, normalizeDesktopAction } from "./appuse-tools";
+import { DesktopExperiences } from "./experiences";
 import { prepareDutyInput } from "./duty-condition";
 import { Context } from "./context";
 import type { EmployeeState } from "./employee";
 import { MCP } from "./mcp";
 import {
+  localAppuse,
   localShell,
   localRead,
   localWrite,
@@ -78,6 +82,8 @@ export class Tools {
   /** Message attachments put on disk for this run (see attachments.ts). */
   attachments: AttachmentFiles;
   private browserTab?: string;
+  /** 本机 SSH 密钥只取一次（每次运行）。 */
+  private localSsh?: Promise<string>;
   sceneStack: string[] = [];
   static async create(engine: Engine, session: Session, config: Config, signal: AbortSignal, emit: (type: string, data: any) => void) {
     const context = await Context.open(engine.store, session.id, config.contextMode === "acp" ? "acp" : "auto");
@@ -101,6 +107,30 @@ export class Tools {
    * In a group chat, a message from anyone but the employee's owner (another user or another employee) is a guest
    * request: it may work with tasks only (see GUEST_RULES).
    */
+  /** Proxy env for server shells when this account has an online relay client (intranet git, curl and ssh). */
+  private async relayEnvironment() {
+    const owner = this.session.ownerId;
+    if (!owner || this.session.localAgent || !(await this.engine.relay.enabled(owner))) return undefined;
+    return await relayShellEnvironment(await this.engine.relay.proxy(owner), this.engine.store.files.root, this.cloud);
+  }
+  /**
+   * 服务端 git over SSH 的环境：账号客户端授权时加上它本机的密钥（本地 SSH 密钥授权，默认允许），
+   * 开了中继就同时保留 ProxyCommand。一次运行只取一次，客户端离线或没有 ssh 密钥时退回服务端自己的 ssh。
+   */
+  private async sshEnvironment(command: string) {
+    // shortcut: 只在命令里出现 git/ssh 时才取，脚本内部间接使用 ssh 时第一条命令仍走服务端自己的 ssh。
+    const relay = await this.relayEnvironment(), keys = /ssh|git/i.test(command) ? await this.localSshKeys() : "";
+    if (!keys) return relay;
+    return { ...relay, GIT_SSH_COMMAND: `${relay?.GIT_SSH_COMMAND || "ssh"} ${keys} -o StrictHostKeyChecking=accept-new -o BatchMode=yes` };
+  }
+  private localSshKeys(): Promise<string> {
+    if (!this.localSsh) {
+      const owner = this.session.ownerId,
+        agent = owner && !this.session.localAgent ? this.engine.localAgents.active(owner) : undefined;
+      this.localSsh = agent ? this.keys.localSshCommand(agent, this.signal).catch(() => "") : Promise.resolve("");
+    }
+    return this.localSsh;
+  }
   async guestRequest() {
     if (!this.session.groupId || this.session.taskId) return undefined;
     const last = await this.engine.store.lastMessage(this.session.id, "user");
@@ -131,6 +161,7 @@ export class Tools {
     const ctx = await this.toolContext(), parts: string[] = [];
     if ([...names].some((n) => CHROME_TOOLS.has(n)))
       parts.push(this.session.scene === "computer" ? CHROME_RULES : CHROME_GATE_RULE);
+    if ([...names].some((n) => APPUSE_TOOLS.has(n))) parts.push(APPUSE_RULES);
     if (names.has("vault_get")) parts.push("[密码本] " + VAULT_USAGE);
     if (ctx.kind === "task") parts.push(EMPLOYEE_TASK_RULES);
     if ([...names].some((n) => CHROME_TOOLS.has(n)) && this.session.scene !== "computer" && !sceneModels(this.config, "computer").length)
@@ -322,6 +353,10 @@ export class Tools {
             ),
           );
     }
+    // 剑来用真实鼠标键盘操作本机桌面：只在 Windows 客户端、可写的会话里列出，不在服务端执行。
+    // 与 Nova 一样按用途拆成窄工具：窄 schema 才不会被模型随手塞进无关字段（旧单个 appuse 就因此整批退回）。
+    if (this.session.localAgent && this.session.localPlatform === "windows" && !this.session.readOnly)
+      defs.push(...appuseTools());
     for (const def of defs) {
       def.parameters = structuredClone(def.parameters);
       def.parameters.properties ??= {};
@@ -330,7 +365,7 @@ export class Tools {
         items: { type: "integer", minimum: 1 },
         maxItems: 64,
         description:
-          "Earlier successful calls in this batch (1-based). UI/agent/MCP results require review and cannot be prerequisites.",
+          "Earlier successful calls in this batch (1-based). Omit when independent: independent calls run concurrently, up to 4 at a time (browser, unknown and side-effecting calls stay ordered). UI/agent/MCP results require review and cannot be prerequisites.",
       };
     }
     if (this.session.employeeId && !this.session.taskId)
@@ -346,7 +381,13 @@ export class Tools {
     if (!this.session.localAgent) return;
     if (!this.session.clientId) throw new LocalAgentUnavailable("此历史会话尚未绑定客户端，请在输入框旁选择执行客户端后继续；不会自动选择设备或重试操作。");
     const agent = this.engine.localAgents.active(this.session.ownerId, this.session.clientId);
-    if (!agent) throw new LocalAgentUnavailable();
+    if (!agent) {
+      // 同账号只允许一台设备干活：被新登录设备接管时，旧会话不会偷偷换到另一台执行。
+      const online = !!this.session.ownerId && this.engine.localAgents.list(this.session.ownerId).length > 0;
+      throw new LocalAgentUnavailable(online
+        ? "本会话绑定的客户端已被同账号下最新登录的设备接管，这台现在待命；本次未执行任何操作。请在新设备继续，或让新设备退出后回复「继续」。"
+        : undefined);
+    }
     return agent;
   }
 
@@ -356,7 +397,7 @@ export class Tools {
     assert(entry, "Vault entry not found for this task");
     const task = this.session.taskId ? (await this.engine.employeeFor(this.session)).task(await (await this.engine.employeeFor(this.session)).state(), this.session.taskId).text
       : (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "";
-    const browser = this.session.localAgent ? this.engine.localBrowsers.peek(this.session.id) : this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud) ? this.engine.browsers.peek(this.engine.browserProfileKey(this.session.ownerId)) : this.engine.chrome;
+    const browser = this.session.localBrowser ? this.engine.localBrowsers.peek(this.session.id) : this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud) ? this.engine.browsers.peek(this.engine.browserProfileKey(this.session.ownerId)) : this.engine.chrome;
     const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
     const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
     const pages = (observation?.pages || []).filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
@@ -395,13 +436,19 @@ export class Tools {
     const definition = (await this.definitions(model)).find((t) => t.name === call.name);
     assert(definition, "Tool unavailable in this scene");
     if (CHROME_TOOLS.has(call.name)) this.assertBrowserScene(call.name);
-    const split = CHROME_TOOLS.has(call.name) || EMPLOYEE_TOOLS.has(call.name) || VAULT_TOOLS.has(call.name);
-    let internal: Internal | undefined, rest: Obj = {};
+    const split = CHROME_TOOLS.has(call.name) || EMPLOYEE_TOOLS.has(call.name) || VAULT_TOOLS.has(call.name) || APPUSE_TOOLS.has(call.name);
+    let internal: Internal | undefined, rest: Obj = {}, appuseArgs: Obj | undefined;
     if (split) {
       const { _after, ...publicArgs } = call.arguments || {};
       rest = publicArgs;
+      // 桌面动作先归一弱模型的等价写法（别名/字符串坐标），再拿窄 schema 严格校验其余部分。
+      const incoming = APPUSE_TOOLS.has(call.name) && Array.isArray(rest.actions)
+        ? { ...rest, actions: rest.actions.map(normalizeDesktopAction) }
+        : rest;
       // Validate against the visible (context-trimmed) schema before any side effect.
-      internal = toInternal(call.name, checkArgs(definition.parameters, rest), await this.toolContext());
+      const validated = checkArgs(definition.parameters, incoming);
+      if (APPUSE_TOOLS.has(call.name)) appuseArgs = appuseArguments(call.name, validated, this.session.id);
+      else internal = toInternal(call.name, validated, await this.toolContext());
     }
     const a = internal ? internal.args : omitPlaceholders({ ...call.arguments }, (definition as any).parameters);
     const waiting = this.session.employeeId && this.session.taskId && (await (await this.engine.employeeFor(this.session)).findTask(this.session.taskId))?.workspaceWait;
@@ -413,6 +460,29 @@ export class Tools {
         this.credentials.push({ site: credential.scopeSite || "", values: credentialValues(credential.content) });
       }
       return result;
+    }
+    if (call.name === "appuse" || appuseArgs) {
+      const agent = this.agent();
+      assert(agent, "桌面工具只能在本机客户端会话执行；当前会话没有绑定客户端，本步未执行任何操作。");
+      const args = appuseArgs || { ...a, owner: this.session.id };
+      // 经验图谱与浏览器路径共用同一套存储与评分，只是 scope 是应用名而不是站点 origin。
+      if (String(args.operation || "").startsWith("experience_")) {
+        const experiences = new DesktopExperiences(this.engine.store, "experience");
+        return { value: await experiences.execute(this.session.id, args, undefined) };
+      }
+      const result = await localAppuse(this.engine.localAgents, agent, args, this.signal);
+      // 客户端在 images[].data 里回传 PNG；落到会话文件后删掉 base64，只留路径和地址。
+      const images: Outcome["images"] = [];
+      for (const image of result.images || []) {
+        if (typeof image.data !== "string") continue;
+        const data = Buffer.from(image.data, "base64");
+        delete image.data;
+        const name = `appuse-${result.snapshotId || "shot"}-${String(image.imageId || "image").replace(/[^\w.-]/g, "_")}.png`;
+        const path = await this.engine.store.files.write(this.session, name, data);
+        image.path = path; image.url = this.engine.store.files.url(path);
+        images.push({ mime: image.mime || "image/png", path, url: image.url });
+      }
+      return { value: result, images };
     }
     if (call.name === "read")
       return this.read(a);
@@ -450,9 +520,15 @@ export class Tools {
     }
     if (call.name === "bash") {
       const agent = this.agent();
-      return agent
-        ? localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal)
-        : shell(this.session.cwd, a, this.signal, this.emit, this.cloud);
+      // 命名命令可以固定在某一端：执行权不在那一端时明确拒绝，不在另一端跑同一命令。
+      if (this.session.employeeId) {
+        const side = await this.engine.handoffs.commandSide(this.session.employeeId, String(a.command || ""));
+        const where = this.session.localAgent ? "local" : "cloud";
+        if (side && side !== where)
+          throw new Error(`这条命令固定在${side === "local" ? "本机" : "云端"}执行，而任务当前执行权在${where === "local" ? "本机" : "云端"}；本步未执行。请先交接执行权，不把同一命令放到另一端跑。`);
+      }
+      if (agent) return localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal);
+      return shell(this.session.cwd, a, this.signal, this.emit, this.cloud, await this.sshEnvironment(String(a.command)));
     }
     if (call.name === "change_working_directory") {
       assert(typeof a.path === "string" && a.path, "path required");
@@ -581,6 +657,11 @@ export class Tools {
   }
   private async chrome(a: Obj): Promise<Outcome> {
     this.assertBrowserScene();
+    // 任务在本机执行、浏览器在云端时，先把本机在授权站点上的登录态同步过去（失败不阻断，留给任务自己处理）。
+    if (this.session.taskId && !this.session.localBrowser && this.session.localAgent) {
+      try { await this.engine.handoffs.ensureBrowserState(this.session); }
+      catch (error: any) { console.warn("[Vega] browser login state sync skipped", { session: this.session.id, reason: String(error?.message || error).slice(0, 200) }); }
+    }
     const profileKey = !this.session.localAgent && this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud)
       ? this.engine.browserProfileKey(this.session.ownerId) : "";
     let browser: Awaited<ReturnType<Engine["chromeFor"]>>;
@@ -873,6 +954,7 @@ export async function shell(
   parent: AbortSignal,
   emit: (type: string, data: any) => void,
   cloud?: CloudRuntime,
+  env?: Record<string, string>,
 ): Promise<Outcome> {
   assert(typeof a.command === "string" && a.command.trim(), "command required");
   assertShellCommand(a.command);
@@ -887,13 +969,13 @@ export async function shell(
     bin = win ? windowsShell() : "/bin/sh";
   return await new Promise((resolve) => {
     const args = win ? ["-NoProfile", "-NonInteractive", "-Command", a.command] : ["-c", a.command];
-    const launch = cloud?.launch(bin, args, cwd);
+    const launch = cloud?.launch(bin, args, cwd, env);
     const child = spawn(
       launch?.command || bin,
       launch?.args || args,
       {
         cwd: launch?.cwd || cwd,
-        ...(launch ? { env: launch.env } : {}),
+        env: launch ? launch.env : env ? { ...process.env, ...env } : undefined,
         windowsHide: true,
         detached: !win,
         stdio: ["ignore", "pipe", "pipe"],

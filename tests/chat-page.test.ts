@@ -23,6 +23,15 @@ test("incremental chat sync exposes the server tail so stale caches can detect d
 
 const q = (params: Record<string, string> = {}) => new URLSearchParams(params);
 
+test("清空聊天也清掉已读位置，新历史里的消息重新算未读", async () => {
+  const { store, id } = await fixture(3);
+  await store.markRead("alice", id);
+  assert.equal(await store.unread("alice", id), 0);
+  await store.clearSessionHistory(id);
+  await store.append(id, { role: "assistant", text: "new" } as any);
+  assert.equal(await store.unread("alice", id), 1, "旧位置大于新 seq 会让未读永远是 0");
+});
+
 test("chat history without paging parameters returns the full history unchanged", async () => {
   const { store, id } = await fixture(250);
   const result = await chatHistory(store, id, q());

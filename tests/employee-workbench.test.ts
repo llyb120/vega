@@ -72,7 +72,7 @@ test("employees isolate state, business keys, conversations, owner access and cr
     assert(!await a.accessible({ id: "bob", role: "operator" }));
     assert(await a.accessible({ id: "alice", role: "viewer" }));
     assert(!await a.manageable({ id: "alice", role: "viewer" }));
-    assert(await a.accessible({ id: "root", role: "admin" }));
+    assert(!await a.accessible({ id: "root", role: "admin" }));
     assert.equal((await employee.state()).memories[0].claim || (await employee.state()).memories[0].text, "legacy");
     await a.execute("", { action: "memory_propose", claim: "A-only durable convention", source: "ui" });
     assert.equal((await b.state()).memories.length, 0);

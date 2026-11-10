@@ -482,7 +482,7 @@ test(
       await ok(`/employees/${team.id}/avatar`, "POST", { mime: "image/png", data: avatarData }, admin);
       for (const login of [a, b, v]) {
         const image = await fetch(base + `/api/employees/${team.id}/avatar`, { headers: { Cookie: login.cookie } });
-        assert.equal(image.status, 404, "only its owner and administrators see an employee outside a shared group"); await image.arrayBuffer();
+        assert.equal(image.status, 404, "only its owner sees an employee outside a shared group"); await image.arrayBuffer();
       }
       await ok(`/employees/${team.id}/avatar`, "POST", { preset: "zodiac:pisces" }, admin);
       assert.equal((await ok(`/employees/${team.id}`, "GET", undefined, admin)).avatar, "zodiac:pisces");
@@ -544,9 +544,9 @@ test(
       assert.notEqual((await req(`/employees/${workerA.id}`, "POST", { action: "vault_get", id: own[workerB.id], text: "authorized test" }, a)).r.status, 200, "A cannot read B's entry by id");
       assert.equal((await req(`/employees/${workerB.id}/vault`, "GET", undefined, a)).r.status, 404);
       for (const login of [admin, b]) assert.notEqual((await req(`/employees/${workerA.id}/vault`, "GET", undefined, login)).r.status, 200);
-      assert.equal((await req(`/employees/${workerA.id}/vault`, "GET", undefined, admin)).r.status, 403, "administrators do not open another creator's vault");
-      assert.equal((await req(`/employees/${workerA.id}`, "POST", { action: "vault_get", id: own[workerA.id], text: "authorized test" }, admin)).r.status, 403);
-      assert.equal((await ok(`/employees/${workerA.id}`, "GET", undefined, admin)).canConfigure, false);
+      assert.equal((await req(`/employees/${workerA.id}/vault`, "GET", undefined, admin)).r.status, 404, "an employee belongs to its owner alone: administrators cannot even see it");
+      assert.equal((await req(`/employees/${workerA.id}`, "POST", { action: "vault_get", id: own[workerA.id], text: "authorized test" }, admin)).r.status, 404);
+      assert.equal((await req(`/employees/${workerA.id}`, "GET", undefined, admin)).r.status, 404);
       for (const login of [a, b, v]) {
         assert.equal((await req(`/employees/${team.id}/vault`, "GET", undefined, login)).r.status, 404);
         assert.equal((await req(`/employees/${team.id}/vault`, "POST", { name: "forbidden", condition: "test", content: "must not save" }, login)).r.status, login === v ? 403 : 404);

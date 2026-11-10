@@ -19,6 +19,8 @@ type keyReq struct {
 
 func keyOperation(req keyReq) map[string]any {
 	switch req.Op {
+	case "ssh":
+		return localSshKeys()
 	case "write":
 		data, err := base64.StdEncoding.DecodeString(req.Content)
 		if err != nil || len(data) == 0 || len(data) > 64<<10 {
@@ -56,6 +58,46 @@ func keyOperation(req keyReq) map[string]any {
 		return map[string]any{"removed": true}
 	}
 	return failure("Unknown key operation")
+}
+
+// localSshKeys 是服务端 git over SSH 借用本机 ssh 时的取材处：只给 ~/.ssh/config 和私钥（不含 .pub、known_hosts）。
+// 关掉「本地 SSH 密钥授权」后一律拒绝：密钥不出这台机器。
+func localSshKeys() map[string]any {
+	if !sshKeysShared {
+		return failure("本地 SSH 密钥授权已关闭；请在客户端「授权」里打开，或改用密码本里的 SSH 私钥")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return failure(err.Error())
+	}
+	dir := filepath.Join(home, ".ssh")
+	names := []string{"config"}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return failure("本机 " + dir + " 里没有可用的 SSH 私钥；请先配好 ssh 密钥，或改用密码本里的 SSH 私钥")
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "id_") || strings.HasSuffix(name, ".pub") {
+			continue
+		}
+		names = append(names, name)
+	}
+	keys := make([]map[string]string, 0, len(names))
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || len(data) == 0 || len(data) > 64<<10 {
+			continue // 带口令的私钥读完也没用，交给 ssh 的 BatchMode 直接失败，不在这里分类
+		}
+		keys = append(keys, map[string]string{"name": name, "content": base64.StdEncoding.EncodeToString(data)})
+		if len(keys) == 8 {
+			break
+		}
+	}
+	if len(keys) == 1 && keys[0]["name"] == "config" {
+		return failure("本机 " + dir + " 里没有可用的 SSH 私钥；请先配好 ssh 密钥，或改用密码本里的 SSH 私钥")
+	}
+	return map[string]any{"keys": keys}
 }
 
 func clearKeys() { _ = os.RemoveAll(keyDir) }

@@ -257,6 +257,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         scope: str("作用域：global、项目路径、站点 host 或职责 id；省略时任务中为工作目录，否则 global", { maxLength: 500 }),
         memoryScene: str("适用场景；省略时任务中按当前场景，否则 chat", { enum: ["chat", "coding", "computer", "any"] }),
         evidence: str("简短核实依据", { maxLength: 500 }),
+        tags: { type: "array", maxItems: 8, items: str("标签，不超过 40 字", { maxLength: 40 }), description: "可选自由标签（项目、技术栈、站点等），也参与检索；也可直接写在 claim 里如 #vue，两条路径等价" },
         memoryId: str("要改写的记忆 ID；省略为新写入", { minLength: 1 }),
         pinned: { type: "boolean", description: "true 钉选：在适用场景和作用域内每轮都注入、不看相关度（与偏好、纠错类同属常驻记忆，共最多 8 条，钉选优先），也不会被自动归档；false 取消钉选；省略不改" } },
       ["claim"]));
@@ -423,7 +424,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
     case "task_relay_computer": return employee({ action: "relay", scene: "computer", text: a.handoff });
     case "task_complete": return employee(defined({ action: "complete", text: a.evidence, summary: a.summary, deliverableRef: a.deliverableRefs }));
     case "memory_search": return employee(defined({ action: "memory_search", query: a.query, status: a.status, memoryScene: a.memoryScene }));
-    case "memory_propose": return employee(defined({ action: "memory_propose", claim: a.claim, memoryKind: a.memoryKind, scope: a.scope, memoryScene: a.memoryScene, evidence: a.evidence, id: a.memoryId, pinned: a.pinned }));
+    case "memory_propose": return employee(defined({ action: "memory_propose", claim: a.claim, memoryKind: a.memoryKind, scope: a.scope, tags: a.tags, memoryScene: a.memoryScene, evidence: a.evidence, id: a.memoryId, pinned: a.pinned }));
     case "memory_manage": {
       const r = a.request;
       if (r.command === "pin" || r.command === "unpin") return employee({ action: "memory_pin", id: r.memoryId, pinned: r.command === "pin" });

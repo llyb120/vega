@@ -16,7 +16,7 @@ import { loadRows, baseRecord, saveRows } from "./employee-rows";
 import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
 
-export type Execution = Pick<Session, "localAgent" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
+export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
 export type Owner = { token: string; name: string };
 export type Task = Obj & {
   id: string;
@@ -41,8 +41,9 @@ export type EmployeeState = {
   avatar?: string;
   instruction: string;
   ownerId: string;
-  execution?: Execution;
   executionCwds?: Record<string, string>;
+  /** 任务接力：本地客户端与云端之间的交接策略（handoffs.ts）。 */
+  handoffPolicy?: Obj;
   chatSession?: string;
   enabled: boolean;
   public: boolean;
@@ -396,6 +397,8 @@ export type EmployeeRuntime = {
   config: () => Obj | Promise<Obj>;
   isolated?: boolean;
   presence?: () => Promise<Presence>;
+  /** 当前生效的客户端机器（开着 vega-local 的那台），用于把“客户端优先”落到具体执行位置；传 clientId 时只回答这台设备现在能否执行。 */
+  client?: (ownerId: string, clientId?: string) => { clientId: string; clientName?: string; localPlatform?: string; cwd: string; browser?: "local" | "cloud"; prefer?: "client" | "cloud" } | undefined;
   /** Group chats (groups.ts): task notices of tasks started in a group go back there; false when the group is gone. */
   groups?: {
     post: (group: NonNullable<Task["group"]>, employeeId: string, message: Message, wake: boolean) => Promise<boolean>;
@@ -461,13 +464,14 @@ export class Employee {
     assert(member, "Employee not found");
     return member;
   }
+  /** An employee is private to its owner; administrators get no override. */
   async accessible(user: { id: string; role: string }) {
     const s = await this.state();
-    return user.role === "admin" || s.ownerId === user.id;
+    return s.ownerId === user.id;
   }
   async manageable(user: { id: string; role: string }) {
     const s = await this.state();
-    return user.role === "admin" || (user.role === "operator" && s.ownerId === user.id);
+    return user.role !== "viewer" && s.ownerId === user.id;
   }
   async create(a: Obj, ownerId: string) {
     assert(typeof a.name === "string" && a.name.trim() && a.name.length <= 80, "Employee name requires 1–80 characters");
@@ -487,7 +491,8 @@ export class Employee {
       avatar = available[Math.floor(Math.random() * available.length)];
     }
     const cloud = cloudFor({ ownerId });
-    const cwd = cloud ? await cloud.cwd(a.cwd) : a.cwd || process.cwd();
+    // 云模式下新建的牛马没有历史文件，一律落在用户私有工作区，不采用客户端/页面传来的目录。
+    const cwd = cloud ? await cloud.cwd() : a.cwd || process.cwd();
     const key = id("e"), employee = new Employee(this.store, this.vaults, this.runtime, key, this.root || this);
     const s = await this.store.transaction(async () => {
       await assertNameFree(this, a.name, { id: key, ownerId });
@@ -660,10 +665,11 @@ export class Employee {
     for (const [key, lease] of writers) if (lease.taskId === taskId && (!transientOnly || !lease.hold)) { writers.delete(key); released = true; }
     if (released) this.schedule();
   }
-  recover(t: Task, reason: string, now = Date.now()) {
+  recover(t: Task, reason: string, now = Date.now(), waitClient?: string) {
     const recovery = t.recovery ||= { attempts: 0, startedAt: now, history: [] };
     delete recovery.stalled;
     delete recovery.evidence;
+    delete recovery.waitClient;
     recovery.attempts++;
     recovery.reason = clip(String(reason), 2000);
     recovery.history.push({ at: now, reason: recovery.reason });
@@ -677,6 +683,8 @@ export class Employee {
       return;
     }
     t.status = "recovering";
+    // 断连的设备：等它自己回连再由调度器续做，不在别处执行，等待期间也不消耗恢复次数。
+    if (waitClient) recovery.waitClient = waitClient;
     // First recovery resumes immediately; later attempts back off 30s, 60s, 120s…
     t.nextCheckAt = recovery.attempts <= 1 ? now : now + 30000 * 2 ** (recovery.attempts - 2);
     t.checkpoint ||= "恢复原任务：检查错误与外部状态，诊断、最小修复并验证；不重复发送/提交，不扩大授权。";
@@ -724,7 +732,8 @@ export class Employee {
       const creator = await this.store.one("SELECT id FROM web_users WHERE role='admin' ORDER BY createdAt,id LIMIT 1");
       if (creator) { state.ownerId = creator.id; await this.save(state); }
     }
-    const defaultCwd = !state.execution?.localAgent && (!state.cwd || state.cwd === process.cwd());
+    // 未指定或等于服务端启动目录的 cwd 视为旧默认值：云模式下迁到用户私有工作区（客户端优先不改变这个基准）。
+    const defaultCwd = !state.cwd || state.cwd === process.cwd();
     const savedDefaultCwd = state.executionCwds?.server === process.cwd();
     if (state.ownerId && (defaultCwd || savedDefaultCwd)) {
       const cloud = cloudFor({ ownerId: state.ownerId });
@@ -755,6 +764,20 @@ export class Employee {
     state.memories = pruned.memories;
     if (migrated.changed || pruned.changed) await this.save(state);
     return state;
+  }
+  /** 绑定新任务的执行位置：只看客户端自己的选择——客户端优先绑那台机器，服务端优先或没在线客户端就落云端。 */
+  private bindExecution(state: EmployeeState): { execution: Execution; cwd?: string; note?: string } {
+    const client = this.runtime.client?.(state.ownerId);
+    if (client?.prefer === "cloud")
+      return { execution: { localAgent: false, localBrowser: false, ownerId: state.ownerId }, note: "客户端设置了服务端优先，任务在云端执行；本地文件通过接力同步。" };
+    if (client) {
+      // 浏览器位置由客户端自己的配置决定（客户端连接授权页），服务端不另行选择。
+      return { execution: { localAgent: true, localBrowser: client.browser !== "cloud", ...client, ownerId: state.ownerId }, cwd: client.cwd };
+    }
+    return {
+      execution: { localAgent: false, localBrowser: false, ownerId: state.ownerId },
+      note: "当前没有在线的客户端，先在服务端执行；客户端上线后可「接回本机」。",
+    };
   }
   /** Read-modify-write of the whole employee (record, tasks, runs) in one transaction. */
   async update<T>(fn: (s: EmployeeState) => T | Promise<T>): Promise<T> {
@@ -994,16 +1017,19 @@ export class Employee {
                 s.tasks.filter((t) => !ended(t.status)).length < 100,
                 "Active task capacity reached",
               );
+              const bound = t ? undefined : this.bindExecution(s);
               const task: Task = {
                 id: id("t"),
                 text: content,
                 status: "queued",
                 createdAt: now,
                 profile: p,
-                cwd: t?.cwd || a.cwd || s.cwd,
+                // 执行位置决定目录基准：客户端优先且有在线客户端时，任务必须落在客户端目录，
+                // 不能沿用调用方会话（可能是云端）的 cwd，否则会在客户端读云端路径。
+                cwd: t?.cwd || bound?.cwd || a.cwd || s.cwd,
                 owner: t?.owner || owner,
                 employeeId: this.employeeId,
-                execution: t ? { ...(t.execution || {} ) } : { ...(s.execution || {}) },
+                execution: t ? { ...(t.execution || {} ) } : bound!.execution,
                 key: a.key || "",
                 origin: t?.id || "",
                 fromDuty: t?.dutyId || t?.fromDuty || "",
@@ -1012,6 +1038,7 @@ export class Employee {
                 plan: [],
                 progress: [],
               };
+              if (bound?.note) task.checkpoint = bound.note;
               s.tasks.push(task);
               return { id: task.id };
             }
@@ -1299,6 +1326,7 @@ export class Employee {
                   claim: m.claim,
                   scope: m.scope,
                   scene: m.scene,
+                  tags: m.tags || [],
                   status: m.status,
                   confidence: m.confidence,
                   usefulness: m.usefulness,
@@ -1318,6 +1346,7 @@ export class Employee {
                   kind: a.memoryKind || a.kind,
                   evidence: a.evidence,
                   scope: a.scope || (t?.cwd ? t.cwd : "global"),
+                  tags: a.tags,
                   scene: a.memoryScene || a.scene || (t ? (t.side === "computer" || t.profile === "computer" ? "computer" : "coding") : "chat"),
                   id: a.id,
                   pinned: a.pinned,
@@ -1585,10 +1614,10 @@ export class Employee {
                 text: t.text,
                 status: "queued",
                 profile: t.profile,
-                cwd: s.cwd,
+                cwd: this.bindExecution(s).cwd || s.cwd,
                 owner: t.owner,
                 employeeId: this.employeeId,
-                execution: { ...(s.execution || {}) },
+                execution: this.bindExecution(s).execution,
                 createdAt: Date.now(),
                 plan: [],
                 progress: [],
@@ -1628,15 +1657,16 @@ export class Employee {
     return value;
   }
   fire(s: EmployeeState, d: Obj, now: number, event?: string) {
+    const bound = this.bindExecution(s);
     const t: Task = {
       id: id("t"),
       text: d.text,
       status: "queued",
       profile: profile(d.profile),
-      cwd: s.cwd,
+      cwd: bound.cwd || s.cwd,
       owner: d.owner || { token: "", name: "" },
       employeeId: this.employeeId,
-      execution: { ...(s.execution || {}) },
+      execution: bound.execution,
       createdAt: now,
       dutyId: d.id,
       triggerCondition: d.condition,
@@ -1645,8 +1675,7 @@ export class Employee {
       progress: [],
     };
     s.tasks.push(t);
-    d.firedAt = now;
-    if (!d.everyMinutes && !d.times?.length) d.nextCheckAt = 0;
+    d.firedAt = now;    if (!d.everyMinutes && !d.times?.length) d.nextCheckAt = 0;
     return t;
   }
   async tick(now = Date.now()) {
@@ -1719,6 +1748,9 @@ export class Employee {
         for (const t of s.tasks) {
           if (this.busy.has(t.id) || !["queued", "deferred", "recovering"].includes(t.status))
             continue;
+          // 这台设备还没回连（或已待命）：不派发、不换设备、不改到服务端执行。
+          const waitClient = t.status === "recovering" ? t.recovery?.waitClient : undefined;
+          if (waitClient && this.runtime.client && this.runtime.client(t.execution?.ownerId || s.ownerId, waitClient)?.clientId !== waitClient) continue;
           if ((t.nextCheckAt || 0) > now) {
             next = Math.min(next, t.nextCheckAt);
             continue;
@@ -1886,9 +1918,9 @@ export class Employee {
         : `[牛马任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, fromDuty: task.fromDuty, triggerCondition: task.triggerCondition, group: task.group ? { name: task.group.name, requester: task.group.requester.name } : undefined })}${memoryBlock}`;
       const groupNote = task.group && !computer ? await this.groupTaskNote(task.group) : "";
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
-      const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。` : "";
+      const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。每完成一步用task_progress记下做了什么与回执（这就是下一轮用的还原点，换了执行位置靠它接着做）；新现场缺必要文件或无法核验时同样 task_ask_user，不凭空补写。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用task_progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。本机 Chrome 未启动时，可在同一客户端用 shell 仅启动 Chrome（不携带导航 URL），随后用 chrome_connection 检查扩展连接；网页交互只能通过所选客户端的 Chrome 扩展，已启动后连接仍失败时停止，不得改用服务端浏览器或 shell 打开 URL。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统会选用本次交付期内最新较长正文；已写出正文时不要传[]，确实没有单独正文才传deliverableRefs=[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
+      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。续做保留已确认步骤，不清空计划，仅在状态或要求改变时用task_progress提交更新后的完整计划；真实验证成功才标completed，用户明确放弃或接受缺口的步骤标cancelled。提交过的作业只检查原作业，不重复提交。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统会选用本次交付期内最新较长正文；已写出正文时不要传[]，确实没有单独正文才传deliverableRefs=[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n不得自建worktree；常规开发分支提交/普通推送按用户授权，先核对差异；强推、共享分支改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       // Attachments the work session has not been given yet.
       const given = new Set(rowsBefore.flatMap((m) => [...(m.images || []), ...(m.files || [])].map((x: { blobId?: string }) => x.blobId)));

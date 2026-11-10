@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,7 +33,7 @@ func readPairing(t *testing.T, conn *websocket.Conn) map[string]any {
 }
 func pairForTest(t *testing.T, origin, configPath string) (*Agent, *websocket.Conn) {
 	t.Helper()
-	agent := &Agent{configPath: configPath, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{origin}}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: configPath, pinnedOrigin: origin, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{origin}}, connections: make(map[*websocket.Conn]struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	agent.startConnections(ctx)
 	server := httptest.NewServer(http.HandlerFunc(agent.serveWS))
@@ -92,6 +92,46 @@ func TestPairingReportsSanitizedLoginAndBackendFailures(t *testing.T) {
 		})
 	}
 }
+func TestRevokedCredentialIsDroppedSoSiteCanPairAgain(t *testing.T) {
+	clientID, token := strings.Repeat("c", 32), strings.Repeat("s", 43)
+	protected, err := protectToken(token)
+	if err != nil {
+		t.Skipf("token protection unavailable on this platform: %v", err)
+	}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/local-agent/socket" {
+			http.Error(w, "revoked", http.StatusForbidden)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(backend.Close)
+	path := filepath.Join(t.TempDir(), "config.json")
+	agent := &Agent{configPath: path, pinnedOrigin: backend.URL, config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}, Servers: []ServerCredential{{Origin: backend.URL, UserID: "alice", Token: protected}}}, connections: make(map[*websocket.Conn]struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent.startConnections(ctx)
+	// 等后端先回一次 403，removeCredential 才有机会跑；轮询而不是睡固定时间。
+	for i := 0; i < 100; i++ {
+		agent.mu.Lock()
+		servers := len(agent.config.Servers)
+		agent.mu.Unlock()
+		if servers == 0 {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("config not rewritten: %v", err)
+			}
+			var stored Config
+			if json.Unmarshal(data, &stored) != nil || len(stored.Servers) != 0 {
+				t.Fatalf("revoked credential still on disk: %s", data)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("revoked credential kept in config after backend_http 403")
+}
+
 func TestPairingDoesNotClaimConnectedBeforeNativeReady(t *testing.T) {
 	hello := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -153,7 +193,7 @@ func TestPairingReportsCredentialSaveFailureAndAccountMismatch(t *testing.T) {
 		})
 	}
 }
-func TestApprovingSiteContinuesToBackendAndReportsFailure(t *testing.T) {
+func TestPinnedSiteContinuesToBackendAndForeignSiteIsRefused(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/local-agent/verify" {
 			_ = json.NewEncoder(w).Encode(map[string]string{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": strings.Repeat("c", 32), "deviceToken": strings.Repeat("s", 43)})
@@ -162,37 +202,31 @@ func TestApprovingSiteContinuesToBackendAndReportsFailure(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer backend.Close()
-	agent := &Agent{configPath: filepath.Join(t.TempDir(), "config.json"), config: Config{ClientID: strings.Repeat("c", 32)}, pendingOrigins: map[string]bool{backend.URL: true}, connections: make(map[*websocket.Conn]struct{})}
+	// 安装包自带的站点直接放行，不需要再点“允许”；其它站点直接拒。
+	agent := &Agent{configPath: filepath.Join(t.TempDir(), "config.json"), pinnedOrigin: backend.URL, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{backend.URL}}, pendingOrigins: map[string]bool{}, connections: make(map[*websocket.Conn]struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent.startConnections(ctx)
 	server := httptest.NewServer(http.HandlerFunc(agent.serveWS))
 	defer server.Close()
-	connect := func() *websocket.Conn {
-		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{"Origin": {backend.URL}})
+	connect := func(origin string) *websocket.Conn {
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{"Origin": {origin}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		_ = conn.WriteJSON(map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"})
 		return conn
 	}
-	first := connect()
-	if status := readPairing(t, first); status["code"] != "permission_required" {
-		t.Fatalf("missing permission prompt: %v", status)
+	foreign := connect("https://evil.example")
+	defer foreign.Close()
+	if status := readPairing(t, foreign); status["code"] != "permission_required" {
+		t.Fatalf("foreign site was not refused: %v", status)
 	}
-	_ = first.Close()
-	request := httptest.NewRequest("POST", "http://"+localAddress+"/config/token", strings.NewReader(url.Values{"origin": {backend.URL}}.Encode()))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("Origin", "http://"+localAddress)
-	response := httptest.NewRecorder()
-	agent.configure(response, request)
-	if response.Code != 303 {
-		t.Fatalf("approval not saved: %d", response.Code)
-	}
-	retry := connect()
-	defer retry.Close()
-	if status := readPairing(t, retry); status["code"] != "backend_http" || status["httpStatus"] != float64(404) {
-		t.Fatalf("approved site failed silently or claimed success: %v", status)
+	// 后端登录接口之后回 404，应该如实报 backend_http，而不是声称已连接。
+	pinned := connect(backend.URL)
+	defer pinned.Close()
+	if status := readPairing(t, pinned); status["code"] != "backend_http" || status["httpStatus"] != float64(404) {
+		t.Fatalf("pinned site failed silently or claimed success: %v", status)
 	}
 }
 
@@ -254,7 +288,7 @@ func TestRemoteHTTPPairsAndReconnectsWithSavedCredential(t *testing.T) {
 		transport.CloseIdleConnections()
 	}()
 	path := filepath.Join(t.TempDir(), "config.json")
-	agent := &Agent{configPath: path, config: Config{ClientID: clientID, TrustedOrigins: []string{origin}}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: path, pinnedOrigin: origin, config: Config{ClientID: clientID, TrustedOrigins: []string{origin}}, connections: make(map[*websocket.Conn]struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent.startConnections(ctx)

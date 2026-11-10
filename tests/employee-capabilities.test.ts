@@ -34,18 +34,8 @@ test("only the creator can edit or read details, including when the other user i
   try {
     await employeeCapabilities(a, alice, "PUT", ["mcp"], { mcp: { shared: { url: "https://private.example/mcp", headers: { Authorization: "private-token" } } } });
     await employeeCapabilities(a, alice, "POST", ["skills", "upload"], bundle("private-instructions"));
-    // Employees are private to their owner: other users do not even see them; administrators see names only.
-    for (const user of [bob, viewer]) await assert.rejects(employeeCapabilities(a, user, "GET", ["capabilities"]), (error: any) => error.statusCode === 404);
-    for (const user of [admin]) {
-      const result = await employeeCapabilities(a, user, "GET", ["capabilities"]);
-      assert.deepEqual(result, { canEdit: false, skills: [{ name: "same-name" }], mcp: [{ name: "shared" }] });
-      for (const [method, path, body] of [
-        ["GET", ["skills", "same-name"], {}],
-        ["DELETE", ["skills", "same-name"], {}],
-        ["POST", ["skills", "upload"], bundle("forged")],
-        ["PUT", ["mcp"], { mcp: {} }],
-      ] as const) await assert.rejects(employeeCapabilities(a, user, method, [...path], body), denied);
-    }
+    // Employees are private to their owner: nobody else sees them, administrators included.
+    for (const user of [bob, viewer, admin]) await assert.rejects(employeeCapabilities(a, user, "GET", ["capabilities"]), (error: any) => error.statusCode === 404);
     const owner: any = await employeeCapabilities(a, alice, "GET", ["capabilities"]);
     assert.equal(owner.canEdit, true);
     assert.equal(owner.mcp[0].config.url, "https://private.example/mcp");
@@ -128,7 +118,7 @@ test("built-in legacy employee binds its configuration to the original administr
     const root = engine.employee;
     assert.equal((await root.state()).ownerId, "first-admin");
     await employeeCapabilities(root, { id: "first-admin", role: "admin" }, "PUT", ["mcp"], { mcp: { service: { command: "node" } } });
-    await assert.rejects(employeeCapabilities(root, { id: "second-admin", role: "admin" }, "PUT", ["mcp"], { mcp: {} }), denied);
+    await assert.rejects(employeeCapabilities(root, { id: "second-admin", role: "admin" }, "PUT", ["mcp"], { mcp: {} }), (error: any) => error.statusCode === 404);
     const personal = await engine.employee.for((await engine.employee.create({ name: "Personal" }, alice.id)).id);
     await assert.rejects(employeeCapabilities(personal, bob, "GET", ["capabilities"]), (error: any) => error.statusCode === 404);
   } finally { await engine.close(); await store.close(); }

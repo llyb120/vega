@@ -19,6 +19,8 @@ export type MemoryStatus = (typeof MEMORY_STATUSES)[number];
 export type MemoryLinks = {
   mergedFrom?: string[];
   conflictsWith?: string[];
+  /** Soft, auto-maintained kinship: same topic, but neither merged nor contradicting. Recalled one hop out. */
+  related?: string[];
   vaultNames?: string[];
 };
 
@@ -29,6 +31,8 @@ export type MemoryRecord = {
   evidence?: string;
   scope: string;
   scene: MemoryScene;
+  /** Free tags (memos-style): given explicitly or written inline as `#tag`; widen recall without touching the claim. */
+  tags?: string[];
   confidence: number;
   usefulness: number;
   status: MemoryStatus;
@@ -59,6 +63,11 @@ export const MEMORY_RELEVANCE_FLOOR = 0.08;
 export const MEMORY_CLAIM_MAX = 200;
 export const MEMORY_MERGE_SIM = 0.72;
 export const MEMORY_CONFLICT_SIM = 0.55;
+/** Below conflict, above noise: two claims talk about the same thing, so they get linked instead of merged. */
+export const MEMORY_RELATED_SIM = 0.35;
+/** Soft-linked neighbours recalled per turn, on top of the standing and top-K tiers. */
+export const MEMORY_RELATED_K = 2;
+export const MEMORY_TAG_MAX = 8;
 export const ARCHIVE_SCORE = 0.08;
 export const HARD_DELETE_ARCHIVE_DAYS = 180;
 
@@ -99,6 +108,23 @@ export function normalizeClaim(text: string) {
     .replace(/[，。！？、；：""''（）【】《》,.!?;:'"()\[\]{}<>]/g, "");
 }
 
+/** Tags are free text (memos-style): an inline `#vue` and an explicit tag list land in the same place. */
+export function normalizeTags(value: any): string[] {
+  const list = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[\s,，、]+/) : [];
+  const out: string[] = [];
+  for (const raw of list) {
+    const tag = String(raw ?? "").trim().replace(/^#+/, "").toLowerCase();
+    if (tag && tag.length <= 40 && !out.includes(tag)) out.push(tag);
+    if (out.length >= MEMORY_TAG_MAX) break;
+  }
+  return out;
+}
+
+/** Only letter-led hashes count, so "构建 #42" stays a number and not a tag. */
+export function parseTags(...texts: (string | undefined)[]) {
+  return normalizeTags(texts.map((text) => String(text || "").match(/#[\p{L}_][\p{L}\p{N}_\-/]*/gu)?.join(" ") || "").join(" "));
+}
+
 function bigrams(s: string) {
   const a = [...normalizeClaim(s).replace(/[^\p{L}\p{N}]/gu, "")];
   if (a.length < 2) return new Set(a.length ? [a[0]] : []);
@@ -134,6 +160,14 @@ export function relevance(query: string, claim: string) {
   for (const x of Q) if (C.has(x)) qhit++;
   const queryCoverage = qhit / Q.size;
   return Math.max(sim, claimCoverage, queryCoverage * 0.95);
+}
+
+/** A tag hit counts as relevance even when the wording of the claim never shows up in the query. */
+export function tagRelevance(query: string, tags?: string[]) {
+  const q = normalizeClaim(query);
+  if (!q || !tags?.length) return 0;
+  for (const tag of tags) if (q.includes(normalizeClaim(tag))) return 0.5;
+  return 0;
 }
 
 const SECRET_PATTERNS: { re: RegExp; reason: string }[] = [
@@ -248,8 +282,10 @@ export function normalizeRecord(raw: any, now = Date.now()): MemoryRecord {
   const links: MemoryLinks = {
     mergedFrom: Array.isArray(raw.links?.mergedFrom) ? raw.links.mergedFrom.map(String) : undefined,
     conflictsWith: Array.isArray(raw.links?.conflictsWith) ? raw.links.conflictsWith.map(String) : undefined,
+    related: Array.isArray(raw.links?.related) ? raw.links.related.map(String).filter((x: string) => x !== raw.id) : undefined,
     vaultNames: Array.isArray(raw.links?.vaultNames) ? raw.links.vaultNames.map(String) : undefined,
   };
+  const tags = normalizeTags(raw.tags);
   return {
     id: String(raw.id || id("m")),
     kind,
@@ -257,6 +293,7 @@ export function normalizeRecord(raw: any, now = Date.now()): MemoryRecord {
     evidence: raw.evidence ? String(raw.evidence).slice(0, 500) : undefined,
     scope,
     scene,
+    tags: tags.length ? tags : parseTags(claim),
     confidence: clamp01(Number(raw.confidence ?? 0.5)),
     usefulness: clamp01(Number(raw.usefulness ?? 0.4)),
     status,
@@ -299,7 +336,7 @@ function contradiction(a: string, b: string) {
   if (aNeg === bNeg) return false;
   const strip = (s: string) =>
     normalizeClaim(s.replace(/不要|别再|绝不能|不可|禁止|避免|勿|别|不|never|don't|do not|must not|cannot/gi, ""));
-  return similarity(strip(a), strip(b)) >= 0.55;
+  return similarity(strip(a), strip(b)) >= MEMORY_CONFLICT_SIM;
 }
 
 export function memoryScore(
@@ -308,7 +345,7 @@ export function memoryScore(
   opts: { scene?: MemoryScene; scope?: string; now?: number } = {},
 ) {
   const now = opts.now ?? Date.now();
-  const rel = relevance(query, m.claim);
+  const rel = Math.max(relevance(query, m.claim), tagRelevance(query, m.tags));
   const sceneBoost = !opts.scene || m.scene === "any" || m.scene === opts.scene ? 0.08 : -0.25;
   const scopeBoost =
     !opts.scope || scopeCompatible(m.scope, opts.scope) ? (m.scope !== "global" && opts.scope && m.scope === opts.scope ? 0.12 : 0.04) : -0.2;
@@ -398,7 +435,21 @@ export function recallMemories(
       }
     }
   }
-  return scored.map((row) => row.m);
+  const hit = scored.map((row) => row.m);
+  // One hop through soft links: a hit pulls in its nearest kin, capped and still bound to scene/scope.
+  const seen = new Set(hit.map((m) => m.id));
+  const kin: MemoryRecord[] = [];
+  outer: for (const m of hit) {
+    for (const rid of m.links.related || []) {
+      const other = memories.find((item) => item.id === rid);
+      if (!other || seen.has(other.id) || !fits(other)) continue;
+      if (other.status !== "active" && other.status !== "conflict") continue;
+      seen.add(other.id);
+      kin.push(other);
+      if (kin.length >= MEMORY_RELATED_K) break outer;
+    }
+  }
+  return [...hit, ...kin];
 }
 
 export function applyFeedback(
@@ -483,6 +534,7 @@ export type ProposeInput = {
   kind?: MemoryKind;
   evidence?: string;
   scope?: string;
+  tags?: string[];
   scene?: MemoryScene;
   id?: string;
   pinned?: boolean;
@@ -512,6 +564,7 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
   const kind = input.kind && isMemoryKind(input.kind) ? input.kind : inferKind(claim);
   const scene = input.scene && isMemoryScene(input.scene) ? input.scene : "any";
   const scope = String(input.scope || "global").trim() || "global";
+  const tags = normalizeTags([...(input.tags || []), ...parseTags(claim)]);
   const source = input.source || "model";
   const byUser = source === "user" || source === "ui";
   // Heuristic extraction is only a suggestion; model-written people facts need the user's confirmation.
@@ -525,6 +578,7 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
     existing.kind = kind;
     existing.scene = scene;
     existing.scope = scope;
+    existing.tags = normalizeTags([...(input.tags ?? existing.tags ?? []), ...parseTags(claim)]);
     if (input.evidence !== undefined) existing.evidence = input.evidence;
     if (input.pinned !== undefined) existing.pinned = input.pinned;
     if (input.ttl !== undefined) existing.ttl = input.ttl;
@@ -539,10 +593,12 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
   const neighbors = memories
     .filter((m) => m.status !== "archived" && m.kind === kind && scopeCompatible(m.scope, scope))
     .map((m) => ({ m, sim: similarity(m.claim, claim) }))
-    .filter((row) => row.sim >= MEMORY_CONFLICT_SIM)
+    .filter((row) => row.sim >= MEMORY_RELATED_SIM)
     .sort((a, b) => b.sim - a.sim);
 
   const best = neighbors[0];
+  // Same topic, neither merged nor contradicting → soft link, closed in both directions after the write.
+  const kin = neighbors.filter((row) => !contradiction(row.m.claim, claim)).slice(0, MEMORY_RELATED_K);
   if (best && best.sim >= MEMORY_MERGE_SIM && !contradiction(best.m.claim, claim)) {
     const target = best.m;
     if ([...claim].length > [...target.claim].length) target.claim = claim;
@@ -553,6 +609,8 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
     target.updatedAt = now;
     target.lastVerifiedAt = now;
     target.links.mergedFrom = [...new Set([...(target.links.mergedFrom || []), ...(input.links?.mergedFrom || [])])];
+    if (input.links?.related?.length)
+      target.links.related = [...new Set([...(target.links.related || []), ...input.links.related])].filter((x) => x !== target.id);
     if (target.status === "draft" && byUser) target.status = "active";
     return { ok: true, memory: target, action: "merged" };
   }
@@ -601,6 +659,8 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
     target.updatedAt = now;
     target.lastVerifiedAt = now;
     target.links.mergedFrom = [...new Set([...(target.links.mergedFrom || []), ...(input.links?.mergedFrom || [])])];
+    if (input.links?.related?.length)
+      target.links.related = [...new Set([...(target.links.related || []), ...input.links.related])].filter((x) => x !== target.id);
     if (target.status === "draft" && byUser) target.status = "active";
     return { ok: true, memory: target, action: "merged" };
   }
@@ -616,8 +676,13 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
       confidence: byUser ? 0.75 : asDraft ? 0.4 : 0.55,
       usefulness: byUser ? 0.55 : 0.4,
       status: asDraft ? "draft" : "active",
+      tags,
       // An extracted contradiction stays a draft; confirming it archives the memory it contradicts.
-      links: clash ? { conflictsWith: [clash.id], ...(input.links || {}) } : input.links || {},
+      links: {
+        ...(clash ? { conflictsWith: [clash.id] } : {}),
+        ...(input.links || {}),
+        ...(kin.length ? { related: [...new Set([...(input.links?.related || []), ...kin.map((row) => row.m.id)])] } : {}),
+      },
       pinned: !!input.pinned || kind === "correction" && byUser,
       ttl: input.ttl,
       createdAt: now,
@@ -627,6 +692,10 @@ export function proposeMemory(memories: MemoryRecord[], input: ProposeInput, now
     now,
   );
   memories.push(created);
+  for (const row of kin) {
+    row.m.links.related = [...new Set([...(row.m.links.related || []), created.id])];
+    row.m.updatedAt = now;
+  }
   const pruned = pruneMemories(memories, now);
   memories.splice(0, memories.length, ...pruned.memories);
   return { ok: true, memory: created, action: asDraft ? "draft" : "created" };
@@ -708,6 +777,7 @@ export function resolveMemory(memories: MemoryRecord[], input: ResolveInput, now
       for (const other of memories) {
         if (other.links.conflictsWith?.includes(m.id))
           other.links.conflictsWith = other.links.conflictsWith.filter((x) => x !== m.id);
+        if (other.links.related?.includes(m.id)) other.links.related = other.links.related.filter((x) => x !== m.id);
         if (other.status === "conflict" && !other.links.conflictsWith?.length) other.status = "active";
       }
       return { ok: true, removed: m.id };
@@ -767,6 +837,7 @@ export function forgetMemory(memories: MemoryRecord[], memoryId: string) {
   for (const other of memories) {
     if (other.links.conflictsWith?.includes(memoryId))
       other.links.conflictsWith = other.links.conflictsWith.filter((x) => x !== memoryId);
+    if (other.links.related?.includes(memoryId)) other.links.related = other.links.related.filter((x) => x !== memoryId);
   }
   return removed;
 }
@@ -862,6 +933,7 @@ export function exportMemoriesMarkdown(memories: MemoryRecord[]) {
     parts.push(`## ${status}`, "");
     for (const m of rows) {
       parts.push(`- **${KIND_LABEL[m.kind]}** (${m.scene}/${m.scope}) \`${m.id}\`: ${m.claim}`);
+      if (m.tags?.length) parts.push(`  - 标签：${m.tags.map((tag) => "#" + tag).join(" ")}`);
       if (m.evidence) parts.push(`  - 证据：${m.evidence}`);
     }
     parts.push("");
