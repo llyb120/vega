@@ -44,6 +44,11 @@ export const equal = (left: string, right: string) => {
   return a.length === b.length && timingSafeEqual(a, b);
 };
 const TTL = 7 * 24 * 60 * 60 * 1000;
+/** Consecutive wrong passwords that lock an account, and how long the lock holds. */
+// Shortcut: the lock is per username, so knowing a name is enough to lock it out for a day; an admin password reset unlocks sooner.
+const LOCK = 3,
+  LOCK_MS = 24 * 60 * 60 * 1000;
+type Lock = { failures: number; until: number };
 const dummy =
   "scrypt1:" +
   Buffer.alloc(16).toString("hex") +
@@ -160,6 +165,24 @@ export class Auth {
       this.attempts.set(key, bucket);
     }
   }
+  /** When an active lock ends, or 0. Persisted, so a restart does not hand out five fresh guesses. */
+  async lockedUntil(userId: string) {
+    const lock = await this.store.object<Lock>("login-lock", userId);
+    return lock && lock.until > Date.now() ? lock.until : 0;
+  }
+  /** Count one failure; the account locks until LOCK_MS from now on the LOCK-th in a row. */
+  async failed(userId: string) {
+    await this.store.transaction(async () => {
+      const lock = await this.store.object<Lock>("login-lock", userId),
+        // A finished lock starts a fresh count, or one more typo would re-lock for another day.
+        spent = !!lock && lock.until > 0 && lock.until <= Date.now(),
+        failures = (spent ? 0 : lock?.failures || 0) + 1;
+      await this.store.save("login-lock", userId, {
+        failures,
+        until: failures >= LOCK ? Date.now() + LOCK_MS : 0,
+      });
+    });
+  }
   async issue(user: User) {
     const token = randomBytes(32).toString("base64url"),
       hash = digest(token),
@@ -219,25 +242,31 @@ export class Auth {
       typeof a.username === "string"
         ? a.username.toLowerCase().slice(0, 64)
         : "";
+    const row = await this.store.one("SELECT id,password FROM web_users WHERE username=?", name) as any,
+      lock = row ? await this.lockedUntil(row.id) : 0;
+    if (lock)
+      throw new AuthError(
+        423,
+        `Account locked; try again in ${Math.ceil((lock - Date.now()) / 60000)} minutes`,
+      );
     this.rate(ip, name);
     check(
       typeof a.password === "string" && Buffer.byteLength(a.password) <= 256,
       401,
       "Invalid username or password",
     );
-    const row = await this.store.one("SELECT id,password FROM web_users WHERE username=?", name) as any;
     const stored = row?.password || dummy;
     const valid = await this.crypto(() => verify(a.password, stored));
     const user = row && await this.user(row.id),
       current =
         row &&
         (await this.store.one("SELECT password FROM web_users WHERE id=?", row.id) as any);
-    check(
-      valid && user && !user.disabled && current?.password === stored,
-      401,
-      "Invalid username or password",
-    );
+    if (!(valid && user && !user.disabled && current?.password === stored)) {
+      if (row) await this.failed(row.id);
+      throw new AuthError(401, "Invalid username or password");
+    }
     this.attempts.delete("user:" + digest(name));
+    if (row) await this.store.remove("login-lock", row.id);
     return await this.issue(user);
   }
   async add(a: Record<string, any>) {
@@ -292,8 +321,11 @@ export class Auth {
               "Cannot disable or demote the last enabled administrator",
             );
           await this.store.run("UPDATE web_users SET role=?,disabled=? WHERE id=?", next.role, next.disabled ? 1 : 0, id);
-          if (hash)
+          if (hash) {
             await this.store.run("UPDATE web_users SET password=? WHERE id=?", hash, id);
+            // A reset is also how an admin lifts a lock.
+            await this.store.remove("login-lock", id);
+          }
           return (await this.user(id))!;
         });
     await this.revoke(id);
@@ -317,6 +349,7 @@ export class Auth {
       "Password changed concurrently; sign in again",
     );
     await this.store.run("UPDATE web_users SET password=? WHERE id=?", hash, id);
+    await this.store.remove("login-lock", id);
     await this.revoke(id);
   }
   async canRead(user: User, session: Session) {
