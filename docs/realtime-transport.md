@@ -51,3 +51,9 @@
 - 网页用 `fetch(url, {method:"POST", headers:{"Content-Type":"text/plain"}, body: JSON.stringify({type:"auth",ticket,userId})})` 发起；`Origin` 头由浏览器自动带上，客户端仍按它做站点授权。
 - 响应是 SSE：先 `authorizing`，再 `backend_connecting`，最后 `{"type":"paired","instance","userId","clientId","connected":true}` 或 `{"type":"status","code":...}`，随后流结束。语义与现在的 WebSocket 版本一致。
 - CORS：响应必须带回 `Access-Control-Allow-Origin: <请求的 Origin>`（请求是 `text/plain` 的简单请求，不触发预检）。
+
+## 部署与升级
+
+- 服务端、网页与桌面客户端没有协议向后兼容：三者要一起换到本次提交。旧客户端连新服务端会在握手处报 `realtime channel rejected: <status>`；新客户端连旧服务端会报 `405 Method Not Allowed`。
+- 看到 `GET /api/local-agent/socket`（或 `/relay`）返回 `405 POST required`，说明跑的还是旧服务端：旧版没有这两个 GET 路由，请求落到底座 `/api/[...path]`，那里第一句就是 `check(method === "POST", 405)`。同理旧版对 `/api/events` 的 GET 会返回 403。先确认服务端确实重建并重启，再查别的。
+- 反向代理的要求（不缓冲 SSE、读超时高于 15 秒心跳、透传 `Authorization` 与 `X-Vega-Relay`）分别在 `README.md` 和 `local/README.md`。
