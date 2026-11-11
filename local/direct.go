@@ -293,7 +293,7 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	relayOn := connection.jobs.relayOn
 	connection.jobs.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "loginState": loginState, "sshKeys": sshKeys, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "relayOn": relayOn, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "loginState": loginState, "sshKeys": sshKeys, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "relayOn": relayOn, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true, "backgroundBash": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true, false
 	}

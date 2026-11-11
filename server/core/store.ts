@@ -5,7 +5,7 @@ import { Db, Sqlite, type Dialect } from "./db";
 import { cloudFor } from "./cloud";
 import { Files } from "./files";
 import type { FileRef } from "./attachments";
-import { assert, id } from "./util";
+import { assert, id, type Obj } from "./util";
 /** Unread counts stop here (the badge shows 99+). */
 export const UNREAD_MAX = 100;
 export type Part = { type: string; [key: string]: any };
@@ -78,6 +78,19 @@ export type Session = {
   relayComputer?: boolean;
   /** Employee main task: scenes to return to (caller work in `resume`), kept across runs so a 429/stop/resume does not drop them. */
   sceneStack?: SceneFrame[];
+  /** Frozen OpenAI-compatible prompt cache key (parent's key is reused by 分身). */
+  promptCacheKey?: string;
+  /** Frozen stable system prefix for this session (including Epic BOOST if it was on at start). */
+  frozenSystem?: string;
+  boostFrozen?: boolean;
+  /** Whether spawn_agent tools were in the schema at session start (kept stable mid-session). */
+  allowSpawnFrozen?: boolean;
+  /** Frozen switch_scene.enum for this session (configured scenes at start; not mutated mid-session). */
+  sceneEnumFrozen?: string[];
+  /** Parent session id when this is a 分身 Stage. */
+  spawnParent?: string;
+  agentName?: string;
+  agentChild?: boolean;
   createdAt: number;
 };
 export type SceneFrame = { scene?: string; model?: string; resume?: string };
@@ -116,6 +129,8 @@ function schema(d: Dialect) {
     `CREATE TABLE blob_access(blob_id ${K} NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,session ${K} NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(blob_id,session))`,
     "CREATE INDEX blob_access_session ON blob_access(session)",
     `CREATE TABLE blob_user_access(blob_id ${K} NOT NULL REFERENCES blobs(id) ON DELETE CASCADE,user ${K} NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,PRIMARY KEY(blob_id,user))`,
+    `CREATE TABLE token_usage(id ${auto},user ${K} NOT NULL,at ${I} NOT NULL,data ${T} NOT NULL)`,
+    "CREATE INDEX token_usage_user ON token_usage(user,at)",
   ].map((statement) => (statement.startsWith("CREATE TABLE") ? statement + table : statement));
 }
 
@@ -162,6 +177,7 @@ export class Store {
     if (tables) {
       const version = await this.db.get("SELECT value FROM settings WHERE name='schema'").catch(() => undefined);
       assert(version && Number(version.value) === SCHEMA, "Not a supported Vega database; existing data left unchanged");
+      await this.ensureTokenUsageTable();
       return;
     }
     await this.db.transaction(async () => {
@@ -487,5 +503,88 @@ export class Store {
           model: inherit ? source.model : undefined,
           readOnly: source.readOnly,
         });
+  }
+  /** Read-only 分身 Stage for a parent session, including task/employee parents. Does not replace /stage. */
+  async agentStage(source: Session, name: string) {
+    return await this.newSession({
+      cwd: source.cwd,
+      title: `[分身] ${name}`,
+      stageSource: source.id,
+      spawnParent: source.id,
+      agentName: name,
+      agentChild: true,
+      ownerId: source.ownerId,
+      employeeId: source.employeeId,
+      taskId: source.taskId,
+      localAgent: source.localAgent,
+      localPlatform: source.localPlatform,
+      clientId: source.clientId,
+      clientName: source.clientName,
+      executionCwds: source.executionCwds,
+      readerIds: source.readerIds,
+      model: source.model,
+      scene: source.scene,
+      promptCacheKey: source.promptCacheKey || source.id,
+      frozenSystem: source.frozenSystem,
+      boostFrozen: source.boostFrozen,
+      allowSpawnFrozen: source.allowSpawnFrozen,
+      sceneEnumFrozen: source.sceneEnumFrozen,
+      readOnly: false,
+    });
+  }
+  async sessionsByStageSource(source: string) {
+    const rows = await this.all("SELECT data FROM sessions WHERE source=? ORDER BY updated", source);
+    return rows.map((row) => JSON.parse(row.data) as Session);
+  }
+  private async ensureTokenUsageTable() {
+    const dialect = this.db.dialect;
+    const exists = dialect === "sqlite"
+      ? await this.one("SELECT name FROM sqlite_schema WHERE type='table' AND name='token_usage'")
+      : await this.one("SELECT table_name name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='token_usage'");
+    if (exists) return;
+    const my = dialect === "mysql", K = my ? "VARCHAR(255)" : "TEXT", T = my ? "LONGTEXT" : "TEXT", I = my ? "BIGINT" : "INTEGER";
+    const auto = my ? "BIGINT AUTO_INCREMENT PRIMARY KEY" : "INTEGER PRIMARY KEY";
+    const table = my ? " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_bin" : "";
+    await this.db.exec(`CREATE TABLE token_usage(id ${auto},user ${K} NOT NULL,at ${I} NOT NULL,data ${T} NOT NULL)${table}`);
+    await this.db.exec("CREATE INDEX token_usage_user ON token_usage(user,at)");
+  }
+  async recordTokenUsage(row: {
+    userId?: string;
+    at?: number;
+    model?: string;
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    total?: number;
+    session?: string;
+    employee?: string;
+    task?: string;
+  }) {
+    if (!row.userId) return;
+    const at = row.at || Date.now();
+    const total = row.total ?? (row.input || 0) + (row.output || 0) + (row.cacheRead || 0) + (row.cacheWrite || 0);
+    await this.ensureTokenUsageTable();
+    await this.run(
+      "INSERT INTO token_usage(user,at,data) VALUES(?,?,?)",
+      row.userId,
+      at,
+      JSON.stringify({ ...row, at, total }),
+    );
+  }
+  async tokenUsage(opts: { userId?: string; from?: number; to?: number; limit?: number } = {}) {
+    await this.ensureTokenUsageTable();
+    const limit = Math.min(Math.max(1, opts.limit || 500), 2000);
+    const params: unknown[] = [];
+    let sql = "SELECT id,user,at,data FROM token_usage";
+    const where: string[] = [];
+    if (opts.userId) { where.push("user=?"); params.push(opts.userId); }
+    if (opts.from) { where.push("at>=?"); params.push(opts.from); }
+    if (opts.to) { where.push("at<=?"); params.push(opts.to); }
+    if (where.length) sql += " WHERE " + where.join(" AND ");
+    sql += " ORDER BY at DESC,id DESC LIMIT ?";
+    params.push(limit);
+    const rows = await this.all(sql, ...params);
+    return rows.map((row) => ({ id: row.id, userId: row.user, ...(JSON.parse(row.data) as Obj) }));
   }
 }

@@ -98,6 +98,7 @@ const unreadLabel = (n) => n > 99 ? "99+" : String(n);
 
     <nav class="sidebar-nav" aria-label="主导航">
       <button type="button" class="nav-item" :class="{ active: view === 'resources' }" :aria-current="view === 'resources' ? 'page' : undefined" title="资源" @click="emit('navigate', 'resources')"><span class="nav-icon"><Icon name="laptop" /></span><span class="nav-label">资源</span></button>
+      <button type="button" class="nav-item" :class="{ active: view === 'usage' }" :aria-current="view === 'usage' ? 'page' : undefined" title="Token 统计" @click="emit('navigate', 'usage')"><span class="nav-icon"><Icon name="graph" /></span><span class="nav-label">Token 统计</span></button>
       <template v-if="isAdmin">
         <div class="sidebar-section-head"><span class="nav-label">管理</span></div>
         <button v-for="[id, label, icon] in adminNav" :key="id" type="button" class="nav-item" :class="{ active: view === id }" :aria-current="view === id ? 'page' : undefined" :title="label" @click="emit('navigate', id)"><span class="nav-icon"><Icon :name="icon" /></span><span class="nav-label">{{ label }}</span></button>

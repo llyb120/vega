@@ -11,9 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -328,6 +326,20 @@ func execute(ctx context.Context, j job) map[string]any {
 		}
 		return runCommand(ctx, req)
 	}
+	if j.Op == "exec_poll" {
+		var req execPollReq
+		if json.Unmarshal(j.Args, &req) != nil || strings.TrimSpace(req.JobID) == "" {
+			return failure("jobId required")
+		}
+		return pollBashJob(req, ctx)
+	}
+	if j.Op == "exec_kill" {
+		var req execPollReq
+		if json.Unmarshal(j.Args, &req) != nil || strings.TrimSpace(req.JobID) == "" {
+			return failure("jobId required")
+		}
+		return killBashJob(req.JobID)
+	}
 	if j.Op == "file" {
 		var req fileReq
 		if json.Unmarshal(j.Args, &req) != nil || req.Path == "" {
@@ -354,9 +366,12 @@ func execute(ctx context.Context, j job) map[string]any {
 func failure(message string) map[string]any { return map[string]any{"error": message} }
 
 type execReq struct {
-	Cwd     string `json:"cwd"`
-	Command string `json:"command"`
-	Timeout int    `json:"timeout"`
+	Cwd       string `json:"cwd"`
+	Command   string `json:"command"`
+	Timeout   int    `json:"timeout"`
+	YieldSecs int    `json:"yieldSecs"`
+	JobID     string `json:"jobId"`
+	Detach    bool   `json:"detach"`
 }
 type limitedOutput struct {
 	mu        sync.Mutex
@@ -387,40 +402,17 @@ func runCommand(parent context.Context, req execReq) map[string]any {
 	if err != nil || !st.IsDir() {
 		return failure("cwd must be an existing directory on this machine")
 	}
+	if req.YieldSecs >= 1 {
+		return runCommandYield(parent, req)
+	}
 	ctx, cancel := context.WithTimeout(parent, time.Duration(req.Timeout)*time.Second)
 	defer cancel()
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		shell := os.Getenv("VEGA_POWERSHELL")
-		if shell == "" {
-			shell = "powershell.exe"
-		}
-		cmd = exec.CommandContext(ctx, shell, "-NoProfile", "-NonInteractive", "-Command", req.Command)
-	} else {
-		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", req.Command)
-	}
-	cmd.Dir = req.Cwd
-	configureCommand(cmd)
-	cmd.WaitDelay = 2 * time.Second
-	output := &limitedOutput{}
-	cmd.Stdout = output
-	cmd.Stderr = output
-	err = cmd.Run()
-	code := 0
-	message := ""
+	cmd, output, err := startShellCommand(ctx, req)
 	if err != nil {
-		code = -1
-		if exit, ok := err.(*exec.ExitError); ok {
-			code = exit.ExitCode()
-		} else {
-			message = err.Error()
-		}
+		return failure(err.Error())
 	}
-	if ctx.Err() != nil {
-		code = -1
-		message = "Cancelled/timeout"
-	}
-	return map[string]any{"output": output.data.String(), "truncated": output.truncated, "exitCode": code, "error": message}
+	err = cmd.Wait()
+	return commandResult(cmd, output, err, ctx.Err() != nil)
 }
 
 type fileReq struct {

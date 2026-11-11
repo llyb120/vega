@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { sceneModels } from "../server/core/config";
 import { Store } from "../server/core/store";
 import { Engine } from "../server/core/engine";
 import { Catalog } from "../server/core/catalog";
@@ -398,7 +399,7 @@ test("the concise delivery field cannot bypass credential redaction", async () =
     await employee.update(state => { Object.assign(state.tasks[0], { status: "running", workSession: session.id, plan: [{ content: "verify", status: "completed" }] }); });
     employee.busy.set(created.value.id, { computer: false, session: session.id });
     const redactor = new Redactor(); redactor.add("private-test-token"); engine.redactors.set(session.id, redactor);
-    const tools = await Tools.create(engine, session, await engine.config(), new AbortController().signal, () => {}), model = await engine.catalog.resolve(await engine.config(), (await engine.config()).scenes!.lightweight![0]);
+    const tools = await Tools.create(engine, session, await engine.config(), new AbortController().signal, () => {}), model = await engine.catalog.resolve(await engine.config(), sceneModels(await engine.config(), "lightweight")[0]);
     assert.equal((await tools.definitions(model)).find(tool => tool.name === "task_complete")!.parameters.properties.summary.maxLength, 400);
     await assert.rejects(tools.execute({ id: "complete", ...employeeCall({ action: "complete", deliverableRef: [], text: "verified result", summary: "The private-test-token works" }) }, model), /task_complete 的 summary 含有密码本凭据内容/);
     assert.equal((await employee.state()).tasks[0].completion, undefined);

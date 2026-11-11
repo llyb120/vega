@@ -1,6 +1,6 @@
 // A tiny history router: the address bar mirrors which page is open, so refresh and links land on it.
 // Paths only describe the page; App.vue checks that the ids exist and are visible before opening them.
-export const PAGES = ["resources", "browser", "experiences", "debug", "settings", "account"];
+export const PAGES = ["resources", "usage", "browser", "experiences", "debug", "settings", "account"];
 export const ADMIN_PAGES = ["browser", "experiences", "debug", "settings"];
 /** Page sub-views kept in the path: a fixed list, or any id (the selected item) when true. */
 const PAGE_SUBS = { settings: ["scenes"], debug: true, experiences: true };

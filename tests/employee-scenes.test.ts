@@ -67,7 +67,7 @@ test("even a coding-profile task starts lightweight, upgrades then switches to c
     assert(system.includes("新主任务统一先用轻量模型") && system.includes("普通信息查询不因使用read或bash而升级"));
     assert(system.includes(EMPLOYEE_DECISION_RULES), "decision guidance survives initial work, scene changes and resumption");
     assert(messages.some(message => message.role === "user" && message.text?.includes("仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user")));
-    assert.match(system, /task_ask_user 仅用于缺少无法自行查得的必要信息/);
+    assert.match(JSON.stringify(messages), /task_ask_user 仅用于缺少无法自行查得的必要信息/, "task rules are attached to the request as dynamic context, not the frozen system prefix");
     if (phase++ === 0) {
       assert.equal(model.selection, "p/light");
       assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("coding"));
@@ -318,7 +318,7 @@ test("a scene covered by the current preferred model stays reachable: switch_sce
     if (phase === 2) {
       const outcome = messages.findLast(message => message.role === "tool" && message.name === "switch_scene")!;
       assert(!outcome.error, outcome.text);
-      assert(sceneEnum(definitions).includes("lightweight") && !sceneEnum(definitions).includes("coding"), "now in coding, can return");
+      assert(sceneEnum(definitions).includes("lightweight") && sceneEnum(definitions).includes("coding"), "enum stays frozen mid-session; return is validated at call time");
       return verified();
     }
     return completed();
@@ -348,7 +348,7 @@ test("attached log scenario: lightweight task whose model is shared with compute
     if (phase++ === 0) {
       chromeDefs = chrome;
       assert(chromeNames(definitions).includes("chrome_navigate"), "chrome definitions are listed from the start");
-      assert(system.includes("[Chrome 场景]") && !system.includes("[Chrome 规则]"), "only the short gate rule outside computer");
+      assert(JSON.stringify(messages).includes("[Chrome 场景]") && !JSON.stringify(messages).includes("[Chrome 规则]") && !system.includes("[Chrome 规则]") && !system.includes("[Chrome 场景]"), "only the short gate rule outside computer, in the dynamic segment");
       assert(sceneEnum(definitions).includes("computer"), "shared model must not hide switch_scene(computer)");
       assert(names.includes("task_progress") && names.includes("task_complete"));
       return { role: "assistant", calls: [
@@ -371,10 +371,10 @@ test("attached log scenario: lightweight task whose model is shared with compute
       assert(JSON.parse(outcome.text!).scene === "computer");
       assert(messages.some(message => message.role === "user" && message.text?.includes("在服务端浏览器打开百度首页")), "task text stays in history");
       assert.equal(chrome, chromeDefs, "chrome schemas, descriptions and order unchanged by the scene switch");
-      assert(system.includes("[Chrome 规则]") && !system.includes("[Chrome 场景]"), "full Chrome rules only in computer");
+      assert(JSON.stringify(messages).includes("[Chrome 规则]") && !JSON.stringify(messages).includes("[Chrome 场景]") && !system.includes("[Chrome 规则]") && !system.includes("[Chrome 场景]"), "full Chrome rules only in computer, in the dynamic segment");
       assert(names.includes("task_progress") && names.includes("task_complete"), "main task progress/complete stay usable");
       assert(!names.includes("write") && !names.includes("edit"), "computer scene keeps its restricted file tools");
-      assert(sceneEnum(definitions).includes("lightweight") && !sceneEnum(definitions).includes("computer"), "return path exists, no self-switch");
+      assert(sceneEnum(definitions).includes("lightweight") && sceneEnum(definitions).includes("computer"), "enum stays frozen mid-session; current scene is rejected at call time");
       assert(!system.includes("[电脑场景未配置]"));
       work = (await store.sessions())[0].id;
       return call("status", "chrome_connection", { command: "status" });
@@ -436,7 +436,7 @@ test("computer scene without a model: not offered, accurate setup diagnosis inst
     assert.equal(model.selection, "p/light");
     assert(!sceneEnum(definitions).includes("computer"));
     assert(chromeNames(definitions).includes("chrome_navigate"), "definitions stay stable even without a computer model");
-    assert.match(system, /\[电脑场景未配置\].*computer 场景未配置模型.*不是浏览器扩展连接问题/s);
+    assert.match(JSON.stringify(messages), /\[电脑场景未配置\].*computer 场景未配置模型.*不是浏览器扩展连接问题/s, "unconfigured-computer diagnosis is in the dynamic segment");
     if (phase++ === 0) return call("browser", "switch_scene", { scene: "computer", message: "强行切换" });
     const outcome = messages.findLast(message => message.role === "tool" && message.name === "switch_scene")!;
     assert(outcome.error);
@@ -459,12 +459,12 @@ test("one model for every scene: lightweight to coding to computer all execute i
     assert.equal(model.selection, "p/vision");
     const names = definitions.map(tool => tool.name);
     if (phase++ === 0) {
-      assert.deepEqual(sceneEnum(definitions).sort(), ["coding", "computer"]);
+      assert.deepEqual(sceneEnum(definitions).sort(), ["coding", "computer", "lightweight"]);
       return call("code", "switch_scene", { scene: "coding", message: "改代码" });
     }
     if (phase === 2) {
       assert(names.includes("write") && chromeNames(definitions).length === CHROME_TOOL_DEFINITIONS.length);
-      assert.deepEqual(sceneEnum(definitions).sort(), ["computer", "lightweight"]);
+      assert.deepEqual(sceneEnum(definitions).sort(), ["coding", "computer", "lightweight"], "switch_scene.enum is frozen for the session");
       return call("browser", "switch_scene", { scene: "computer", message: "浏览器验证" });
     }
     if (phase === 3) {

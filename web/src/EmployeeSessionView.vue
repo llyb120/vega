@@ -1,5 +1,5 @@
 <script setup vapor>
-import { nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import ConversationTimeline from "./ConversationTimeline.vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
@@ -10,7 +10,7 @@ const props = defineProps({
   revision: Number,
   debug: Boolean,
 });
-const emit = defineEmits(["back"]);
+const emit = defineEmits(["back", "open"]);
 const raw = ref(false);
 const record = ref(null);
 const session = ref(null),
@@ -45,7 +45,7 @@ async function refresh() {
       "/sessions/" + encodeURIComponent(props.sessionId) + (initial ? "?limit=" + CHAT_PAGE_SIZE : "?after=" + last),
     );
     if (current !== version || request !== refreshVersion) return;
-    if (!result.session.taskId && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是牛马的会话");
+    if (!result.session.taskId && !result.session.agentChild && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是牛马的会话");
     if (!initial && Number.isSafeInteger(result.lastSeq) && result.lastSeq < last) {
       record.value = null;
       messages.value = [];
@@ -96,7 +96,7 @@ async function loadOlder() {
       "/sessions/" + encodeURIComponent(props.sessionId) + "?before=" + first + "&limit=" + CHAT_PAGE_SIZE,
     );
     if (request !== version || messages.value[0]?.seq !== first) return;
-    if (!result.session.taskId && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是牛马的会话");
+    if (!result.session.taskId && !result.session.agentChild && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是牛马的会话");
     const height = el?.scrollHeight ?? 0, top = el?.scrollTop ?? 0;
     messages.value = mergeMessages(result.messages || [], messages.value);
     hasMore.value = !!result.hasMore;
@@ -156,6 +156,24 @@ async function exportSession() {
     setTimeout(() => { if (url) URL.revokeObjectURL(url); }, 1000);
   }
 }
+
+const stages = computed(() => {
+  const rec = record.value;
+  if (!rec?.session) return [];
+  const current = rec.session;
+  const parent = rec.parentSession;
+  const agents = rec.agentSessions || [];
+  const items = [];
+  const main = parent || (current.agentChild ? null : current);
+  if (main) items.push({ id: main.id, title: main.title || "主会话", kind: "main", status: main.status, current: main.id === current.id });
+  for (const agent of agents) {
+    if (items.some((item) => item.id === agent.id)) continue;
+    items.push({ id: agent.id, title: agent.title || agent.agentName || "分身", kind: "agent", status: agent.status, current: agent.id === current.id });
+  }
+  if (current.agentChild && !items.some((item) => item.id === current.id))
+    items.push({ id: current.id, title: current.title || current.agentName || "分身", kind: "agent", status: current.status, current: true });
+  return items;
+});
 watch(
   () => [props.sessionId, props.revision],
   () => void refresh(),
@@ -164,7 +182,7 @@ watch(
 onBeforeUnmount(() => { version++; });
 </script>
 <template>
-  <PageHeader :title="session?.title || '牛马会话记录'" :subtitle="debug ? '调试会话' : '只读执行记录'" :back="debug ? '调试会话' : '返回牛马'" @back="emit('back')">
+  <PageHeader :title="session?.title || '牛马会话记录'" :subtitle="debug ? '调试会话' : (session?.agentChild ? '分身只读记录' : '只读执行记录')" :back="debug ? '调试会话' : '返回牛马'" @back="emit('back')">
     <template #title-extra><span :class="['badge', running ? 'info' : '']"><span v-if="running" class="dot info pulse"></span>{{ running ? "执行中" : "执行记录" }}</span></template>
     <button v-if="debug" type="button" class="sm" :aria-pressed="raw" @click="raw = !raw"><Icon name="code" :size="14" /><span class="hide-mobile">{{ raw ? '整理视图' : '原始消息' }}</span></button>
     <button v-if="debug" type="button" class="sm" :disabled="busy || !record" title="导出当前会话记录（JSON）" aria-label="导出会话（JSON）" @click="exportSession"><Icon name="download" :size="14" /><span class="hide-mobile">导出会话</span></button>
@@ -177,6 +195,18 @@ onBeforeUnmount(() => { version++; });
     :aria-busy="busy || loadingOlder"
     @scroll.passive="onScroll"
   >
+    <nav v-if="stages.length > 1" class="session-stages" aria-label="会话与分身">
+      <button
+        v-for="item in stages"
+        :key="item.id"
+        type="button"
+        class="sm"
+        :class="{ active: item.current }"
+        :aria-current="item.current ? 'page' : undefined"
+        :disabled="item.current"
+        @click="emit('open', item.id)"
+      >{{ item.kind === 'main' ? item.title : item.title }}<span v-if="item.status === 'running' || item.status === 'working'" class="dot info pulse"></span></button>
+    </nav>
     <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；补充、审批或续做请返回对应牛马，不能在这里输入或重放操作。<template v-if="debug">导出包含原始消息、工具参数与本地路径，分享前请脱敏；图片仅保留引用。</template></span></p>
     <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>牛马 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>模型 / 场景</dt><dd>{{ session.model || '未配置' }} / {{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
@@ -245,6 +275,9 @@ onBeforeUnmount(() => { version++; });
 .employee-session { background: var(--surface); overflow-anchor: none; }
 .session-note { max-width: 820px; margin: 0 auto 12px; }
 .load-older { display: flex; align-items: center; justify-content: center; height: 32px; margin: 0 auto 12px; color: var(--muted); }
+.session-stages { display: flex; flex-wrap: wrap; gap: 6px; max-width: 820px; margin: 0 auto 12px; }
+.session-stages .sm.active { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border-strong, var(--border)); }
+.session-stages .dot { margin-left: 6px; }
 .debug-metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; max-width: 820px; margin: 0 auto 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); font-size: 12px; }
 .debug-metadata dt { color: var(--muted); }
 .debug-metadata dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); }

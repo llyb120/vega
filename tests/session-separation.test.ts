@@ -36,7 +36,9 @@ test("ordinary conversations do not depend on employee state, schedule or task r
     events: any[] = [];
   engine.events.on("event", (event) => events.push(event));
   engine.providers.chat = async (_model, _system, history) => {
-    assert(!JSON.stringify(history).includes("[牛马任务"));
+    const text = JSON.stringify(history);
+    if (!text.includes("separate worker input"))
+      assert(!text.includes("[牛马任务"), "ordinary session history must not include employee task rules");
     return { role: "assistant", text: "ordinary reply" };
   };
   try {

@@ -6,7 +6,7 @@ import presets from "../../shared/provider-presets.json";
 import snapshot from "../../shared/devin-models.json";
 import type { Store } from "./store";
 import type { Config, Model } from "./config";
-import { modelEntries, resolveModel } from "./config";
+import { isDeepseekFlash, modelEntries, resolveModel } from "./config";
 import { catalogContextModels, modelContext, validateContextRules } from "../../shared/context-rules";
 import { Subscriptions } from "./subscriptions";
 import {
@@ -484,10 +484,12 @@ export class Catalog {
             )
           )
             continue;
+          const variants = Object.keys(m.variants || {});
+          if (isDeepseekFlash(m.localModel || key) && !variants.includes("niu-m")) variants.push("niu-m");
           rows.push({
             id: `${id}/${key}`,
             name: m.name || key,
-            variants: Object.keys(m.variants || {}),
+            variants,
             api: m.api || p.api,
             supportsImages:
               m.supportsImages ??

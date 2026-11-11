@@ -8,10 +8,12 @@ export type SchedulerConfig = {
   /** Per-employee max concurrently running tasks. Default 3. */
   perEmployeeSlots?: number;
 };
+export type SceneModelRow = string | { model: string; allowSpawn?: boolean };
+export type SceneModelSelection = { model: string; allowSpawn: boolean };
 export type Config = {
   model: string;
   provider: Record<string, Obj>;
-  scenes?: Record<string, string[]>;
+  scenes?: Record<string, SceneModelRow[]>;
   systemPrompt?: string;
   contextMode?: string;
   mcp?: Record<string, Obj>;
@@ -82,9 +84,33 @@ export const protocols = [
 ];
 
 export const SCENE_KEYS = ["lightweight", "coding", "computer"] as const;
+export function isDeepseekFlash(modelId: string) {
+  const id = String(modelId || "").toLowerCase();
+  return id.includes("deepseek") && id.includes("flash");
+}
+export function variantLabel(variant: string) {
+  return variant === "niu-m" ? "Epic" : variant;
+}
+/** Normalize a scene row from the legacy string or { model, allowSpawn? } shape. */
+export function sceneModelSelection(row: SceneModelRow | null | undefined, scene?: string): SceneModelSelection | undefined {
+  if (row == null) return;
+  const model = typeof row === "string" ? row.trim() : String((row as any).model || "").trim();
+  if (!model) return;
+  const allowSpawn = scene !== "computer" && typeof row === "object" && !!(row as any).allowSpawn;
+  return { model, allowSpawn };
+}
+export function sceneModelRows(config: Config | { scenes?: Record<string, SceneModelRow[]> } | null | undefined, scene: string): SceneModelSelection[] {
+  const ids = config?.scenes?.[scene];
+  return Array.isArray(ids) ? ids.map((row) => sceneModelSelection(row, scene)).filter((row): row is SceneModelSelection => !!row) : [];
+}
 export function sceneModels(config: Config, scene: string): string[] {
-  const ids = config.scenes?.[scene];
-  return Array.isArray(ids) ? ids.map(String).map((id) => id.trim()).filter(Boolean) : [];
+  return sceneModelRows(config, scene).map((row) => row.model);
+}
+export function sceneAllowSpawn(config: Config, scene: string, selection?: string) {
+  if (scene === "computer") return false;
+  const rows = sceneModelRows(config, scene);
+  const row = selection ? rows.find((item) => item.model === selection) : rows[0];
+  return !!row?.allowSpawn;
 }
 export function requireSceneModel(config: Config, scene: string): string {
   const id = sceneModels(config, scene)[0];
@@ -104,15 +130,18 @@ export function resolveModel(config: Config, selection = config.model): Model {
   assert(p, `Provider not found: ${provider}`);
   const m = modelEntries(p.models)[key];
   assert(m, `Model not found: ${base}`);
+  const modelId = String(m.localModel || key);
+  const epic = variant === "niu-m" && isDeepseekFlash(modelId);
   assert(
-    !variant || m.variants?.[variant],
+    !variant || m.variants?.[variant] || epic,
     `Variant not configured: ${variant}`,
   );
   const opts = {
     ...object(p.options),
     ...object(m.options),
     ...object(m.variants?.[variant]),
-  };
+    ...(epic ? { reasoningEffort: "max" } : {}),
+  } as Record<string, any>;
   const api =
     m.api ||
     p.api ||
@@ -179,8 +208,14 @@ export function validateConfig(c: Config) {
         Array.isArray(models),
       "Invalid scene",
     );
-    for (const selection of models) {
-      const m = resolveModel(c, selection);
+    for (const row of models) {
+      assert(
+        scene !== "computer" || typeof row !== "object" || !row || !(row as any).allowSpawn,
+        "Computer scene cannot enable 分身",
+      );
+      const selection = sceneModelSelection(row, scene);
+      if (!selection) continue;
+      const m = resolveModel(c, selection.model);
       assert(
         scene !== "computer" || m.supportsImages,
         "Computer scene must support images",

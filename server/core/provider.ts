@@ -3,6 +3,7 @@ import type { Message, Call } from "./store";
 import { historyImages } from "./history";
 import type { Model } from "./config";
 import { wireOptions } from "./config";
+import { clampPromptCacheKey } from "./prompt";
 import {
   assert,
   clip,
@@ -51,6 +52,31 @@ function usableReply(reply: Message) {
     throw new ProviderError("模型只返回了思考内容或空白，没有回复正文或工具调用", 0, "empty");
   return reply;
 }
+
+export function codebuddyRequestHeaders(session?: string) {
+  const messageId = crypto.randomUUID().replaceAll("-", "");
+  const headers: Record<string, string> = {
+    "X-Request-ID": messageId,
+    "X-Conversation-Message-ID": messageId,
+    "X-Agent-Type": "main",
+  };
+  if (session) {
+    const requestId = createHash("sha256").update(session).digest("hex").slice(0, 32);
+    headers["X-Conversation-ID"] = session;
+    headers["X-Session-ID"] = session;
+    headers["X-Conversation-Request-ID"] = requestId;
+    headers["X-Root-Request-ID"] = requestId;
+  }
+  return headers;
+}
+function applyPromptCache(body: Obj, model: Model, cacheKey?: string) {
+  if (model.api === "codebuddy" || model.api === "anthropic-messages" || model.api === "devin") return;
+  const key = clampPromptCacheKey(cacheKey);
+  if (key) body.prompt_cache_key = key;
+  if (key && model.options.supportsLongCacheRetention && model.localAuth !== "codex")
+    body.prompt_cache_retention = "24h";
+  if (model.localAuth === "codex") delete body.prompt_cache_retention;
+}
 const hash = (v: any) =>
   createHash("sha256").update(JSON.stringify(v)).digest("hex");
 const historyHash = (rows: Message[]) =>
@@ -88,6 +114,7 @@ export async function bodyFor(
     mime: string;
     data: string;
   }>,
+  cacheKey?: string,
 ) {
   const trimmed = historyImages(input),
     rows = resolveImage
@@ -359,6 +386,10 @@ export async function bodyFor(
       body.store = false;
       body.stream = true;
     }
+    applyPromptCache(body, model, cacheKey);
+    if (model.localAuth === "codex") {
+      delete body.prompt_cache_retention;
+    }
     return { path: "/responses", body };
   }
   const messages: Obj[] = [{ role: "system", content: system }];
@@ -432,6 +463,7 @@ export async function bodyFor(
     ])
       delete body[key];
   }
+  applyPromptCache(body, model, cacheKey);
   return { path: "/chat/completions", body };
 }
 type Checkpoint = {
@@ -467,13 +499,16 @@ export class Providers {
     signal: AbortSignal,
     emit: Emit = () => {},
     session = "",
+    cacheKey?: string,
   ): Promise<Message> {
+    const promptCacheKey = cacheKey || session;
     const { path, body } = await bodyFor(
           model,
           system,
           messages,
           tools,
           this.resolveImage,
+          promptCacheKey,
         );
     if (model.api === "devin")
       return usableReply(await devinStream(
@@ -495,9 +530,8 @@ export class Providers {
         else headers["x-api-key"] = model.apiKey;
       }
     } else if (model.apiKey) headers.Authorization = "Bearer " + model.apiKey;
-    if (model.api === "codebuddy")
-      headers["X-Conversation-ID"] = session || crypto.randomUUID();
-    if (model.options.sendSessionAffinityHeaders && session)
+    if (model.api === "codebuddy") Object.assign(headers, codebuddyRequestHeaders(promptCacheKey || session || undefined));
+    else if (model.options.sendSessionAffinityHeaders && session)
       headers["X-Session-ID"] = session;
     if (model.id.endsWith("[1m]") && model.api === "anthropic-messages") {
       const key =
@@ -517,8 +551,8 @@ export class Providers {
         key: hash(model.apiKey),
         headers,
       }),
-      cacheKey = session + ":" + scope;
-    const previous = this.checkpoints.get(cacheKey);
+      checkpointKey = session + ":" + scope;
+    const previous = this.checkpoints.get(checkpointKey);
     const owner = crypto.randomUUID();
     let continuation = false;
     if (session && model.api === "openai-responses") {
@@ -537,10 +571,11 @@ export class Providers {
                   messages.slice(previous.count),
                   tools,
                   this.resolveImage,
+                  promptCacheKey,
                 )).body.input;
         continuation = true;
       }
-      this.checkpoints.set(cacheKey, {
+      this.checkpoints.set(checkpointKey, {
         response: "",
         count: 0,
         prefix: "",
@@ -594,7 +629,7 @@ export class Providers {
         0,
       );
       continuation = false;
-      const state = this.checkpoints.get(cacheKey);
+      const state = this.checkpoints.get(checkpointKey);
       if (state?.owner === owner) state.disabled = true;
     }
     const signedRows = messages.some(
@@ -899,7 +934,7 @@ export class Providers {
     signal.throwIfAborted();
     usableReply(result);
     if (responseID && session && model.api === "openai-responses") {
-      const state = this.checkpoints.get(cacheKey);
+      const state = this.checkpoints.get(checkpointKey);
       if (state?.owner === owner) {
         const history = [...messages, result];
         state.response = responseID;

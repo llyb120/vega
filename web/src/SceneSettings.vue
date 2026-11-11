@@ -10,6 +10,12 @@ const scenes = [
   ["coding", "编码"],
   ["computer", "浏览器操作"],
 ];
+const variantName = (v) => (v === "niu-m" ? "Epic" : v);
+function asRow(item) {
+  if (!item) return { model: "", allowSpawn: false };
+  if (typeof item === "string") return { model: item, allowSpawn: false };
+  return { model: item.model || "", allowSpawn: !!item.allowSpawn };
+}
 const entries = computed(
   () =>
     props.models
@@ -22,19 +28,19 @@ const entries = computed(
         },
         ...(m.variants || []).map((v) => ({
           id: m.id + "/variant/" + v,
-          name: (m.name || m.id) + " · " + v + " · " + m.id,
+          name: (m.name || m.id) + " · " + variantName(v) + " · " + m.id,
           images: m.supportsImages,
         })),
       ]) || [],
 );
 const incomplete = computed(() =>
-  scenes.filter(([key]) => !choices.value[key].some(Boolean)).map(([, label]) => label),
+  scenes.filter(([key]) => !choices.value[key].some((row) => row.model)).map(([, label]) => label),
 );
 watch(
   () => props.config,
   () => {
     choices.value = Object.fromEntries(
-      scenes.map(([key]) => [key, [...(props.config.scenes?.[key] || [])]]),
+      scenes.map(([key]) => [key, (props.config.scenes?.[key] || []).map(asRow)]),
     );
   },
   { immediate: true },
@@ -42,6 +48,17 @@ watch(
 function move(key, n, delta) {
   const list = [...choices.value[key]];
   [list[n], list[n + delta]] = [list[n + delta], list[n]];
+  choices.value[key] = list;
+}
+function setModel(key, n, model) {
+  const list = [...choices.value[key]];
+  list[n] = { ...list[n], model };
+  choices.value[key] = list;
+}
+function setAllowSpawn(key, n, allowSpawn) {
+  if (key === "computer") return;
+  const list = [...choices.value[key]];
+  list[n] = { ...list[n], allowSpawn: !!allowSpawn };
   choices.value[key] = list;
 }
 async function save() {
@@ -52,7 +69,7 @@ async function save() {
     next.scenes = Object.fromEntries(
       scenes.map(([key]) => [
         key,
-        [...new Set(choices.value[key].filter(Boolean))],
+        [...new Map(choices.value[key].filter((row) => row.model).map((row) => [row.model, key === "computer" || !row.allowSpawn ? row.model : { model: row.model, allowSpawn: true }])).values()],
       ]),
     );
     if (incomplete.value.length) {
@@ -75,18 +92,19 @@ async function save() {
     <p v-if="!entries.length" class="callout info"><Icon name="alert" :size="14" /><span>先添加服务商并获取模型。</span></p>
     <div class="scene-grid">
       <article v-for="[key, label] in scenes" :key="key" class="scene-item">
-        <header><h4>{{ label }}</h4><span class="hint">{{ choices[key].filter(Boolean).length ? choices[key].filter(Boolean).length + ' 个模型' : '未配置' }}</span></header>
+        <header><h4>{{ label }}</h4><span class="hint">{{ choices[key].filter((row) => row.model).length ? choices[key].filter((row) => row.model).length + ' 个模型' : '未配置' }}</span></header>
         <p v-if="key === 'lightweight'" class="hint">新任务与沟通会话从这里起步；留空则无法运行。</p>
         <p v-else-if="key === 'coding'" class="hint">实际进入编码工作时才升级；后续按需求继续编码或回到轻量，原任务历史不变。</p>
-        <p v-else-if="key === 'computer'" class="hint">仅显示支持图片的模型；留空则无法启动浏览器执行。</p>
+        <p v-else-if="key === 'computer'" class="hint">仅显示支持图片的模型；留空则无法启动浏览器执行。电脑场景不能开启分身。</p>
         <ol class="scene-rows">
           <li v-for="(selection, n) in choices[key]" :key="n" class="scene-row">
             <span class="scene-rank">{{ n + 1 }}</span>
-            <select v-model="choices[key][n]" :aria-label="label + '模型' + (n + 1)">
+            <select :value="selection.model" :aria-label="label + '模型' + (n + 1)" @change="setModel(key, n, $event.target.value)">
               <option value="">选择模型</option>
-              <option v-if="selection && !entries.some((m) => m.id === selection)" :value="selection">{{ selection }}（暂不可用）</option>
+              <option v-if="selection.model && !entries.some((m) => m.id === selection.model)" :value="selection.model">{{ selection.model }}（暂不可用）</option>
               <option v-for="m in entries.filter((m) => key !== 'computer' || m.images)" :key="m.id" :value="m.id">{{ m.name }}</option>
             </select>
+            <label v-if="key !== 'computer'" class="spawn-toggle"><input type="checkbox" :checked="selection.allowSpawn" @change="setAllowSpawn(key, n, $event.target.checked)" />允许开启分身</label>
             <span class="row-actions">
               <button type="button" class="icon sm" :disabled="n === 0" :aria-label="'上移' + label + '模型'" @click="move(key, n, -1)"><Icon name="down" :size="14" class="flip" /></button>
               <button type="button" class="icon sm" :disabled="n === choices[key].length - 1" :aria-label="'下移' + label + '模型'" @click="move(key, n, 1)"><Icon name="down" :size="14" /></button>
@@ -94,7 +112,7 @@ async function save() {
             </span>
           </li>
         </ol>
-        <button type="button" class="sm ghost add-model" @click="choices[key].push('')"><Icon name="plus" :size="14" />{{ choices[key].length ? "备用模型" : "选择模型" }}</button>
+        <button type="button" class="sm ghost add-model" @click="choices[key].push({ model: '', allowSpawn: false })"><Icon name="plus" :size="14" />{{ choices[key].length ? "备用模型" : "选择模型" }}</button>
       </article>
     </div>
   </section>
@@ -113,7 +131,11 @@ async function save() {
 .row-actions .icon { color: var(--muted); }
 .flip { transform: rotate(180deg); }
 .add-model { justify-self: start; color: var(--accent-text); }
+.spawn-toggle { display: flex; align-items: center; gap: 4px; flex: none; color: var(--text-2); font-size: 12px; white-space: nowrap; }
+.spawn-toggle input { margin: 0; }
 @media (max-width: 767px) {
   .scene-item { padding: 12px; }
+  .scene-row { flex-wrap: wrap; }
+  .spawn-toggle { margin-left: 26px; }
 }
 </style>

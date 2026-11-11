@@ -194,7 +194,7 @@ test("the communication session lists only recently delivered tasks as follow-up
     const old = await f.add("很久以前的任务");
     await f.employee.update(s => { Object.assign(f.employee.task(s, old.id), { status: "done", workSession: "w-old", finishedAt: Date.now() - FOLLOW_UP_WINDOW_MS - 60_000 }); });
     let seen = "";
-    f.engine.providers.chat = async (_model, system) => { seen = system; return { role: "assistant", text: "好的" }; };
+    f.engine.providers.chat = async (_model, system, messages) => { seen = system + "\n" + JSON.stringify(messages); return { role: "assistant", text: "好的" }; };
     await f.engine.run(f.chat.id, { role: "user", text: "点一下第一条结果" });
     const digest = seen.split("[近期已交付、可在原任务续做] ")[1]?.split("\n")[0] || "";
     assert(digest.includes(recent.id), "recent delivered task is offered");
