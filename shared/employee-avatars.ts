@@ -82,7 +82,7 @@ export function bubbleTint(hex: string) {
   return { fill, ink: inkOn(fill) };
 }
 
-/** The fill and ink of an employee's message bubbles: exactly the color of the bot avatar it shows. */
+/** The fill and ink of my own message bubbles inside one employee's chat: exactly that employee's avatar color. */
 export function avatarBubble(avatar: unknown, seed = "") {
   return bubbleTint((parseBotAvatar(avatar) || defaultBotAvatar(seed)).hex);
 }

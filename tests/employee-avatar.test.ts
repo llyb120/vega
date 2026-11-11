@@ -151,7 +151,7 @@ test("invalid, oversized and disguised image uploads leave the current avatar an
   } finally { root.close(); await store.close(); }
 });
 
-test("an employee's message bubbles take the color of the bot avatar it shows, one color per employee", () => {
+test("my own message bubbles take the color of the employee I am talking to, one color per employee", () => {
   // Bright fills keep dark text, deep fills white: the ink is what makes every color readable.
   assert.equal(inkOn("#ffa424"), "#1d1d21");
   assert.equal(inkOn("#30b4f0"), "#1d1d21");
@@ -169,12 +169,12 @@ test("an employee's message bubbles take the color of the bot avatar it shows, o
     const [light, dark] = [luminance(fill), luminance(ink)].sort((a, b) => b - a);
     assert((light + 0.05) / (dark + 0.05) >= 4.5, `${color.id} bubble text is below WCAG AA`);
   }
-  // The bubble follows the avatar that is actually rendered: the chosen preset, else the stable default bot.
+  // The bubble follows the avatar that employee actually shows: the chosen preset, else its stable default bot.
   assert.deepEqual(avatarBubble("bot:cloud:teal", "any"), bubbleTint("#0fb4a3"));
   assert.deepEqual(avatarBubble("bot:cloud:teal", "another"), avatarBubble("bot:cloud:teal", "any"));
   for (const seed of ["e1", "e2", "e3"]) assert.deepEqual(avatarBubble("", seed), bubbleTint(defaultBotAvatar(seed).hex));
   assert.notDeepEqual(avatarBubble("bot:cloud:teal", "e1"), avatarBubble("bot:round:red", "e1"));
-  assert(new Set(Array.from({ length: 8 }, (_, n) => avatarBubble("", "employee-" + n).fill)).size > 1, "two employees do not share one bubble color");
+  assert(new Set(Array.from({ length: 8 }, (_, n) => avatarBubble("", "employee-" + n).fill)).size > 1, "two employees do not share one color");
 });
 
 test("bot faces are projected onto a turning 3D head", () => {

@@ -11,8 +11,7 @@ import { MESSAGE_POSE } from "./bot-avatar.js";
 import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
-import { avatarBubble } from "../../shared/employee-avatars";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean });
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean, selfTint: Object });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author", "mention"]);
 // In a group, long-pressing an employee's avatar @mentions it in the composer (mentionAuthor); a tap still opens it.
 const pressable = computed(() => props.mentionAuthor && sender.value.kind === "employee");
@@ -22,13 +21,8 @@ const exportOpen = ref(false), exportError = ref("");
 // viewer's own messages sit on the right. A private chat has no authors: user messages are mine, the rest the employee's.
 const mine = computed(() => props.message.role === "user" && (!props.message.author || props.message.author.id === props.viewerId));
 const sender = computed(() => props.message.author ? { kind: props.message.author.kind, id: props.message.author.id, name: props.message.author.name, avatar: props.message.author.avatar || "" } : { kind: "employee", id: props.employeeId, name: props.name, avatar: props.avatar });
-// A 牛马 speaks in the color of the avatar it shows, so two employees never share a bubble color.
-// Only its own messages: a private chat's user bubbles carry no author, so role decides, not sender.
-const tint = computed(() => {
-  if (props.message.role === "user" || props.message.error) return undefined;
-  const color = avatarBubble(sender.value.avatar, sender.value.id || sender.value.name || "");
-  return { background: color.fill, color: color.ink };
-});
+// My own bubbles take the color of the 牛马 I am talking to (the chat view passes it); the 牛马's replies stay neutral.
+const tint = computed(() => (mine.value && !props.message.error ? props.selfTint : undefined));
 const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
 const linkedTask = computed(() => {
   const id = props.message.tasks?.[0]?.id;
