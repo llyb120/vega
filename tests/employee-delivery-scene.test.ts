@@ -62,7 +62,7 @@ test("export replay: 429 inside computer keeps the caller's resume, the browser 
     if (phase === 3) { assert.equal(model.selection, "p/vision"); throw new ProviderError("rate_limit_reached HTTP 429", 400); }
     if (phase === 4) {
       assert.equal(model.selection, "p/vision", "the resumed run continues the browser phase");
-      assert.match(system, /\[场景栈\] 当前在「computer」场景.*自动返回「lightweight」继续调用方保留的工作：回到原场景整理并交付完整测试方案正文/s, "resume survived the failed run");
+      assert.match(JSON.stringify(messages), /\[场景栈\] 当前在「computer」场景.*自动返回「lightweight」继续调用方保留的工作：回到原场景整理并交付完整测试方案正文/s, "resume survived the failed run (dynamic segment)");
       return call("again", "switch_scene", { scene: "computer", message: "重新进入电脑场景" });
     }
     if (phase === 5) {
@@ -210,13 +210,13 @@ test("no caller work: delivering straight from computer needs no extra model tur
 test("a plain reply mid-computer without caller work keeps the browser phase and its return scene for the next run", async () => {
   const { store, engine, employee, add, segment } = await fixture();
   let phase = 0;
-  engine.providers.chat = async (model, system) => {
+  engine.providers.chat = async (model, system, messages) => {
     phase++;
     if (phase === 1) return call("enter", "switch_scene", { scene: "computer", message: "打开页面" });
     if (phase === 2) return { role: "assistant", text: "页面加载中。" };
     if (phase === 3) {
       assert.equal(model.selection, "p/vision", "browser capability is not hidden mid-work");
-      assert.match(system, /任务交付后会话自动恢复到「lightweight」/);
+      assert.match(JSON.stringify(messages), /任务交付后会话自动恢复到「lightweight」/);
       return plan("completed");
     }
     if (phase === 4) return call("done", "employee", { action: "complete", text: "已打开。", summary: "已打开。" });

@@ -141,7 +141,8 @@ test("employee conversation delegates through the existing engine without leakin
     const tools = await Tools.create(engine, computer, await engine.config(), new AbortController().signal, () => {});
     const definitions = await tools.definitions(await engine.catalog.resolve(await engine.config(), "fixture/model"));
     assert(definitions.some((tool) => tool.name === "bash"));
-    assert(!definitions.some((tool) => ["write", "edit", "mcp", "switch_scene"].includes(tool.name)));
+    assert(!definitions.some((tool) => ["write", "edit", "mcp"].includes(tool.name)));
+    assert(definitions.some((tool) => tool.name === "switch_scene"), "a non-relay computer main task keeps switch_scene so it can return");
     const close = Tools.prototype.close;
     try {
       Tools.prototype.close = async () => { throw Error("cleanup failed"); };
@@ -181,7 +182,7 @@ test("employee chat delegates evidence-dependent questions, follows an existing 
         : follow("investigate", { action: "add", kind: "todo", profile: "lightweight", key: "endpoint-investigation", text: investigation });
     }
     if (result.id) {
-      assert(system.includes(result.id), "the next model request sees tasks created in this turn, not a stale task index");
+      assert(JSON.stringify(messages).includes(result.id), "the next model request sees tasks created in this turn, not a stale task index");
       return { role: "assistant", text: `已安排只读调查（任务 ${result.id}），查到实际请求地址和证据后会回到这里。` };
     }
     return { role: "assistant", text: "已跟进原调查，不重复派单。" };

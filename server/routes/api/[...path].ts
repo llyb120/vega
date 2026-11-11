@@ -372,9 +372,22 @@ export default defineEventHandler(async (event) => {
       if (path.length === 2 && method === "GET") {
         const query = getRequestURL(event).searchParams;
         const history = await chatHistory(store, key, query);
+        const parentId = session.spawnParent || (session.agentChild ? session.stageSource : undefined);
+        const parent = parentId && parentId !== session.id ? await store.session(parentId).catch(() => undefined) : undefined;
+        const siblings = await store.sessionsByStageSource(parentId || key);
+        const agentSessions = siblings.filter((item) => item.agentChild).map((item) => ({
+          id: item.id,
+          title: item.title,
+          agentName: item.agentName,
+          status: engine.active.has(item.id) ? "running" : "idle",
+          running: engine.active.has(item.id),
+          updated: item.createdAt,
+        }));
         return {
           session,
-          canWrite: !session.taskId && auth.canWrite(user, session),
+          parentSession: parent ? { id: parent.id, title: parent.title || "主会话", status: engine.active.has(parent.id) ? "running" : "idle" } : undefined,
+          agentSessions,
+          canWrite: !session.taskId && !session.agentChild && auth.canWrite(user, session),
           ...history,
           folds: (await engine.store.all("SELECT data FROM folds WHERE session=?", key))
             .map((r: any) => JSON.parse(r.data)),
@@ -412,6 +425,7 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
       if (["messages", "steer"].includes(path[2]) && method === "POST") {
+        assert(!session.agentChild, "分身记录只读，不能继续发消息");
         assert(!session.taskId, "Use employee controls to resume tasks");
         const message = await inputMessage(a, store, key);
         if (path[2] === "steer") {
@@ -466,6 +480,16 @@ export default defineEventHandler(async (event) => {
         );
         return await store.fork(key);
       }
+    }
+    if (path[0] === "usage" && method === "GET") {
+      const query = getRequestURL(event).searchParams;
+      const requested = query.get("userId") || undefined;
+      const userId = user.role === "admin" ? requested : user.id;
+      if (user.role !== "admin") check(!requested || requested === user.id, 403, "只能查看自己的用量");
+      const from = query.get("from") ? Number(query.get("from")) : undefined;
+      const to = query.get("to") ? Number(query.get("to")) : undefined;
+      const rows = await store.tokenUsage({ userId, from, to, limit: Number(query.get("limit") || 500) });
+      return { rows, self: user.id, admin: user.role === "admin" };
     }
     if (path[0] === "config" && method === "PUT")
       return engine.saveConfig(a as any);

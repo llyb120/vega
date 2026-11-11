@@ -46,10 +46,21 @@ import {
   localEdit,
   localCwdExists,
   LocalAgentUnavailable,
+  localShellPoll,
+  localShellKill,
 } from "./local-agent";
 import { assert, clip, id, type Obj } from "./util";
 import type { Config, Model } from "./config";
 import type { Tool } from "./provider";
+import {
+  BASH_YIELD_SECS,
+  appendBashOutput,
+  backgroundBashMessage,
+  completeBashJob,
+  createBashJob,
+  pollBash,
+} from "./bash-jobs";
+import { agentTools, isAgentTool } from "./spawn-agent";
 export type Outcome = {
   value: any;
   images?: Message["images"];
@@ -76,6 +87,8 @@ export class Tools {
 
   setupAccess?: "provider";
   actorId?: string;
+  batchCalls?: Call[];
+  batchOutcomes?: Outcome[];
   private credentials: CredentialBinding[] = [];
   private keys: KeyFiles;
   private cloud?: CloudRuntime;
@@ -166,6 +179,21 @@ export class Tools {
     if (ctx.kind === "task") parts.push(EMPLOYEE_TASK_RULES);
     if ([...names].some((n) => CHROME_TOOLS.has(n)) && this.session.scene !== "computer" && !sceneModels(this.config, "computer").length)
       parts.push("[电脑场景未配置] 设置里没有为 computer 场景选择模型，所以本会话无法进入电脑场景，列出的 chrome_* 工具也无法执行。需要网页/浏览器操作时如实说明“computer 场景未配置模型（需选择支持图片的模型，可与其他场景共用同一个）”，请用户到设置里补上（任务中用 task_ask_user）；这不是浏览器扩展连接问题，不要让用户重连扩展，也不要用 bash 或脚本绕行。");
+    if (names.has("switch_scene")) {
+      const isolatedComputer = !!this.session.taskId && this.session.scene === "computer" && !!this.session.relayComputer;
+      const mainTask = !!this.session.taskId && !isolatedComputer;
+      const allowed = ["lightweight", "coding", "computer"].filter((scene) => {
+        if (scene === this.session.scene) return false;
+        if (!sceneModels(this.config, scene)?.length) return false;
+        if (!mainTask && scene === "lightweight") return false;
+        if (!mainTask && this.sceneStack.includes(scene)) return false;
+        if (this.session.readOnly && scene === "computer") return false;
+        return true;
+      });
+      parts.push(allowed.length
+        ? `[场景切换] 当前在「${this.session.scene || "未设置"}」。此刻可切入：${allowed.join("、")}。工具 schema 的 enum 保持不变，能否切入以调用时校验为准。`
+        : `[场景切换] 当前在「${this.session.scene || "未设置"}」，此刻没有可切入的其他已配置场景。工具 schema 的 enum 保持不变。`);
+    }
     if (ctx.kind === "normal" && names.has("employee_status")) parts.push(NORMAL_SESSION_EMPLOYEE_RULES);
     if (ctx.kind === "chat") parts.push(ctx.member ? GUEST_RULES : OWNER_RULES);
     return parts.length ? "\n" + parts.join("\n") : "";
@@ -241,9 +269,22 @@ export class Tools {
         ),
         schema(
           "bash",
-          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout120s, max600s. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; chrome_* run only in the computer scene: switch_scene(scene=computer) first. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
-          { command: string, timeout: positive },
+          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout 120s, max 600s. A command still running after 10 seconds is moved to the background and returns jobId immediately so the rest of the turn is not blocked: issue independent short work in the same turn, then continue other work after you have the jobId. **Backgrounded commands are waited on and auto-delivered when you stop issuing new tool calls; bash_poll is usually unnecessary.** Only poll mid-turn when you truly need the result (wait 20–30s; if still running, do other work). detach=true means a long-running service: do not wait and do not auto-deliver at end of turn. Background jobs still honor the total timeout and are killed if the session is cancelled. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; chrome_* run only in the computer scene: switch_scene(scene=computer) first. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
+          {
+            command: string,
+            timeout: positive,
+            detach: { type: "boolean", description: "true = after backgrounding, this turn will not wait and will not auto-deliver the result (long-running service); default waits and auto-delivers at wind-down, no bash_poll needed" },
+          },
           ["command"],
+        ),
+        schema(
+          "bash_poll",
+          "Fetch later output from a background bash job. bash moves a command still running after 10 seconds to the background and returns jobId; if it finishes within wait seconds, you get the result and exit code, otherwise the current tail marked running. poll is a one-shot ask, not an await: give wait 20–30 seconds, and if it is still running go do other work; do not poll the same job back-to-back. Background job records are kept for 60 seconds after timeout.",
+          {
+            job_id: { type: "integer", description: "jobId returned by bash" },
+            wait: { type: "integer", description: "seconds to wait, default 30; more than 60 is usually just idle waiting unless you truly have nothing else to do" },
+          },
+          ["job_id"],
         ),
         schema(
           "change_working_directory",
@@ -296,33 +337,37 @@ export class Tools {
       const ctx = await this.toolContext();
       defs.push(...employeeTools(ctx), ...vaultTools(ctx));
     }
+    // switch_scene.enum is frozen on first use so mid-session scene, stack, or config changes do not bust the tool-schema cache prefix.
+    // Current availability is described in rules() and enforced when the tool is called.
     const isolatedComputer = !!this.session.taskId && this.session.scene === "computer" && !!this.session.relayComputer;
     const mainTask = !!this.session.taskId && !isolatedComputer;
-    const scenes = (mainTask
-      ? (this.session.scene === "computer" ? ["lightweight", "coding"] : ["lightweight", "coding", "computer"])
-      : ["coding", "computer"]).filter((scene) => {
-      const ids = sceneModels(this.config, scene);
-      return scene !== this.session.scene && (mainTask || !this.sceneStack.includes(scene)) && ids?.length;
-    });
+    if (this.session.sceneEnumFrozen === undefined) {
+      const allowed = (mainTask ? ["lightweight", "coding", "computer"] : ["coding", "computer"])
+        .filter((scene) => !!sceneModels(this.config, scene)?.length);
+      this.session.sceneEnumFrozen = allowed;
+    }
+    const scenes = this.session.sceneEnumFrozen || [];
     const switching = defs.find((t) => t.name === "switch_scene");
     if (switching) {
       if (!scenes.length) defs.splice(defs.indexOf(switching), 1);
-      else switching.parameters.properties.scene.enum = scenes;
+      else switching.parameters.properties.scene.enum = [...scenes];
     }
-
-    if (this.session.readOnly && scenes.some(scene => scene === "coding" || (mainTask && scene === "lightweight")))
-      defs.push(
-        schema(
-          "switch_scene",
-          "Select the model needed for the actual work in this same session; all permissions remain read-only.",
-          {
-            scene: { type: "string", enum: scenes.filter(scene => scene === "coding" || (mainTask && scene === "lightweight")) },
-            message: string,
-            resume: string,
-          },
-          ["scene", "message"],
-        ),
-      );
+    if (this.session.readOnly) {
+      const readable = scenes.filter((scene) => scene === "coding" || (mainTask && scene === "lightweight"));
+      if (readable.length)
+        defs.push(
+          schema(
+            "switch_scene",
+            "Select the model needed for the actual work in this same session; all permissions remain read-only.",
+            {
+              scene: { type: "string", enum: readable },
+              message: string,
+              resume: string,
+            },
+            ["scene", "message"],
+          ),
+        );
+    }
     if (this.session.readOnly) {
       for (const name of ["compress", "decompress"])
         if (!defs.some((t) => t.name === name))
@@ -357,6 +402,8 @@ export class Tools {
     // 与 Nova 一样按用途拆成窄工具：窄 schema 才不会被模型随手塞进无关字段（旧单个 appuse 就因此整批退回）。
     if (this.session.localAgent && this.session.localPlatform === "windows" && !this.session.readOnly)
       defs.push(...appuseTools());
+    // Tool schemas stay frozen for the session: include 分身 tools only when they were enabled at start.
+    if (this.session.allowSpawnFrozen && !this.session.readOnly) defs.push(...agentTools());
     for (const def of defs) {
       def.parameters = structuredClone(def.parameters);
       def.parameters.properties ??= {};
@@ -527,8 +574,22 @@ export class Tools {
         if (side && side !== where)
           throw new Error(`这条命令固定在${side === "local" ? "本机" : "云端"}执行，而任务当前执行权在${where === "local" ? "本机" : "云端"}；本步未执行。请先交接执行权，不把同一命令放到另一端跑。`);
       }
-      if (agent) return localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal);
-      return shell(this.session.cwd, a, this.signal, this.emit, this.cloud, await this.sshEnvironment(String(a.command)));
+      if (agent) return localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal, this.session.id, this.emit);
+      return shell(this.session.cwd, a, this.signal, this.emit, this.cloud, await this.sshEnvironment(String(a.command)), this.session.id);
+    }
+    if (call.name === "bash_poll") {
+      const jobId = a.job_id ?? a.jobId;
+      assert(Number.isInteger(jobId) && jobId >= 1, "job_id required");
+      const wait = a.wait ?? 30;
+      assert(Number.isInteger(wait) && wait >= 1 && wait <= 600, "wait must be 1–600");
+      const result = await pollBash(this.session.id, jobId, wait, this.signal);
+      return { value: result.status === "running" ? { running: true, jobId: result.jobId, output: result.text } : { jobId: result.jobId, output: result.text, exitCode: result.exitCode }, error: result.status === "finished" && !!result.error };
+    }
+    if (isAgentTool(call.name)) {
+      if (this.session.agentChild) return { value: { error: `${call.name} 仅在主会话中可用；分身不能再派生分身` }, error: true };
+      if (this.session.scene === "computer") return { value: { error: "电脑场景不能开启分身" }, error: true };
+      assert(this.session.allowSpawnFrozen, "当前会话未开放分身");
+      return { value: await this.engine.invokeAgentTool(this.session, call, this) };
     }
     if (call.name === "change_working_directory") {
       assert(typeof a.path === "string" && a.path, "path required");
@@ -649,6 +710,7 @@ export class Tools {
   }
   /** Chrome tools are listed in every scene but only run in the computer scene; no automatic switch or relay. */
   private assertBrowserScene(tool = "chrome_*") {
+    if (this.session.agentChild) throw new Error("分身不能占用浏览器，也不能抢占父会话的 Chrome 会话；不要调用 chrome_*。");
     if (this.session.scene === "computer") return;
     const configured = sceneModels(this.config, "computer").length > 0;
     throw new Error(configured
@@ -955,6 +1017,7 @@ export async function shell(
   emit: (type: string, data: any) => void,
   cloud?: CloudRuntime,
   env?: Record<string, string>,
+  session?: string,
 ): Promise<Outcome> {
   assert(typeof a.command === "string" && a.command.trim(), "command required");
   assertShellCommand(a.command);
@@ -963,75 +1026,139 @@ export async function shell(
     Number.isInteger(timeout) && timeout >= 1 && timeout <= 600,
     "timeout must be1–600",
   );
-  const signal = AbortSignal.any([parent, AbortSignal.timeout(timeout * 1000)]);
-  signal.throwIfAborted();
+  const detach = a.detach === true;
+  const hardMs = timeout * 1000;
+  const yieldMs = session ? Math.min(hardMs, BASH_YIELD_SECS * 1000) : hardMs;
+  const started = Date.now();
   const win = process.platform === "win32",
     bin = win ? windowsShell() : "/bin/sh";
-  return await new Promise((resolve) => {
-    const args = win ? ["-NoProfile", "-NonInteractive", "-Command", a.command] : ["-c", a.command];
-    const launch = cloud?.launch(bin, args, cwd, env);
-    const child = spawn(
-      launch?.command || bin,
-      launch?.args || args,
-      {
-        cwd: launch?.cwd || cwd,
-        env: launch ? launch.env : env ? { ...process.env, ...env } : undefined,
+  const args = win ? ["-NoProfile", "-NonInteractive", "-Command", a.command] : ["-c", a.command];
+  const launch = cloud?.launch(bin, args, cwd, env);
+  const child = spawn(
+    launch?.command || bin,
+    launch?.args || args,
+    {
+      cwd: launch?.cwd || cwd,
+      env: launch ? launch.env : env ? { ...process.env, ...env } : undefined,
+      windowsHide: true,
+      detached: !win,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let output = "",
+    truncated = false,
+    last = 0,
+    finished = false,
+    exitCode = -1,
+    fail: string | undefined,
+    job: ReturnType<typeof createBashJob> | undefined;
+  const killTree = () => {
+    if (!child.pid) return;
+    if (win)
+      spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
         windowsHide: true,
-        detached: !win,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: "ignore",
+      });
+    else
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+  };
+  const abort = () => killTree();
+  parent.addEventListener("abort", abort, { once: true });
+  const stdoutDecoder = new StringDecoder("utf8"),
+    stderrDecoder = new StringDecoder("utf8");
+  const collect = (text: string) => {
+    if (!text) return;
+    if (output.length + text.length > 2 << 20) truncated = true;
+    output = (output + text).slice(0, 2 << 20);
+    if (job) appendBashOutput(job, text, truncated);
+    if (Date.now() - last > 200) {
+      last = Date.now();
+      emit("tool_progress", clip(text, 4096));
+    }
+  };
+  child.stdout.on("data", (chunk) => collect(stdoutDecoder.write(chunk)));
+  child.stderr.on("data", (chunk) => collect(stderrDecoder.write(chunk)));
+  const finishValue = (code: number, error?: string) => {
+    collect(stdoutDecoder.end());
+    collect(stderrDecoder.end());
+    return {
+      value: {
+        output,
+        truncated,
+        exitCode: code,
+        error: parent.aborted ? "Cancelled/timeout" : error,
       },
-    );
-    let output = "",
-      truncated = false,
-      last = 0,
-      finished = false;
-    const abort = () => {
-      if (child.pid) {
-        if (win)
-          spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
-            windowsHide: true,
-            stdio: "ignore",
-          });
-        else
-          try {
-            process.kill(-child.pid, "SIGKILL");
-          } catch {
-            child.kill("SIGKILL");
-          }
-      }
-    };
-    signal.addEventListener("abort", abort, { once: true });
-    const stdoutDecoder = new StringDecoder("utf8"),
-      stderrDecoder = new StringDecoder("utf8");
-    const collect = (text: string) => {
-      if (!text) return;
-      if (output.length + text.length > 2 << 20) truncated = true;
-      output = (output + text).slice(0, 2 << 20);
-      if (Date.now() - last > 200) {
-        last = Date.now();
-        emit("tool_progress", clip(text, 4096));
-      }
-    };
-    child.stdout.on("data", (chunk) => collect(stdoutDecoder.write(chunk)));
-    child.stderr.on("data", (chunk) => collect(stderrDecoder.write(chunk)));
+      error: code !== 0 || parent.aborted || !!error,
+    } as Outcome;
+  };
+  const closed = new Promise<void>((resolve) => {
     const done = (code: number, error?: string) => {
       if (finished) return;
       finished = true;
-      collect(stdoutDecoder.end());
-      collect(stderrDecoder.end());
-      signal.removeEventListener("abort", abort);
-      resolve({
-        value: {
+      exitCode = code;
+      fail = error;
+      parent.removeEventListener("abort", abort);
+      if (job) {
+        const cancelled = job.cancelled || parent.aborted;
+        const expired = job.expired || (!cancelled && Date.now() >= job.deadline && code !== 0);
+        completeBashJob(job, {
+          exitCode: cancelled || expired ? -1 : code,
+          error: cancelled ? "Cancelled/timeout" : expired ? `命令超过 ${timeout}s 未结束，已终止` : error,
           output,
           truncated,
-          exitCode: code,
-          error: signal.aborted ? "Cancelled/timeout" : error,
-        },
-        error: code !== 0 || signal.aborted,
-      });
+        });
+      }
+      resolve();
     };
     child.on("error", (e) => done(-1, e.message));
     child.on("close", (code) => done(code ?? -1));
-    if (signal.aborted) abort();
   });
+  const wait = async (ms: number) => {
+    await Promise.race([
+      closed,
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, ms);
+        timer.unref?.();
+        parent.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+      }),
+    ]);
+  };
+  await wait(yieldMs);
+  if (finished) return finishValue(exitCode, fail);
+  if (parent.aborted) {
+    abort();
+    await closed;
+    return finishValue(-1, "Cancelled/timeout");
+  }
+  const elapsed = Date.now() - started;
+  if (elapsed >= hardMs || yieldMs >= hardMs) {
+    abort();
+    await closed;
+    return finishValue(-1, `命令超过 ${timeout}s 未结束，已终止`);
+  }
+  // Still running past the 10s yield: move to the background and return jobId.
+  job = createBashJob({
+    session: session!,
+    waitable: !detach,
+    timeoutSecs: timeout,
+    startedAt: started,
+    kill: abort,
+    output,
+    truncated,
+  });
+  void closed;
+  return {
+    value: {
+      jobId: job.id,
+      running: true,
+      output,
+      truncated,
+      message: backgroundBashMessage(job.id, timeout, detach, output.slice(-4000)),
+    },
+  };
 }
+

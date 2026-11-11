@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { assert, type Obj } from "./util";
 import { assertShellCommand } from "./shell-policy";
+import {
+  appendBashOutput,
+  backgroundBashMessage,
+  consumeBashJob,
+  completeBashJob,
+  createBashJob,
+} from "./bash-jobs";
 import type { Auth, Principal } from "./auth";
 
 export const CLIENT_HEARTBEAT_TIMEOUT = 30000;
@@ -36,6 +43,8 @@ export type Agent = {
   transport?: { send: (job: Obj) => void; close: () => void };
   /** 登录顺序：同一账号只有一个设备干活，以最新登录的为准。 */
   order: number;
+  /** New clients can yield a long exec after 10s and speak exec_poll / exec_kill. */
+  backgroundBash?: boolean;
 };
 
 export function validateClient(a: Obj) {
@@ -51,6 +60,7 @@ export function validateClient(a: Obj) {
   assert(a.browser === undefined || a.browser === "local" || a.browser === "cloud", "Invalid client browser location");
   assert(a.loginState === undefined || typeof a.loginState === "boolean", "Invalid client login state");
   assert(a.sshKeys === undefined || typeof a.sshKeys === "boolean", "Invalid client ssh keys");
+  assert(a.backgroundBash === undefined || typeof a.backgroundBash === "boolean", "Invalid backgroundBash");
   return clientId;
 }
 
@@ -129,6 +139,7 @@ export class LocalAgents {
       this.emit({ type: "clients_changed", targetUser: userId });
     }
     agent.supplement = a.supplement || "";
+    agent.backgroundBash = a.backgroundBash === true;
     // 客户端配置决定浏览器优先；旧客户端不上报时按本机浏览器处理。
     agent.browser = a.browser === "cloud" ? "cloud" : "local";
     agent.loginState = a.loginState !== false;
@@ -177,7 +188,7 @@ export class LocalAgents {
     if (!agent.transport) throw new LocalAgentUnavailable();
     agent.transport.send(job);
   }
-  request(agent: Agent, op: "exec" | "file" | "browser" | "key" | "appuse", args: Obj, signal: AbortSignal) {
+  request(agent: Agent, op: "exec" | "exec_poll" | "exec_kill" | "file" | "browser" | "key" | "appuse", args: Obj, signal: AbortSignal) {
     if (op === "exec") {
       assert(typeof args.command === "string" && args.command.trim(), "command required");
       assertShellCommand(args.command);
@@ -191,7 +202,10 @@ export class LocalAgents {
       // Browser: Nova pickup ≤30s + CDP budget ≤10s, plus margin for slow pages and occasional large-result HTTP upload (Tapd etc.).
       // A too-tight budget used to fire this timer while the socket was healthy, suspend the client
       // as if the link dropped, then surface LocalAgentUnavailable — even when the page later loaded.
-      let remaining = op === "exec" ? (args.timeout + 15) * 1000 : op === "browser" || op === "appuse" ? 180000 : 30000, deadline = 0;
+      let remaining = op === "exec"
+        ? ((args.yieldSecs ? args.yieldSecs : args.timeout) + 15) * 1000
+        : op === "exec_poll" ? ((args.wait || 30) + 15) * 1000
+        : op === "browser" || op === "appuse" ? 180000 : 30000, deadline = 0;
       const finish = (error?: Error, value?: Obj) => {
         if (settled) return;
         settled = true;
@@ -276,12 +290,45 @@ export class LocalAgents {
   }
 }
 
-export async function localShell(hub: LocalAgents, agent: Agent, cwd: string, a: Obj, signal: AbortSignal) {
+export async function localShell(hub: LocalAgents, agent: Agent, cwd: string, a: Obj, signal: AbortSignal, session?: string, emit?: (type: string, data: any) => void) {
   assert(typeof a.command === "string" && a.command.trim(), "command required");
   const timeout = a.timeout ?? 120;
   assert(Number.isInteger(timeout) && timeout >= 1 && timeout <= 600, "Invalid timeout");
-  const r = await hub.request(agent, "exec", { cwd, command: a.command, timeout }, signal);
+  const detach = a.detach === true;
+  if (!agent.backgroundBash || !session) {
+    const r = await hub.request(agent, "exec", { cwd, command: a.command, timeout }, signal);
+    return { value: r, error: Number(r.exitCode) !== 0 || !!r.error };
+  }
+  const job = createBashJob({
+    session,
+    waitable: !detach,
+    timeoutSecs: timeout,
+    kill: () => { void localShellKill(hub, agent, String(job.id), AbortSignal.timeout(15000)).catch(() => {}); },
+    pollRemote: (waitSecs, pollSignal) => localShellPoll(hub, agent, String(job.id), waitSecs, pollSignal || signal),
+  });
+  const r = await hub.request(agent, "exec", { cwd, command: a.command, timeout, yieldSecs: 10, jobId: String(job.id), detach }, signal);
+  if (r.running) {
+    appendBashOutput(job, String(r.output || ""), !!r.truncated);
+    return {
+      value: {
+        jobId: job.id,
+        running: true,
+        output: r.output,
+        truncated: r.truncated,
+        message: backgroundBashMessage(job.id, timeout, detach, String(r.output || "").slice(-4000)),
+      },
+    };
+  }
+  completeBashJob(job, { exitCode: Number(r.exitCode ?? 0), error: r.error ? String(r.error) : undefined, output: String(r.output || ""), truncated: !!r.truncated });
+  consumeBashJob(job);
   return { value: r, error: Number(r.exitCode) !== 0 || !!r.error };
+}
+export async function localShellPoll(hub: LocalAgents, agent: Agent, jobId: string, wait: number, signal: AbortSignal) {
+  const r = await hub.request(agent, "exec_poll", { jobId, wait }, signal);
+  return { running: !!r.running, output: r.output as string | undefined, truncated: !!r.truncated, exitCode: r.exitCode as number | undefined, error: r.error ? String(r.error) : undefined };
+}
+export async function localShellKill(hub: LocalAgents, agent: Agent, jobId: string, signal: AbortSignal) {
+  try { await hub.request(agent, "exec_kill", { jobId }, signal); } catch { /* best effort */ }
 }
 export async function localRead(hub: LocalAgents, agent: Agent, cwd: string, path: string, signal: AbortSignal) {
   const r = await hub.request(agent, "file", { op: "read", cwd, path }, signal);

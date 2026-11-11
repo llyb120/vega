@@ -1,6 +1,7 @@
 <script setup vapor>
 import SettingsView from "./SettingsView.vue";
 import ResourcesView from "./ResourcesView.vue";
+import TokenStatsView from "./TokenStatsView.vue";
 import { LocalAgentPairing, canBridgeLocal, pairingStatusText } from "./local-agent";
 import ConversationTimeline from "./ConversationTimeline.vue";
 import ExperiencesView from "./ExperiencesView.vue";
@@ -77,6 +78,7 @@ const mobileTitles = {
   experiences: "经验图谱",
   account: "账号",
   resources: "资源",
+  usage: "Token 统计",
   settings: "设置",
 };
 function closeNavigation() {
@@ -1614,7 +1616,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @read="unread.groupRead" />
       <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
       <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" :tab="pageSub" @tab="setPageTab" />
-      <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" />
+      <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" @open="openEmployee($event)" />
       <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
         <template v-if="(creatingEmployee || !employees.length)">
           <PageHeader :title="canExecute ? '创建新牛马' : '数字牛马'" :subtitle="canExecute ? '取个名字，交代工作方向，就可以开始了。' : ''" :back="employees.length ? '返回' : ''" @back="creatingEmployee = false" />
@@ -1701,6 +1703,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
         </template>
       </section>
       <ResourcesView v-else-if="view === 'resources'" />
+      <TokenStatsView v-else-if="view === 'usage'" :api="api" :admin="isAdmin" :self-id="user.id" />
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" />
       <ExperiencesView v-else-if="view === 'experiences' && isAdmin" :api="api" :tab="pageSub" @tab="setPageTab" />
       <SettingsView v-else-if="view === 'settings' && isAdmin" :api="api" :config="config" :user-id="user.id" :models="catalogModels" :tab="pageSub" @tab="setPageTab" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
