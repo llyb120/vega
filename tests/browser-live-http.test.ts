@@ -97,7 +97,7 @@ test(
         {
           headers: {
             Accept: "text/event-stream",
-            Origin: origin,
+            ...(origin ? { Origin: origin } : {}),
             ...(login?.cookie ? { Cookie: login.cookie } : {}),
           },
           signal: controller.signal,
@@ -317,6 +317,11 @@ test(
         crossOrigin = await open(first.value.ticket, admin, "https://evil.test").catch((e) => e);
       assert.equal(anonymous.status, 401, "a stream without the session cookie is unauthorized");
       assert.equal(crossOrigin.status, 403, "another origin cannot read this browser");
+      // 浏览器对同源 GET 不带 Origin（只有 POST 和跳源请求才带）；事件流/实时画面必须照样开。
+      const browserTicket = await request("/chrome/live", "POST", { tabTag: "C1-live" }, admin);
+      const browserStream = await open(browserTicket.value.ticket, admin, "");
+      await browserStream.wait("frame");
+      assert.match(browserStream.channel.id, /^[A-Za-z0-9_-]{16,}$/, "a same-origin GET without Origin opens the live stream");
       const live = await open(first.value.ticket, admin);
       await live.wait("frame");
       await live.wait("frame", (m) => m.frameId > 1);

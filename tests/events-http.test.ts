@@ -126,6 +126,23 @@ test(
       };
       assert.equal((await connect("")).status, 401, "a stream without the login cookie is refused as unauthenticated, never opened");
       assert.equal((await connect(login.cookie, "https://evil.test")).status, 403);
+      // 浏览器对同源 GET 不带 Origin（只有 POST 和跳源请求才带），事件流必须照样开；
+      // 跨站信号仍被 sec-fetch-site 拦住。这两条就是“网页里永远 403”那个故障的回归。
+      const browserTicket = (await request("/events", "POST", {}, login)).value.ticket;
+      const browserStream = await fetch(
+        base + "/api/events?ticket=" + browserTicket,
+        { headers: { cookie: login.cookie, "sec-fetch-site": "same-origin" } },
+      );
+      assert.equal(browserStream.status, 200, "同源 GET 没有 Origin 也不能当成跨站");
+      const browserPage = await stream(browserStream);
+      opened.push(browserPage);
+      await browserPage.until(() => browserPage.messages.some((v: any) => v.type === "ready"));
+      const crossSiteTicket = (await request("/events", "POST", {}, login)).value.ticket;
+      assert.equal(
+        (await fetch(base + "/api/events?ticket=" + crossSiteTicket, { headers: { cookie: login.cookie, "sec-fetch-site": "cross-site" } })).status,
+        403,
+        "跨站请求仍然拒绝",
+      );
       const page = await open(login.cookie);
       const hello = page.messages.find((v: any) => v.type === "ready");
       assert.equal(typeof hello.epoch, "string");

@@ -76,9 +76,12 @@ export class EventsSocket {
     const url = new URL(request.url),
       origin = process.env.VEGA_PUBLIC_URL
         ? new URL(process.env.VEGA_PUBLIC_URL).origin
-        : url.origin;
+        : url.origin,
+      // 浏览器对同源 GET 不发 Origin（事件流就是一条 GET），所以没有 Origin 不算跨站；
+      // 跨站请求仍被自己的 sec-fetch-site 和「响应不带 CORS 头」挡住。
+      sent = request.headers.get("origin");
     assert(
-      request.headers.get("origin") === origin &&
+      (!sent || sent === origin) &&
         !["cross-site", "same-site"].includes(request.headers.get("sec-fetch-site") || ""),
       "不允许跨站连接",
     );

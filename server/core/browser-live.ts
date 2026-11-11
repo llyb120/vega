@@ -76,9 +76,11 @@ export class BrowserLive {
     const url = new URL(request.url),
       origin = process.env.VEGA_PUBLIC_URL
         ? new URL(process.env.VEGA_PUBLIC_URL).origin
-        : url.origin;
+        : url.origin,
+      // 浏览器对同源 GET 不发 Origin（实时画面同样是一条 GET）；跨站请求仍被 sec-fetch-site 与无 CORS 头挡住。
+      sent = request.headers.get("origin");
     assert(
-      request.headers.get("origin") === origin &&
+      (!sent || sent === origin) &&
         !["cross-site", "same-site"].includes(
           request.headers.get("sec-fetch-site") || "",
         ),
