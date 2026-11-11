@@ -56,6 +56,8 @@ export function headlessArguments(profile: string, extension: string, network?: 
   return args;
 }
 
+const EXTENSION_STARTUP_MS = 10000;
+
 async function loadExtension(child: ChildProcess, path: string) {
   const input = child.stdio[3] as Duplex, output = child.stdio[4] as Duplex;
   await new Promise<void>((resolve, reject) => {
@@ -83,7 +85,7 @@ async function loadExtension(child: ChildProcess, path: string) {
         } catch { finish(Error("Invalid Chromium startup response")); }
       }
     };
-    const timer = setTimeout(() => finish(Error("Chromium extension startup timeout")), 10000);
+    const timer = setTimeout(() => finish(Error("Chromium extension startup timeout")), EXTENSION_STARTUP_MS);
     child.once("exit", exited);
     input.once("error", finish);
     output.on("data", receive);
@@ -145,8 +147,10 @@ export async function reclaimProfile(profile: string, cloud?: CloudRuntime): Pro
 const removeSingletons = (profile: string, cloud?: CloudRuntime) =>
   Promise.all(["SingletonLock", "SingletonSocket", "SingletonCookie"].map((name) => (cloud?.fs || { rm }).rm(join(profile, name), { force: true })));
 
+// Chromium's own words are the only clue when it stalls before answering; keep them in every failure report.
+const stderrTail = (text: string) => text.trim().split("\n").slice(-12).join("\n").slice(-1500);
 function startupError(code: number | null, signal: NodeJS.Signals | null, stderr: string, cause: unknown) {
-  const tail = stderr.trim().split("\n").slice(-12).join("\n").slice(-1500);
+  const tail = stderrTail(stderr);
   const parts = [`牛马浏览器 Chromium 启动即退出（${signal ? "signal " + signal : "code " + code}）`];
   // 21 = profile in use; 0 = handed off to a live Chromium already holding the profile.
   if (code === 21 || code === 0) parts.push("该牛马的浏览器配置目录正被残留 Chromium 占用（未能自动清理，请结束占用该目录的 chromium 进程后重试）");
@@ -248,9 +252,12 @@ export class HeadlessBrowser {
         // A dead pipe (ECONNRESET/EPIPE) means Chromium is exiting: wait briefly for its exit status.
         if (child.exitCode === null && child.signalCode === null)
           await new Promise<void>((yes) => { const timer = setTimeout(yes, 2000); child.once("exit", () => { clearTimeout(timer); yes(); }); });
-        const exited = child.exitCode !== null || child.signalCode !== null;
+        const exited = child.exitCode !== null || child.signalCode !== null, tail = stderrTail(stderr);
         await this.close();
-        throw exited ? startupError(child.exitCode, child.signalCode, stderr, error) : error;
+        // A live-but-silent Chromium is a hang or a cold start slower than the budget; losing its stderr
+        // left every container failure reporting a bare "extension startup timeout".
+        throw exited ? startupError(child.exitCode, child.signalCode, stderr, error)
+          : Error(`牛马浏览器 Chromium ${EXTENSION_STARTUP_MS / 1000} 秒内没有响应扩展加载命令（进程仍在运行）` + (tail ? "；stderr：" + tail : "；无错误输出"));
       }
     }
   }
