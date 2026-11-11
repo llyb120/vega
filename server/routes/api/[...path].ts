@@ -30,6 +30,7 @@ import { clientBaseName, clientPackage } from "../../core/client-package";
 import { CLIENT_BODY_LIMIT } from "../../core/client-socket";
 import { installBrowserExtension } from "../../core/local-extension";
 import { assert, filterAsync, object, type Obj } from "../../core/util";
+import { Experiences, experienceKindForOwner } from "../../core/experiences";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
 import presets from "../../../shared/provider-presets.json";
@@ -685,10 +686,10 @@ export default defineEventHandler(async (event) => {
       await browser.bridge.start();
       return browser.bridge.status();
     }
-    if (path[0] === "experiences" && method === "GET")
-      return engine.chrome.experiences.graph(
-        (await engine.chrome.experiences.all()).filter((e) => !e.disabled),
-      );
+    if (path[0] === "experiences" && method === "GET") {
+      const experiences = new Experiences(store, experienceKindForOwner(user.id));
+      return experiences.graph((await experiences.all()).filter((e) => !e.disabled));
+    }
     throw createError({
       statusCode: 404,
       statusMessage: "API route not found",

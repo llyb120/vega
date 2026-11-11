@@ -33,6 +33,7 @@ import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, fo
 import { EmployeeBrowsers } from "./employee-browsers";
 import { NetworkRelay } from "./network-relay";
 import { LocalBrowsers } from "./local-browsers";
+import { Experiences } from "./experiences";
 import { Vault } from "./vault";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
 
@@ -309,6 +310,7 @@ export class Engine {
     await rm(keyDir(store.files.root), { recursive: true, force: true });
     await engine.vault.key();
     await engine.runtimes.loadAll();
+    await Experiences.adoptOwnerStores(store);
     await engine.fire.recover();
     return engine;
   }

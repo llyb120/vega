@@ -2,6 +2,7 @@ import { dirname, join, resolve } from "node:path";
 import { rm } from "node:fs/promises";
 import type { Store } from "./store";
 import { Chrome } from "./chrome";
+import { experienceKindForOwner } from "./experiences";
 import { ChromeBridge } from "./chrome-bridge";
 import { HeadlessBrowser } from "./headless";
 import { assert, sleep, workspaceFile } from "./util";
@@ -33,7 +34,8 @@ export class EmployeeBrowsers {
     let entry = this.entries.get(id);
     if (!entry) {
       this.profile(id);
-      entry = { chrome: new Chrome(this.store, new ChromeBridge(true), this.pageScript, "experience:" + id), browser: new HeadlessBrowser() };
+      const ownerId = id.startsWith("user_") ? id.slice(5) : undefined;
+      entry = { chrome: new Chrome(this.store, new ChromeBridge(true), this.pageScript, ownerId ? experienceKindForOwner(ownerId) : "experience:" + id), browser: new HeadlessBrowser() };
       this.entries.set(id, entry);
     }
     assert(!entry.stopping, "Employee browser is stopping");

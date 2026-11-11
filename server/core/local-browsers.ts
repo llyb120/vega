@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Chrome } from "./chrome";
+import { experienceKindForOwner } from "./experiences";
 import { ChromeBridge } from "./chrome-bridge";
 import { LocalAgentUnavailable, type Agent, type LocalAgents } from "./local-agent";
 import type { Store, Session } from "./store";
@@ -38,7 +39,7 @@ export class LocalBrowsers {
     if (!entry || entry.agent !== agent) {
       if (entry) await this.release(session.id, true);
       const bridge = new LocalBridge(this.hub, agent);
-      const chrome = new Chrome(this.store, bridge, this.pageScript, "experience:client:" + agent.clientId);
+      const chrome = new Chrome(this.store, bridge, this.pageScript, experienceKindForOwner(agent.userId || session.ownerId));
       const shared = [...this.sessions.values()].find(value => value.agent === agent);
       // Navigation affects every session on this browser; observation keys still isolate input ownership.
       if (shared) chrome.observations = shared.chrome.observations;

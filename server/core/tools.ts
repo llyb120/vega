@@ -33,7 +33,7 @@ import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
 import { APPUSE_RULES, CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
 import { appuseTools, appuseArguments, APPUSE_TOOLS, normalizeDesktopAction } from "./appuse-tools";
-import { DesktopExperiences } from "./experiences";
+import { DesktopExperiences, experienceKindForOwner } from "./experiences";
 import { prepareDutyInput } from "./duty-condition";
 import { Context } from "./context";
 import type { EmployeeState } from "./employee";
@@ -517,7 +517,8 @@ export class Tools {
       const args = appuseArgs || { ...a, owner: this.session.id };
       // 经验图谱与浏览器路径共用同一套存储与评分，只是 scope 是应用名而不是站点 origin。
       if (String(args.operation || "").startsWith("experience_")) {
-        const experiences = new DesktopExperiences(this.engine.store, "experience");
+        assert(this.session.ownerId, "经验图谱需要归属用户");
+        const experiences = new DesktopExperiences(this.engine.store, experienceKindForOwner(this.session.ownerId));
         return { value: await experiences.execute(this.session.id, args, undefined) };
       }
       const result = await localAppuse(this.engine.localAgents, agent, args, this.signal);

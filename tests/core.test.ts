@@ -19,7 +19,7 @@ import {
   workSlot,
   type EmployeeRuntime,
 } from "../server/core/employee";
-import { Experiences } from "../server/core/experiences";
+import { Experiences, experienceKindForOwner } from "../server/core/experiences";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Chrome } from "../server/core/chrome";
 import { Engine, dependencies } from "../server/core/engine";
@@ -383,6 +383,69 @@ test("experience routes dedup wording, share only identical prefixes and fail cl
     });
   assert.equal(result.totalRoutes, 1);
   assert.equal(result.graph.roots.length, 1);
+});
+test("同一用户的牛马共用经验图谱，读写都落在该用户的云端存储", async () => {
+  const db = await store(),
+    dir = await temp(),
+    owner = "owner-a",
+    other = "owner-b",
+    session = await db.newSession({ cwd: dir, ownerId: owner }),
+    payload = {
+      operation: "experience_save",
+      snapshotId: "s",
+      experience: {
+        scope: "https://a.test",
+        task: "导出报表",
+        conditions: ["已登录"],
+        steps: ["打开报表", "点击导出"],
+        checks: ["下载完成"],
+        pitfalls: [],
+        outcome: "success",
+        evidence: "完成",
+        redacted: true,
+      },
+    };
+  // 即使从按客户端拆开的旧 kind 写入，也会按会话归属落到用户存储。
+  const fromClient = new Experiences(db, "experience:client:abcdef1234567890abcdef1234567890");
+  await fromClient.execute(session.id, payload, { id: "s", origin: "https://a.test" });
+  const shared = new Experiences(db, experienceKindForOwner(owner));
+  assert.equal((await shared.all()).length, 1);
+  assert.equal((await fromClient.all()).length, 0);
+  const session2 = await db.newSession({ cwd: dir, ownerId: owner });
+  const again: any = await shared.execute(session2.id, payload, { id: "s", origin: "https://a.test" });
+  assert.equal((await shared.all()).length, 1);
+  assert.equal(again.experience.confidence, "reused");
+  const foreign = new Experiences(db, experienceKindForOwner(other));
+  assert.equal((await foreign.all()).length, 0);
+});
+test("把按客户端或牛马拆开的经验迁到用户共用存储", async () => {
+  const db = await store(),
+    owner = "owner-1",
+    clientId = "abcdef1234567890abcdef1234567890",
+    route = {
+      scope: "https://a.test",
+      conditions: ["已登录"],
+      steps: ["打开"],
+      checks: ["完成"],
+      pitfalls: [],
+      alternatives: [],
+      successes: [],
+      failures: [],
+      disabled: false,
+      source: "auto",
+      updatedAt: 1,
+    };
+  await db.save("employee", "e1", { id: "e1", ownerId: owner, name: "A" });
+  await db.save("client-token", "h1", { hash: "h1", userId: owner, clientId });
+  await db.save("experience:e1", "r1", { ...route, id: "r1", task: "路径一" });
+  await db.save("experience:client:" + clientId, "r2", { ...route, id: "r2", task: "路径二" });
+  const result = await Experiences.adoptOwnerStores(db);
+  assert.equal(result.moved, 2);
+  const all = await new Experiences(db, experienceKindForOwner(owner)).all();
+  assert.equal(all.length, 2);
+  assert.deepEqual(all.map((item: any) => item.task).sort(), ["路径一", "路径二"]);
+  assert.equal((await db.objects("experience:e1")).length, 0);
+  assert.equal((await db.objects("experience:client:" + clientId)).length, 0);
 });
 test("agent retries provider only, shares scene history, leaves one side effect", async () => {
   let n = 0;

@@ -12,7 +12,96 @@ const terms = (s: string) =>
   );
 const normalizeList = (a: string[]) => a.map(norm);
 const setKey = (a: string[]) => normalizeList(a).sort().join("|");
+/** 同一账号下所有牛马共用一份经验图谱，存在云端，按用户隔离。 */
+export function experienceKindForOwner(ownerId: string) {
+  const id = String(ownerId || "").trim();
+  assert(id, "经验图谱需要归属用户");
+  return "experience:user_" + id;
+}
+function sameRoute(a: Obj, b: Obj) {
+  return (
+    a.scope === b.scope &&
+    norm(a.task) === norm(b.task) &&
+    setKey(a.conditions || []) === setKey(b.conditions || []) &&
+    setKey(a.checks || []) === setKey(b.checks || []) &&
+    JSON.stringify(normalizeList(a.steps || [])) === JSON.stringify(normalizeList(b.steps || []))
+  );
+}
+function mergeRoute(target: Obj, source: Obj) {
+  target.successes = [...new Set([...(target.successes || []), ...(source.successes || [])])].slice(0, 32);
+  target.failures = [...new Set([...(target.failures || []), ...(source.failures || [])])].slice(0, 32);
+  if ((source.updatedAt || 0) >= (target.updatedAt || 0)) {
+    target.updatedAt = source.updatedAt || target.updatedAt;
+    if (source.lastReason) target.lastReason = source.lastReason;
+    if (source.evidence) target.evidence = source.evidence;
+    if (source.source === "model" && target.source === "auto") target.source = "model";
+  }
+  if (source.disabled) target.disabled = true;
+  if (Array.isArray(source.alternatives) && source.alternatives.length) {
+    target.alternatives = target.alternatives || [];
+    for (const alt of source.alternatives) {
+      const existing = target.alternatives.find((item: Obj) => item.at === alt.at);
+      if (existing) existing.actions = [...new Set([...(existing.actions || []), ...(alt.actions || [])])].slice(0, 12);
+      else target.alternatives.push(alt);
+    }
+  }
+}
 export class Experiences {
+  static async adoptOwnerStores(store: Store) {
+    const rows = (await store.all(
+      "SELECT kind, id, data FROM objects WHERE kind = ? OR kind LIKE ?",
+      "experience",
+      "experience:%",
+    )) as { kind: string; id: string; data: string }[];
+    const pending = rows.filter((row) => !row.kind.startsWith("experience:user_"));
+    if (!pending.length) return { moved: 0 };
+    const employeeOwner = new Map(
+      (await store.objects<any>("employee")).map((employee) => [employee.id, employee.ownerId] as const),
+    );
+    const clientOwner = new Map(
+      (await store.objects<{ userId: string; clientId: string }>("client-token")).map((grant) => [grant.clientId, grant.userId] as const),
+    );
+    const users = (await store.all("SELECT id FROM web_users")) as { id: string }[];
+    const fallback = users.length === 1 ? users[0].id : undefined;
+    const inferOwner = async (kind: string, entry: Obj) => {
+      if (kind.startsWith("experience:client:")) return clientOwner.get(kind.slice("experience:client:".length));
+      if (kind.startsWith("experience:") && !kind.startsWith("experience:user_")) {
+        const ownerId = employeeOwner.get(kind.slice("experience:".length));
+        if (ownerId) return ownerId;
+      }
+      for (const sessionId of [...(entry.successes || []), ...(entry.failures || [])]) {
+        if (typeof sessionId !== "string" || !(await store.hasSession(sessionId))) continue;
+        const ownerId = (await store.session(sessionId)).ownerId;
+        if (ownerId) return ownerId;
+      }
+      return fallback;
+    };
+    let moved = 0;
+    await store.transaction(async () => {
+      for (const row of pending) {
+        const entry = JSON.parse(row.data);
+        const ownerId = await inferOwner(row.kind, entry);
+        if (!ownerId) continue;
+        const kind = experienceKindForOwner(ownerId);
+        const cloud = await store.objects<any>(kind);
+        const byId = cloud.find((item) => item.id === entry.id);
+        const byRoute = cloud.find((item) => item.id !== entry.id && sameRoute(item, entry));
+        if (byId) {
+          mergeRoute(byId, entry);
+          await store.save(kind, byId.id, byId);
+        } else if (byRoute) {
+          mergeRoute(byRoute, entry);
+          await store.save(kind, byRoute.id, byRoute);
+        } else {
+          entry.id = entry.id || row.id;
+          await store.save(kind, entry.id, entry);
+        }
+        await store.remove(row.kind, row.id);
+        moved++;
+      }
+    });
+    return { moved };
+  }
   shown = new Set<string>();
   trails = new Map<
     string,
@@ -26,6 +115,15 @@ export class Experiences {
     }
   >();
   constructor(public store: Store, public kind = "experience") {}
+  async kindFor(sessionId: string) {
+    try {
+      if (sessionId && (await this.store.hasSession(sessionId))) {
+        const ownerId = (await this.store.session(sessionId)).ownerId;
+        if (ownerId) return experienceKindForOwner(ownerId);
+      }
+    } catch { /* 测试里会传入非会话 id */ }
+    return this.kind;
+  }
   scope(raw: string): string {
     const u = new URL(raw);
     assert(
@@ -123,7 +221,8 @@ export class Experiences {
       typeof r.task === "string" && r.task.trim() && r.task.length <= 300,
       "Experience task required, max 300 characters",
     );
-    const all = await this.all();
+    const kind = await this.kindFor(owner),
+      all = await this.store.objects<any>(kind);
     if (op === "experience_search") {
       const query = terms(r.task);
       let matches = all
@@ -298,7 +397,7 @@ export class Experiences {
     entry.evidence = r.evidence || "";
     entry.snapshotId = args.snapshotId;
     entry.updatedAt = Date.now();
-    await this.store.save(this.kind, entry.id, entry);
+    await this.store.save(kind, entry.id, entry);
     const trail = this.trails.get(owner + ":" + scope);
     if (trail && !args.auto) trail.modelSaved = true;
     return { experience: this.summary(entry), saved: true };
@@ -307,7 +406,7 @@ export class Experiences {
     const key = owner + ":" + origin;
     if (this.shown.has(key)) return;
     this.shown.add(key);
-    const entries = (await this.all())
+    const entries = (await this.store.objects<any>(await this.kindFor(owner)))
       .filter((e) => e.scope === origin && !e.disabled)
       .sort(
         (a, b) =>
@@ -356,11 +455,12 @@ export class Experiences {
     trail.steps = trail.steps.slice(0, 12);
   }
   async finish(owner: string, success: boolean) {
+    const kind = await this.kindFor(owner);
     for (const [key, trail] of this.trails) {
       if (!key.startsWith(owner + ":")) continue;
       this.trails.delete(key);
       if (!success || trail.modelSaved || trail.steps.length < 2) continue;
-      const autos = (await this.all()).filter(
+      const autos = (await this.store.objects<any>(kind)).filter(
         (e) => e.scope === trail.scope && e.source === "auto",
       );
       const existing = autos.find(
@@ -391,7 +491,7 @@ export class Experiences {
                     this.kind,
                     autos.sort((a, b) => a.updatedAt - b.updatedAt)[0].id,
                   );
-      await this.store.save(this.kind, entry.id, entry);
+      await this.store.save(kind, entry.id, entry);
     }
     for (const key of this.shown)
       if (key.startsWith(owner + ":")) this.shown.delete(key);
