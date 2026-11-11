@@ -130,7 +130,10 @@ export class Engine {
     // 客户端离线/回连由调度器统一处理：自动接管与增量回传不依赖界面点击。
     if ((value as Obj)?.type === "clients_changed") {
       const owner = String((value as Obj).targetUser || "");
-      if (owner) this.runtimePush?.(owner);
+      if (owner) {
+        this.runtimePush?.(owner);
+        void this.runtimes?.releaseUnavailable(owner).catch(() => {});
+      }
       void this.handoffs?.clients(value as Obj).catch(() => {});
       // 回连的可能正是某个任务在等的设备：交回调度器，由它核对 waitClient 后继续。
       void this.employee?.all().then((all) => all.forEach((employee) => employee.schedule())).catch(() => {});

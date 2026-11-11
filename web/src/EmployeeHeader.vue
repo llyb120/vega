@@ -16,7 +16,7 @@ defineProps({
   workOpen: Boolean,
   workCount: Number,
 });
-const emit = defineEmits(["tab", "delete", "toggle-work", "menu"]);
+const emit = defineEmits(["tab", "delete", "toggle-work", "menu", "set-master"]);
 const menu = ref(null);
 const icons = { chat: "chat", tasks: "tasks", browser: "globe", duties: "repeat", memories: "memory", capabilities: "zap", vault: "key", settings: "settings" };
 function close(target) { if (target.value) target.value.open = false; }
@@ -24,6 +24,16 @@ function masterName(employee, id) {
   if (!id || id === "cloud") return "云端";
   const node = employee.runtime?.nodes?.find((item) => item.id === id);
   return node?.name || ("客户端 " + String(id).slice(0, 8));
+}
+function hasClient(employee) {
+  return !!(employee.runtime?.hasClient || employee.runtime?.nodes?.some((item) => item.kind === "client" && item.online));
+}
+function masterNodes(employee) {
+  return (employee.runtime?.nodes || []).filter((item) => item.kind === "cloud" || item.online);
+}
+function changeMaster(kind, event) {
+  const value = event.target.value;
+  emit("set-master", kind === "fs" ? { fsMaster: value } : { browserMaster: value });
 }
 </script>
 <template>
@@ -34,7 +44,12 @@ function masterName(employee, id) {
       <div class="identity-text">
         <h2 class="truncate">{{ employee.name || "加载中…" }}</h2>
         <span :class="['identity-status', tone]" :title="employee.instruction || '把目标交给我，任务由我安排。'"><span class="dot" :class="[tone, { pulse: tone === 'info' }]" aria-hidden="true"></span>{{ status }}</span>
-        <p v-if="employee.runtime" class="master-line">文件系统 Master：{{ masterName(employee, employee.runtime.fsMaster) }} · 浏览器 Master：{{ masterName(employee, employee.runtime.browserMaster) }}</p>
+        <p v-if="employee.runtime && !hasClient(employee)" class="master-line">文件系统、浏览器均为云端 Master</p>
+        <div v-else-if="employee.runtime && employee.canManage" class="master-line master-edit">
+          <label>文件系统 <select :value="employee.runtime.fsMaster" aria-label="文件系统 Master" @change="changeMaster('fs', $event)"><option v-for="node in masterNodes(employee)" :key="'fs-' + node.id" :value="node.id">{{ node.name }}</option></select></label>
+          <label>浏览器 <select :value="employee.runtime.browserMaster" aria-label="浏览器 Master" @change="changeMaster('browser', $event)"><option v-for="node in masterNodes(employee)" :key="'browser-' + node.id" :value="node.id">{{ node.name }}</option></select></label>
+        </div>
+        <p v-else-if="employee.runtime" class="master-line">文件系统 Master：{{ masterName(employee, employee.runtime.fsMaster) }} · 浏览器 Master：{{ masterName(employee, employee.runtime.browserMaster) }}</p>
       </div>
     </div>
     <nav class="employee-tabs" aria-label="牛马工作区">
@@ -57,7 +72,7 @@ function masterName(employee, id) {
 </template>
 <style scoped>
 .employee-header { display: flex; align-items: center; gap: 4px 16px; flex: none; min-height: 56px; padding: 0 12px 0 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
-.identity { display: flex; align-items: center; gap: 10px; flex: 0 1 auto; min-width: 0; max-width: 300px; }
+.identity { display: flex; align-items: center; gap: 10px; flex: 0 1 auto; min-width: 0; max-width: 420px; }
 .header-menu { display: none; margin-left: -6px; }
 .identity-avatar { display: grid; place-items: center; flex: none; width: 36px; height: 36px; overflow: hidden; border-radius: 10px; background: var(--accent-soft); color: var(--accent-text); font-size: 15px; font-weight: 600; }
 .identity-text { display: grid; min-width: 0; }
@@ -107,4 +122,7 @@ function masterName(employee, id) {
   .icon-summary { width: 40px; height: 40px; }
 }
 .master-line { margin: 2px 0 0; font-size: 12px; color: var(--muted, #667); }
+.master-edit { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.master-edit label { display: inline-flex; align-items: center; gap: 4px; }
+.master-edit select { height: 24px; max-width: 140px; padding: 0 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font-size: 12px; }
 </style>

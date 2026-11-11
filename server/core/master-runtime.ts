@@ -67,24 +67,68 @@ export class MasterRuntimes {
     }
   }
 
-  /** 同步快照：未配置时用该账户旧客户端上报的缺省，否则两端都是云端。 */
-  peek(employeeId: string, ownerId = ""): EmployeeMasters {
-    const stored = this.cache.get(employeeId);
-    if (stored) return stored;
+  hasOnlineClient(ownerId: string) {
+    return !!ownerId && this.agents.list(ownerId).length > 0;
+  }
+
+  private onlineIds(ownerId: string) {
+    return new Set(ownerId ? this.agents.list(ownerId).map((item) => item.id) : []);
+  }
+
+  /** 所选 Master 必须当前在线；否则这端由云端担任。没有在线客户端时两端都是云端。 */
+  resolveMaster(master: MasterId, ownerId = "") {
+    if (master === CLOUD_MASTER) return master;
+    return ownerId && this.onlineIds(ownerId).has(master) ? master : CLOUD_MASTER;
+  }
+
+  private stored(employeeId: string, ownerId = ""): EmployeeMasters {
+    const saved = this.cache.get(employeeId);
+    if (saved) return saved;
     const fallback = (ownerId && this.fallback.get(ownerId)) || { fsMaster: CLOUD_MASTER, browserMaster: CLOUD_MASTER };
     return { employeeId, ownerId, fsMaster: fallback.fsMaster, browserMaster: fallback.browserMaster, updatedAt: 0 };
+  }
+
+  private effective(runtime: EmployeeMasters, ownerId = ""): EmployeeMasters {
+    const owner = ownerId || runtime.ownerId || "";
+    const fsMaster = this.resolveMaster(runtime.fsMaster, owner);
+    const browserMaster = this.resolveMaster(runtime.browserMaster, owner);
+    if (fsMaster === runtime.fsMaster && browserMaster === runtime.browserMaster) return runtime;
+    return { ...runtime, fsMaster, browserMaster };
+  }
+
+  /** 生效中的快照：未配置时用该账户旧客户端上报的缺省，否则两端都是云端；所选客户端不在线时也回落到云端。 */
+  peek(employeeId: string, ownerId = ""): EmployeeMasters {
+    return this.effective(this.stored(employeeId, ownerId), ownerId);
   }
 
   async get(employeeId: string, ownerId = ""): Promise<EmployeeMasters> {
     if (!employeeId) return this.peek("", ownerId);
     if (!this.known.has(employeeId)) {
-      const stored = await this.store.object<EmployeeMasters>(RECORD, employeeId);
-      if (stored && isMasterId(stored.fsMaster) && isMasterId(stored.browserMaster)) {
-        this.cache.set(employeeId, stored);
+      const saved = await this.store.object<EmployeeMasters>(RECORD, employeeId);
+      if (saved && isMasterId(saved.fsMaster) && isMasterId(saved.browserMaster)) {
+        this.cache.set(employeeId, saved);
       }
       this.known.add(employeeId);
     }
     return this.peek(employeeId, ownerId);
+  }
+
+  /**
+   * 所选 Master 已不在线时，把该端写回云端并触发交接。
+   * 没有在线客户端时，这头牛马的文件系统和浏览器都由云端当 Master。
+   */
+  async releaseUnavailable(ownerId: string) {
+    if (!ownerId) return;
+    const employees = await this.listEmployees?.(ownerId) || [];
+    const online = this.onlineIds(ownerId);
+    for (const item of employees) {
+      if (!this.known.has(item.id)) await this.get(item.id, ownerId);
+      const current = this.stored(item.id, ownerId);
+      if (current.fsMaster !== CLOUD_MASTER && !online.has(current.fsMaster))
+        await this.setMaster(item.id, "fs", CLOUD_MASTER, "unavailable");
+      if (current.browserMaster !== CLOUD_MASTER && !online.has(current.browserMaster))
+        await this.setMaster(item.id, "browser", CLOUD_MASTER, "unavailable");
+    }
   }
 
   /** 这头牛马的云端是文件系统或浏览器 Master 时，才允许单向借助 Follower 出网。 */
@@ -112,16 +156,18 @@ export class MasterRuntimes {
     return { nodes, employees: views };
   }
 
-  async viewEmployee(employeeId: string, ownerId = ""): Promise<EmployeeMasterView & { nodes: RuntimeNode[] }> {
+  async viewEmployee(employeeId: string, ownerId = ""): Promise<EmployeeMasterView & { nodes: RuntimeNode[]; hasClient: boolean }> {
     const info = await this.employeeInfo?.(employeeId);
     const owner = ownerId || info?.ownerId || "";
     const runtime = await this.get(employeeId, owner);
+    const nodes: RuntimeNode[] = owner ? await this.nodes(owner) : [{ id: CLOUD_MASTER, name: "云端", kind: "cloud" }];
     return {
       id: employeeId,
       name: info?.name || "",
       fsMaster: runtime.fsMaster,
       browserMaster: runtime.browserMaster,
-      nodes: owner ? await this.nodes(owner) : [{ id: CLOUD_MASTER, name: "云端", kind: "cloud" }],
+      hasClient: this.hasOnlineClient(owner),
+      nodes,
     };
   }
 
@@ -143,8 +189,7 @@ export class MasterRuntimes {
   async allowedMaster(ownerId: string, master: MasterId) {
     assert(isMasterId(master), "无效的 Master");
     if (master === CLOUD_MASTER) return master;
-    const nodes = await this.nodes(ownerId);
-    assert(nodes.some((node) => node.id === master), "只能把云端或本账户已授权/已连接的客户端设为 Master");
+    assert(this.onlineIds(ownerId).has(master), "没有在线客户端时由云端担任 Master，只能选择当前在线的客户端");
     return master;
   }
 
@@ -152,17 +197,18 @@ export class MasterRuntimes {
    * 把某头牛马的某一套配置的 Master 设为指定节点，只把这头牛马的其余节点降为 Follower。
    * 写入成功后才通知各端并开始交接这头牛马的工作。
    */
-  async setMaster(employeeId: string, kind: MasterKind, master: MasterId, source: "explicit" | "legacy" = "explicit") {
+  async setMaster(employeeId: string, kind: MasterKind, master: MasterId, source: "explicit" | "legacy" | "unavailable" = "explicit") {
     assert(employeeId, "请指定牛马");
     assert(kind === "fs" || kind === "browser", "只能设置文件系统或浏览器 Master");
     const info = await this.employeeInfo?.(employeeId);
     assert(info?.ownerId, "找不到这头牛马");
     const to = await this.allowedMaster(info.ownerId, master);
-    const current = await this.get(employeeId, info.ownerId);
+    await this.get(employeeId, info.ownerId);
+    const current = this.stored(employeeId, info.ownerId);
     const key = kind === "fs" ? "fsMaster" : "browserMaster";
     const from = current[key];
     if (from === to && current.updatedAt) return current;
-    await this.beforeSwitch?.(employeeId, kind, from, to);
+    if (source !== "unavailable") await this.beforeSwitch?.(employeeId, kind, from, to);
     const next: EmployeeMasters = { ...current, employeeId, ownerId: info.ownerId, [key]: to, updatedAt: Date.now() };
     await this.store.save(RECORD, employeeId, next);
     this.cache.set(employeeId, next);

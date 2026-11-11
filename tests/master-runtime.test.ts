@@ -64,8 +64,9 @@ test("未配置或空缺时把云端当作 Master", async () => {
 });
 
 test("旧的 prefer/browser 只给尚未配置的牛马做缺省，不能覆盖已配好的值", async () => {
-  const { runtimes } = setup();
+  const { runtimes, online } = setup();
   const client = "cccccccccccccccccccccccccccccccc";
+  online.push({ userId: "u1", clientId: client, name: "本机", cwd: "/tmp", platform: "linux" });
   await runtimes.setMaster("e1", "fs", CLOUD_MASTER);
   await runtimes.applyClientReport("u1", client, { prefer: "client", browser: "local" });
   assert.equal(runtimes.peek("e1", "u1").fsMaster, CLOUD_MASTER, "已配置的甲不能被旧上报覆盖");
@@ -85,4 +86,23 @@ test("只有云端是这头牛马的 Master 时才允许借网桥", async () => 
   assert.equal(runtimes.cloudMayBorrow("e1", "u1"), false);
   assert.equal(runtimes.cloudMayBorrow("e2", "u1"), true);
   assert.equal(await runtimes.ownerMayBorrow("u1"), true);
+});
+
+test("没有在线客户端时两端都由云端当 Master，客户端掉线后写回云端", async () => {
+  const { runtimes, online } = setup();
+  const client = "1234567890abcdef1234567890abcdef";
+  online.push({ userId: "u1", clientId: client, name: "本机", cwd: "/tmp", platform: "linux" });
+  await runtimes.setMaster("e1", "fs", client);
+  await runtimes.setMaster("e1", "browser", client);
+  assert.equal(runtimes.peek("e1", "u1").fsMaster, client);
+  online.splice(0);
+  assert.equal(runtimes.peek("e1", "u1").fsMaster, CLOUD_MASTER, "不在线时生效中的 Master 是云端");
+  assert.equal(runtimes.peek("e1", "u1").browserMaster, CLOUD_MASTER);
+  await runtimes.releaseUnavailable("u1");
+  const second = "abcdef1234567890abcdef1234567890";
+  online.push({ userId: "u1", clientId: second, name: "另一台", cwd: "/tmp", platform: "linux" });
+  assert.equal(runtimes.peek("e1", "u1").fsMaster, CLOUD_MASTER, "写回云端后，别的客户端上线不会把已掉线的 Master 找回来");
+  await assert.rejects(() => runtimes.setMaster("e1", "fs", client), /在线/);
+  await runtimes.setMaster("e1", "fs", second);
+  assert.equal(runtimes.peek("e1", "u1").fsMaster, second);
 });
