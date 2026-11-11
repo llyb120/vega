@@ -183,6 +183,17 @@ test("superseded streams cannot schedule retries; too many pages back off for 30
   assert(retry && retry.ms <= 37500, "account connection cap waits for zombies to be reaped");
 });
 
+test("a refused realtime stream says why and backs off instead of retrying silently", async () => {
+  const s = mount();
+  await connected(s);
+  // 浏览器对同源 GET 不带 Origin 那次故障就是这个码：页面必须把服务端的话摆出来，而不是静默热重试。
+  s.feed(s, { type: "closed", code: 4403, reason: "不允许跨站连接" });
+  await tick();
+  assert.match(String(s.context.error.value), /不允许跨站连接/);
+  const retry = [...s.timers.values()].find((timer) => timer.ms >= 22500);
+  assert(retry && retry.ms <= 37500, "a refusal backs off instead of hot-looping");
+});
+
 test("returning to a tab after a long silence reconnects at once", async () => {
   const s = mount();
   await connected(s);

@@ -576,6 +576,11 @@ function openEventSocket(url, generation) {
       return;
     }
     if (event.code === 4429) eventRetryDelay = 30000;
+    // 4403 是服务端明确拒绝（站点还没换成本次版本、被撤销或权限不足）：静默热重试只会把问题藏起来。
+    if (event.code === 4403) {
+      error.value = event.reason || "实时通道被服务端拒绝，请刷新页面；若持续如此，站点可能还没更新到当前版本";
+      eventRetryDelay = 30000;
+    }
     reconnectEvents(generation);
   };
 }
