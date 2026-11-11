@@ -68,14 +68,6 @@ export function userAvatarURL(userId?: string, avatar?: string) {
   return userId && avatar && /^blob-[a-f\d]{32}$/.test(avatar) ? `/api/avatars/users/${encodeURIComponent(userId)}?v=${avatar}` : "";
 }
 
-/** `color:<id>`: a user's chosen avatar color (their initial stays; the tile and their messages use it). */
-export function parseAvatarColor(value: unknown): { id: string; hex: string } | undefined {
-  if (typeof value !== "string") return undefined;
-  const match = /^color:([a-z]+)$/.exec(value);
-  const color = match && BOT_AVATAR_COLORS.find(item => item.id === match[1]);
-  return color ? { id: color.id, hex: color.hex } : undefined;
-}
-
 /** Ink that stays legible on a hex fill: bright colors (amber, sky) take dark text, deep ones white. */
 export function inkOn(hex: string) {
   const [r, g, b] = [1, 3, 5].map(at => Number.parseInt(hex.slice(at, at + 2), 16) / 255)
@@ -88,4 +80,9 @@ export function bubbleTint(hex: string) {
   const dim = (amount: number) => "#" + hex.slice(1).replace(/../g, (pair) => Math.round(Number.parseInt(pair, 16) * amount).toString(16).padStart(2, "0"));
   const fill = inkOn(hex) === "#fff" ? dim(0.88) : hex;
   return { fill, ink: inkOn(fill) };
+}
+
+/** The fill and ink of an employee's message bubbles: exactly the color of the bot avatar it shows. */
+export function avatarBubble(avatar: unknown, seed = "") {
+  return bubbleTint((parseBotAvatar(avatar) || defaultBotAvatar(seed)).hex);
 }

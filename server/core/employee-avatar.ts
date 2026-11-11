@@ -1,5 +1,5 @@
 import sharp from "sharp";
-import { BOT_AVATAR_COLORS, isAvatarPreset } from "../../shared/employee-avatars";
+import { isAvatarPreset } from "../../shared/employee-avatars";
 import type { Employee } from "./employee";
 import type { Store } from "./store";
 import { assert, type Obj } from "./util";
@@ -32,9 +32,6 @@ export async function avatarImage(input: Obj) {
 /** The user's own avatar (shown in their chat bubbles and group avatars); `clear` goes back to the initial. */
 export async function updateUserAvatar(store: Store, userId: string, input: Obj) {
   if (input.clear === true) await store.remove("user-avatar", userId);
-  else if (input.color !== undefined) {
-    assert(typeof input.color === "string" && BOT_AVATAR_COLORS.some((color) => color.id === input.color), "请选择有效的头像颜色");
-    await store.save("user-avatar", userId, { avatar: "color:" + input.color });
-  } else await store.save("user-avatar", userId, { avatar: await store.blob("image/webp", await avatarImage(input)) });
+  else await store.save("user-avatar", userId, { avatar: await store.blob("image/webp", await avatarImage(input)) });
   return { avatar: (await store.object<{ avatar: string }>("user-avatar", userId))?.avatar || "" };
 }

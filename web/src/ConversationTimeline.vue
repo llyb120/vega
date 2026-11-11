@@ -6,7 +6,6 @@ import TurnProcess from "./TurnProcess.vue";
 import ToolSteps from "./ToolSteps.vue";
 import FileCard from "./FileCard.vue";
 import { conversationTurns, toolCaption } from "./conversation";
-import { bubbleTint, parseAvatarColor } from "../../shared/employee-avatars";
 const props = defineProps({
   messages: { type: Array, default: () => [] },
   running: Boolean,
@@ -16,14 +15,6 @@ const props = defineProps({
   name: { type: String, default: "Vega" },
   model: String,
   newFrom: { type: Number, default: 0 },
-  userAvatar: String,
-});
-// The viewer's own bubbles take their chosen avatar color, exactly like the employee chat.
-const tint = computed(() => {
-  const hex = parseAvatarColor(props.userAvatar)?.hex;
-  if (!hex) return undefined;
-  const color = bubbleTint(hex);
-  return { background: color.fill, color: color.ink };
 });
 const turns = computed((previous) => conversationTurns(props.messages, { running: props.running, live: props.live, thinking: props.thinking }, previous));
 // 「新」分界：进来时上次看到的位置之后的第一轮（内容可能是旧用户消息加新回复）；来了新消息就收起。
@@ -40,7 +31,7 @@ watch(() => props.messages.at(-1)?.seq || 0, (seq) => {
 <template>
   <section v-for="(turn, index) in turns" :key="turn.key" class="conversation-turn">
     <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
-    <article v-if="turn.user" class="message user" :style="tint">
+    <article v-if="turn.user" class="message user">
       <UserMessage v-if="turn.user.text" :text="turn.user.displayText || turn.user.text" />
       <img v-for="(image, n) in turn.user.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="用户附图" />
       <FileCard v-for="(file, n) in turn.user.files || []" :key="'f' + n" :file="file" />

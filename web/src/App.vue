@@ -1605,7 +1605,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             Fire · 第 {{ fireState.attempt }} 次 · {{ fireState.role === "judge" ? "独立验收" : "执行" }} · {{ fireState.status }}
             <p v-if="fireState.reason">{{ fireState.reason }}</p>
           </div>
-          <ConversationTimeline :key="current?.id ?? 'none'" :messages="messages" :new-from="newFrom" :running="!!isRunning" :live="live" :thinking="thinking" :active-tools="activeTools" :model="model" :user-avatar="user.avatar" />
+          <ConversationTimeline :key="current?.id ?? 'none'" :messages="messages" :new-from="newFrom" :running="!!isRunning" :live="live" :thinking="thinking" :active-tools="activeTools" :model="model" />
         </div>
         <p v-if="!canWriteCurrent" class="context-note">历史会话仅供查阅；继续工作请交给牛马，执行会话由牛马管理。</p>
         <div v-if="canWriteCurrent" class="composer-wrap">
@@ -1677,7 +1677,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
               <button v-if="attentionTasks.length && !workPanelVisible" type="button" class="attention-strip" @click="attentionTasks.length === 1 ? openEmployeeTask(attentionTasks[0].id) : showTasks('attention')">
                 <Icon name="hand" :size="16" /><span><strong>{{ attentionTasks.length }} 项需要你处理</strong><span class="truncate">{{ attentionTasks[0].text }}</span></span><Icon name="right" :size="16" />
               </button>
-              <EmployeeChat :key="user.id + ':' + selectedEmployee" :api="api" :user-id="user.id" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :viewer-avatar="user.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" :tasks="employee.tasks" :remember="employee.canManage ? saveMemory : undefined" @task="openEmployeeTask" />
+              <EmployeeChat :key="user.id + ':' + selectedEmployee" :api="api" :user-id="user.id" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" :tasks="employee.tasks" :remember="employee.canManage ? saveMemory : undefined" @task="openEmployeeTask" />
             </div>
             <button v-if="workPanelVisible && !wide" type="button" class="panel-backdrop" aria-label="关闭当前工作" tabindex="-1" @click="workRailOpen = false"></button>
             <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />

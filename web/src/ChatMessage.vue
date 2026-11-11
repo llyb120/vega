@@ -11,8 +11,8 @@ import { MESSAGE_POSE } from "./bot-avatar.js";
 import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
-import { bubbleTint, parseAvatarColor } from "../../shared/employee-avatars";
-const props = defineProps({ message: Object, name: String, avatar: String, viewerAvatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean });
+import { avatarBubble } from "../../shared/employee-avatars";
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author", "mention"]);
 // In a group, long-pressing an employee's avatar @mentions it in the composer (mentionAuthor); a tap still opens it.
 const pressable = computed(() => props.mentionAuthor && sender.value.kind === "employee");
@@ -22,11 +22,11 @@ const exportOpen = ref(false), exportError = ref("");
 // viewer's own messages sit on the right. A private chat has no authors: user messages are mine, the rest the employee's.
 const mine = computed(() => props.message.role === "user" && (!props.message.author || props.message.author.id === props.viewerId));
 const sender = computed(() => props.message.author ? { kind: props.message.author.kind, id: props.message.author.id, name: props.message.author.name, avatar: props.message.author.avatar || "" } : { kind: "employee", id: props.employeeId, name: props.name, avatar: props.avatar });
-// A user who picked an avatar color speaks in it (a private chat's own messages carry no author, so the viewer's does).
+// A 牛马 speaks in the color of the avatar it shows, so two employees never share a bubble color.
+// Only its own messages: a private chat's user bubbles carry no author, so role decides, not sender.
 const tint = computed(() => {
-  const hex = parseAvatarColor(props.message.author ? props.message.author.avatar : mine.value ? props.viewerAvatar : "")?.hex;
-  if (!hex) return undefined;
-  const color = bubbleTint(hex);
+  if (props.message.role === "user" || props.message.error) return undefined;
+  const color = avatarBubble(sender.value.avatar, sender.value.id || sender.value.name || "");
   return { background: color.fill, color: color.ink };
 });
 const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
@@ -124,8 +124,8 @@ async function runExport(format) {
 .chat-reply:hover:not(:disabled) { background: var(--surface-2); color: var(--accent); }
 .chat-bubble { min-width: 0; padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: var(--surface-2); line-height: 1.65; overflow-wrap: anywhere; }
 .user .chat-bubble { border-radius: 14px 4px 14px 14px; background: var(--accent-soft); color: #13254f; }
-/* A chosen avatar color fills the bubble (inline); mentions keep the text readable instead of blue-on-blue. */
-.chat-bubble.tinted :deep(.mention) { color: inherit; text-decoration: underline; }
+/* A colored bubble keeps its links and mentions readable instead of accent-blue on the same color. */
+.chat-bubble.tinted :deep(a), .chat-bubble.tinted :deep(.mention) { color: inherit; text-decoration: underline; }
 .chat-bubble.failed { background: var(--danger-soft); box-shadow: inset 3px 0 var(--danger); }
 .chat-message:focus .chat-bubble { outline: 2px solid var(--accent); outline-offset: 2px; }
 .chat-bubble :deep(.message-text) { font-size: 14px; }

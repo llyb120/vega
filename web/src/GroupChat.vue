@@ -12,6 +12,7 @@ import { continuesPrevious } from "./conversation";
 import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 import { markSeen, seenSeq } from "./seen.js";
+import { avatarBubble } from "../../shared/employee-avatars";
 import PressMention from "./PressMention.vue";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
 const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number });
@@ -39,6 +40,8 @@ let settled = false, baseSeq = 0;
 watch(lastSeq, (seq) => { if (settled && seq > baseSeq) markGone.value = true; });
 watch(shown, (rows) => { if (props.groupId) markSeen(props.user?.id, props.groupId, rows.at(-1)?.message.seq); });
 const runningMembers = computed(() => (group.value?.employees || []).filter((e) => group.value.running?.includes(e.id)));
+// A member's typing row wears the same avatar color as its replies.
+const typingTint = (e) => { const color = avatarBubble(e.avatar, e.id); return { background: color.fill, color: color.ink }; };
 const available = computed(() => (props.myEmployees || []).filter((e) => !group.value?.employees.some((m) => m.id === e.id)));
 const invitable = computed(() => directory.value.filter((u) => !group.value?.users.some((m) => m.id === u.id)));
 // Both add rows always show, so users find them; when empty they say why.
@@ -193,7 +196,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
                 <span class="chat-avatar" aria-hidden="true"><PressMention :name="e.name" :disabled="readonly" @press="mentionMember"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></PressMention></span>
                 <div class="chat-content">
                   <div class="chat-heading"><strong>{{ e.name }}</strong><span>正在回复</span><button v-if="canStop(e) && !readonly" type="button" class="ghost sm stop-reply" @click="stop(e)"><Icon name="stop" :size="12" />停止</button></div>
-                  <div class="chat-bubble"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
+                  <div class="chat-bubble tinted" :style="typingTint(e)"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
                 </div>
               </article>
             </div>
@@ -269,6 +272,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
 .stop-reply { min-height: 22px; padding: 0 6px; color: var(--danger); font-size: 11px; }
 .typing-dots { display: flex; align-items: center; gap: 4px; height: 23px; }
 .typing-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: typing 1.2s ease-in-out infinite; }
+.chat-bubble.tinted .typing-dots i { background: currentColor; }
 .typing-dots i:nth-child(2) { animation-delay: .15s; }
 .typing-dots i:nth-child(3) { animation-delay: .3s; }
 @media (prefers-reduced-motion: reduce) { .typing-dots i { animation: none; opacity: .7; } }

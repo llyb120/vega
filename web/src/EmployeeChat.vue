@@ -8,7 +8,8 @@ import { employeeChatMessages, continuesPrevious } from "./conversation";
 import { createChatHistory } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
 import { markSeen, seenSeq } from "./seen.js";
-const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, viewerAvatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array, remember: Function });
+import { avatarBubble } from "../../shared/employee-avatars";
+const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array, remember: Function });
 const emit = defineEmits(["task"]);
 const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
@@ -47,6 +48,8 @@ let settled = false, baseSeq = 0;
 watch(lastSeq, (seq) => { if (settled && seq > baseSeq) markGone.value = true; });
 watch(visible, (rows) => markSeen(props.userId, props.employeeId, rows.at(-1)?.seq));
 const typingContinued = computed(() => continuesPrevious(displayed.value.at(-1)?.message, { role: "assistant" }));
+// The typing row wears the same avatar color as the reply that replaces it.
+const typingTint = computed(() => { const color = avatarBubble(props.avatar, props.employeeId); return { background: color.fill, color: color.ink }; });
 const history = createChatHistory({ api: (...args) => props.api(...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore, cache: createChatCache(props.userId, props.employeeId) });
 
 // Message avatars rest on one up-right glance. The reply that replaces the typing row starts from the typing
@@ -248,14 +251,14 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         <template v-for="({ message, continued }, index) in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
         <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
         <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
-        <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :viewer-avatar="viewerAvatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
         </template>
         <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
           <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>
           <span v-else class="chat-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" /></span>
           <div class="chat-content">
             <div class="chat-heading"><strong v-if="!typingContinued">{{ name }}</strong><span>正在输入中</span></div>
-            <div class="chat-bubble"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
+            <div class="chat-bubble tinted" :style="typingTint"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
           </div>
         </article>
       </div>
@@ -298,6 +301,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
 .chat-typing .chat-bubble { justify-self: start; padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: var(--surface-2); line-height: 1.65; }
 .typing-dots { display: flex; align-items: center; gap: 4px; height: 23px; }
 .typing-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: typing 1.2s ease-in-out infinite; }
+.chat-bubble.tinted .typing-dots i { background: currentColor; }
 .typing-dots i:nth-child(2) { animation-delay: .15s; }
 .typing-dots i:nth-child(3) { animation-delay: .3s; }
 @media (prefers-reduced-motion: reduce) { .typing-dots i { animation: none; opacity: .7; } }

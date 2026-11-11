@@ -1,10 +1,9 @@
 <script setup vapor>
-import { ref, computed, onMounted } from "vue";
+import { ref, onMounted } from "vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
 import UserAvatar from "./UserAvatar.vue";
 import { formatBeijing } from "../../shared/time";
-import { BOT_AVATAR_COLORS, parseAvatarColor } from "../../shared/employee-avatars";
 const props = defineProps({ api: Function, user: Object });
 const emit = defineEmits(["error", "notice", "signed-out", "changed"]);
 const users = ref([]),
@@ -17,7 +16,6 @@ const users = ref([]),
 const labels = { admin: "管理员", operator: "操作用户", viewer: "只读用户" };
 // My avatar: shown on my messages and as my tile in group avatars.
 const avatarInput = ref(null), avatarBusy = ref(false);
-const currentColor = computed(() => parseAvatarColor(props.user.avatar)?.id || "");
 async function saveAvatar(payload) {
   avatarBusy.value = true;
   try { await props.api("/me/avatar", "POST", payload); emit("changed"); }
@@ -106,9 +104,6 @@ onMounted(() => void run(refresh));
             <button v-if="user.avatar" type="button" class="sm ghost" :disabled="avatarBusy" @click="saveAvatar({ clear: true })">移除</button>
           </div>
         </div>
-        <div class="avatar-colors" role="group" aria-label="头像颜色">
-          <button v-for="color in BOT_AVATAR_COLORS" :key="color.id" type="button" :class="['swatch', { selected: currentColor === color.id }]" :style="{ '--swatch': color.hex }" :aria-pressed="currentColor === color.id" :aria-label="'使用' + color.name" :title="color.name" :disabled="avatarBusy" @click="saveAvatar({ color: color.id })"></button>
-        </div>
         <form class="password-form" @submit.prevent="changePassword">
           <div class="form-head"><strong>修改我的密码</strong><span class="hint">修改后需在所有设备重新登录。</span></div>
           <div class="form-grid three">
@@ -167,10 +162,6 @@ onMounted(() => void run(refresh));
 .me-head h3 { font-size: 16px; }
 .me-avatar { overflow: hidden; flex: none; }
 .me-head .avatar-actions { display: flex; gap: 6px; margin-left: auto; }
-/* The chosen color paints the avatar tile and the user's own chat bubbles. */
-.avatar-colors { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
-.swatch { width: 26px; height: 26px; min-height: 0; padding: 0; border: 0; border-radius: 50%; background: var(--swatch); box-shadow: inset 0 0 0 1px rgb(0 0 0 / .08); }
-.swatch.selected { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--swatch); }
 .form-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .form-head strong { font-size: 13px; }
 .form-grid.three { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; }
