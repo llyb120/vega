@@ -6,6 +6,7 @@ import TurnProcess from "./TurnProcess.vue";
 import ToolSteps from "./ToolSteps.vue";
 import FileCard from "./FileCard.vue";
 import { conversationTurns, toolCaption } from "./conversation";
+import { bubbleTint, parseAvatarColor } from "../../shared/employee-avatars";
 const props = defineProps({
   messages: { type: Array, default: () => [] },
   running: Boolean,
@@ -14,12 +15,20 @@ const props = defineProps({
   activeTools: { type: Array, default: () => [] },
   name: { type: String, default: "Vega" },
   model: String,
+  userAvatar: String,
+});
+// The viewer's own bubbles take their chosen avatar color, exactly like the employee chat.
+const tint = computed(() => {
+  const hex = parseAvatarColor(props.userAvatar)?.hex;
+  if (!hex) return undefined;
+  const color = bubbleTint(hex);
+  return { background: color.fill, color: color.ink };
 });
 const turns = computed((previous) => conversationTurns(props.messages, { running: props.running, live: props.live, thinking: props.thinking }, previous));
 </script>
 <template>
   <section v-for="turn in turns" :key="turn.key" class="conversation-turn">
-    <article v-if="turn.user" class="message user">
+    <article v-if="turn.user" class="message user" :style="tint">
       <UserMessage v-if="turn.user.text" :text="turn.user.displayText || turn.user.text" />
       <img v-for="(image, n) in turn.user.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="用户附图" />
       <FileCard v-for="(file, n) in turn.user.files || []" :key="'f' + n" :file="file" />

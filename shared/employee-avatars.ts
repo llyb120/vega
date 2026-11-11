@@ -67,3 +67,25 @@ export function employeeAvatarURL(employeeId?: string, avatar?: string) {
 export function userAvatarURL(userId?: string, avatar?: string) {
   return userId && avatar && /^blob-[a-f\d]{32}$/.test(avatar) ? `/api/avatars/users/${encodeURIComponent(userId)}?v=${avatar}` : "";
 }
+
+/** `color:<id>`: a user's chosen avatar color (their initial stays; the tile and their messages use it). */
+export function parseAvatarColor(value: unknown): { id: string; hex: string } | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = /^color:([a-z]+)$/.exec(value);
+  const color = match && BOT_AVATAR_COLORS.find(item => item.id === match[1]);
+  return color ? { id: color.id, hex: color.hex } : undefined;
+}
+
+/** Ink that stays legible on a hex fill: bright colors (amber, sky) take dark text, deep ones white. */
+export function inkOn(hex: string) {
+  const [r, g, b] = [1, 3, 5].map(at => Number.parseInt(hex.slice(at, at + 2), 16) / 255)
+    .map(value => value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b >= 0.3 ? "#1d1d21" : "#fff";
+}
+
+/** A chosen avatar color as a fill plus its ink; fills that take white text are deepened slightly so it stays readable. */
+export function bubbleTint(hex: string) {
+  const dim = (amount: number) => "#" + hex.slice(1).replace(/../g, (pair) => Math.round(Number.parseInt(pair, 16) * amount).toString(16).padStart(2, "0"));
+  const fill = inkOn(hex) === "#fff" ? dim(0.88) : hex;
+  return { fill, ink: inkOn(fill) };
+}

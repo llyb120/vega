@@ -7,7 +7,7 @@ import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 import { employeeChatMessages, continuesPrevious } from "./conversation";
 import { createChatHistory } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
-const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array, remember: Function });
+const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, viewerAvatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array, remember: Function });
 const emit = defineEmits(["task"]);
 const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
@@ -237,7 +237,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         </div>
         <template v-for="{ message, continued } in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
         <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
-        <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :viewer-avatar="viewerAvatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
         </template>
         <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
           <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>

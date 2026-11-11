@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import sharp from "sharp";
-import { ZODIAC_AVATARS, BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS, isAvatarPreset, employeeAvatarURL, parseBotAvatar, defaultBotAvatar, botAvatarPreset } from "../shared/employee-avatars";
+import { ZODIAC_AVATARS, BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS, isAvatarPreset, employeeAvatarURL, parseBotAvatar, defaultBotAvatar, botAvatarPreset, parseAvatarColor, inkOn, bubbleTint } from "../shared/employee-avatars";
 import { BOT_SHAPE_GEOMETRY, BOT_POSES, LOOK_POSES, MESSAGE_POSE, projectFace, shade, nextPose, holdDuration, blinkPlan } from "../web/src/bot-avatar.js";
-import { updateEmployeeAvatar } from "../server/core/employee-avatar";
+import { updateEmployeeAvatar, updateUserAvatar } from "../server/core/employee-avatar";
 import { Employee, type EmployeeRuntime } from "../server/core/employee";
 import { Store } from "../server/core/store";
 import { Vault } from "../server/core/vault";
@@ -149,6 +149,40 @@ test("invalid, oversized and disguised image uploads leave the current avatar an
     assert.equal((await employee.state()).avatar, "zodiac:aries");
     assert.equal((await store.one("SELECT COUNT(*) count FROM blobs") as any).count, before);
   } finally { root.close(); await store.close(); }
+});
+
+test("a user's chosen avatar color paints their tile and their bubbles, and only known ids are accepted", async () => {
+  const store = await Store.open(":memory:");
+  try {
+    assert.deepEqual(parseAvatarColor("color:blue"), { id: "blue", hex: "#3878fb" });
+    for (const value of ["bot:round:red", "color:", "color:unknown", "color:#ff0000", "color:red:blue", "blob-" + "1".repeat(32), "", undefined, null]) assert.equal(parseAvatarColor(value), undefined, String(value));
+    // Bright fills keep dark text, deep fills white: the ink is what makes every color readable.
+    assert.equal(inkOn("#ffa424"), "#1d1d21");
+    assert.equal(inkOn("#30b4f0"), "#1d1d21");
+    assert.equal(inkOn("#1d1d21"), "#fff");
+    assert.equal(inkOn("#3878fb"), "#fff");
+    const luminance = (hex: string) => {
+      const full = hex.length === 4 ? "#" + hex.slice(1).replace(/./g, (digit) => digit + digit) : hex;
+      const [r, g, b] = [1, 3, 5].map(at => Number.parseInt(full.slice(at, at + 2), 16) / 255)
+        .map(value => value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    for (const color of BOT_AVATAR_COLORS) {
+      const { fill, ink } = bubbleTint(color.hex);
+      assert(["#1d1d21", "#fff"].includes(ink), color.id);
+      const [light, dark] = [luminance(fill), luminance(ink)].sort((a, b) => b - a);
+      assert((light + 0.05) / (dark + 0.05) >= 4.5, `${color.id} bubble text is below WCAG AA`);
+    }
+    assert.equal((await updateUserAvatar(store, "u1", { color: "teal" })).avatar, "color:teal");
+    assert.deepEqual(await store.object<{ avatar: string }>("user-avatar", "u1"), { avatar: "color:teal" });
+    for (const color of ["#00ff00", "bot:round:red", ""])
+      await assert.rejects(updateUserAvatar(store, "u1", { color }), /头像颜色/);
+    assert.deepEqual(await store.object<{ avatar: string }>("user-avatar", "u1"), { avatar: "color:teal" }, "a rejected color leaves the current one");
+    await updateUserAvatar(store, "u1", { clear: true });
+    assert.equal(await store.object("user-avatar", "u1"), undefined);
+  } finally {
+    await store.close();
+  }
 });
 
 test("bot faces are projected onto a turning 3D head", () => {
