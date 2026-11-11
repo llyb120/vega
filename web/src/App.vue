@@ -54,7 +54,8 @@ const clientStatus = computed(() => !clientListReady.value ? "客户端状态同
 const localPairingText = computed(() => pairingStatusText(localPairing.value));
 let localBridge;
 function startLocalPairing() {
-  if (!localBridge && canBridgeLocal() && canExecute.value) {
+  // 客户端自己有凭据，连上站点的就是直连；网页再拨 127.0.0.1 只会在前端与安装站点不同源时反复失败。
+  if (!localBridge && canBridgeLocal() && canExecute.value && !localConnected.value) {
     const bridge = new LocalAgentPairing(httpApi, user.value.id, (status) => {
       if (localBridge !== bridge) return;
       localPairing.value = status;
@@ -67,8 +68,11 @@ function startLocalPairing() {
 function retryLocalPairing() {
   localBridge?.close();
   localBridge = null;
+  localPairing.value = null;
   startLocalPairing();
 }
+// 客户端自己连上站点（clients_changed → bootstrap）就可以收掉网页这次握手。
+watch(localConnected, (online) => { if (online) retryLocalPairing(); });
 const mobileTitles = {
   chat: "对话",
   employee: "数字牛马",

@@ -148,7 +148,7 @@ test("pairing exposes local-network, credential-save and old-client failures and
 
 test("local pairing starts independently from the website event socket and refreshes actual online clients", () => {
   const source = readFileSync("web/src/App.vue", "utf8"), statuses: any[] = [];
-  let refreshes = 0;
+  let refreshes = 0, onlineWatcher: any;
   class Pairing {
     constructor(_api: any, _user: any, public status: any) { statuses.push(this); }
     connect() { this.status({ code: "detecting" }); }
@@ -156,7 +156,8 @@ test("local pairing starts independently from the website event socket and refre
   }
   const state: any = {
     LocalAgentPairing: Pairing, canBridgeLocal: () => true, canExecute: { value: true }, user: { value: { id: "alice" } },
-    localPairing: { value: null }, httpApi() {}, attempt: (fn: any) => fn(), bootstrap: () => { refreshes++; },
+    localPairing: { value: null }, localConnected: { value: false }, watch: (_source: any, cb: any) => { onlineWatcher = cb; },
+    httpApi() {}, attempt: (fn: any) => fn(), bootstrap: () => { refreshes++; },
   };
   const code = source.slice(source.indexOf("let localBridge;"), source.indexOf("const mobileTitles ="));
   const actions = vm.runInNewContext(code + "\n({startLocalPairing,retryLocalPairing})", state);
@@ -167,6 +168,14 @@ test("local pairing starts independently from the website event socket and refre
   actions.retryLocalPairing();
   statuses[0].status({ code: "backend_http", httpStatus: 404 });
   assert.equal(state.localPairing.value.code, "detecting", "stale bridges cannot overwrite a retry");
+  state.localConnected.value = true;
+  onlineWatcher(true);
+  assert.equal(state.localPairing.value, null, "a client that connects on its own ends the page handshake");
+  const attempts = statuses.length;
+  actions.startLocalPairing();
+  assert.equal(statuses.length, attempts, "an online client keeps its own connection; the page never dials 127.0.0.1");
+  state.localConnected.value = false;
+  assert.match(source, /canBridgeLocal\(\) && canExecute\.value && !localConnected\.value/);
   const onClose = source.slice(source.indexOf("  ws.onclose = (event) => {"), source.indexOf("async function attempt(fn)"));
   assert(!onClose.includes("localBridge?.close()"), "website event loss must not abort initial native pairing");
   assert(onClose.includes("clientListReady.value = false"), "a lost event connection means unknown state, not proven offline");
