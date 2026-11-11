@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { assert, id, type Obj } from "./util";
-const EXTENSION_ID = "mdicifjlbgnkkdkcbfdnebeghhlamjbm";
+const EXTENSION_ID = "bhiemmbmefifaloapbcopihahhckolce";
 
 /** Navigation / readiness probes need headroom for extension reconnect gaps; CDP stays aligned. */
 const BRIDGE_NAV = new Set(["tabs", "goto", "open", "new_tab", "status", "close_tab", "back", "forward", "reload", "downloads", "connect"]);
@@ -28,13 +28,13 @@ export class ChromeBridge {
     }
   >();
   queued = new EventEmitter();
-  version = "0.1.17";
+  version = "0.2.0";
   constructor(public privateInstance = false) {}
   async start() {
     if (this.server) return;
-    const ports = this.privateInstance ? [0] : process.env.NOVA_CHROME_PORT
-      ? [Number(process.env.NOVA_CHROME_PORT)]
-      : Array.from({ length: 10 }, (_, n) => 47653 + n);
+    const ports = this.privateInstance ? [0] : process.env.VEGA_CHROME_PORT
+      ? [Number(process.env.VEGA_CHROME_PORT)]
+      : Array.from({ length: 10 }, (_, n) => 47753 + n);
     for (const port of ports) {
       const server = createServer((req, res) => {
         void this.serve(req, res).catch((e) => {
@@ -58,7 +58,7 @@ export class ChromeBridge {
         if (e.code !== "EADDRINUSE") throw e;
       }
     }
-    throw Error("Chrome extension loopback ports 47653–47662 are occupied");
+    throw Error("Chrome extension loopback ports 47753–47762 are occupied");
   }
   live() {
     for (const [key, v] of this.clients)
@@ -97,7 +97,7 @@ export class ChromeBridge {
   ): Promise<any> {
     assert(
       client,
-      "Chrome extension is not connected; load extensions/nova-chrome in Chrome",
+      "Chrome extension is not connected; load local/extension/vega-chrome in Chrome",
     );
     signal?.throwIfAborted();
     const key = id(),
@@ -170,7 +170,8 @@ export class ChromeBridge {
     assert(req.method === "POST", "POST required");
     if (req.url === "/pair") {
       assert(!this.privateInstance || req.headers.authorization === "Bearer " + this.token, "Private browser pairing denied");
-      send({ token: this.token });
+      // The extension refuses any bridge that does not identify itself as Vega; Nova's client never answers here.
+      send({ token: this.token, app: "vega" });
       return;
     }
     assert(

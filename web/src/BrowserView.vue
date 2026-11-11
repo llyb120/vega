@@ -938,7 +938,7 @@ onBeforeUnmount(() => {
           <Icon name="globe" :size="32" />
           <strong>{{ employeeId ? '牛马浏览器未启动' : '浏览器扩展尚未连接' }}</strong>
           <p v-if="employeeId">点击“刷新标签页”自动启动该牛马的独立浏览器。登录数据会保留，无需手动安装扩展。</p>
-          <p v-else>Windows：在本机 Chrome 加载项目 extensions/nova-chrome。Docker：等待容器 Chromium 和扩展自动连接，然后刷新标签页。</p>
+          <p v-else>Windows：在本机 Chrome 加载项目 local/extension/vega-chrome。Docker：等待容器 Chromium 和扩展自动连接，然后刷新标签页。</p>
           <button type="button" class="primary sm" :disabled="busy" @click="refresh"><Icon name="refresh" :size="14" />刷新标签页</button>
         </div>
         <div v-else-if="!selected && !error" class="browser-placeholder">

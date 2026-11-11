@@ -1,8 +1,8 @@
-// Floating launchers for published Nova miniapps whose browser.match covers this page.
+// Floating launchers for published Vega miniapps whose browser.match covers this page.
 // Matching and the page URL come from the worker (sender.tab), never from page script.
 (() => {
-  if (window.top !== window || globalThis.__novaMiniapps) return;
-  globalThis.__novaMiniapps = true;
+  if (window.top !== window || globalThis.__vegaMiniapps) return;
+  globalThis.__vegaMiniapps = true;
   const KEY = 'miniappLauncherPosition';
   let host, generation = 0;
   const clamp = (value, max) => Math.max(0, Math.min(max, value));
@@ -15,7 +15,7 @@
     host?.remove();
     host = undefined;
     if (!apps.length) return;
-    host = document.createElement('nova-miniapps');
+    host = document.createElement('vega-miniapps');
     host.style.cssText = 'all:initial;position:fixed;z-index:2147483647;';
     const place = () => { host.style.right = `${clamp(position.right, innerWidth - 56)}px`; host.style.bottom = `${clamp(position.bottom, innerHeight - 56)}px`; };
     place();
@@ -40,8 +40,8 @@
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = Array.from(app.name.trim() || '✦')[0];
-      button.title = `Nova：${app.name}（可拖动）`;
-      button.setAttribute('aria-label', `打开 Nova 应用：${app.name}`);
+      button.title = `Vega：${app.name}（可拖动）`;
+      button.setAttribute('aria-label', `打开 Vega 应用：${app.name}`);
       let start, dragged = false;
       button.addEventListener('pointerdown', event => {
         start = {x: event.clientX, y: event.clientY, right: position.right, bottom: position.bottom};

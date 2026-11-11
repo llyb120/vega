@@ -35,9 +35,9 @@ test("employee browsers automatically receive the owner's stable network proxy",
   await f.browsers.get("ea");
   assert.deepEqual(requests, ["ea"]);
   assert.equal((f.start.mock.calls[0].arguments as any[])[1].proxy, proxy);
-  const args = headlessArguments("profile", "extension", { proxy, port: 47653 });
+  const args = headlessArguments("profile", "extension", { proxy, port: 47753 });
   assert(args.includes("--proxy-server=" + proxy));
-  assert(args.includes("--proxy-bypass-list=<-loopback>;127.0.0.1:47653"));
+  assert(args.includes("--proxy-bypass-list=<-loopback>;127.0.0.1:47753"));
   assert(args.includes("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"));
   assert(args.includes("--disable-quic"));
   assert(args.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
@@ -134,7 +134,7 @@ test("a reloaded private worker immediately replaces a stale peer without replay
   const oldCommand = bridge.queues.get(oldClient)![0];
   const post = (path: string, body: any) => fetch(`http://127.0.0.1:${bridge.port}${path}`, {
     method: "POST",
-    headers: { Origin: "chrome-extension://mdicifjlbgnkkdkcbfdnebeghhlamjbm", Authorization: "Bearer " + bridge.token, "Content-Type": "application/json" },
+    headers: { Origin: "chrome-extension://bhiemmbmefifaloapbcopihahhckolce", Authorization: "Bearer " + bridge.token, "Content-Type": "application/json" },
     body: JSON.stringify({ ...body, clientId: newClient }),
   });
   const poll = post("/poll", {});

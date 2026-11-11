@@ -5,7 +5,7 @@ export default defineNitroConfig({
   compatibilityDate: "2026-10-30",
   publicAssets: [
     { dir: "../web/dist", baseURL: "/", maxAge: 0 },
-    { dir: "../extensions", baseURL: "/extension", maxAge: 0 },
+    { dir: "../local/extension", baseURL: "/extension", maxAge: 0 },
   ],
   serverAssets: [
     { baseName: "assets", dir: "../shared" },

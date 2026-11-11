@@ -28,6 +28,7 @@ import { cloudFor, cloudEnabled, cloudHealthy } from "../../core/cloud";
 import { newCommand } from "../../core/new-session";
 import { clientBaseName, clientPackage } from "../../core/client-package";
 import { CLIENT_BODY_LIMIT } from "../../core/client-socket";
+import { installBrowserExtension } from "../../core/local-extension";
 import { assert, filterAsync, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
@@ -92,6 +93,17 @@ export default defineEventHandler(async (event) => {
     try { return await clientChat(path[2], body, grant.userId); }
     catch (e: any) { throw createError({ statusCode: e.statusCode || 400, statusMessage: String(e.message || e).slice(0, 500) }); }
   }
+  if (path[0] === "local-agent" && path[1] === "extension" && method === "POST") {
+    // 本机客户端「更新浏览器扩展」：设备凭据自己验，然后把安装任务交给这个账号的第一个牛马。
+    setHeader(event, "Cache-Control", "no-store");
+    const request = { headers: new Headers(getRequestHeaders(event) as Record<string, string>), url: getRequestURL(event).href } as unknown as Request;
+    let grant: { userId: string; clientId: string };
+    try { grant = await app().clientSockets.authorize(request); }
+    catch { throw createError({ statusCode: 403, statusMessage: "Client credential invalid or revoked" }); }
+    const body = await bodyJSON(event, 4096);
+    try { return await installBrowserExtension({ auth, engine }, grant, body); }
+    catch (e: any) { throw createError({ statusCode: e.statusCode || 409, statusMessage: String(e.message || e).slice(0, 500) }); }
+  }
   const who = principal(event),
     user = who.user;
   let a: Obj = {};
@@ -129,6 +141,9 @@ export default defineEventHandler(async (event) => {
       }))).filter(Boolean)];
     }
     if (path[0] === "bootstrap" && method === "GET") {
+      // 新账号第一次进来就有一只自己的牛马；建失败不挡住登录，下次进入再试。
+      if (user.role !== "viewer")
+        await engine.employee.ensureOwned(user.id, user.username + " 的牛马").catch((error) => console.warn("[Vega] 自动创建牛马失败：" + error.message));
       let cwd = "", cloudError = "";
       if (user.role !== "viewer") {
         try { cwd = await cloudFor({ ownerId: user.id })?.cwd() || process.cwd(); }

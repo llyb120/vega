@@ -215,7 +215,7 @@ export class LocalAgents {
       };
       const abort = () => cancel(signal.reason);
       const timedOut = () => new LocalAgentUnavailable(op === "browser"
-        ? "客户端浏览器操作超时。连接仍正常，本步未确认完成（本机 Chrome 直连，与流量中继无关）；请核对 Nova 扩展是否卡住或结果是否回传，检查页面实际状态后回复「继续」重试该步骤，不会自动改用其他客户端或服务端浏览器。"
+        ? "客户端浏览器操作超时。连接仍正常，本步未确认完成（本机 Chrome 直连，与流量中继无关）；请核对 Vega 扩展是否卡住或结果是否回传，检查页面实际状态后回复「继续」重试该步骤，不会自动改用其他客户端或服务端浏览器。"
         : "客户端操作超时。连接仍正常，本步未确认完成；请回复「继续」重试，不会自动切换执行位置。");
       const resume = () => {
         if (settled || agent.reconnecting || timer) return;

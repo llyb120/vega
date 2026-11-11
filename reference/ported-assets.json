@@ -12,23 +12,23 @@
     "sha256": "31C488CA6F528F786C2FDD1FB8997CC46B492065B91AD8E514FDD803F1D9E4EF"
   },
   {
-    "path": "extensions/nova-chrome/worker.js",
+    "path": "local/extension/vega-chrome/worker.js",
     "sha256": "3C1AFAB94642F16F02A78B50489F8ABAE5CB219B2671B1311D31759102BA4DF8"
   },
   {
-    "path": "extensions/nova-chrome/content.js",
+    "path": "local/extension/vega-chrome/content.js",
     "sha256": "580B8FCCE2E7A68AD3D8B1336E96DAC114ECF1B4399C52F46D14EAA12AA0EB5D"
   },
   {
-    "path": "extensions/nova-chrome/manifest.json",
+    "path": "local/extension/vega-chrome/manifest.json",
     "sha256": "1C4898690CDC23FCAE2B984A671AB96E41BCE4B357B4C6C8835D841D0C5A9FA6"
   },
   {
-    "path": "extensions/nova-chrome/popup.js",
+    "path": "local/extension/vega-chrome/popup.js",
     "sha256": "14DE006E0D5DA426B69E8430B76B058405726BFDB90389231AC9F927736DF53C"
   },
   {
-    "path": "extensions/nova-chrome/popup.html",
+    "path": "local/extension/vega-chrome/popup.html",
     "sha256": "8E8B08F68AF61996BBC82E06C5AEF0472A7CF0CE1427BE5E93AF0B30DE279CCA"
   }
 ]

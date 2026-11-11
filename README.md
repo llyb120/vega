@@ -105,7 +105,7 @@ docker run -d --name vega --shm-size=1g \
 | 牛马会话 | 与普通聊天隔离：任务固定主会话 + 独立固定 Chrome 会话，仅从牛马看板打开执行记录，不混入普通会话列表/默认选中项；task_relay_computer 交接后结束本轮、结果自动回任务主会话；defer 保存恢复点、释放名额，到期只检查原作业 |
 | 记忆 / 密码本 | 相关性检索、强化/衰减/永久重要性、300 条记忆上限；AES-256-GCM、使用条件/用途审计、X25519 跨机加密支援、任务专属临时条目与清理 |
 | StarLink | 原 v2 HTTP + SSE 中转协议、群组/设备/纪元/游标、gzip 与旧 `_z` 信封、messageId 幂等重传、成员派单、交代人审批/补充、加密凭据支援与任务时间线 |
-| Chrome | 原版 0.1.17 扩展与 DOM 脚本；稳定 tag、多实例/多浏览器、iframe/OOPIF、Shadow DOM、DOM/ref、真实 CDP 输入、焦点/遮挡/像素前检、截图分片/裁剪/长图、上传下载、DevTools、run 短程计划、经验图谱 |
+| Chrome | 0.2.0 扩展与 DOM 脚本；稳定 tag、多实例/多浏览器、iframe/OOPIF、Shadow DOM、DOM/ref、真实 CDP 输入、焦点/遮挡/像素前检、截图分片/裁剪/长图、上传下载、DevTools、run 短程计划、经验图谱 |
 
 普通会话的未发送文字和图片按会话保存在当前页面内存中，切换后可恢复；发送失败、发送中继续编辑或切到别的会话都不会误清草稿，退出登录与删除对应会话会清理。刷新或关闭页面不保留草稿，不写入浏览器长期存储。
 
@@ -165,8 +165,8 @@ Codex / Claude Code / Devin 的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DEVIN_CONF
 ### Chrome（兼容入口）
 
 1. Chrome 与 Nitro 桥接必须在同一电脑/回环环境，运行 Nitro。
-2. 打开 `chrome://extensions`，开启开发者模式，加载项目 `extensions/nova-chrome`；部署产物在 `.output/public/extension/nova-chrome`。
-3. 扩展按原固定 ID 自动配对端口 47653–47662。`NOVA_CHROME_PORT` 可指定单一回环端口。现有 Nova 和 Vega 可同时连接同一扩展，命令与回执按实例/客户端隔离。
+2. 打开 `chrome://extensions`，开启开发者模式，加载项目 `local/extension/vega-chrome`；部署产物在 `.output/public/extension/vega-chrome`，资源页也下载同一个包。扩展同时内置在本机客户端里，「连接授权 → 授权 → 浏览器扩展」可以把它重新装到本机 Chrome（要求这头牛马的文件系统 Master 与浏览器 Master 都是本机）。
+3. Vega 的扩展有自己的 ID（manifest `key`）和端口 47753–47762，只与 Vega 客户端配对；Nova 的扩展用 47653–47662，两边同时安装也不会互相连接。`VEGA_CHROME_PORT` 可指定单一回环端口。
 4. 无痕操作须在扩展详情开启无痕权限；多浏览器同时连接时优先 Chrome。控制目标始终是已观察到的稳定 tag，不猜当前激活页。
 
 只操控网页，**没有桌面工具或原生系统对话框能力**。截图/完整DOM与大输出可按返回的 `sqlite:` 路径回读；二进制存在SQLite。文件上传限当前工作目录内的普通文件并校验真实路径。输入/提交超时会报告不确定性，不能自动重放。牛马任务使用自己的私有浏览器，不争抢宿主桌面；旧的物理桌面空闲/锁屏检测保留给兼容执行环境。没有引入Jianlai或桌面输入模拟。

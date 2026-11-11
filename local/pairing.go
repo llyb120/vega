@@ -296,6 +296,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   {{if .Approved}}<div class="flash ok" role="status"><strong>站点权限已保存。</strong>请回到 Vega 查看登录验证与后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输。</div>{{end}}
   {{if .Revoked}}<div class="flash warn" role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</div>{{end}}
   {{if .Saved}}<div class="flash ok" role="status">本地配置已保存，将同步到已连接的后端；离线时请等待客户端重新连接。</div>{{end}}
+  {{if .Extension}}<div class="flash ok" role="status">{{.Extension}}</div>{{end}}
   {{if .Unpaired}}<div class="flash warn" role="status">指定账户的本地配对已移除，站点授权不变。若该账户仍在 Vega 网页中登录，网页可能再次发起配对。</div>{{end}}
 
   <input type="radio" name="tab" id="tab-site" class="tab"{{if eq .Tab "site"}} checked{{end}}>
@@ -346,6 +347,14 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
     </form>
     {{end}}
     {{else}}<p class="empty">连上站点后，可按牛马分别配置浏览器 Master。尚未列出牛马时无法保存。</p>{{end}}
+  </section>
+
+  <section class="card">
+    <h2>浏览器扩展</h2>
+    <form method="post">
+      <small>把客户端内置的 Vega Chrome 扩展解压到本机（<code>{{.ExtensionDir}}</code>），再交给一头牛马在电脑会话里用 appuse 打开 chrome://extensions 加载它。要求该牛马的文件系统 Master 与浏览器 Master 都是本机；不满足会提示该去改哪一项。</small>
+      <div class="row"><button name="updateExtension" value="1">更新浏览器扩展</button></div>
+    </form>
   </section>
 
   </section>
@@ -445,7 +454,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid form", 400)
 			return
 		}
-		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveFsMaster") == "1" || r.FormValue("saveBrowserMaster") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" {
+		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveFsMaster") == "1" || r.FormValue("saveBrowserMaster") == "1" || r.FormValue("updateExtension") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" {
 			var err error
 			tab := "client"
 			if r.FormValue("saveBrowserMaster") == "1" {
@@ -453,6 +462,9 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 				err = a.saveBrowserMaster(strings.TrimSpace(r.FormValue("employeeId")), strings.TrimSpace(r.FormValue("browserMaster")))
 			} else if r.FormValue("saveFsMaster") == "1" {
 				err = a.saveFsMaster(strings.TrimSpace(r.FormValue("employeeId")), strings.TrimSpace(r.FormValue("fsMaster")))
+			} else if r.FormValue("updateExtension") == "1" {
+				tab = "access"
+				err = a.installExtension()
 			} else if r.FormValue("saveButterfly") == "1" {
 				tab = "computer"
 				err = a.saveButterfly(r.FormValue("butterflyOn") == "1")
@@ -583,8 +595,10 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	}
 	supplement := a.config.Supplement
 	employees, nodes := a.pairingMasters()
+	extension := a.lastExtension
 	butterfly := a.config.Butterfly
 	a.mu.Unlock()
+	extensionDir := a.extensionDir()
 	tab := r.URL.Query().Get("tab")
 	switch tab {
 	case "site", "client", "access", "computer", "relay":
@@ -605,7 +619,9 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		ConfirmMin, ConfirmMax             int
 		Tab                                string
 		Accounts                           []account
-	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, employees, nodes, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts})
+		Extension                          string
+		ExtensionDir                       string
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, employees, nodes, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts, extension, extensionDir})
 }
 
 type loginProof struct {

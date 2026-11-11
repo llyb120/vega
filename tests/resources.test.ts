@@ -29,7 +29,7 @@ test("Docker builds exactly the client platforms offered by Resources before bun
   assert(clients.every((client) => client.name && client.arch));
   assert.match(docker, /FROM --platform=\$BUILDPLATFORM golang:1\.26-bookworm AS clients/);
   assert.match(docker, /COPY local\/go\.mod local\/go\.sum \.\/\s+RUN go mod download/);
-  assert.match(docker, /COPY local\/\*\.go local\/icon\.ico local\/VERSION \.\//);
+  assert.match(docker, /COPY local\/\*\.go local\/\*\.html local\/\*\.js local\/\*\.syso local\/\*\.ico local\/VERSION \.\/\s+COPY local\/extension \.\/extension/);
   assert.match(docker, /RUN set -eu;/, "a failed cross-build must stop the image build");
   assert.match(docker, /CGO_ENABLED=0 GOOS="\$os" GOARCH="\$arch" go build -trimpath/);
   assert.match(docker, /if \[ "\$os" = windows \]; then flags="\$flags -H=windowsgui"; suffix="\.exe"; fi/);
@@ -73,15 +73,15 @@ test("Resources offers a Chrome extension ZIP containing only the current runtim
     rmSync(publicDir, { recursive: true, force: true });
   });
   await server.listen();
-  const response = await fetch(new URL("clients/nova-chrome.zip", server.resolvedUrls!.local[0]));
+  const response = await fetch(new URL("clients/vega-chrome.zip", server.resolvedUrls!.local[0]));
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type")!, /application\/zip/);
   const files = unzipSync(new Uint8Array(await response.arrayBuffer()));
   const expected = ["manifest.json", "worker.js", "content.js", "popup.html", "popup.js"];
   assert.deepEqual(Object.keys(files).sort(), expected.sort());
   for (const file of expected)
-    assert.deepEqual(Buffer.from(files[file]), readFileSync("extensions/nova-chrome/" + file));
-  assert.match(resources, /href="\/clients\/nova-chrome\.zip" download="nova-chrome\.zip"/);
+    assert.deepEqual(Buffer.from(files[file]), readFileSync("local/extension/vega-chrome/" + file));
+  assert.match(resources, /href="\/clients\/vega-chrome\.zip" download="vega-chrome\.zip"/);
   assert.match(resources, /aria-label="下载 Chrome 扩展 ZIP"/);
   assert.match(resources, /chrome:\/\/extensions/);
   assert.match(resources, /加载已解压的扩展程序/);

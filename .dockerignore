@@ -12,9 +12,6 @@
 !shared/**
 !web/
 !web/**
-!extensions/
-!extensions/nova-chrome/
-!extensions/nova-chrome/**
 !docker/
 !docker/**
 !local/
@@ -26,6 +23,8 @@
 !local/go.sum
 !local/icon.ico
 !local/VERSION
+!local/extension/
+!local/extension/**
 !scripts/
 !scripts/client-manifest.mjs
 web/public/clients/

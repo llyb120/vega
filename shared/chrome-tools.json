@@ -1,7 +1,7 @@
 [
   {
     "name": "chrome_tabs",
-    "description": "列出 Nova 扩展可控的 Chrome 标签页（tag、标题、URL、是否在加载）。query 按标题或 URL 子串过滤；恰好命中一个时直接附该页观察（DOM 摘要 + 视口图）。用来找已打开页面的 tabTag。要打开网址用 chrome_navigate；已知 tabTag 要重新观察用 chrome_inspect。",
+    "description": "列出 Vega 扩展可控的 Chrome 标签页（tag、标题、URL、是否在加载）。query 按标题或 URL 子串过滤；恰好命中一个时直接附该页观察（DOM 摘要 + 视口图）。用来找已打开页面的 tabTag。要打开网址用 chrome_navigate；已知 tabTag 要重新观察用 chrome_inspect。",
     "parameters": {
       "type": "object",
       "properties": {

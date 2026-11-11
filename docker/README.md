@@ -1,6 +1,6 @@
 # Docker：自动加载容器内 Chromium 扩展
 
-镜像包含 Nitro、Linux 原生构建的前端/`sharp`、Debian Chromium 和现有 Nova Chrome 扩展。只运行一个容器：受信启动器管理系统身份，网站服务降权为 UID 1000，云端文件工具、shell、技能、MCP 子进程和 Chromium 使用所属用户的独立 UID/GID。浏览器按需启动并自动加载扩展，不要求先启动公共浏览器。
+镜像包含 Nitro、Linux 原生构建的前端/`sharp`、Debian Chromium 和现有 Vega Chrome 扩展。只运行一个容器：受信启动器管理系统身份，网站服务降权为 UID 1000，云端文件工具、shell、技能、MCP 子进程和 Chromium 使用所属用户的独立 UID/GID。浏览器按需启动并自动加载扩展，不要求先启动公共浏览器。
 
 **这是容器里的专用浏览器，不是给宿主机或访问网页的客户端浏览器静默安装扩展。** 使用 Debian Chromium 而不是受近年扩展命令行限制影响的品牌版 Google Chrome，不篡改用户 Preferences，也不需要签名私钥或 Web Store 发布。
 
@@ -38,7 +38,7 @@ docker inspect --format '{{.State.Health.Status}}' vega
 
 成功启动日志包含 `Per-user cloud execution ready`；`healthy`通过专用`/api/health`确认身份执行器可用。首次浏览器操作才启动该用户/牛马的 Chromium，并检查扩展连接。
 
-- 只发布 **8080**；扩展桥接固定在容器内 `127.0.0.1:47653`，不发布桥接或远程调试端口。
+- 只发布 **8080**；扩展桥接固定在容器内 `127.0.0.1:47753`，不发布桥接或远程调试端口。
 - `tini` 管理子进程；Nitro 退出时停止执行器并退出容器。单个用户的浏览器退出不拖垮网站，后续操作按原恢复机制处理；SIGTERM 关闭执行进程组。
 - 不挂宿主机 X11/Wayland socket，不挂 Docker socket，不使用 `--privileged`。
 

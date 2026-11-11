@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-const extensionOrigin = "chrome-extension://mdicifjlbgnkkdkcbfdnebeghhlamjbm"
-const extensionVersion = "0.1.17"
+const extensionOrigin = "chrome-extension://bhiemmbmefifaloapbcopihahhckolce"
+const extensionVersion = "0.2.0"
 
 var extensionClientID = regexp.MustCompile(`(?i)^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 var localChrome = newBrowserBridge()
@@ -68,7 +68,7 @@ func newBrowserBridge() *browserBridge {
 	return &browserBridge{token: hex.EncodeToString(token), clients: make(map[string]browserPeer), queues: make(map[string]chan *browserCommand), pending: make(map[string]*browserCommand)}
 }
 func (b *browserBridge) start() (*http.Server, error) {
-	for port := 47653; port <= 47662; port++ {
+	for port := 47753; port <= 47762; port++ {
 		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			continue
@@ -80,7 +80,7 @@ func (b *browserBridge) start() (*http.Server, error) {
 		go func() { _ = server.Serve(listener) }()
 		return server, nil
 	}
-	return nil, fmt.Errorf("Chrome extension loopback ports 47653–47662 are occupied")
+	return nil, fmt.Errorf("Chrome extension loopback ports 47753–47762 are occupied")
 }
 
 // The caller holds b.mu for status and queue selection.
@@ -177,7 +177,7 @@ func (b *browserBridge) execute(connection, ctx context.Context, j job) map[stri
 	}
 	if status["connected"] != true {
 		b.mu.Unlock()
-		return map[string]any{"status": "unavailable", "error": "客户端本地 Chrome 扩展未连接或已更换，请在所选电脑加载/重新连接 Nova Chrome 扩展后继续；不会使用服务端浏览器。"}
+		return map[string]any{"status": "unavailable", "error": "客户端本地 Chrome 扩展未连接或已更换，请在所选电脑加载/重新连接 Vega Chrome 扩展后继续；不会使用服务端浏览器。"}
 	}
 	if req.Operation == "acquire" {
 		if b.connection == nil {
@@ -247,7 +247,7 @@ func (b *browserBridge) execute(connection, ctx context.Context, j job) map[stri
 		}
 	case <-pickup.C:
 		if withdraw() {
-			return map[string]any{"status": "unavailable", "error": "本地 Chrome 扩展未取走命令（Nova 扩展后台可能被 Chrome 挂起或已断开），本步未执行，可以直接重试；持续出现请在 chrome://extensions 确认 Nova Chrome 已启用"}
+			return map[string]any{"status": "unavailable", "error": "本地 Chrome 扩展未取走命令（Vega 扩展后台可能被 Chrome 挂起或已断开），本步未执行，可以直接重试；持续出现请在 chrome://extensions 确认 Vega Chrome 已启用"}
 		}
 	}
 	timer := time.NewTimer(timeout + time.Second)
@@ -283,7 +283,7 @@ func (b *browserBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/pair" {
-		_ = json.NewEncoder(w).Encode(map[string]string{"token": b.token})
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": b.token, "app": "vega"})
 		return
 	}
 	if r.Header.Get("Authorization") != "Bearer "+b.token {

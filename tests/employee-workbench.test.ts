@@ -688,16 +688,16 @@ test("workspace leases distinguish execution devices and release transient comma
 });
 
 test("employee browser copies bind only their authenticated private bridge; profile path ids stay isolated at the store layer", async () => {
-  const source = await readFile("extensions/nova-chrome/worker.js", "utf8");
+  const source = await readFile("local/extension/vega-chrome/worker.js", "utf8");
   const worker = privateWorker(source, { port: 54321, token: "private-token" });
   assert.match(worker, /connect\("http:\/\/127\.0\.0\.1:54321"\)/);
-  assert(!worker.includes("for (let port=47653"));
+  assert(!worker.includes("for (let port=47753"));
   assert.match(worker, /Bearer private-token/);
   assert.throws(() => privateWorker("changed protocol", { port: 1, token: "x" }), /protocol changed/);
   const bridge = new ChromeBridge(true);
   await bridge.start();
   try {
-    const req = (authorization?: string) => fetch(`http://127.0.0.1:${bridge.port}/pair`, { method: "POST", headers: { Origin: "chrome-extension://mdicifjlbgnkkdkcbfdnebeghhlamjbm", ...(authorization ? { Authorization: authorization } : {}) } });
+    const req = (authorization?: string) => fetch(`http://127.0.0.1:${bridge.port}/pair`, { method: "POST", headers: { Origin: "chrome-extension://bhiemmbmefifaloapbcopihahhckolce", ...(authorization ? { Authorization: authorization } : {}) } });
     assert.equal((await req()).status, 400);
     assert.equal((await req("Bearer " + bridge.token)).status, 200);
   } finally { bridge.close(); }
@@ -861,4 +861,30 @@ test("engine preserves TimeoutError text when message is getter-only", () => {
   assert.equal(error, raw);
   assert.match(String(error.message), /timeout|aborted/i);
   assert.throws(() => { error.message = "x"; }, /Cannot set property message/);
+});
+
+test("every account owns one employee from its first entry, and the last one cannot be deleted", async () => {
+  const store = await Store.open(":memory:");
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  engine.employee.closed = true;
+  const owned = async (ownerId: string) => {
+    const found: Employee[] = [];
+    for (const employee of await engine.employee.all())
+      if ((await employee.profile()).ownerId === ownerId) found.push(employee);
+    return found;
+  };
+  try {
+    // Two overlapping page loads still create exactly one employee.
+    await Promise.all([engine.employee.ensureOwned("alice", "alice 的牛马"), engine.employee.ensureOwned("alice", "alice 的牛马")]);
+    const [only] = await owned("alice");
+    assert.equal((await owned("alice")).length, 1);
+    assert.equal((await only.profile()).name, "alice 的牛马");
+    await engine.employee.ensureOwned("alice", "alice 的牛马");
+    assert.deepEqual((await owned("alice")).map((employee) => employee.employeeId), [only.employeeId], "an account that already has one keeps it");
+    await assert.rejects(engine.removeEmployee(only.employeeId), /唯一的牛马/);
+    assert.equal((await owned("alice")).length, 1);
+    const next = await engine.employee.for((await engine.employee.create({ name: "接班的牛马" }, "alice")).id);
+    await engine.removeEmployee(only.employeeId);
+    assert.deepEqual((await owned("alice")).map((employee) => employee.employeeId), [next.employeeId]);
+  } finally { await engine.close(); await store.close(); }
 });

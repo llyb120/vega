@@ -12,7 +12,7 @@ class LocalBridge extends ChromeBridge {
   private async send(operation: string, args: Obj, signal = new AbortController().signal) {
     const r = await this.hub.request(this.agent, "browser", { session: this.lease, operation, args }, signal);
     if (r.error) {
-      if (r.error === "Unknown operation") throw new LocalAgentUnavailable("所选客户端版本不支持本地浏览器，请升级客户端并重新加载 Nova Chrome 扩展后继续；不会改用服务端浏览器。");
+      if (r.error === "Unknown operation") throw new LocalAgentUnavailable("所选客户端版本不支持本地浏览器，请升级客户端并重新加载 Vega Chrome 扩展后继续；不会改用服务端浏览器。");
       if (["busy", "unavailable"].includes(r.status)) throw new LocalAgentUnavailable(r.error);
       throw Error(r.error);
     }

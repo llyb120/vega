@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "incognito": "spanning",
+  "name": "Vega Chrome",
+  "version": "0.2.0",
+  "minimum_chrome_version": "125",
+  "description": "自动连接 Vega 本机客户端，用稳定 tag 操作 Chrome，快捷复制当前标签页标识。扩展身份与回环端口只属于 Vega，不和 Nova 共用。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnQHqwCDl552EWumeDbYNVSRKnVES13s1k6zxBzKaKFt6CBH6XCrH2KegMh3X8xw70AaMi9JI9uJ5aDHi/MC7EWV5i3HgHlQ9hxM80ZIMoNOtf868Z0ma3ZwBs8aFQyiCE92yOhNO4vketPDs87pvJVM/v3Mn2SRpN8O6sJ4WIvFEPuhsaXfvEWwtZ4Yeq5xOh12eYFa0Y88XtJHtVHbXg6UfTUA8gVPeqporiW4+NUQSkr/ZmhzQBtDzdShd2yef4zjkmU6Vo3syJT41rUuDt7fITY/CqEgzqOdJcWL74bVEQwteT6BDcwsKC4uwuAeIh3pLn1TaOw+zMppxTPEUPQIDAQAB",
+  "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms", "downloads", "webNavigation"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {"service_worker": "worker.js", "type": "module"},
+  "content_scripts": [{"matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "run_at": "document_idle"}],
+  "action": {"default_title": "Vega Chrome", "default_popup": "popup.html"}
+}

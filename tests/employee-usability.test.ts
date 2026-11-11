@@ -32,8 +32,8 @@ test("browser extension is resolved from source or packaged assets, never the wo
   const dir = await mkdtemp(join(tmpdir(), "vega-extension-layout-"));
   try {
     for (const [asset, module, entry] of [
-      ["source/extensions/nova-chrome", "source/server/core/headless.ts", "source/server/index.ts"],
-      ["built/.output/public/extension/nova-chrome", "built/.output/server/chunks/_/nitro.mjs", "built/.output/server/index.mjs"],
+      ["source/local/extension/vega-chrome", "source/server/core/headless.ts", "source/server/index.ts"],
+      ["built/.output/public/extension/vega-chrome", "built/.output/server/chunks/_/nitro.mjs", "built/.output/server/index.mjs"],
       ["container/extension", "container/.output/server/chunks/_/nitro.mjs", "container/.output/server/index.mjs"],
     ]) {
       const path = join(dir, asset);

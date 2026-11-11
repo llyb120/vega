@@ -12,18 +12,18 @@ import type { CloudRuntime } from "./cloud";
 
 export function extensionDirectory(moduleUrl = import.meta.url, entry = process.argv[1]) {
   const candidates = [
-    fileURLToPath(new URL("../../extensions/nova-chrome", moduleUrl)),
-    fileURLToPath(new URL("../../../public/extension/nova-chrome", moduleUrl)),
-    ...(entry ? [resolve(dirname(entry), "../public/extension/nova-chrome"), resolve(dirname(entry), "../../extension")] : []),
+    fileURLToPath(new URL("../../local/extension/vega-chrome", moduleUrl)),
+    fileURLToPath(new URL("../../../public/extension/vega-chrome", moduleUrl)),
+    ...(entry ? [resolve(dirname(entry), "../public/extension/vega-chrome"), resolve(dirname(entry), "../../extension")] : []),
   ];
   const directory = candidates.find((path) => existsSync(join(path, "manifest.json")) && existsSync(join(path, "worker.js")));
-  assert(directory, "找不到随应用打包的 Chrome 扩展，请完整部署 .output（包含 public/extension/nova-chrome）");
+  assert(directory, "找不到随应用打包的 Chrome 扩展，请完整部署 .output（包含 public/extension/vega-chrome）");
   return directory;
 }
 
 type PrivateBrowser = { profile: string; port: number; token: string; proxy?: string };
 export function privateWorker(source: string, instance: Pick<PrivateBrowser, "port" | "token">) {
-  const loop = 'for (let port=47653; port<=47662; port++) void connect(`http://127.0.0.1:${port}`);';
+  const loop = 'for (let port=47753; port<=47762; port++) void connect(`http://127.0.0.1:${port}`);';
   const pair = "{method:'POST',signal:AbortSignal.timeout(3000)}";
   assert(source.includes(loop) && source.includes(pair), "Bundled browser bridge protocol changed");
   // Keep vendored extension intact; only this employee's generated copy can pair with its private bridge.
@@ -39,7 +39,7 @@ export function headlessArguments(profile: string, extension: string, network?: 
     "--window-size=1920,1200",
     "--password-store=basic",
     // No "started debugging this browser" bar (headless shows it too): it shrank the viewport 56px on every attach.
-    // Safe here: the private profile only runs the Nova extension.
+    // Safe here: the private profile only runs the Vega extension.
     "--silent-debugger-extension-api",
     "--remote-debugging-port=0",
     `--user-data-dir=${profile}`,

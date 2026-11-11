@@ -1,4 +1,4 @@
-// Only Nova's authenticated loopback receiver supplies commands. Never infer a target from the active tab.
+// Only Vega's authenticated loopback receiver supplies commands. Never infer a target from the active tab.
 let model, loading;
 const loops = new Set(), connections = new Set(), reconnects = new Map();
 // Paired instances (origin -> authenticated post), available before the first long poll returns.
@@ -82,7 +82,7 @@ async function inventory() {
     model.tabs[tab.id] = {tag:`C${model.next++}-${model.clientId.replaceAll('-','').slice(0,16)}`};
   }
   await save();
-  // `loading` lets Nova wait for a navigation to settle instead of costing the model another inspect.
+  // `loading` lets Vega wait for a navigation to settle instead of costing the model another inspect.
   return tabs.map(tab=>{
     const openerId = navigationOpeners.get(tab.id) ?? tab.openerTabId;
     return {tag:model.tabs[tab.id].tag,title:tab.title || '',url:tab.url || tab.pendingUrl || '',active:tab.active,incognito:!!tab.incognito,windowId:tab.windowId,allowed:true,controllable:permittedUrl(tab.url || tab.pendingUrl),openerTag:model.tabs[openerId]?.tag,status:tab.status || 'unknown',loading:tab.status!=='complete' || Boolean(tab.pendingUrl)};
@@ -101,7 +101,7 @@ const checkUrl = value => {
   if (!['http:','https:'].includes(url.protocol) || url.username || url.password) throw Error('只允许不含凭据的 HTTP(S) 地址');
   return url.href;
 };
-// Visible marker: tabs under debugger control sit in a blue "Nova" tab group; idle tabs detach so Chrome's debugging bar goes away.
+// Visible marker: tabs under debugger control sit in a blue "Vega" tab group; idle tabs detach so Chrome's debugging bar goes away.
 // The bar (headless too, unless Chrome runs with --silent-debugger-extension-api) resizes the viewport ~56px when it appears
 // or disappears, shifting pages away from earlier screenshots. A model often thinks 30–60s between calls, so detach only
 // after 5 idle minutes, and after a fresh attach wait (bounded) for the bar's resize.
@@ -112,9 +112,9 @@ const grouped = new Set(), idle = new Map();
 async function mark(tab) {
   if (tab.groupId !== -1 || grouped.has(tab.id)) return;
   try {
-    const [group] = await chrome.tabGroups.query({windowId:tab.windowId,title:'Nova'});
+    const [group] = await chrome.tabGroups.query({windowId:tab.windowId,title:'Vega'});
     const groupId = await chrome.tabs.group(group ? {tabIds:tab.id,groupId:group.id} : {tabIds:tab.id,createProperties:{windowId:tab.windowId}});
-    if (!group) await chrome.tabGroups.update(groupId,{title:'Nova',color:'blue'});
+    if (!group) await chrome.tabGroups.update(groupId,{title:'Vega',color:'blue'});
     grouped.add(tab.id);
   } catch { /* Popup windows cannot be grouped; control still works. */ }
 }
@@ -159,7 +159,7 @@ async function execute(command) {
   const {operation, args} = command;
   if (Date.now() > command.expiresAt) throw Error('命令已过期，未执行');
   if (operation === 'downloads') {
-    if (!chrome.downloads) throw Error('下载查询需要 Nova Chrome 0.1.6，请更新并重新加载扩展');
+    if (!chrome.downloads) throw Error('下载查询需要 Vega Chrome，请更新并重新加载扩展');
     const query = {orderBy:['-startTime'],limit:100};
     if (args.downloadId !== undefined) {
       if (typeof args.downloadId !== 'string' || !/^\d+$/.test(args.downloadId) || !Number.isSafeInteger(Number(args.downloadId))) throw Error('downloadId 必须为下载查询返回的 ID');
@@ -178,7 +178,7 @@ async function execute(command) {
     })),notice:'Chrome 下载记录为浏览器范围，不能按 tabTag 归属；按时间、URL、文件名确认目标。空列表不代表导出失败，网页可能尚在生成文件。只有 state=complete 才表示下载完成。'};
   }
   if (operation === 'status') return {incognitoAllowed:await chrome.extension.isAllowedIncognitoAccess(),version:chrome.runtime.getManifest?.().version};
-  // Nova 已把新文件写入加载目录；先回传结果再重载，重载后以新 clientId 自动重连。
+  // Vega 已把新文件写入加载目录；先回传结果再重载，重载后以新 clientId 自动重连。
   if (operation === 'reload' && args.extension === true) { setTimeout(()=>chrome.runtime.reload(),300); return {reloading:true}; }
   if (operation === 'tabs') return {tabs:(await inventory()).filter(tab=>args.incognito === undefined || tab.incognito === args.incognito),incognitoAllowed:await chrome.extension.isAllowedIncognitoAccess()};
   if (operation === 'open' || operation === 'new_tab') {
@@ -186,7 +186,7 @@ async function execute(command) {
     const url = args.url ? checkUrl(args.url) : 'about:blank';
     let tab;
     if (args.incognito === true) {
-      if (!await chrome.extension.isAllowedIncognitoAccess()) throw Error('请在 chrome://extensions 中打开 Nova Chrome 详情，开启“允许在无痕模式下运行”，然后重试；未创建普通窗口');
+      if (!await chrome.extension.isAllowedIncognitoAccess()) throw Error('请在 chrome://extensions 中打开 Vega Chrome 详情，开启“允许在无痕模式下运行”，然后重试；未创建普通窗口');
       const created = await chrome.windows.create({url,incognito:true});
       [tab] = created.tabs || await chrome.tabs.query({windowId:created.id});
     } else {
@@ -264,7 +264,7 @@ async function miniappMatches(url) {
 }
 async function launchMiniapp(message, tab) {
   const post = instances.get(message.origin);
-  if (!post || !tab) throw Error('Nova 未连接');
+  if (!post || !tab) throw Error('Vega 未连接');
   await inventory();
   const tabTag = model.tabs[tab.id]?.tag;
   if (!tabTag) throw Error('启动应用的标签页已关闭，请重新打开页面');
@@ -272,8 +272,9 @@ async function launchMiniapp(message, tab) {
   if (!response.ok) throw Error((await response.json().catch(() => ({}))).error || `HTTP ${response.status}`);
   return {ok: true};
 }
+// Vega 自己的回环端口段：Nova 的扩展只找 47653–47662，两边互不发现、互不共用。
 function loop() {
-  for (let port=47653; port<=47662; port++) void connect(`http://127.0.0.1:${port}`);
+  for (let port=47753; port<=47762; port++) void connect(`http://127.0.0.1:${port}`);
 }
 const newer = (a, b) => { const [x, y] = [a, b].map(v => v.split('.').map(Number)); for (let i = 0; i < 4; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; };
 async function connect(origin, attempt = 0) {
@@ -283,8 +284,10 @@ async function connect(origin, attempt = 0) {
   try {
     await ready(); await inventory();
     const paired=await fetch(`${origin}/pair`,{method:'POST',signal:AbortSignal.timeout(3000)});
-    if(!paired.ok)throw Error(`Nova 连接失败 HTTP ${paired.status}`);
-    const {token}=await paired.json();
+    if(!paired.ok)throw Error(`Vega 连接失败 HTTP ${paired.status}`);
+    const {token,app}=await paired.json();
+    // 只接自己的客户端：没声明 app=vega 的端口不搭话，避免被别的本机程序冒充成 Vega 桥接。
+    if(app!=='vega')throw Error('这个端口不是 Vega 客户端（未声明 app=vega），已忽略');
     if(typeof token!=='string' || token.length<32)throw Error('无效的本机连接令牌');
     const config={origin,token};
     const post = (path,body) => fetch(`${config.origin}${path}`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${config.token}`},body:JSON.stringify({...body,clientId:model.clientId}),signal:AbortSignal.timeout(25000)});
@@ -298,7 +301,7 @@ async function connect(origin, attempt = 0) {
       connections.add(origin);
       const {command, version} = await response.json();
       attempt = 0;
-      // Nova rewrites the unpacked files on update; every browser profile reloads itself once per target version.
+      // Vega rewrites the unpacked files on update; every browser profile reloads itself once per target version.
       if (version && newer(version, chrome.runtime.getManifest().version) && (await chrome.storage.local.get('reloadedFor')).reloadedFor !== version) {
         await chrome.storage.local.set({reloadedFor: version});
         chrome.runtime.reload();
@@ -359,7 +362,7 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
 });
 // Single-page apps change URLs without reloading the content script.
 chrome.tabs.onUpdated.addListener((id,change)=>{if(change.url)void chrome.tabs.sendMessage(id,{type:'miniapp-refresh'}).catch(()=>{});});
-chrome.alarms.onAlarm.addListener(alarm=>{if(alarm.name==='nova-reconnect')void loop();});
-chrome.runtime.onInstalled.addListener(()=>{void chrome.alarms.create('nova-reconnect',{periodInMinutes:.5});void loop();});
+chrome.alarms.onAlarm.addListener(alarm=>{if(alarm.name==='vega-reconnect')void loop();});
+chrome.runtime.onInstalled.addListener(()=>{void chrome.alarms.create('vega-reconnect',{periodInMinutes:.5});void loop();});
 chrome.runtime.onStartup.addListener(()=>void loop());
 void loop();

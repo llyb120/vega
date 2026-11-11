@@ -11,11 +11,11 @@ export default defineConfig({
     configResolved(config) {
       const archive = zipSync(Object.fromEntries(
         ["manifest.json", "worker.js", "content.js", "popup.html", "popup.js"].map((file) =>
-          [file, readFileSync(new URL("../extensions/nova-chrome/" + file, import.meta.url))]),
+          [file, readFileSync(new URL("../local/extension/vega-chrome/" + file, import.meta.url))]),
       ));
       const directory = join(config.publicDir, "clients");
       mkdirSync(directory, { recursive: true });
-      writeFileSync(join(directory, "nova-chrome.zip"), archive);
+      writeFileSync(join(directory, "vega-chrome.zip"), archive);
     },
   }],
   server: { host: "127.0.0.1", proxy: { "/api": "http://127.0.0.1:8080" } },

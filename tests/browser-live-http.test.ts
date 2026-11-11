@@ -36,7 +36,7 @@ test(
           ...process.env,
           NITRO_HOST: "127.0.0.1",
           NITRO_PORT: String(port),
-          NOVA_CHROME_PORT: String(bridgePort),
+          VEGA_CHROME_PORT: String(bridgePort),
           VEGA_PUBLIC_URL: base,
           VEGA_TOKEN: token,
           VEGA_DB: join(dir, "live.db"),
@@ -219,7 +219,7 @@ test(
         cookie: setup.response.headers.get("set-cookie")!.split(";")[0],
         csrf: setup.value.csrfToken,
       };
-      const extension = "chrome-extension://mdicifjlbgnkkdkcbfdnebeghhlamjbm",
+      const extension = "chrome-extension://bhiemmbmefifaloapbcopihahhckolce",
         clientId = randomUUID();
       const pair = await (
         await fetch(bridge + "/pair", {

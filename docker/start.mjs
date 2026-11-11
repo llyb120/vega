@@ -15,7 +15,7 @@ export function chromiumArguments(profile, extension, sandbox = "0") {
     "--no-default-browser-check",
     "--window-size=1440,900",
     "--password-store=basic",
-    // No debugging bar resizing the viewport on attach; only the Nova extension runs in this profile.
+    // No debugging bar resizing the viewport on attach; only the Vega extension runs in this profile.
     "--silent-debugger-extension-api",
     `--user-data-dir=${profile}`,
     `--disable-extensions-except=${extension}`,
@@ -33,7 +33,7 @@ export async function supervise() {
   const env = {
     ...process.env,
     NITRO_HOST: "0.0.0.0",
-    NOVA_CHROME_PORT: "47653",
+    VEGA_CHROME_PORT: "47753",
     VEGA_BROWSER_MODE: "isolated",
     VEGA_CHROMIUM_EXTERNAL: "1",
   };

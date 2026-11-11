@@ -36,7 +36,7 @@ const clients = [
     <section class="card" aria-labelledby="chrome-extension-heading">
       <h3 id="chrome-extension-heading">Chrome 扩展</h3>
       <p class="hint">在需要操作 Chrome 的电脑上安装，复用浏览器的登录态与标签页。容器内置浏览器已自动加载扩展，无需重复安装。</p>
-      <a class="client-download" href="/clients/nova-chrome.zip" download="nova-chrome.zip" aria-label="下载 Chrome 扩展 ZIP">下载 Chrome 扩展（ZIP） ↓</a>
+      <a class="client-download" href="/clients/vega-chrome.zip" download="vega-chrome.zip" aria-label="下载 Chrome 扩展 ZIP">下载 Chrome 扩展（ZIP） ↓</a>
       <ol>
         <li>下载并解压 ZIP，保留解压后的文件夹。</li>
         <li>打开 <code>chrome://extensions</code>，开启“开发者模式”，点击“加载已解压的扩展程序”，选择包含 <code>manifest.json</code> 的文件夹。</li>

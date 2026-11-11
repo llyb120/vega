@@ -41,6 +41,7 @@ type Agent struct {
 	context         context.Context
 	lastSite        string
 	runtime         *RuntimeView
+	lastExtension   string
 }
 
 func main() {

@@ -29,8 +29,8 @@ test('native downloads expose progress, interruption and completion without tab 
   assert.equal((await scope.run({incognito:true})).downloads.length,0);
   for(const args of [{since:-1},{since:'1'},{since:8640000000000001},{downloadId:'oops'},{downloadId:'9007199254740992'},{incognito:'true'}])await assert.rejects(scope.run(args));
   assert.equal(calls,4,'invalid inputs must not query or trigger downloads');
-  delete chrome.downloads;await assert.rejects(scope.run({}),/0\.1\.6/);
-  const tools=JSON.parse(await readFile(new URL('../../shared/chrome-tools.json',import.meta.url),'utf8'));const byName=Object.fromEntries(tools.map(t=>[t.name,t]));
+  delete chrome.downloads;await assert.rejects(scope.run({}),/Vega Chrome/);
+  const tools=JSON.parse(await readFile(new URL('../../../shared/chrome-tools.json',import.meta.url),'utf8'));const byName=Object.fromEntries(tools.map(t=>[t.name,t]));
   assert.ok(byName.chrome_downloads);assert.ok(byName.chrome_devtools);
   assert.match(byName.chrome_act.description,/Ctrl\+C.*TSV/);
   assert.equal(byName.chrome_downloads.parameters.properties.downloadId.type,'string');
@@ -108,8 +108,8 @@ test('a stuck debugger command times out, polling resumes and late results are n
   };
   const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async(url,options)=>{
     const endpoint=new URL(url);
-    if(endpoint.port!=='47653')throw Error('offline');
-    if(endpoint.pathname==='/pair')return {ok:true,json:async()=>({token:'t'.repeat(32)})};
+    if(endpoint.port!=='47753')throw Error('offline');
+    if(endpoint.pathname==='/pair')return {ok:true,json:async()=>({token:'t'.repeat(32),app:'vega'})};
     if(endpoint.pathname==='/reply'){replies.push(JSON.parse(options.body));return {ok:true};}
     if(polls++>=2)return new Promise(()=>{});
     const [tab]=await scope.api.inventory();
@@ -203,14 +203,14 @@ test('stable tags, default access, auto-attached frames, expiry and worker resta
   assert.equal(nativeCalls.length,count);
   tabs=tabs.filter(t=>t.id!==11);await restarted.inventory();
   await assert.rejects(restarted.execute(command(initial[0].tag)),/失效/);
-  assert.ok(discovery.length>0,'Discover Nova without a bundled config or user setup');
-  assert.deepEqual([...new Set(discovery)].sort(),Array.from({length:10},(_,i)=>`http://127.0.0.1:${47653+i}/pair`));
+  assert.ok(discovery.length>0,'Discover Vega without a bundled config or user setup');
+  assert.deepEqual([...new Set(discovery)].sort(),Array.from({length:10},(_,i)=>`http://127.0.0.1:${47753+i}/pair`));
 });
 
-test('multiple Nova instances route replies independently, serialize commands and reconnect without replay',async()=>{
+test('multiple Vega instances route replies independently, serialize commands and reconnect without replay',async()=>{
   const event=()=>({addListener(){}});
   const replies=[], pairs=new Map(), polls=new Map();
-  const available=new Set([47653,47654]);
+  const available=new Set([47753,47754]);
   let active=0, peak=0, attaches=0;
   const chrome={
     extension:{isAllowedIncognitoAccess:async()=>false},
@@ -228,7 +228,7 @@ test('multiple Nova instances route replies independently, serialize commands an
     if(!available.has(port))throw Error('offline');
     if(endpoint.pathname==='/pair'){
       pairs.set(port,(pairs.get(port)||0)+1);
-      return {ok:true,json:async()=>({token:String(port).repeat(8),origin:'http://127.0.0.1:1'})};
+      return {ok:true,json:async()=>({token:String(port).repeat(8),app:'vega',origin:'http://127.0.0.1:1'})};
     }
     assert.equal(options.headers.Authorization,`Bearer ${String(port).repeat(8)}`);
     if(endpoint.pathname==='/poll'){
@@ -239,7 +239,7 @@ test('multiple Nova instances route replies independently, serialize commands an
     }
     const reply=JSON.parse(options.body);
     replies.push({port,reply});
-    if(port===47653)throw Error('reply connection lost');
+    if(port===47753)throw Error('reply connection lost');
     return {ok:true};
   }};
   const source=await readFile(new URL('./worker.js',import.meta.url),'utf8');
@@ -252,14 +252,14 @@ test('multiple Nova instances route replies independently, serialize commands an
   for(const {port,reply} of replies){assert.equal(reply.result.text,String(port));assert.equal(reply.id,'same-id');}
   assert.equal(attaches,1,'shared tab is attached once');
   assert.equal(peak,1,'commands from separate instances cannot race a debugger attachment');
-  assert.ok(scope.api.connections.has('http://127.0.0.1:47654'),'a failed instance does not disconnect the other');
-  available.add(47655);
+  assert.ok(scope.api.connections.has('http://127.0.0.1:47754'),'a failed instance does not disconnect the other');
+  available.add(47755);
   scope.api.loop();scope.api.loop();
   await waitFor(()=>replies.length===3);
-  assert.equal(pairs.get(47653),2,'failed instance is discovered again');
-  assert.equal(pairs.get(47654),1,'live poll is not duplicated');
-  assert.equal(pairs.get(47655),1,'new instance is discovered while another is connected');
-  assert.equal(replies.filter(value=>value.port===47653).length,1,'failed delivery is never replayed');
+  assert.equal(pairs.get(47753),2,'failed instance is discovered again');
+  assert.equal(pairs.get(47754),1,'live poll is not duplicated');
+  assert.equal(pairs.get(47755),1,'new instance is discovered while another is connected');
+  assert.equal(replies.filter(value=>value.port===47753).length,1,'failed delivery is never replayed');
 });
 
 test('ordinary poll and reply failures reconnect automatically without replaying input',async()=>{
@@ -274,8 +274,8 @@ test('ordinary poll and reply failures reconnect automatically without replaying
     if(ms===500){delays.push(ms);return setTimeout(fn,1);}return setTimeout(fn,ms);
   },fetch:async(url)=>{
     const endpoint=new URL(url);
-    if(endpoint.port!=='47653')return new Promise(()=>{});
-    if(endpoint.pathname==='/pair'){pairs++;return {ok:true,json:async()=>({token:'t'.repeat(32)})};}
+    if(endpoint.port!=='47753')return new Promise(()=>{});
+    if(endpoint.pathname==='/pair'){pairs++;return {ok:true,json:async()=>({token:'t'.repeat(32),app:'vega'})};}
     if(endpoint.pathname==='/reply'){replies++;throw Error('reply connection lost');}
     polls++;
     if(polls===1)throw Error('poll connection lost');
@@ -299,8 +299,8 @@ test('a Chrome call that never settles cannot wedge the poll loop',async()=>{
     debugger:{onDetach:event(),onEvent:event()},runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
   const scope={chrome,crypto:webcrypto,URL,AbortSignal,clearTimeout,setTimeout,fetch:async(url,init)=>{
     const endpoint=new URL(url);
-    if(endpoint.port!=='47653')return new Promise(()=>{});
-    if(endpoint.pathname==='/pair')return {ok:true,json:async()=>({token:'t'.repeat(32)})};
+    if(endpoint.port!=='47753')return new Promise(()=>{});
+    if(endpoint.pathname==='/pair')return {ok:true,json:async()=>({token:'t'.repeat(32),app:'vega'})};
     if(endpoint.pathname==='/reply'){replies.push(JSON.parse(init.body));return {ok:true};}
     polls++;
     if(polls>2)return new Promise(()=>{});
@@ -314,14 +314,14 @@ test('a Chrome call that never settles cannot wedge the poll loop',async()=>{
   assert.match(replies[0].error,/时限/);
 });
 
-test('after a reload Nova still holds the old clientId: retry soon instead of waiting for the alarm',async()=>{
+test('after a reload Vega still holds the old clientId: retry soon instead of waiting for the alarm',async()=>{
   const event=()=>({addListener(){}});let polls=0;
   const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},tabs:{query:async()=>[],onRemoved:event(),onReplaced:event(),onUpdated:event()},
     debugger:{onEvent:event(),onDetach:event()},runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
   const scope={chrome,crypto:webcrypto,URL,AbortSignal,clearTimeout,setTimeout:(fn,ms)=>setTimeout(fn,ms===5000?1:ms),fetch:async(url)=>{
     const endpoint=new URL(url);
-    if(endpoint.port!=='47653')throw Error('offline');
-    if(endpoint.pathname==='/pair')return {ok:true,json:async()=>({token:'t'.repeat(32)})};
+    if(endpoint.port!=='47753')throw Error('offline');
+    if(endpoint.pathname==='/pair')return {ok:true,json:async()=>({token:'t'.repeat(32),app:'vega'})};
     if(++polls<=2)return {ok:false,status:409};
     return new Promise(()=>{});
   }};
@@ -394,7 +394,7 @@ test('miniapp page patterns match the whole URL with * as the only wildcard',asy
   assert.ok(!scope.match('https://a.com/','https://a.com/?evil'),'no implicit prefix match');
 });
 
-test('self-reload only targets a numerically newer Nova-bundled version',async()=>{
+test('self-reload only targets a numerically newer Vega-bundled version',async()=>{
   const event=()=>({addListener(){}});
   const chrome={storage:{session:{get:async()=>({}),set:async()=>{}}},tabs:{query:async()=>[],onRemoved:event(),onReplaced:event(),onUpdated:event()},
     debugger:{onEvent:event(),onDetach:event()},runtime:{onMessage:event(),onInstalled:event(),onStartup:event()},alarms:{onAlarm:event()}};
@@ -403,7 +403,7 @@ test('self-reload only targets a numerically newer Nova-bundled version',async()
   assert.equal(scope.newer('0.1.12','0.1.11'),true);
   assert.equal(scope.newer('0.1.10','0.1.9'),true,'numeric, not string, comparison');
   assert.equal(scope.newer('0.1.11','0.1.11'),false);
-  assert.equal(scope.newer('0.1.9','0.1.10'),false,'an older Nova never downgrades the extension');
+  assert.equal(scope.newer('0.1.9','0.1.10'),false,'an older Vega never downgrades the extension');
 });
 
 test('a fresh attach waits for the debugging bar resize once and idle detach waits five minutes',async()=>{
@@ -420,4 +420,28 @@ test('a fresh attach waits for the debugging bar resize once and idle detach wai
   assert.equal(JSON.stringify(sent),JSON.stringify(['attach','settle','Runtime.evaluate','Input.dispatchMouseEvent']),'settle once, before the first command');
   assert.ok(delays.includes(300000),'idle detach after five minutes');
   assert.ok(!delays.includes(30000));
+});
+
+test('a loopback port that does not identify itself as Vega is ignored without polling or commands',async()=>{
+  const event=()=>({addListener(){}});
+  let polls=0;
+  const chrome={
+    extension:{isAllowedIncognitoAccess:async()=>false},
+    storage:{session:{get:async()=>({}),set:async()=>{}}},
+    tabs:{query:async()=>[],get:async()=>({}),onRemoved:event(),onReplaced:event(),onUpdated:event()},
+    debugger:{attach:async()=>{},sendCommand:async()=>({}),onDetach:event(),onEvent:event()},
+    runtime:{id:'test',onMessage:event(),onInstalled:event(),onStartup:event()},
+    alarms:{onAlarm:event()},
+  };
+  const scope={chrome,crypto:webcrypto,URL,AbortSignal,setTimeout,clearTimeout,fetch:async(url)=>{
+    const endpoint=new URL(url);
+    if(endpoint.pathname==='/pair')return {ok:true,json:async()=>({token:'t'.repeat(32)})};
+    polls++;
+    return {ok:true,json:async()=>({command:null})};
+  }};
+  const source=await readFile(new URL('./worker.js',import.meta.url),'utf8');
+  runInNewContext(source+'\nglobalThis.api={connections};',scope);
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(polls,0,'a foreign bridge never receives a poll or a command');
+  assert.equal(scope.api.connections.size,0);
 });

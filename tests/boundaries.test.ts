@@ -17,7 +17,7 @@ test("Chrome extension bridge pairing, client identity binding and no unauthoriz
   cleanup.push(() => bridge.close());
   await bridge.start();
   const origin = `http://127.0.0.1:${bridge.port}`,
-    extension = "chrome-extension://mdicifjlbgnkkdkcbfdnebeghhlamjbm";
+    extension = "chrome-extension://bhiemmbmefifaloapbcopihahhckolce";
   const post = async (path: string, value: any, headers: any = {}) =>
     fetch(origin + path, {
       method: "POST",
