@@ -16,7 +16,7 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
   const context: any = {
     console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
     props: { employeeId: "fixture", api, composer: reactive({ text: "", attachments: [], quote: undefined }) },
-    employeeChatMessages, continuesPrevious, attachmentPayload, isImage,
+    employeeChatMessages, continuesPrevious, attachmentPayload, isImage, seenSeq: () => 0, markSeen: () => {},
   };
   const methods = vm.runInNewContext([
     "let turn = 0;",

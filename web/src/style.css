@@ -306,6 +306,11 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
 .execution-warning { margin-top: 6px; color: var(--warn); font-size: 12px; }
 
 /* ---------- Conversation timeline ---------- */
+/* 「新」分界：切进会话时上次看到的位置之后是新消息。 */
+.chat-new { display: flex; align-items: center; gap: 10px; margin: 2px 0 14px; color: var(--accent); font-size: 11px; font-weight: 600; }
+.chat-new::before, .chat-new::after { content: ""; flex: 1; height: 1px; background: currentColor; opacity: .3; }
+/* 来了新消息就收起上次的分界；占位留着，收起时下面的内容不会跳。 */
+.chat-new.gone { visibility: hidden; }
 .conversation-turn + .conversation-turn { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
 .message { padding: 4px 0 8px; overflow-wrap: anywhere; }
 .message.user { width: fit-content; max-width: min(80%, 680px); margin: 4px 0 12px auto; padding: 8px 12px; border-radius: 12px 12px 4px 12px; background: var(--accent-soft); }

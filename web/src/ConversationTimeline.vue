@@ -1,5 +1,5 @@
 <script setup vapor>
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import MessageText from "./MessageText.vue";
 import UserMessage from "./UserMessage.vue";
 import TurnProcess from "./TurnProcess.vue";
@@ -15,6 +15,7 @@ const props = defineProps({
   activeTools: { type: Array, default: () => [] },
   name: { type: String, default: "Vega" },
   model: String,
+  newFrom: { type: Number, default: 0 },
   userAvatar: String,
 });
 // The viewer's own bubbles take their chosen avatar color, exactly like the employee chat.
@@ -25,9 +26,20 @@ const tint = computed(() => {
   return { background: color.fill, color: color.ink };
 });
 const turns = computed((previous) => conversationTurns(props.messages, { running: props.running, live: props.live, thinking: props.thinking }, previous));
+// 「新」分界：进来时上次看到的位置之后的第一轮（内容可能是旧用户消息加新回复）；来了新消息就收起。
+const markGone = ref(false);
+const newAt = computed(() => props.newFrom > 0
+  ? turns.value.findIndex((turn) => [turn.user, ...turn.body].some((message) => (message?.seq ?? 0) > props.newFrom))
+  : -1);
+let baseSeq = 0;
+watch(() => props.messages.at(-1)?.seq || 0, (seq) => {
+  if (!baseSeq) baseSeq = seq;
+  else if (seq > baseSeq) markGone.value = true;
+}, { immediate: true });
 </script>
 <template>
-  <section v-for="turn in turns" :key="turn.key" class="conversation-turn">
+  <section v-for="(turn, index) in turns" :key="turn.key" class="conversation-turn">
+    <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
     <article v-if="turn.user" class="message user" :style="tint">
       <UserMessage v-if="turn.user.text" :text="turn.user.displayText || turn.user.text" />
       <img v-for="(image, n) in turn.user.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="用户附图" />

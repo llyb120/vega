@@ -19,7 +19,7 @@ function mount(handler: (path: string, method: string, data: any) => any = () =>
     contextBudget: ref(null), fireState: ref(null), live: ref(""), thinking: ref(""), activeTools: ref([]), view: ref("chat"),
     canWriteCurrent: ref(true), executionUnavailable: ref(false), uploading: ref(false), error: ref(""), notice: ref(""),
     project: ref("fixture"), executionLocal: ref(false), executionClientId: ref(""),
-    sessionStorage: { setItem() {}, removeItem() {} }, closeNavigation() {}, transcript: ref(null), nextTick,
+    sessionStorage: { setItem() {}, removeItem() {} }, closeNavigation() {}, transcript: ref(null), nextTick, seenSeq: () => 0, markSeen: () => {},
     bootstrap: async () => {}, refreshCurrent: async () => {},
     api: async (path: string, method = "GET", data?: any) => {
       calls.push({ path, method, data });

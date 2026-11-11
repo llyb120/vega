@@ -11,6 +11,7 @@ import GroupWork from "./GroupWork.vue";
 import { continuesPrevious } from "./conversation";
 import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
+import { markSeen, seenSeq } from "./seen.js";
 import PressMention from "./PressMention.vue";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
 const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number });
@@ -29,6 +30,14 @@ const shown = computed(() => {
     .map((m) => m.author ? { ...m, author: { ...m.author, avatar: avatars.value.get(m.author.id) || "" } } : m);
   return rows.map((message, index) => ({ message, continued: !message.notice && continuesPrevious(rows[index - 1], message) }));
 });
+// 「新」分界：进来时上次看到的位置之后是新的；来了新消息就收起（切出再进来也不会再出现）。
+const newFrom = seenSeq(props.user?.id, props.groupId);
+const markGone = ref(false);
+const newAt = computed(() => newFrom > 0 ? shown.value.findIndex(({ message }) => message.seq > newFrom) : -1);
+const lastSeq = computed(() => messages.value.at(-1)?.seq || 0);
+let settled = false, baseSeq = 0;
+watch(lastSeq, (seq) => { if (settled && seq > baseSeq) markGone.value = true; });
+watch(shown, (rows) => { if (props.groupId) markSeen(props.user?.id, props.groupId, rows.at(-1)?.message.seq); });
 const runningMembers = computed(() => (group.value?.employees || []).filter((e) => group.value.running?.includes(e.id)));
 const available = computed(() => (props.myEmployees || []).filter((e) => !group.value?.employees.some((m) => m.id === e.id)));
 const invitable = computed(() => directory.value.filter((u) => !group.value?.users.some((m) => m.id === u.id)));
@@ -55,6 +64,7 @@ async function load(scroll = false) {
   const result = await props.api(`/groups/${id}/messages?limit=200`);
   if (props.groupId !== id) return;
   messages.value = result.messages;
+  if (!settled) { settled = true; baseSeq = lastSeq.value; }
   taskStatus.value = result.taskStatus || {};
   group.value = result.group;
   edit.value = { name: result.group.name, bulletin: result.group.bulletin };
@@ -174,7 +184,8 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
           <div ref="transcript" class="chat-scroll" aria-live="polite">
             <div class="chat-column">
               <div v-if="group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
-              <template v-for="{ message, continued } in shown" :key="message.seq">
+              <template v-for="({ message, continued }, index) in shown" :key="message.seq">
+                <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
                 <p v-if="message.notice" class="group-notice">{{ message.text }}</p>
                 <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
               </template>

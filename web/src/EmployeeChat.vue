@@ -7,6 +7,7 @@ import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 import { employeeChatMessages, continuesPrevious } from "./conversation";
 import { createChatHistory } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
+import { markSeen, seenSeq } from "./seen.js";
 const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, viewerAvatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array, remember: Function });
 const emit = defineEmits(["task"]);
 const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
@@ -37,6 +38,14 @@ const displayed = computed(() => {
   }
   return rows.map((message, index) => ({ message, continued: continuesPrevious(rows[index - 1], message) }));
 });
+// 「新」分界：进来时上次看到的位置之后是新的；来了新消息就收起（切出再进来也不会再出现）。
+const newFrom = seenSeq(props.userId, props.employeeId);
+const markGone = ref(false);
+const newAt = computed(() => newFrom > 0 ? displayed.value.findIndex(({ message }) => message.seq > newFrom) : -1);
+const lastSeq = computed(() => messages.value.at(-1)?.seq || 0);
+let settled = false, baseSeq = 0;
+watch(lastSeq, (seq) => { if (settled && seq > baseSeq) markGone.value = true; });
+watch(visible, (rows) => markSeen(props.userId, props.employeeId, rows.at(-1)?.seq));
 const typingContinued = computed(() => continuesPrevious(displayed.value.at(-1)?.message, { role: "assistant" }));
 const history = createChatHistory({ api: (...args) => props.api(...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore, cache: createChatCache(props.userId, props.employeeId) });
 
@@ -104,6 +113,7 @@ async function load() {
     if (disposed) return;
     if (!cached || nearBottom()) await scroll();
     ready = true;
+    settled = true; baseSeq = lastSeq.value;
     await fillViewport();
   } catch (e) { if (!disposed && !e.network) error.value = e.message; }
 }
@@ -235,7 +245,8 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
             <button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><Icon name="tasks" :size="15" />看看工作进度</button>
           </div>
         </div>
-        <template v-for="{ message, continued } in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
+        <template v-for="({ message, continued }, index) in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
+        <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
         <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
         <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :viewer-avatar="viewerAvatar" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
         </template>

@@ -163,6 +163,11 @@
   .ta-welcome { padding: 56px 12px; text-align: center; font-size: 15px; font-weight: 600; color: var(--fg); }
   .ta-welcome small { display: block; margin-top: 8px; font-size: 12px; font-weight: 400; color: var(--fg-3); }
   .ta-welcome code { padding: 1px 5px; border-radius: 4px; background: rgb(var(--ink) / 0.08); font-size: 11px; }
+  /* 「新」分界：切进线程时上次看到的位置之后是新消息；来了新消息或切出再进来就不再出现。 */
+  .ta-new { display: flex; align-items: center; gap: 10px; margin: 2px 0 12px; color: var(--brand); font-size: 11px; font-weight: 600; }
+  .ta-new::before, .ta-new::after { content: ""; flex: 1; height: 1px; background: currentColor; opacity: 0.3; }
+  /* 占位留着，收起时下面的内容不会跳。 */
+  .ta-new.gone { visibility: hidden; }
 
   .ta-message { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 14px; }
   .ta-message.user { flex-direction: row-reverse; }
@@ -563,7 +568,7 @@ const el = {
   close: document.getElementById("close")
 };
 
-const state = { threads: { employees: [], groups: [] }, current: "", title: "", avatar: "", authors: {}, messages: [], lastSeq: 0, running: false, busy: false, stick: true };
+const state = { threads: { employees: [], groups: [] }, current: "", title: "", avatar: "", authors: {}, messages: [], lastSeq: 0, newFrom: 0, markGone: false, running: false, busy: false, stick: true };
 
 // 跟随任务栏明暗（WebView2 跟随应用主题）。
 const scheme = matchMedia("(prefers-color-scheme: dark)");
@@ -781,6 +786,13 @@ function threadOf(thread) {
 
 // ── 会话 ────────────────────────────────────────────────
 // Nova 的 ta-message-meta 只放会话状态/打开会话按钮，没有消息时间戳。
+// 每个线程在本机记住看到的位置，切进来时把它之后的消息标成新的；来了新消息或切出再进来就不再出现。
+const seen = {
+  key: (thread) => "vega.assistant.seen:" + thread,
+  of(thread) { try { return Number(localStorage.getItem(this.key(thread))) || 0; } catch { return 0; } },
+  at(thread, seq) { try { if (seq) localStorage.setItem(this.key(thread), String(seq)); } catch {} },
+};
+const newLine = () => `<div class="ta-new${state.markGone ? " gone" : ""}" role="separator"><span>新</span></div>`;
 
 function messageHTML(message) {
   if (message.notice) return `<div class="ta-notice"><span>${esc(message.text || "")}</span></div>`;
@@ -822,7 +834,10 @@ function messageHTML(message) {
 function renderStream(scroll = false) {
   const thread = state.current;
   if (!thread) return;
-  let html = state.messages.map((message) => messageHTML(message)).join("");
+  const parts = state.messages.map((message) => messageHTML(message));
+  // 只分新旧：上次看到的位置之后第一条可见消息前画一条「新」；一直在本线程就不再出现。
+  const first = state.newFrom > 0 ? parts.findIndex((part, index) => part && state.messages[index].seq > state.newFrom) : -1;
+  let html = parts.map((part, index) => (index > 0 && index === first ? newLine() : "") + part).join("");
   if (state.running) {
     const typingAvatar = state.current.startsWith("employee:") ? avatarHTML(state.avatar, state.current.slice(9)) : `<span class="ta-avatar">${esc(initials(state.title))}</span>`;
     html += `<div class="ta-message bot">${typingAvatar}
@@ -888,6 +903,8 @@ async function open(thread) {
   state.avatar = "";
   state.authors = {};
   state.title = threadOf(thread)?.name || "";
+  state.newFrom = seen.of(thread);
+  state.markGone = false;
   try { localStorage.setItem("vega.assistant.thread", thread); } catch {}
   updateHead();
   renderRail();
@@ -901,6 +918,7 @@ async function open(thread) {
     state.title = data.title || state.title;
     if (data.avatar !== undefined) state.avatar = data.avatar;
     if (data.authors !== undefined) state.authors = data.authors;
+    seen.at(thread, state.lastSeq);
     updateHead();
     renderStream(true);
     api("read", { thread }).then(() => {
@@ -929,6 +947,8 @@ async function pollMessages() {
     if (fresh.length) {
       state.messages.push(...fresh);
       state.lastSeq = data.lastSeq || fresh.at(-1).seq;
+      state.markGone = true;
+      seen.at(thread, state.lastSeq);
     }
     if (fresh.length || running !== state.running) {
       state.running = running;

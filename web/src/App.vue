@@ -10,6 +10,7 @@ import EmployeeSessionView from "./EmployeeSessionView.vue";
 import EmployeeChat from "./EmployeeChat.vue";
 import { clearChatCache, pruneChatCache } from "./chat-cache.js";
 import { mergeMessages } from "./chat-history.js";
+import { markSeen, seenSeq } from "./seen.js";
 import EmployeeHeader from "./EmployeeHeader.vue";
 import EmployeeTasks from "./EmployeeTasks.vue";
 import EmployeeDuties from "./EmployeeDuties.vue";
@@ -193,6 +194,7 @@ watch(notice, (text) => {
 const sessions = ref([]),
   current = ref(null),
   messages = ref([]),
+  newFrom = ref(0),
   sessionLoading = ref(false),
   folds = ref([]),
   running = ref({}),
@@ -778,6 +780,8 @@ async function selectSession(session) {
   const request = ++sessionRequest;
   closeNavigation();
   current.value = session;
+  // 「新」分界：记住进来之前看到的位置，之后到达的算新消息。
+  newFrom.value = seenSeq(user.value.id, session.id);
   try {
     sessionStorage.setItem("vega:session:" + user.value.id, session.id);
   } catch {}
@@ -980,6 +984,10 @@ async function refreshCurrent() {
   fireState.value = data.fire;
   running.value[current.value.id] = data.running;
 }
+// 会话在屏幕上时把看到的位置记在本机，切走再回来只标出这之后的。
+watch(messages, (rows) => { if (user.value && current.value && rows.length) markSeen(user.value.id, current.value.id, rows.at(-1).seq); });
+// 切开这个会话再回来：上次的分界不再出现。
+watch(() => view.value, (next) => { if (next === "chat" && user.value && current.value) newFrom.value = seenSeq(user.value.id, current.value.id); });
 /** Runs fn at most once at a time; calls made meanwhile collapse into one trailing run. */
 function coalesced(fn) {
   let running = null, again = false;
@@ -1592,7 +1600,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             Fire · 第 {{ fireState.attempt }} 次 · {{ fireState.role === "judge" ? "独立验收" : "执行" }} · {{ fireState.status }}
             <p v-if="fireState.reason">{{ fireState.reason }}</p>
           </div>
-          <ConversationTimeline :key="current?.id ?? 'none'" :messages="messages" :running="!!isRunning" :live="live" :thinking="thinking" :active-tools="activeTools" :model="model" :user-avatar="user.avatar" />
+          <ConversationTimeline :key="current?.id ?? 'none'" :messages="messages" :new-from="newFrom" :running="!!isRunning" :live="live" :thinking="thinking" :active-tools="activeTools" :model="model" :user-avatar="user.avatar" />
         </div>
         <p v-if="!canWriteCurrent" class="context-note">历史会话仅供查阅；继续工作请交给牛马，执行会话由牛马管理。</p>
         <div v-if="canWriteCurrent" class="composer-wrap">

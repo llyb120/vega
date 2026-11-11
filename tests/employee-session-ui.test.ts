@@ -201,7 +201,7 @@ test("turn and process keys preserve mounted folds through refresh, tool complet
   ];
   const props = reactive({ messages: messages.slice(5, 7), running: true, live: "", thinking: "" });
   const timeline = readFileSync("web/src/ConversationTimeline.vue", "utf8");
-  const turns = vm.runInNewContext(timeline.slice(timeline.indexOf("const turns ="), timeline.indexOf("</script>")) + "\nturns", { computed, conversationTurns, props });
+  const turns = vm.runInNewContext(timeline.slice(timeline.indexOf("const turns ="), timeline.indexOf("</script>")) + "\nturns", { computed, ref, watch: () => {}, conversationTurns, props });
   const initial = turns.value[0], firstKey = initial.process[0].key, pendingKey = initial.process.at(-1).key;
   props.messages = messages.slice(5);
   const completed = turns.value[0];
