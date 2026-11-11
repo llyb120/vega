@@ -1,7 +1,8 @@
 <script setup vapor>
 import Icon from "./Icon.vue";
+import { SseSocket } from "./sse-socket.js";
 import { computed, ref, onMounted, onBeforeUnmount } from "vue";
-const props = defineProps({ api: Function, employeeId: String });
+const props = defineProps({ api: Function, employeeId: String, csrf: String });
 const status = ref(null),
   tabs = ref([]),
   selected = ref(""),
@@ -34,7 +35,6 @@ const inputDisabled = computed(
 );
 const DRAG_PX = 6;
 let socket = null,
-  heartbeat = null,
   sequence = 0,
   inflight = 0,
   outbox = [],
@@ -64,11 +64,9 @@ function resetInput() {
 function disconnect() {
   operating.value = false;
   resetInput();
-  clearInterval(heartbeat);
   clearTimeout(connectTimer);
   clearTimeout(retryTimer);
   retryTimer = null;
-  heartbeat = null;
   socket?.close();
   socket = null;
   inflight = 0;
@@ -91,7 +89,7 @@ function zoomView(event, factor) {
   zoom.value = next;
 }
 function requestControl() {
-  if (liveState.value !== "view" || !imageReady.value || socket?.readyState !== WebSocket.OPEN) return;
+  if (liveState.value !== "view" || !imageReady.value || socket?.readyState !== SseSocket.OPEN) return;
   resetInput();
   operating.value = true;
   liveState.value = "waiting";
@@ -100,7 +98,7 @@ function requestControl() {
 function releaseControl() {
   operating.value = false;
   resetInput();
-  if (socket?.readyState === WebSocket.OPEN) {
+  if (socket?.readyState === SseSocket.OPEN) {
     liveState.value = "view";
     socket.send(JSON.stringify({ type: "mode", mode: "view" }));
   }
@@ -111,7 +109,7 @@ function loadedImage() {
     previousImageURL = "";
   }
   imageFailStreak = 0;
-  if (!screenshot.value || socket?.readyState !== WebSocket.OPEN) return;
+  if (!screenshot.value || socket?.readyState !== SseSocket.OPEN) return;
   imageReady.value = true;
   shownFrame = screenshot.value;
   if (/画面已过期|网页或视口已变化/.test(error.value) || /画面已过期|网页或视口已变化|请等待实时画面/.test(info.value)) {
@@ -190,10 +188,12 @@ async function capture(tab, resume = false) {
     });
     if (disposed || request !== version) return;
     const url = new URL("/api/chrome/live", window.location.href);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("ticket", ticket);
     if (props.employeeId) url.searchParams.set("employeeId", props.employeeId);
-    const ws = new WebSocket(url);
+    // 浏览器实时画面的上行是另一个路径；同一通道的上行按到达顺序交给 LiveSession.message()。
+    const input = new URL("/api/chrome/live/input", window.location.href);
+    if (props.employeeId) input.searchParams.set("employeeId", props.employeeId);
+    const ws = new SseSocket(url, { csrf: props.csrf, uplink: input });
     socket = ws;
     let serverError = false, opened = false;
     const fail = (reason) => {
@@ -225,21 +225,21 @@ async function capture(tab, resume = false) {
       );
     };
     connectTimer = setTimeout(
-      () => fail("实时连接超时，请检查反向代理是否支持WebSocket并刷新"),
+      () => fail("实时连接超时，请检查反向代理是否支持 SSE 并刷新"),
       15000,
     );
     ws.onopen = () => {
       opened = true;
       clearTimeout(connectTimer);
-      heartbeat = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN)
-          ws.send(JSON.stringify({ type: "ping" }));
-      }, 5000);
     };
     ws.onmessage = async (event) => {
       if (disposed || request !== version || socket !== ws) return;
+      const value = event.value;
+      if (!value) {
+        fail("实时画面格式无效，请重新连接");
+        return;
+      }
       try {
-        const value = JSON.parse(event.data);
         if (value.type === "frame" && value.same === true) {
           // The picture did not change: keep the shown image, take the fresh frame state, acknowledge at once.
           const image = imageReady.value && screenshot.value?.image;
@@ -262,7 +262,7 @@ async function capture(tab, resume = false) {
           } catch {
             imageFailStreak++;
             info.value = "收到损坏画面帧，已跳过";
-            if (value.frameId && ws.readyState === WebSocket.OPEN)
+            if (value.frameId && ws.readyState === SseSocket.OPEN)
               ws.send(JSON.stringify({ type: "frame_ack", frameId: value.frameId, resend: true }));
             return;
           }
@@ -275,7 +275,7 @@ async function capture(tab, resume = false) {
             URL.revokeObjectURL(nextURL);
             imageFailStreak++;
             info.value = "画面帧无法解码，已跳过";
-            if (value.frameId && ws.readyState === WebSocket.OPEN)
+            if (value.frameId && ws.readyState === SseSocket.OPEN)
               ws.send(JSON.stringify({ type: "frame_ack", frameId: value.frameId, resend: true }));
             return;
           }
@@ -324,7 +324,7 @@ async function capture(tab, resume = false) {
       }
     };
     ws.onerror = () => {
-      if (!opened) fail("WebSocket连接失败；请确认登录状态和反向代理配置");
+      if (!opened) fail("实时连接失败；请确认登录状态和反向代理配置");
     };
     ws.onclose = (event) => lost(event?.code);
   } catch (e) {
@@ -445,7 +445,7 @@ function inputResult(value) {
       // Transient freshness: keep control, soft notice, force a full next frame so the user can retry.
       error.value = "";
       info.value = value.reason || "请等待实时画面更新";
-      if (socket?.readyState === WebSocket.OPEN)
+      if (socket?.readyState === SseSocket.OPEN)
         socket.send(JSON.stringify({ type: "frame_ack", frameId: shownFrame?.frameId || 0, resend: true }));
       return;
     }
@@ -481,7 +481,7 @@ function schedulePointer() {
 }
 function sendPointer() {
   const drag = remoteDrag;
-  if (!drag?.ready || !drag.pending || drag.release || !remote.value || socket?.readyState !== WebSocket.OPEN) return;
+  if (!drag?.ready || !drag.pending || drag.release || !remote.value || socket?.readyState !== SseSocket.OPEN) return;
   if (drag.pending.phase !== "up" && drag.sent.length >= 4) return;
   if (socket.bufferedAmount > 65536) {
     disconnect();
@@ -495,7 +495,7 @@ function sendPointer() {
   socket.send(JSON.stringify({ type: "pointer", seq, dragSeq: drag.seq, frameId: drag.frameId, action }));
 }
 function control(action, frameId = shownFrame?.frameId) {
-  if (!remote.value || !screenshot.value || socket?.readyState !== WebSocket.OPEN)
+  if (!remote.value || !screenshot.value || socket?.readyState !== SseSocket.OPEN)
     return;
   if (action.action === "pointer" && action.phase !== "down") {
     if (!remoteDrag || remoteDrag.frameId !== frameId || remoteDrag.release) return;
@@ -824,7 +824,7 @@ function failedImage(event) {
   if (src && screenshot.value?.image?.url && src !== screenshot.value.image.url) return;
   imageFailStreak++;
   imageReady.value = false;
-  if (imageFailStreak < 3 && socket?.readyState === WebSocket.OPEN) {
+  if (imageFailStreak < 3 && socket?.readyState === SseSocket.OPEN) {
     error.value = "";
     info.value = "画面帧解码失败，正在等待下一帧…";
     return;
@@ -892,7 +892,7 @@ onBeforeUnmount(() => {
           <button v-if="screenshot" type="button" class="sm ghost zoom-reset" :disabled="operating" title="恢复原始缩放和位置（快捷键 0）" @click="resetView"><Icon name="maximize" :size="14" /><span>{{ Math.round(zoom * 100) }}%</span></button>
           <a v-if="!!screenshot" :href="screenshot.image.url" target="_blank" rel="noopener noreferrer" class="button-link icon-link" title="查看大图" aria-label="查看大图"><Icon name="external" :size="15" /></a>
           <button type="button" class="icon sm" :disabled="busy" title="刷新截图" aria-label="刷新截图" @click="capture(tabs.find((t) => t.tag === selected))"><Icon name="refresh" :size="15" /></button>
-          <button type="button" class="sm" :class="operating ? 'primary' : ''" :disabled="busy || (!operating && (liveState !== 'view' || !imageReady))" @click="operating ? releaseControl() : requestControl()"><Icon :name="operating ? 'close' : 'hand'" :size="14" />{{ operating ? '退出操作' : '开始操作' }}</button>
+          <button type="button" class="sm remote-toggle" :class="operating ? 'primary' : ''" :disabled="busy || (!operating && (liveState !== 'view' || !imageReady))" @click="operating ? releaseControl() : requestControl()"><Icon :name="operating ? 'close' : 'hand'" :size="14" />{{ operating ? '退出操作' : '开始操作' }}</button>
         </div>
       </div>
       <div class="browser-stage">

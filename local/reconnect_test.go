@@ -13,46 +13,42 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 func TestNativeReconnectKeepsRunningJobsAndResendsOnlyUnacknowledgedResults(t *testing.T) {
 	clientID, token := strings.Repeat("c", 32), strings.Repeat("t", 43)
 	type resumedPeer struct {
-		*backendPeer
+		*channelPeer
 		instance string
 	}
 	accepted := make(chan resumedPeer, 8)
 	results := make(chan map[string]any, 8)
 	var mu sync.Mutex
 	wanted := []string{}
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+token {
-			http.Error(w, "unauthorized", 401)
+	socket := newChannelServer(func(peer *channelPeer, r *http.Request) {
+		message, ok := peer.poll()
+		if !ok {
 			return
 		}
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
 		var hello struct {
 			Type, ClientID, Instance string
 			Resume                   bool
 		}
-		if conn.ReadJSON(&hello) != nil || hello.Type != "hello" || hello.ClientID != clientID || !hello.Resume {
+		if json.Unmarshal(message.raw, &hello) != nil || hello.Type != "hello" || hello.ClientID != clientID || !hello.Resume {
 			return
 		}
-		peer := &backendPeer{conn: conn}
 		mu.Lock()
 		pending := append([]string{}, wanted...)
 		mu.Unlock()
 		_ = peer.send(map[string]any{"type": "ready", "userId": "alice", "clientId": clientID, "resume": true, "pending": pending})
 		accepted <- resumedPeer{peer, hello.Instance}
 		for {
+			message, ok := peer.poll()
+			if !ok {
+				return
+			}
 			var value map[string]any
-			if conn.ReadJSON(&value) != nil {
+			if json.Unmarshal(message.raw, &value) != nil {
 				return
 			}
 			if value["type"] == "ping" {
@@ -61,11 +57,23 @@ func TestNativeReconnectKeepsRunningJobsAndResendsOnlyUnacknowledgedResults(t *t
 				results <- value
 			}
 		}
+	})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/local-agent/result" {
+			// 服务端拒收大结果：客户端应该退回通道上交，而不是重试同一个帧。
+			http.Error(w, "upload unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
+		socket.ServeHTTP(w, r)
 	}))
 	defer backend.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	agent := &Agent{pinnedOrigin: backend.URL, config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{}), context: ctx}
+	agent := &Agent{pinnedOrigin: backend.URL, config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*Conn]struct{}), context: ctx}
 	connection := agent.startConnection(ServerCredential{Origin: backend.URL, UserID: "alice"}, token)
 	if connection == nil {
 		t.Fatal("connection did not start")
@@ -93,7 +101,7 @@ func TestNativeReconnectKeepsRunningJobsAndResendsOnlyUnacknowledgedResults(t *t
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	_ = first.conn.Close()
+	first.stop()
 	second := receive(t, accepted)
 	if first.instance != second.instance {
 		t.Fatal("transport reconnect changed the execution instance")
@@ -107,7 +115,7 @@ func TestNativeReconnectKeepsRunningJobsAndResendsOnlyUnacknowledgedResults(t *t
 		t.Fatalf("in-flight work did not survive disconnect: %s", data)
 	}
 	// Drop the result acknowledgement, as if the response was lost in the network.
-	_ = second.conn.Close()
+	second.stop()
 	third := receive(t, accepted)
 	if third.instance != first.instance {
 		t.Fatal("unacknowledged result lost its original instance")
@@ -144,7 +152,7 @@ func TestNativeReconnectKeepsRunningJobsAndResendsOnlyUnacknowledgedResults(t *t
 	mu.Lock()
 	wanted = []string{}
 	mu.Unlock()
-	_ = third.conn.Close()
+	third.stop()
 	_ = receive(t, accepted)
 	select {
 	case <-cancelledCtx.Done():

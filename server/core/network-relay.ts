@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createServer, connect, isIP, type Server, type Socket } from "node:net";
-import type { Peer } from "crossws";
 import type { Store } from "./store";
 import type { Agent, LocalAgents } from "./local-agent";
+import { decodeFrame, encodeFrame, type Wire } from "./sse";
 import { assert } from "./util";
 
 const FRAME = 32 << 10;
@@ -10,7 +10,7 @@ type Grant = { userId: string; clientId: string; hash: string };
 type Record = Grant & { rules: string[]; on?: boolean };
 /** 老记录没有 on：以是否报了规则为准；新客户端总是显式上报开关。 */
 const allowed = (record: Record) => record.on !== false;
-type TunnelPeer = Pick<Peer, "id" | "send" | "close">;
+type TunnelPeer = Wire;
 type Flow = { grant: Grant; transport: Agent["transport"]; socket: Socket; peer?: TunnelPeer; ready: boolean; sending: boolean; incoming: boolean; timer: ReturnType<typeof setTimeout>; finish: (reason?: string) => void };
 
 export function relayRules(value: unknown): string[] {
@@ -216,7 +216,7 @@ export class NetworkRelay {
     const finish = (reason?: string) => {
       const flow = this.flows.get(id);
       if (!flow) return;
-      if (reason) console.warn("[Vega relay] Tunnel failed", { userId: record.userId, clientId: flow.grant.clientId, id, host, port, stage: flow.ready ? "stream" : flow.peer ? "target_connect" : "websocket_upgrade", reason,
+      if (reason) console.warn("[Vega relay] Tunnel failed", { userId: record.userId, clientId: flow.grant.clientId, id, host, port, stage: flow.ready ? "stream" : flow.peer ? "target_connect" : "stream_open", reason,
         tip: flow.ready ? undefined : "客户端未在时限内就绪：检查本机客户端在线、目标是否在流量中继规则中、反代是否转发 /api/local-agent/relay 与 X-Vega-Relay，以及客户端日志中的 relay 失败原因。" });
       this.flows.delete(id);
       clearTimeout(flow.timer);
@@ -239,7 +239,7 @@ export class NetworkRelay {
   }
   message(peer: TunnelPeer, data: Uint8Array) {
     const flow = this.flows.get(this.peers.get(peer.id) || "");
-    if (!flow) { peer.close(); return; }
+    if (!flow) { peer.close(1000, "Relay closed"); return; }
     try {
       assert(data.length > 0 && data.length <= FRAME + 1, "Invalid relay frame");
       if (data[0] === 2) {
@@ -262,7 +262,7 @@ export class NetworkRelay {
         flow.socket.write(Buffer.from(data.subarray(1)), (error) => {
           flow.incoming = false;
           if (error || flow.socket.destroyed) flow.finish();
-          else try { peer.send(Buffer.from([1])); } catch { flow.finish(); }
+          else peer.send({ type: "relay", data: encodeFrame(Buffer.from([1])) }, { data: true });
         });
       }
     } catch { flow.finish("Invalid tunnel frame"); }
@@ -276,11 +276,17 @@ export class NetworkRelay {
     // shortcut: one bounded frame in flight per direction; add a credit window if WAN throughput requires it.
     flow.sending = true;
     flow.timer = setTimeout(() => flow.finish("Acknowledgement timed out"), 30000);
-    try { flow.peer!.send(Buffer.concat([Buffer.from([0]), data])); } catch { flow.finish("Tunnel send failed"); }
+    try { flow.peer!.send({ type: "relay", data: encodeFrame(Buffer.concat([Buffer.from([0]), data])) }, { data: true }); } catch { flow.finish("Tunnel send failed"); }
   }
   closePeer(id: string) {
     const flow = this.flows.get(this.peers.get(id) || "");
     flow?.finish(flow.ready ? undefined : "Client tunnel closed before target connection was ready");
+  }
+  /** One upstream frame posted by the client; the tunnel's byte order must never be reordered. */
+  incoming(id: string, grant: Grant, text: unknown) {
+    const flow = this.flows.get(id);
+    assert(flow?.peer && flow.grant.hash === grant.hash && flow.grant.userId === grant.userId && flow.grant.clientId === grant.clientId, "Invalid or expired relay connection");
+    this.message(flow.peer, decodeFrame(text));
   }
   async close() {
     this.closed = true;

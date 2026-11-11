@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
-import type { Peer } from "crossws";
 import { Auth, digest } from "./auth";
 import type { Store } from "./store";
 import { CLIENT_HEARTBEAT_TIMEOUT, LocalAgents, validateClient, type Agent } from "./local-agent";
+import { SseChannels, type Request, type Wire } from "./sse";
 import { assert, type Obj } from "./util";
 import type { NetworkRelay } from "./network-relay";
 
@@ -24,12 +24,14 @@ export function clientOutdated(minimum: string, actual?: string) {
   for (let i = 0; i < 3; i++) if (version[i] !== floor[i]) return version[i] < floor[i];
   return false;
 }
-type Socket = Pick<Peer, "id" | "request" | "send" | "close">;
+type Socket = Wire;
 type Grant = { hash: string; userId: string; clientId: string; createdAt: number };
 type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj; transport?: Agent["transport"]; updating?: boolean; tail?: Promise<void> };
 
 export class ClientSockets {
   private connections = new Map<string, Connection>();
+  /** Channels that extra lanes (queued jobs) may attach to. */
+  channels = new SseChannels();
   private timer: ReturnType<typeof setInterval>;
   /** 正在做下线交接的连接：同一条连接只交接一次。 */
   private goingOffline = new Set<string>();
@@ -67,8 +69,9 @@ export class ClientSockets {
     const stored = await this.store.object<Grant>("client-token", grant.hash), user = await this.auth.user(grant.userId);
     return !!stored && stored.clientId === grant.clientId && stored.userId === grant.userId && !!user && !user.disabled && user.role !== "viewer";
   }
-  async authorize(request: Socket["request"]) {
-    assert(!request.headers.get("origin") && !new URL(request.url).search, "Native client connection required");
+  async authorize(request: Request) {
+    // Native client requests carry no Origin and no cookie; a stream adds only lane/channel query parameters.
+    assert(!request.headers.get("origin"), "Native client connection required");
     const token = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") || "")?.[1];
     const grant = token && await this.record(token);
     assert(grant, "Client credential invalid or revoked");
@@ -80,20 +83,23 @@ export class ClientSockets {
     assert(this.connections.size < 128, "Too many native client connections");
     this.connections.set(socket.id, { socket, grant, lastAt: Date.now() });
   }
-  /** Messages of one connection are handled one after another, in arrival order. */
-  message(socket: Socket, raw: string) {
-    const connection = this.connections.get(socket.id);
-    if (!connection) return;
-    return (connection.tail = (connection.tail || Promise.resolve()).then(() => this.handle(socket, raw)));
+  /** One upstream message posted by the device; the channel must belong to the same device grant. */
+  async messageByChannel(id: string, grant: Grant, value: Obj) {
+    this.channels.owned(id, grant.hash);
+    return await this.message(id, value);
   }
-  private async handle(socket: Socket, raw: string) {
-    const connection = this.connections.get(socket.id);
+  /** Messages of one connection are handled one after another, in arrival order. */
+  message(socketId: string, value: Obj) {
+    const connection = this.connections.get(socketId);
+    if (!connection) return;
+    return (connection.tail = (connection.tail || Promise.resolve()).then(() => this.handle(socketId, value)));
+  }
+  private async handle(socketId: string, value: Obj) {
+    const connection = this.connections.get(socketId);
     if (!connection) return;
     let accepted = false;
     try {
       assert(await this.valid(connection.grant), "Client authorization revoked");
-      assert(Buffer.byteLength(raw) <= CLIENT_SOCKET_LIMIT, "Client message too large");
-      const value = JSON.parse(raw);
       assert(value && typeof value === "object" && !Array.isArray(value), "Invalid client message");
       connection.lastAt = Date.now();
       const { grant } = connection;
@@ -104,8 +110,8 @@ export class ClientSockets {
         const minimum = minClientVersion();
         if (clientOutdated(minimum, value.version)) {
           // Say why before closing: a bare socket close only looks like a network fault on the client.
-          socket.send(JSON.stringify({ type: "error", code: "client_outdated", message: `本节点要求客户端 ${minimum} 或更新，当前为 ${value.version || "未知版本"}，请到「资源」页下载并安装新客户端。` }));
-          this.close(socket.id, true);
+          connection.socket.send({ type: "error", code: "client_outdated", message: `本节点要求客户端 ${minimum} 或更新，当前为 ${value.version || "未知版本"}，请到「资源」页下载并安装新客户端。` });
+          this.close(socketId, true);
           return;
         }
         if (value.relay !== undefined) await this.relay?.configure(grant, value.relay, value.relayOn);
@@ -114,14 +120,14 @@ export class ClientSockets {
         const previous = this.hub.active(grant.userId, grant.clientId);
         if (previous && previous.instance !== value.instance) this.hub.disconnect(grant.userId, previous.instance);
         connection.transport = {
-          send: (job) => socket.send(JSON.stringify(job)),
-          close: () => this.close(socket.id),
+          send: (job) => connection.socket.send(job, { data: true, key: job.id }),
+          close: () => this.close(socketId),
         };
         this.hub.connect(grant.userId, value, connection.transport);
         connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, supplement: value.supplement, browser: value.browser, loginState: value.loginState, sshKeys: value.sshKeys, prefer: value.prefer, resume: value.resume === true, autoUpdate: value.autoUpdate === true && value.resume === true && !!value.version };
         const agent = this.hub.active(grant.userId, grant.clientId)!;
         accepted = true;
-        socket.send(JSON.stringify({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) }));
+        connection.socket.send({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) });
         void this.pushStatus(grant.userId, grant.clientId);
         return;
       }
@@ -135,12 +141,12 @@ export class ClientSockets {
           this.hub.suspend(grant.userId, agent.instance, connection.transport, true);
         }
         accepted = true;
-        socket.send(JSON.stringify({ type: idle ? "update_ready" : "update_busy" }));
+        connection.socket.send({ type: idle ? "update_ready" : "update_busy" });
       } else if (value.type === "offline" && !connection.updating) {
         // 客户端主动下线：趁连接还在先做软交接（现读工作区与登录态），交接完才断开。
         // 不在这里等：心跳还要照常回 pong，否则客户端读超时会把这条连接拆掉，交接就被截断。
         accepted = true;
-        void this.offline(socket, connection);
+        void this.offline(socketId, connection);
         return;
       } else if (value.type === "ping") {
         if (value.relay !== undefined) await this.relay?.configure(grant, value.relay, value.relayOn);
@@ -166,14 +172,14 @@ export class ClientSockets {
         }
         if (!connection.updating) this.hub.connect(grant.userId, connection.details, this.liveTransport(grant.userId, connection));
         accepted = true;
-        socket.send(JSON.stringify({ type: "pong", ...(connection.details.autoUpdate ? { busy: await this.clientInUse(grant.clientId) } : {}) }));
+        connection.socket.send({ type: "pong", ...(connection.details.autoUpdate ? { busy: await this.clientInUse(grant.clientId) } : {}) });
         void this.pushStatus(grant.userId, grant.clientId);
       } else if (value.type === "user_stop") {
         // 用户在自己电脑上按了 Esc：只停他正在看得到的那个会话，不接受停止任意会话。
         assert(typeof value.session === "string" && value.session, "user_stop requires a session");
         const stopped = this.userStop?.(value.session, typeof value.reason === "string" && value.reason ? value.reason.slice(0, 200) : "用户在自己电脑上按了 Esc 叫停") === true;
         accepted = true;
-        socket.send(JSON.stringify({ type: "user_stop", session: value.session, stopped }));
+        connection.socket.send({ type: "user_stop", session: value.session, stopped });
       } else {
         assert(value.type === "result", "Client may only send heartbeats, job results and user stops");
         this.hub.result(grant.userId, { id: value.id, result: value.result, instance: connection.details.instance });
@@ -181,9 +187,9 @@ export class ClientSockets {
         // results without an interleaved ping cannot expire the LocalAgents timer and suspend the client.
         if (!connection.updating) this.hub.connect(grant.userId, connection.details, this.liveTransport(grant.userId, connection));
         accepted = true;
-        if (connection.details.resume) socket.send(JSON.stringify({ type: "ack", id: value.id }));
+        if (connection.details.resume) connection.socket.send({ type: "ack", id: value.id });
       }
-    } catch { this.close(socket.id, !accepted); }
+    } catch { this.close(socketId, !accepted); }
   }
   /**
    * 心跳/结果证明这条 socket 还活着：设备当前没有 transport（心跳过期被挂起、更新预留没收尾）时用它
@@ -198,22 +204,22 @@ export class ClientSockets {
    * 下线交接：客户端还连着时由它现读工作区与登录态交接到服务端，交接完（或失败）才断开这条连接。
    * 连接已经不在时 offline() 会按服务端还原点硬交接，这里只负责收尾。
    */
-  private async offline(socket: Socket, connection: Connection) {
-    if (this.goingOffline.has(socket.id)) return;
-    this.goingOffline.add(socket.id);
+  private async offline(socketId: string, connection: Connection) {
+    if (this.goingOffline.has(socketId)) return;
+    this.goingOffline.add(socketId);
     const { userId, clientId } = connection.grant;
     try {
       const result = await this.offlineHandoff?.(userId, clientId) || {};
-      try { socket.send(JSON.stringify({ type: "offline_ready", ...result })); } catch {}
+      connection.socket.send({ type: "offline_ready", ...result });
     } catch (error: any) {
-      try { socket.send(JSON.stringify({ type: "offline_ready", error: String(error?.message || error).slice(0, 300) })); } catch {}
+      connection.socket.send({ type: "offline_ready", error: String(error?.message || error).slice(0, 300) });
     }
-    this.goingOffline.delete(socket.id);
-    this.close(socket.id, true);
+    this.goingOffline.delete(socketId);
+    this.close(socketId, true);
   }
 
   /** A result posted over HTTP; the response is its acknowledgement. */
-  async upload(request: Socket["request"], value: Obj) {
+  async upload(request: Request, value: Obj) {
     const grant = await this.authorize(request), instance = request.headers.get("x-vega-instance");
     assert(await this.valid(grant), "Client authorization revoked");
     assert(value && typeof value === "object" && value.type === "result", "Invalid client result");
@@ -249,7 +255,7 @@ export class ClientSockets {
     for (const connection of this.connections.values()) {
       if (connection.grant.userId !== userId || (clientId && connection.grant.clientId !== clientId)) continue;
       const status = await this.statusFor(connection.grant.userId, connection.grant.clientId).catch(() => undefined);
-      if (status) connection.socket.send(JSON.stringify({ type: "task_status", status }));
+      if (status) connection.socket.send({ type: "task_status", status });
     }
   }
   closeAll() {

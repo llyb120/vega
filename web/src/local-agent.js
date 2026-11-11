@@ -1,3 +1,5 @@
+import { readEvents } from "./sse-socket.js";
+
 export function canBridgeLocal(device = globalThis.navigator) {
   return !device?.userAgentData?.mobile &&
     !/Android|iPhone|iPad|iPod|Mobile/i.test(device?.userAgent || "") &&
@@ -15,10 +17,10 @@ const STATUS = {
   login_invalid: "配对响应不兼容或票据无效，请确认网站与客户端均为最新版本后重新检测。",
   credential_save: "客户端无法保存设备凭据，请检查当前用户配置目录的写入权限和系统凭据保护。",
   backend_connecting: "登录验证已通过，客户端正在直连后端…",
-  backend_network: "站点已授权，但客户端无法建立后端连接，请检查客户端网络及反向代理的 WebSocket 转发。",
+  backend_network: "站点已授权，但客户端无法建立后端连接，请检查客户端网络及反向代理对 SSE 流的转发。",
   backend_tls: "站点已授权，但后端 HTTPS 证书校验失败，请修复证书链或域名；不会跳过证书校验。",
-  backend_http: "站点已授权，但后端拒绝了客户端 WebSocket，请检查 /api/local-agent/socket 的 Upgrade、Connection、Authorization 转发及设备授权。",
-  backend_protocol: "客户端已接通 WebSocket，但未收到有效的后端 ready 确认，请检查前后端与客户端版本及代理配置。",
+  backend_http: "站点已授权，但后端拒绝了客户端的实时流，请检查 /api/local-agent/socket 的 Authorization 转发、代理缓冲及设备授权。",
+  backend_protocol: "客户端已接通实时流，但未收到有效的后端 ready 确认，请检查前后端与客户端版本及代理配置。",
   client_outdated: "客户端版本低于本节点要求，请到「资源」页下载并安装新客户端。",
   backend_timeout: "登录验证已通过，但后端连接尚未就绪。客户端会独立重连，可稍后重新检测。",
   backend_disconnected: "客户端到后端的连接已中断，客户端会独立重连；不会重发已提交的任务。",
@@ -29,7 +31,9 @@ const STATUS = {
 };
 export function pairingStatusText(status) {
   if (!status) return "";
-  if (typeof status.message === "string" && status.message) return status.message;
+  // A client-supplied message only explains codes this page does not know; known codes keep the local wording
+  // so a server or proxy string never replaces the actionable explanation.
+  if (typeof status.message === "string" && status.message && !STATUS[status.code]) return status.message;
   const text = STATUS[status.code] || STATUS.login_invalid;
   return text + (Number.isInteger(status.httpStatus) && status.httpStatus >= 100 && status.httpStatus <= 599 ? `（HTTP ${status.httpStatus}）` : "");
 }
@@ -51,49 +55,57 @@ export class LocalAgentPairing {
     this.instance = [...crypto.getRandomValues(new Uint8Array(16))]
       .map((n) => n.toString(16).padStart(2, "0")).join("");
     const instance = this.instance;
+    let opened = false, ticket;
     const retry = (code, httpStatus, message) => {
       if (this.closed || this.paired || generation !== this.generation) return;
       this.generation++;
       clearTimeout(this.timeout);
       this.report(code, httpStatus, message);
-      this.socket?.close();
+      this.stream?.abort();
       const terminal = ["credential_save", "login_invalid"].includes(code) ||
         (code === "backend_http" && [401, 403].includes(httpStatus));
       if (!terminal) this.retry = setTimeout(() => void this.connect(), 5000);
     };
     try {
-      const { ticket } = await this.api("/local-agent/ticket", "POST", { instance });
+      ({ ticket } = await this.api("/local-agent/ticket", "POST", { instance }));
+    } catch { retry("ticket_failed"); return; }
+    if (this.closed || generation !== this.generation) return;
+    try {
+      // 本机客户端用一个 POST 回一条 SSE：先 authorizing / backend_connecting，最后一帧是 paired。
+      const response = await fetch("http://127.0.0.1:47673/agent", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: JSON.stringify({ type: "auth", ticket, userId: this.userId }),
+        mode: "cors",
+      });
       if (this.closed || generation !== this.generation) return;
-      const ws = new WebSocket("ws://127.0.0.1:47673/agent");
-      this.socket = ws;
+      if (!response.ok || !response.body) throw Error("Local pairing refused");
+      this.stream = new AbortController();
       this.timeout = setTimeout(() => retry("backend_timeout"), 30000);
-      let opened = false;
-      ws.onopen = () => {
-        if (this.closed || generation !== this.generation) return;
-        opened = true;
-        ws.send(JSON.stringify({ type: "auth", ticket, userId: this.userId }));
-      };
-      ws.onerror = () => retry(opened ? "backend_disconnected" : "local_unavailable");
-      ws.onclose = () => retry(opened ? "backend_disconnected" : "local_unavailable");
-      ws.onmessage = ({ data }) => {
-        if (this.closed || generation !== this.generation) return;
+      await readEvents(response, (data) => {
+        if (this.closed || generation !== this.generation) return true;
         try {
-          if (typeof data !== "string" || data.length > 4096) throw Error("Invalid pairing response");
+          if (data.length > 4096) throw Error("Invalid pairing response");
           const message = JSON.parse(data);
           if (message.type === "status" && (Object.hasOwn(STATUS, message.code) || typeof message.message === "string") && message.code !== "connected") {
-            if (["authorizing", "backend_connecting"].includes(message.code)) this.report(message.code);
-            else retry(message.code, message.httpStatus, message.message);
-            return;
+            if (["authorizing", "backend_connecting"].includes(message.code)) {
+              this.report(message.code);
+              return false;
+            }
+            retry(message.code, message.httpStatus, message.message);
+            return true;
           }
           if (message.type !== "paired" || message.instance !== instance || message.userId !== this.userId || !/^[a-f0-9]{32}$/.test(message.clientId)) throw Error("Local pairing mismatch");
           this.paired = true;
           clearTimeout(this.timeout);
           clearTimeout(this.retry);
           this.report(message.connected === true ? "connected" : "legacy_client");
-          ws.close();
-        } catch { retry("login_invalid"); }
-      };
-    } catch { retry("ticket_failed"); }
+          // 拿到 paired 就主动断开读流，不等客户端结束响应。
+          return true;
+        } catch { retry("login_invalid"); return true; }
+      }, { onByte: () => { opened = true; }, signal: this.stream.signal });
+      retry(opened ? "backend_disconnected" : "local_unavailable");
+    } catch { retry(opened ? "backend_disconnected" : "local_unavailable"); }
   }
   report(code, httpStatus, message) {
     this.lastStatus = { code, ...(typeof message === "string" && message ? { message } : {}), ...(Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? { httpStatus } : {}) };
@@ -104,6 +116,6 @@ export class LocalAgentPairing {
     this.generation++;
     clearTimeout(this.retry);
     clearTimeout(this.timeout);
-    this.socket?.close();
+    this.stream?.abort();
   }
 }

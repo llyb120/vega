@@ -1,29 +1,38 @@
-import { defineWebSocketHandler } from "h3";
+import { defineEventHandler, createError } from "h3";
 import { app } from "../../core/application";
+import { laneParams, openStream, wire, wireRequest } from "../../core/sse";
 
-// Events only: the page sends subscriptions; API calls go over HTTP.
-export default defineWebSocketHandler({
-  async upgrade(request) {
+const denied = (error: any): never => {
+  throw createError({ statusCode: 403, statusMessage: String(error?.message || "Realtime connection denied").slice(0, 300) });
+};
+
+// Events only: the page keeps one stream open and reopens it when it needs a different set of sessions.
+export default defineEventHandler(async (event) => {
+  const { eventsSocket } = app(),
+    request = wireRequest(event),
+    { lane, channel } = laneParams(event);
+  if (lane > 0) {
+    const principal = await eventsSocket.identity(request).catch(denied),
+      { sink, body } = openStream(event);
     try {
-      await app().eventsSocket.authorize(request);
-    } catch {
-      return new Response("Realtime connection denied", { status: 403 });
+      eventsSocket.channels.owned(channel, principal.hash).attach(lane, sink);
+    } catch (error) {
+      denied(error);
     }
-  },
-  async open(peer) {
-    try {
-      await app().eventsSocket.open(peer);
-    } catch {
-      peer.close(4403, "实时连接已失效");
-    }
-  },
-  message(peer, message) {
-    app().eventsSocket.message(peer, message.text());
-  },
-  close(peer) {
-    app().eventsSocket.close(peer.id);
-  },
-  error(peer) {
-    app().eventsSocket.close(peer.id);
-  },
+    return body;
+  }
+  const { principal } = await eventsSocket.authorize(request, true).catch(denied),
+    { sink, body } = openStream(event);
+  let id = "";
+  const live = eventsSocket.channels.create(principal.hash, { lanes: 3, ongone: () => eventsSocket.close(id) });
+  id = live.id;
+  live.attach(0, sink);
+  const socket = wire(live, request);
+  socket.send({ type: "channel", channel: live.id });
+  try {
+    await eventsSocket.open(socket, principal);
+  } catch (error: any) {
+    live.close(4429, String(error?.message || "实时连接过多").slice(0, 200));
+  }
+  return body;
 });

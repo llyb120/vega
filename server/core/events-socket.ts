@@ -1,14 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type { Peer } from "crossws";
 import type { Auth, Principal } from "./auth";
 import type { Engine } from "./engine";
 import { eventAllowed } from "./http-auth";
-import { probe, type Probe } from "./ws-probe";
+import { SseChannels, type Request, type Wire } from "./sse";
 import { assert, type Obj } from "./util";
 
-type Socket = Pick<Peer, "id" | "send" | "close" | "request">;
+type Socket = Wire;
 type Ticket = { hash: string; until: number };
-type Entry = { seq: number; at: number; value: Obj; json: string };
+type Entry = { seq: number; at: number; value: Obj };
 export type EventsOptions = {
   /** Server heartbeat and dead-peer check interval. */
   heartbeatMs?: number;
@@ -43,6 +42,8 @@ export function publicEvent(e: Obj): Obj | undefined {
 // page missed instead of reloading everything; outside the replay window the page is told to reset.
 export class EventsSocket {
   sessions = new Map<string, ReturnType<EventsSocket["session"]>>();
+  /** Channels that extra lanes (bulk token deltas) may attach to. */
+  channels = new SseChannels();
   tickets = new Map<string, Ticket>();
   epoch = randomUUID().slice(0, 8);
   seq = 0;
@@ -71,7 +72,7 @@ export class EventsSocket {
     this.tickets.set(id, { hash: principal.hash, until: Date.now() + 15000 });
     return { ticket: id };
   }
-  async authorize(request: Socket["request"], consume = false) {
+  async identity(request: Request) {
     const url = new URL(request.url),
       origin = process.env.VEGA_PUBLIC_URL
         ? new URL(process.env.VEGA_PUBLIC_URL).origin
@@ -86,16 +87,20 @@ export class EventsSocket {
       .map((v) => v.trim())
       .find((v) => v.startsWith("vega_session="))
       ?.slice("vega_session=".length);
-    const principal = await this.auth.authenticate(token),
-      id = url.searchParams.get("ticket") || "",
+    const principal = await this.auth.authenticate(token);
+    assert(principal, "登录已失效");
+    return principal;
+  }
+  async authorize(request: Request, consume = false) {
+    const principal = await this.identity(request),
+      id = new URL(request.url).searchParams.get("ticket") || "",
       ticket = this.tickets.get(id);
     assert(principal && ticket?.hash === principal.hash, "连接票据已失效");
     assert(ticket.until >= Date.now(), "连接票据已过期");
     if (consume) this.tickets.delete(id);
     return { principal };
   }
-  async open(socket: Socket) {
-    const { principal } = await this.authorize(socket.request, true);
+  async open(socket: Socket, principal: Principal) {
     const mine = [...this.sessions.values()].filter((s) => s.principal.user.id === principal.user.id);
     if (mine.length >= this.options.perUser) {
       socket.close(4429, "实时连接过多，请关闭部分页面");
@@ -120,14 +125,13 @@ export class EventsSocket {
     let tail: Promise<unknown> = Promise.resolve();
     const subscribed = new Set<string>(),
       allowed = new Map<string, { ok: boolean; until: number }>(),
-      liveness: Probe | undefined = probe(socket),
       close = (code = 1000, reason = "连接已关闭") => {
         if (!this.sessions.has(socket.id)) return;
         this.close(socket.id);
         try { socket.close(code, reason); } catch {}
       },
       send = (value: Obj) => {
-        if (this.sessions.has(socket.id)) socket.send(JSON.stringify(value));
+        if (this.sessions.has(socket.id)) socket.send(value);
       },
       permitted = async (value: Obj) => {
         // Session events dominate (token streams); their permission is stable for a few seconds.
@@ -145,13 +149,14 @@ export class EventsSocket {
       ordered = (fn: () => unknown) => { tail = tail.then(fn).catch(() => {}); },
       deliver = (entry: Entry) => ordered(async () => {
         if (!this.sessions.has(socket.id)) return;
-        if (STREAM.has(entry.value.type) && !subscribed.has(entry.value.session)) return;
+        const data = STREAM.has(entry.value.type);
+        if (data && !subscribed.has(entry.value.session)) return;
         if (!(await permitted(entry.value))) return;
-        const buffered = liveness?.buffered ?? 0;
+        const buffered = socket.buffered;
         if (buffered > HARD_BUFFER) return close(4408, "网络拥堵，实时连接已重置");
         // A slow link sheds token streams first; message_end/done still arrive and trigger a refresh.
-        if (buffered > SOFT_BUFFER && STREAM.has(entry.value.type)) return;
-        socket.send(entry.json);
+        if (buffered > SOFT_BUFFER && data) return;
+        socket.send(entry.value, data ? { data: true, key: entry.value.session } : undefined);
       }),
       subscribe = (ids: unknown) => {
         subscribed.clear();
@@ -165,20 +170,7 @@ export class EventsSocket {
       revoke = (userId: string) => {
         if (userId === principal.user.id) close(4401, "账号权限已变化");
       };
-    return { close, send, deliver, ordered, subscribe, logout, revoke, principal, liveness, subscribed };
-  }
-  message(socket: Socket, raw: string) {
-    const session = this.sessions.get(socket.id);
-    if (!session) return;
-    try {
-      assert(raw.length <= 8192, "消息过大");
-      const value = JSON.parse(raw);
-      if (value?.type === "ping") return session.send({ type: "pong", epoch: this.epoch, seq: this.seq });
-      if (value?.type === "subscribe") return session.subscribe(value.sessions);
-      // Unknown client frames are ignored: this channel is subscribe/heartbeat only.
-    } catch (e: any) {
-      session.send({ type: "error", reason: e.message });
-    }
+    return { close, send, deliver, ordered, subscribe, logout, revoke, principal, subscribed, get buffered() { return socket.buffered; } };
   }
   /** Engine event intake: merge token deltas briefly, keep per-session order, number and fan out. */
   ingest = (raw: Obj) => {
@@ -208,7 +200,7 @@ export class EventsSocket {
   }
   private publish(value: Obj) {
     const seq = ++this.seq,
-      entry: Entry = { seq, at: Date.now(), value, json: JSON.stringify({ ...value, seq }) };
+      entry: Entry = { seq, at: Date.now(), value: { ...value, seq } };
     this.log.push(entry);
     const horizon = Date.now() - this.options.replayMs;
     let drop = 0;
@@ -216,16 +208,15 @@ export class EventsSocket {
     if (drop) this.log.splice(0, drop);
     for (const session of [...this.sessions.values()]) session.deliver(entry);
   }
-  /** Reap dead peers, re-check logins and give every page a cursor even when nothing it may see happened. */
+  /** Re-check logins, drop peers that stopped reading, and give every page a cursor when nothing it may see happened. */
   async beat() {
-    for (const [id, session] of [...this.sessions]) {
+    for (const session of [...this.sessions.values()]) {
       if (!await this.auth.resolveHash(session.principal.hash)) {
         session.close(4401, "登录已失效");
         continue;
       }
-      if (session.liveness && !session.liveness.ping()) {
-        session.liveness.terminate();
-        this.close(id);
+      if (session.buffered > HARD_BUFFER) {
+        session.close(4408, "网络拥堵，实时连接已重置");
         continue;
       }
       session.send({ type: "heartbeat", epoch: this.epoch, seq: this.seq });

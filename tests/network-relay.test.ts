@@ -5,8 +5,20 @@ import { once } from "node:events";
 import { NetworkRelay, relayRules } from "../server/core/network-relay";
 import { Store } from "../server/core/store";
 import { LocalAgents } from "../server/core/local-agent";
+import { encodeFrame, type SendOptions, type Wire } from "../server/core/sse";
 
 const grant = { userId: "alice", clientId: "c".repeat(32), hash: "device-hash" };
+/** 隧道下行是 SSE 消息对象：一帧一个 {type:"relay", data:<base64>}，走数据车道；上行帧由 incoming() 送回。 */
+function tunnel(id: string, sink?: (frame: Buffer) => void) {
+  const frames: any[] = [], closed: [number, string][] = [], dataLane: boolean[] = [];
+  const wire: Wire & { frames: any[]; closed: [number, string][]; dataLane: boolean[] } = {
+    id, request: { url: "http://localhost/api/local-agent/relay", headers: new Headers() },
+    send: (value, options?: SendOptions) => { frames.push(value); dataLane.push(!!options?.data); sink?.(Buffer.from(String((value as any)?.data || ""), "base64")); },
+    close: (code: number, reason: string) => { closed.push([code, reason]); }, buffered: 0, frames, closed, dataLane,
+  };
+  return wire;
+}
+const upstream = (bytes: Uint8Array | readonly number[]) => encodeFrame(Buffer.from(bytes));
 async function fixture(t: TestContext) {
   const store = await Store.open(":memory:"), hub = new LocalAgents(), relay = new NetworkRelay(store, hub);
   let command: (job: any) => void = () => {};
@@ -83,12 +95,12 @@ test("SOCKS routes binary streams through one authenticated device tunnel with b
   let peer: any, command: any;
   f.onCommand((job) => {
     command = job;
-    peer = { id: "tunnel", close() {}, send: (data: Uint8Array) => { outbound.push(Buffer.from(data)); } };
+    peer = tunnel("tunnel", (frame) => outbound.push(frame));
     assert.throws(() => f.relay.open(peer, { ...grant, userId: "bob" }, job.id));
     assert.throws(() => f.relay.open(peer, { ...grant, hash: "wrong" }, job.id));
     f.relay.open(peer, grant, job.id);
-    assert.throws(() => f.relay.open({ ...peer, id: "replay" }, grant, job.id));
-    f.relay.message(peer, Buffer.from([2]));
+    assert.throws(() => f.relay.open(tunnel("replay"), grant, job.id));
+    f.relay.incoming(job.id, grant, upstream([2]));
   });
   const socket = await socks(await f.relay.proxy("alice"), "git.internal", 443, t);
   assert.equal((await read(socket, 10))[1], 0);
@@ -105,10 +117,11 @@ test("SOCKS routes binary streams through one authenticated device tunnel with b
   while (Buffer.concat(sent).length < payload.length) {
     await until(() => outbound.length > 0);
     const frame = outbound.shift()!; assert.equal(frame[0], 0); sent.push(frame.subarray(1));
-    f.relay.message(peer, Buffer.from([1]));
+    f.relay.incoming(command.id, grant, upstream([1]));
   }
   assert.deepEqual(Buffer.concat(sent), payload);
-  f.relay.message(peer, Buffer.from([0, 255, 0, 8]));
+  assert(peer.dataLane.length > 0 && peer.dataLane.every(Boolean), "隧道帧走数据车道，不阻塞控制帧");
+  f.relay.incoming(command.id, grant, upstream([0, 255, 0, 8]));
   assert.deepEqual(await read(socket, 3), Buffer.from([255, 0, 8]));
   await until(() => outbound.some(frame => frame.length === 1 && frame[0] === 1));
   const closed = once(socket, "close");
@@ -116,6 +129,29 @@ test("SOCKS routes binary streams through one authenticated device tunnel with b
   await closed;
   assert(!f.relay.inUse(grant.clientId));
   assert.throws(() => f.relay.open(peer, grant, command.id));
+});
+
+test("tunnel bytes may only be posted back by the flow's own device grant", async (t) => {
+  const f = await fixture(t);
+  await f.relay.configure(grant, ["git.internal:443"]);
+  let job: any, peer: any;
+  f.onCommand((command) => {
+    job = command;
+    peer = tunnel(command.id);
+    f.relay.open(peer, grant, command.id);
+    f.relay.incoming(command.id, grant, upstream([2]));
+    f.relay.incoming(command.id, grant, upstream([0, ...Buffer.from("hi")]));
+  });
+  const socket = await socks(await f.relay.proxy("alice"), "git.internal", 443, t);
+  assert.equal((await read(socket, 10))[1], 0);
+  assert.equal((await read(socket, 2)).toString(), "hi");
+  // 别的设备凭据（同一个账号）不能往这条隧道里塞字节，未登记的 flow 也不存在。
+  assert.throws(() => f.relay.incoming(job.id, { ...grant, clientId: "d".repeat(32) }, upstream([1])), /Invalid or expired relay connection/);
+  assert.throws(() => f.relay.incoming("unknown-flow", grant, upstream([1])), /Invalid or expired relay connection/);
+  const closed = once(socket, "close");
+  f.relay.incoming(job.id, grant, upstream([9]));
+  await closed;
+  assert(!f.relay.inUse(grant.clientId), "非法帧只断这条隧道");
 });
 
 test("relay rejection logs the destination and reason without device credentials", async (t) => {
@@ -136,7 +172,7 @@ test("a tunnel closing before readiness logs its stage once without replay", asy
   let commands = 0;
   f.onCommand((job) => {
     commands++;
-    f.relay.open({ id: job.id, send() {}, close() {} }, grant, job.id);
+    f.relay.open(tunnel(job.id), grant, job.id);
     opened(job.id);
   });
   const socket = await socks(await f.relay.proxy("alice"), "git.internal", 443, t);
@@ -155,7 +191,7 @@ test("a tunnel closing before readiness logs its stage once without replay", asy
 test("saving a changed policy flushes pooled sockets; invalid rules preserve the policy", async (t) => {
   const f = await fixture(t);
   await f.relay.configure(grant, ["git.internal:443"]);
-  f.onCommand((job) => { const peer = { id: job.id, send() {}, close() {} }; f.relay.open(peer, grant, job.id); f.relay.message(peer, Buffer.from([2])); });
+  f.onCommand((job) => { const peer = tunnel(job.id); f.relay.open(peer, grant, job.id); f.relay.incoming(job.id, grant, upstream([2])); });
   const socket = await socks(await f.relay.proxy("alice"), "git.internal", 443, t);
   await read(socket, 10);
   await assert.rejects(f.relay.configure(grant, ["*:443"]));
@@ -212,9 +248,9 @@ test("a failed direct dial falls back to the account client with no rule configu
   const outbound: Buffer[] = [];
   f.onCommand((job) => {
     command = job;
-    peer = { id: job.id, send: (data: Uint8Array) => outbound.push(Buffer.from(data)), close() {} };
+    peer = tunnel(job.id, (frame) => outbound.push(frame));
     f.relay.open(peer, grant, job.id);
-    f.relay.message(peer, Buffer.from([2]));
+    f.relay.incoming(job.id, grant, upstream([2]));
   });
   assert.equal(await f.relay.enabled("alice"), true);
   const socket = await socks(await f.relay.proxy("alice"), "only-client.internal", 22, t);
@@ -224,7 +260,7 @@ test("a failed direct dial falls back to the account client with no rule configu
   socket.write("ssh");
   await until(() => outbound.length > 0);
   assert.equal(outbound[0].subarray(1).toString(), "ssh");
-  f.relay.message(peer, Buffer.concat([Buffer.from([0]), Buffer.from("SSH-2.0")]));
+  f.relay.incoming(command.id, grant, upstream(Buffer.concat([Buffer.from([0]), Buffer.from("SSH-2.0")])));
   assert.equal((await read(socket, 7)).toString(), "SSH-2.0");
 });
 
@@ -234,9 +270,9 @@ test("one unreachable address is probed once, then reused until the relay policy
   let jobs = 0;
   f.onCommand((job) => {
     jobs++;
-    const peer = { id: job.id, send() {}, close() {} };
+    const peer = tunnel(job.id);
     f.relay.open(peer, grant, job.id);
-    f.relay.message(peer, Buffer.from([2]));
+    f.relay.incoming(job.id, grant, upstream([2]));
   });
   const proxy = await f.relay.proxy("alice"), probes = () => warn.mock.calls.map((call) => String(call.arguments[0]))
     .filter((label) => label.startsWith("[Vega relay] Direct")).length;
@@ -271,9 +307,9 @@ test("matched domain rules still send the client a relay job with the hostname",
   let command: any;
   f.onCommand((job) => {
     command = job;
-    const peer = { id: job.id, send() {}, close() {} };
+    const peer = tunnel(job.id);
     f.relay.open(peer, grant, job.id);
-    f.relay.message(peer, Buffer.from([2]));
+    f.relay.incoming(job.id, grant, upstream([2]));
   });
   const socket = await socks(await f.relay.proxy("alice"), "databrain-test.intlgame.com", 443, t);
   assert.equal((await read(socket, 10))[1], 0);

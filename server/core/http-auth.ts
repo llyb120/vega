@@ -73,7 +73,7 @@ export async function gate(event: H3Event, path: string) {
   if (path === "/api/providers/callback/devin" && event.method === "GET")
     return;
   if (path === "/api/local-agent/verify" && event.method === "POST") return;
-  if ((path === "/api/local-agent/socket" || path === "/api/local-agent/relay") && event.method === "GET") return;
+  if ((path === "/api/local-agent/socket" || path === "/api/local-agent/relay") && ["GET", "POST"].includes(event.method)) return;
   // Large results arrive here with the device credential, which the route verifies itself (no website cookie).
   if (path === "/api/local-agent/result" && event.method === "POST") return;
   // 蝴蝶面板的聊天接口：同样只认设备凭据（原生客户端不带 Origin、不带 cookie）。
@@ -113,7 +113,7 @@ export async function gate(event: H3Event, path: string) {
   if (/^\/api\/employees(?:\/|$)/.test(path) && (role === "operator" || event.method === "GET")) return;
   if (
     (path === "/api/bootstrap" && event.method === "GET") ||
-    (path === "/api/events" && ["GET", "POST"].includes(event.method))
+    (/^\/api\/events(?:\/|$)/.test(path) && ["GET", "POST"].includes(event.method))
   )
     return;
   if (/^\/api\/blobs\/[^/]+$/.test(path) && event.method === "GET") return;

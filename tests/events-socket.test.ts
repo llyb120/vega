@@ -2,7 +2,28 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { EventsSocket, publicEvent } from "../server/core/events-socket";
+import { SseChannel, wire } from "../server/core/sse";
 import { sleep } from "../server/core/util";
+
+/** One page: a channel with its control lane, one data lane, and every frame it received. */
+function collector(channel: SseChannel) {
+  const sent: any[] = [],
+    state = { buffered: 0 };
+  const sink = () => ({
+    write(chunk: string) {
+      for (const block of chunk.split("\n\n"))
+        if (block.startsWith("data: ")) sent.push(JSON.parse(block.slice("data: ".length)));
+      return true;
+    },
+    end() {},
+    buffered: () => state.buffered,
+    onclose() {},
+  });
+  channel.attach(0, sink());
+  channel.requested.add(1);
+  channel.attach(1, sink());
+  return { sent, state };
+}
 
 function fixture(options: ConstructorParameters<typeof EventsSocket>[3] = {}) {
   const principals: Record<string, any> = {
@@ -18,18 +39,17 @@ function fixture(options: ConstructorParameters<typeof EventsSocket>[3] = {}) {
     hub = new EventsSocket(engine as any, auth as any, (user, event) => event.public === true || user.id === "admin", { heartbeatMs: 3600000, coalesceMs: 5, ...options });
   const open = async ({ origin = "http://local", cookie = "cookie", query = "" } = {}) => {
     const principal = principals[cookie];
-    const { ticket } = await hub.ticket(principal),
-      sent: any[] = [],
-      wire = { pings: 0, pong: [] as (() => void)[], bufferedAmount: 0, terminated: false, ping() { this.pings++; }, on(_: string, f: () => void) { this.pong.push(f); }, terminate() { this.terminated = true; } },
-      peer = {
-        id: Math.random().toString(36).slice(2),
-        request: new Request("http://local/api/events?ticket=" + ticket + query, { headers: { origin, cookie: "vega_session=" + cookie, host: "local" } }),
-        send: (text: string) => sent.push(JSON.parse(text)),
-        close: (code?: number) => sent.push({ type: "closed", code }),
-        _internal: { ws: wire },
-      };
-    await hub.open(peer as any);
-    return { peer, sent, wire };
+    const { ticket } = await hub.ticket(principal);
+    const request = {
+      url: "http://local/api/events?ticket=" + ticket + query,
+      headers: new Headers({ origin, cookie: "vega_session=" + cookie }),
+    };
+    await hub.authorize(request, true);
+    const channel = new SseChannel({ lanes: 3 }),
+      page = collector(channel),
+      socket = wire(channel, request);
+    await hub.open(socket, principal);
+    return { socket, channel, request, ...page };
   };
   return { hub, auth, engine, open };
 }
@@ -37,23 +57,21 @@ const emit = (f: ReturnType<typeof fixture>, value: any) => f.engine.events.emit
 /** Delivery is ordered per page but asynchronous (permission checks may read the database). */
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-test("events WebSocket authenticates one-use tickets, filters events and only accepts subscriptions", async () => {
+test("events stream authenticates one-use tickets and filters events", async () => {
   const f = fixture();
   await assert.rejects(f.open({ origin: "https://evil.test" }));
   const first = await f.open({ cookie: "other" });
   await settle();
   assert.equal(first.sent[0].type, "ready");
-  await assert.rejects(async () => await f.hub.open(first.peer as any), "ticket is single use");
+  await assert.rejects(async () => await f.hub.authorize(first.request, true), /票据|过期/, "a ticket is single use");
   emit(f, { type: "private", data: 1 });
   emit(f, { type: "public", public: true });
   await settle();
   assert(!first.sent.some((v) => v.type === "private"));
   assert(first.sent.some((v) => v.type === "public" && v.seq > 0));
-  const beforeNoise = first.sent.length;
-  f.hub.message(first.peer as any, JSON.stringify({ type: "request", id: "00000001", method: "POST", path: "/sessions" }));
-  assert.equal(first.sent.length, beforeNoise, "unknown client frames are ignored without an error toast");
-  assert(!first.sent.some((v) => /只接收订阅/.test(v.reason || "")));
+  assert.equal((f.hub as any).message, undefined, "the events channel has no upstream entry: API calls cannot be tunnelled");
   f.auth.events.emit("logout", "other-hash");
+  await settle();
   assert.equal(f.hub.sessions.size, 0);
   assert(first.sent.some((v) => v.type === "closed" && v.code === 4401));
 });
@@ -90,13 +108,13 @@ test("token streams go only to subscribers while lifecycle events reach every pe
     assert.ok(steer);
     assert.equal(steer.data, undefined);
   }
-  // Re-subscribing moves the stream without reconnecting.
-  f.hub.message(elsewhere.peer as any, JSON.stringify({ type: "subscribe", sessions: ["s1"] }));
-  f.hub.message(watching.peer as any, JSON.stringify({ type: "subscribe", sessions: [] }));
+  // Switching conversations reopens the stream with the new subscription instead of sending a frame upstream.
+  f.hub.close(watching.channel.id);
+  const resumed = await f.open({ query: "&sessions=s1" });
   emit(f, { type: "text_delta", session: "s1", data: "d" });
   await sleep(20);
-  assert.equal(elsewhere.sent.filter((v) => v.type === "text_delta").at(-1).data, "d");
-  assert.equal(watching.sent.filter((v) => v.type === "text_delta").length, 1);
+  assert.equal(resumed.sent.filter((v) => v.type === "text_delta").at(-1).data, "d");
+  assert.equal(watching.sent.filter((v) => v.type === "text_delta").length, 1, "the closed stream receives nothing more");
   assert.equal(publicEvent({ type: "done", session: "s1", data: { error: false } })!.type, "done");
 });
 
@@ -107,7 +125,7 @@ test("a reconnect inside the window replays missed events in order; outside it t
   await settle();
   const ready = first.sent[0];
   const cursor = ready.epoch + ":" + first.sent.at(-1).seq;
-  f.hub.close(first.peer.id);
+  f.hub.close(first.channel.id);
   emit(f, { type: "text_delta", session: "s1", data: "missed " });
   emit(f, { type: "message_end", session: "s1" });
   emit(f, { type: "done", session: "s1" });
@@ -126,38 +144,35 @@ test("a reconnect inside the window replays missed events in order; outside it t
   assert.equal(foreign.sent.at(-1).replayed, false);
 });
 
-test("heartbeats reap dead peers, re-check logins, and the per-account cap leaves other accounts alone", async () => {
+test("heartbeats re-check logins and reset a page that stopped reading; the per-account cap leaves other accounts alone", async () => {
   const f = fixture({ perUser: 2 }),
     alive = await f.open(),
     dead = await f.open();
   await f.hub.beat();
-  assert.equal(alive.wire.pings, 1);
   assert.equal(alive.sent.at(-1).type, "heartbeat");
-  alive.wire.pong.forEach((pong) => pong());
   const third = await f.open();
   await settle();
   assert.equal(third.sent.at(-1).code, 4429, "a third page of the same account is refused while two are alive");
   const other = await f.open({ cookie: "other" });
   await settle();
   assert.equal(other.sent[0].type, "ready", "another account is unaffected");
+  dead.state.buffered = 64 << 20;
   await f.hub.beat();
-  assert.equal(dead.wire.terminated, true, "no pong since the last ping: terminated");
-  assert.equal(alive.wire.terminated, false);
-  const again = await f.open();
-  await settle();
-  assert.equal(again.sent[0].type, "ready", "the reaped slot is free again");
+  assert(dead.sent.some((v) => v.type === "closed" && v.code === 4408), "a peer that stopped reading is reset");
+  assert.equal(f.hub.sessions.size, 2, "the wedged page is gone, the healthy ones stay");
+  assert(alive.sent.at(-1).type === "heartbeat");
 });
 
 test("a slow page sheds token streams first and is reset when its buffer keeps growing", async () => {
   const f = fixture(),
     page = await f.open({ query: "&sessions=s1" });
-  page.wire.bufferedAmount = 2 << 20;
+  page.state.buffered = 2 << 20;
   emit(f, { type: "text_delta", session: "s1", data: "x" });
   emit(f, { type: "done", session: "s1" });
   await sleep(20);
   assert(!page.sent.some((v) => v.type === "text_delta"));
   assert(page.sent.some((v) => v.type === "done"));
-  page.wire.bufferedAmount = 64 << 20;
+  page.state.buffered = 64 << 20;
   emit(f, { type: "done", session: "s1" });
   await settle();
   assert.equal(page.sent.at(-1).code, 4408);

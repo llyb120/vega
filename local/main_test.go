@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 func TestExactEditsCRLFAndAtomicFailure(t *testing.T) {
@@ -109,63 +107,54 @@ func TestShellCancellationAndOutputLimit(t *testing.T) {
 func TestWebSocketRequiresTrustedOriginAndOneTimeWebsiteLogin(t *testing.T) {
 	ticket := strings.Repeat("a", 72)
 	used := false
-	website := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/local-agent/socket" {
-			conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-			if err != nil {
+	mux := http.NewServeMux()
+	socket := newChannelServer(func(peer *channelPeer, r *http.Request) {
+		message, ok := peer.poll()
+		if !ok {
+			return
+		}
+		var hello map[string]any
+		if json.Unmarshal(message.raw, &hello) != nil || hello["type"] != "hello" {
+			return
+		}
+		_ = peer.send(map[string]string{"type": "ready", "userId": "alice", "clientId": strings.Repeat("c", 32)})
+		for {
+			if _, ok := peer.poll(); !ok {
 				return
-			}
-			defer conn.Close()
-			var hello map[string]any
-			if conn.ReadJSON(&hello) != nil {
-				return
-			}
-			_ = conn.WriteJSON(map[string]string{"type": "ready", "userId": "alice", "clientId": strings.Repeat("c", 32)})
-			for {
-				if _, _, err := conn.ReadMessage(); err != nil {
-					return
-				}
 			}
 		}
+	})
+	mux.Handle("/api/local-agent/socket", socket)
+	mux.HandleFunc("/api/local-agent/verify", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Ticket string `json:"ticket"`
 		}
-		if r.URL.Path != "/api/local-agent/verify" || r.Method != "POST" || json.NewDecoder(r.Body).Decode(&body) != nil || body.Ticket != ticket || used {
+		if r.Method != "POST" || json.NewDecoder(r.Body).Decode(&body) != nil || body.Ticket != ticket || used {
 			http.Error(w, "invalid", 401)
 			return
 		}
 		used = true
 		_ = json.NewEncoder(w).Encode(map[string]any{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": strings.Repeat("c", 32), "deviceToken": strings.Repeat("d", 43)})
-	}))
+	})
+	website := httptest.NewServer(mux)
 	defer website.Close()
-	agent := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), pinnedOrigin: website.URL, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{website.URL}}, connections: make(map[*websocket.Conn]struct{}), pendingOrigins: map[string]bool{"https://untrusted.test": true}}
+	agent := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), pinnedOrigin: website.URL, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{website.URL}}, connections: make(map[*Conn]struct{}), pendingOrigins: map[string]bool{"https://untrusted.test": true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent.startConnections(ctx)
 	server := httptest.NewServer(http.HandlerFunc(agent.serveWS))
 	defer server.Close()
-	connect := func(origin string) (*websocket.Conn, error) {
-		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{"Origin": []string{origin}})
-		return conn, err
-	}
-	untrusted, err := connect("https://untrusted.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = untrusted.WriteJSON(map[string]string{"type": "auth", "ticket": ticket, "userId": "alice"})
+	login := map[string]string{"type": "auth", "ticket": ticket, "userId": "alice"}
+	untrusted := dialPairing(t, server.URL, "https://untrusted.test", login)
 	if status := readPairing(t, untrusted); status["code"] != "permission_required" {
 		t.Fatalf("untrusted site did not receive permission-only status: %v", status)
 	}
-	_ = untrusted.Close()
+	untrusted.close()
 	if len(agent.config.Servers) != 0 {
 		t.Fatal("untrusted site was paired")
 	}
-	conn, err := connect(website.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	_ = conn.WriteJSON(map[string]string{"type": "auth", "ticket": ticket, "userId": "alice"})
+	conn := dialPairing(t, server.URL, website.URL, login)
+	defer conn.close()
 	ready := readPairing(t, conn)
 	if ready["userId"] != "alice" || ready["type"] != "paired" || ready["connected"] != true {
 		t.Fatalf("pairing failed: %v", ready)
@@ -179,19 +168,15 @@ func TestWebSocketRequiresTrustedOriginAndOneTimeWebsiteLogin(t *testing.T) {
 	if count != 1 {
 		t.Fatal("paired credential not saved")
 	}
-	duplicate, err := connect(website.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer duplicate.Close()
-	_ = duplicate.WriteJSON(map[string]string{"type": "auth", "ticket": ticket, "userId": "alice"})
+	duplicate := dialPairing(t, server.URL, website.URL, login)
+	defer duplicate.close()
 	if status := readPairing(t, duplicate); status["code"] != "login_http" || status["httpStatus"] != float64(401) {
 		t.Fatalf("used login ticket was accepted or failed silently: %v", status)
 	}
 }
 func TestPermissionPageRefusesOtherSites(t *testing.T) {
 	origin := "https://vega.example"
-	agent := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), pinnedOrigin: origin, config: Config{TrustedOrigins: []string{origin}}, pendingOrigins: map[string]bool{}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), pinnedOrigin: origin, config: Config{TrustedOrigins: []string{origin}}, pendingOrigins: map[string]bool{}, connections: make(map[*Conn]struct{})}
 	page := httptest.NewRecorder()
 	agent.configure(page, httptest.NewRequest("GET", "http://"+localAddress+"/config/token", nil))
 	if page.Code != 200 || page.Header().Get("Referrer-Policy") != "same-origin" {

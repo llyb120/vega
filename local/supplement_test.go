@@ -10,25 +10,22 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/gorilla/websocket"
 )
 
 func TestSupplementSyncPreservesJobsAndDefersUpdates(t *testing.T) {
 	messages := make(chan map[string]string, 1)
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
+	backend := httptest.NewServer(newChannelServer(func(peer *channelPeer, r *http.Request) {
+		message, ok := peer.poll()
+		if !ok {
 			return
 		}
-		defer conn.Close()
-		var message map[string]string
-		if conn.ReadJSON(&message) == nil {
-			messages <- message
+		var value map[string]string
+		if json.Unmarshal(message.raw, &value) == nil {
+			messages <- value
 		}
 	}))
 	defer backend.Close()
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(backend.URL, "http"), nil)
+	conn, _, err := Dial("http"+strings.TrimPrefix(backend.URL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

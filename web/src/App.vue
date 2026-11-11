@@ -3,6 +3,7 @@ import SettingsView from "./SettingsView.vue";
 import ResourcesView from "./ResourcesView.vue";
 import TokenStatsView from "./TokenStatsView.vue";
 import { LocalAgentPairing, canBridgeLocal, pairingStatusText } from "./local-agent";
+import { SseSocket } from "./sse-socket.js";
 import ConversationTimeline from "./ConversationTimeline.vue";
 import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
@@ -459,7 +460,7 @@ async function httpApi(path, method = "GET", data) {
 }
 // Token streams and per-tool detail are pushed only for the conversations on screen.
 const subscribedSessions = computed(() => [...new Set([current.value?.id, employee.value?.chatSession, employeeSession.value].filter(Boolean))]);
-// All API calls are plain HTTP; the WebSocket only pushes events.
+// All API calls are plain HTTP; the SSE stream only pushes events.
 function api(path, method = "GET", data) {
   return httpApi(path, method, data);
 }
@@ -488,7 +489,6 @@ function connectEvents() {
     .then(({ ticket }) => {
       if (generation !== eventGeneration) return;
       const url = new URL("/api/events", window.location.href);
-      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("ticket", ticket);
       if (eventCursor) url.searchParams.set("since", eventCursor);
       if (subscribedSessions.value.length) url.searchParams.set("sessions", subscribedSessions.value.join(","));
@@ -505,7 +505,7 @@ function connectEvents() {
 }
 /**
  * Armed from network handlers only: background tabs throttle chained timers to once a minute, but a timer set
- * by a message handler is not chained. The server sends a heartbeat every 20s and pings at protocol level.
+ * by a message handler is not chained. The stream sends `: keepalive` every 15s and a heartbeat event every 20s.
  */
 function watchSilence(ws, generation) {
   clearTimeout(eventsWatchdog);
@@ -514,17 +514,14 @@ function watchSilence(ws, generation) {
   }, EVENT_SILENCE_MS);
 }
 function openEventSocket(url, generation) {
-  const ws = new WebSocket(url);
+  const ws = new SseSocket(url, { post: false });
   eventsSocket = ws;
   let readyAt = 0;
   watchSilence(ws, generation);
-  ws.onmessage = ({ data }) => {
+  ws.onmessage = ({ value }) => {
     if (generation !== eventGeneration) return;
-    let value;
-    try {
-      value = JSON.parse(data);
-    } catch (e) {
-      error.value = `实时消息无效：${e.message}`;
+    if (!value) {
+      error.value = "实时消息无效";
       return;
     }
     lastEventAt = Date.now();
@@ -536,8 +533,11 @@ function openEventSocket(url, generation) {
       eventsReady = true;
       eventsWasConnected = true;
       readyAt = Date.now();
-      if (subscribedSessions.value.join(",") !== (url.searchParams.get("sessions") || ""))
-        ws.send(JSON.stringify({ type: "subscribe", sessions: subscribedSessions.value }));
+      // 订阅会话变了就带新票据重开车道 0（since 游标不动，服务端按它补发）。
+      if (subscribedSessions.value.join(",") !== (url.searchParams.get("sessions") || "")) {
+        connectEvents();
+        return;
+      }
       // Missed events were replayed in order; only a page outside the replay window reloads its state.
       if (reconnect && !value.replayed)
         void (async () => {
@@ -581,8 +581,8 @@ function openEventSocket(url, generation) {
 }
 watch(subscribedSessions, (ids, previous) => {
   if (ids.join(",") === previous?.join(",")) return;
-  if (eventsReady && eventsSocket?.readyState === WebSocket.OPEN)
-    eventsSocket.send(JSON.stringify({ type: "subscribe", sessions: ids }));
+  // 订阅会话变了就重开车道 0：connectEvents 先关掉旧流、重新拿票据，并带上当前 since 游标。
+  if (eventsReady) connectEvents();
 });
 function recoverEvents() {
   if (document.hidden || !authenticated.value || closed) return;
@@ -1677,7 +1677,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             <button v-if="workPanelVisible && !wide" type="button" class="panel-backdrop" aria-label="关闭当前工作" tabindex="-1" @click="workRailOpen = false"></button>
             <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
           </div>
-          <div v-if="employeeTab === 'browser' && selectedEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" /></div>
+          <div v-if="employeeTab === 'browser' && selectedEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" :csrf="csrfToken" /></div>
           <EmployeeTasks
             v-if="employeeTab === 'tasks'"
             :key="selectedEmployee"
@@ -1716,7 +1716,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       </section>
       <ResourcesView v-else-if="view === 'resources'" />
       <TokenStatsView v-else-if="view === 'usage'" :api="api" :admin="isAdmin" :self-id="user.id" />
-      <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" />
+      <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" :csrf="csrfToken" />
       <ExperiencesView v-else-if="view === 'experiences' && isAdmin" :api="api" :tab="pageSub" @tab="setPageTab" />
       <SettingsView v-else-if="view === 'settings' && isAdmin" :api="api" :config="config" :user-id="user.id" :models="catalogModels" :tab="pageSub" @tab="setPageTab" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
     </section>

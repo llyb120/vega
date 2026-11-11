@@ -1,13 +1,13 @@
 import sharp from "sharp";
 import { randomBytes } from "node:crypto";
-import type { Peer } from "crossws";
 import type { Auth, Principal } from "./auth";
 import type { Chrome } from "./chrome";
 import { browserTarget, remoteKeys } from "./browser-preview";
 import { normalizeAction } from "./browser-actions";
+import { SseChannels, type Request, type Wire } from "./sse";
 import { assert, httpURL, Mutex, sleep, type Obj } from "./util";
 
-type Socket = Pick<Peer, "id" | "send" | "close" | "request">;
+type Socket = Wire;
 type Ticket = { hash: string; tabTag: string; until: number };
 type Frame = {
   id: number;
@@ -30,6 +30,8 @@ const FRAME_HOLD_MS = 10000;
 export class BrowserLive {
   tickets = new Map<string, Ticket>();
   sessions = new Map<string, LiveSession>();
+  /** Stream channels, so extra lanes can attach to the same session. */
+  channels = new SseChannels();
   controllers = new Map<string, LiveSession>();
   controllerOf(tag: string) {
     return this.controllers.get(tag);
@@ -69,7 +71,8 @@ export class BrowserLive {
     });
     return { ticket };
   }
-  async authorize(request: Socket["request"], consume = false) {
+  /** Origin + login only: a `?channel=`/`?lane=` request re-uses the stream's identity without a ticket. */
+  async identity(request: Request) {
     const url = new URL(request.url),
       origin = process.env.VEGA_PUBLIC_URL
         ? new URL(process.env.VEGA_PUBLIC_URL).origin
@@ -86,12 +89,16 @@ export class BrowserLive {
       .map((v) => v.trim())
       .find((v) => v.startsWith("vega_session="))
       ?.slice("vega_session=".length);
-    const principal = await this.auth.authenticate(token),
-      id = url.searchParams.get("ticket") || "",
+    const principal = await this.auth.authenticate(token);
+    assert(principal && await this.canUse(principal), "连接已过期，请重新连接浏览器");
+    return principal;
+  }
+  async authorize(request: Request, consume = false) {
+    const principal = await this.identity(request);
+    const id = new URL(request.url).searchParams.get("ticket") || "",
       ticket = this.tickets.get(id);
     assert(
-      principal && (await this.canUse(principal)) &&
-        ticket &&
+      ticket &&
         ticket.hash === principal.hash &&
         ticket.until >= Date.now(),
       "连接已过期，请重新连接浏览器",
@@ -99,29 +106,32 @@ export class BrowserLive {
     if (consume) this.tickets.delete(id);
     return { principal, ticket };
   }
-  async open(socket: Socket) {
-    const { principal, ticket } = await this.authorize(socket.request, true);
+  async open(socket: Socket, principal: Principal, tabTag: string) {
     assert(this.sessions.size < 4, "实时浏览器连接过多");
     for (const session of this.sessions.values())
       if (session.principal.hash === principal.hash)
         void session.close(1000, "已在新窗口连接");
-    const session = new LiveSession(this, socket, principal, ticket.tabTag);
+    const session = new LiveSession(this, socket, principal, tabTag);
     this.sessions.set(socket.id, session);
     void session.run();
   }
-  async message(socket: Socket, raw: string) {
-    const session = this.sessions.get(socket.id);
+  async message(socketId: string, value: Obj) {
+    const session = this.sessions.get(socketId);
     if (!session) return;
     // Messages are handled one at a time in arrival order, even though each check awaits storage.
     const handle = async () => {
       try {
-        assert(Buffer.byteLength(raw) <= 65536, "消息过大");
-        await session.message(JSON.parse(raw));
+        await session.message(value);
       } catch {
         void session.close(4400, "实时操作消息无效，请重新连接");
       }
     };
     await (session.inbox = session.inbox.then(handle));
+  }
+  /** One upstream message posted by the viewer; the channel must belong to the same login. */
+  async messageByChannel(id: string, principal: Principal, value: Obj) {
+    this.channels.owned(id, principal.hash);
+    return await this.message(id, value);
   }
   async close() {
     this.auth.events.off("logout", this.logout);
@@ -152,7 +162,6 @@ class LiveSession {
   pointerTask = false;
   pointerReleasing = false;
   inputPending = false;
-  lastMessage = Date.now();
   lastInput = Date.now();
   lastChange = Date.now();
   lastCapture = -Infinity;
@@ -166,7 +175,9 @@ class LiveSession {
     public tabTag: string,
   ) {}
   send(value: Obj) {
-    if (this.active) this.socket.send(JSON.stringify(value));
+    if (!this.active) return;
+    // The picture is the bulky payload and may take an extra lane; control must stay ordered and immediate.
+    this.socket.send(value, value.type === "frame" ? { data: true } : undefined);
   }
   async valid() {
     return (
@@ -181,7 +192,6 @@ class LiveSession {
       let captureFailedAt = 0;
       while (this.active) {
         assert(await this.valid(), "登录已失效");
-        assert(Date.now() - this.lastMessage < 20000, "连接已中断，请重新连接");
         if (this.wantsControl && Date.now() - this.lastInput > 30000)
           this.releaseControl("闲置已退出远程操作");
         if (this.pendingFrame) {
@@ -318,7 +328,6 @@ class LiveSession {
   }
   async message(message: Obj) {
     assert(await this.valid(), "登录已失效");
-    this.lastMessage = Date.now();
     assert(
       message && typeof message === "object" && !Array.isArray(message),
       "消息无效",

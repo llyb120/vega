@@ -1,22 +1,32 @@
-import { defineWebSocketHandler } from "h3";
+import { defineEventHandler, getHeader, createError } from "h3";
 import { app } from "../../../core/application";
-import type { NetworkRelay } from "../../../core/network-relay";
+import { laneParams, openStream, wire, wireRequest } from "../../../core/sse";
 
-export default defineWebSocketHandler({
-  async upgrade(request) {
-    try { request.context.relayGrant = await app().clientSockets.authorize(request); }
-    catch { return new Response("Unauthorized", { status: 401 }); }
-  },
-  open(peer) {
-    try {
-      // crossws dispatches messages without awaiting open; authenticate before completing the upgrade.
-      app().engine.relay.open(peer, peer.context.relayGrant as Parameters<NetworkRelay["open"]>[1], peer.request.headers.get("x-vega-relay") || "");
-    } catch {
-      console.warn("[Vega relay] Tunnel rejected: missing, expired or mismatched flow/device grant");
-      peer.close(1008, "Invalid relay connection");
-    }
-  },
-  message(peer, message) { app().engine.relay.message(peer, message.uint8Array()); },
-  close(peer) { app().engine.relay.closePeer(peer.id); },
-  error(peer) { app().engine.relay.closePeer(peer.id); },
+const denied = (error: any): never => {
+  throw createError({ statusCode: 403, statusMessage: String(error?.message || "Unauthorized").slice(0, 300) });
+};
+
+// Downstream half of one TCP tunnel. One lane only: tunnel bytes must stay in order.
+export default defineEventHandler(async (event) => {
+  const request = wireRequest(event),
+    { clientSockets, engine } = app(),
+    relay = engine.relay,
+    flow = getHeader(event, "x-vega-relay") || "";
+  // A tunnel is a single ordered stream: extra lanes would let bytes overtake each other.
+  if (laneParams(event).lane !== 0) denied(Error("Relay does not support lanes"));
+  const grant = await clientSockets.authorize(request).catch(denied),
+    { sink, body } = openStream(event);
+  let id = "";
+  const stream = clientSockets.channels.create(grant.hash, { lanes: 1, ongone: () => relay.closePeer(id) });
+  id = stream.id;
+  stream.attach(0, sink);
+  const socket = wire(stream, request);
+  socket.send({ type: "channel", channel: stream.id });
+  try {
+    relay.open(socket, grant, flow);
+  } catch {
+    console.warn("[Vega relay] Tunnel rejected: missing, expired or mismatched flow/device grant");
+    stream.close(1008, "Invalid relay connection");
+  }
+  return body;
 });

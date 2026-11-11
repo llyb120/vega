@@ -11,18 +11,12 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
-func readPairing(t *testing.T, conn *websocket.Conn) map[string]any {
+func readPairing(t *testing.T, client *pairingClient) map[string]any {
 	t.Helper()
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for i := 0; i < 8; i++ {
-		var value map[string]any
-		if err := conn.ReadJSON(&value); err != nil {
-			t.Fatal(err)
-		}
+		value := client.next(t)
 		if value["code"] == "authorizing" || value["code"] == "backend_connecting" {
 			continue
 		}
@@ -31,22 +25,16 @@ func readPairing(t *testing.T, conn *websocket.Conn) map[string]any {
 	t.Fatal("too many progress messages")
 	return nil
 }
-func pairForTest(t *testing.T, origin, configPath string) (*Agent, *websocket.Conn) {
+func pairForTest(t *testing.T, origin, configPath string) (*Agent, *pairingClient) {
 	t.Helper()
-	agent := &Agent{configPath: configPath, pinnedOrigin: origin, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{origin}}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: configPath, pinnedOrigin: origin, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{origin}}, connections: make(map[*Conn]struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	agent.startConnections(ctx)
 	server := httptest.NewServer(http.HandlerFunc(agent.serveWS))
 	t.Cleanup(func() { cancel(); server.Close() })
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{"Origin": {origin}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	if err = conn.WriteJSON(map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"}); err != nil {
-		t.Fatal(err)
-	}
-	return agent, conn
+	client := dialPairing(t, server.URL, origin, map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"})
+	t.Cleanup(client.close)
+	return agent, client
 }
 func TestPairingReportsSanitizedLoginAndBackendFailures(t *testing.T) {
 	for _, item := range []struct {
@@ -107,7 +95,7 @@ func TestRevokedCredentialIsDroppedSoSiteCanPairAgain(t *testing.T) {
 	}))
 	t.Cleanup(backend.Close)
 	path := filepath.Join(t.TempDir(), "config.json")
-	agent := &Agent{configPath: path, pinnedOrigin: backend.URL, config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}, Servers: []ServerCredential{{Origin: backend.URL, UserID: "alice", Token: protected}}}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: path, pinnedOrigin: backend.URL, config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}, Servers: []ServerCredential{{Origin: backend.URL, UserID: "alice", Token: protected}}}, connections: make(map[*Conn]struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent.startConnections(ctx)
@@ -135,29 +123,24 @@ func TestRevokedCredentialIsDroppedSoSiteCanPairAgain(t *testing.T) {
 func TestPairingDoesNotClaimConnectedBeforeNativeReady(t *testing.T) {
 	hello := make(chan struct{}, 1)
 	release := make(chan struct{})
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/local-agent/verify" {
-			_ = json.NewEncoder(w).Encode(map[string]string{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": strings.Repeat("c", 32), "deviceToken": strings.Repeat("s", 43)})
-			return
-		}
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		var value map[string]any
-		if conn.ReadJSON(&value) != nil {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/local-agent/verify", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": strings.Repeat("c", 32), "deviceToken": strings.Repeat("s", 43)})
+	})
+	mux.Handle("/api/local-agent/socket", newChannelServer(func(peer *channelPeer, r *http.Request) {
+		if _, ok := peer.poll(); !ok {
 			return
 		}
 		hello <- struct{}{}
 		<-release
-		_ = conn.WriteJSON(map[string]string{"type": "ready", "userId": "alice", "clientId": strings.Repeat("c", 32)})
+		_ = peer.send(map[string]string{"type": "ready", "userId": "alice", "clientId": strings.Repeat("c", 32)})
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
+			if _, ok := peer.poll(); !ok {
 				return
 			}
 		}
 	}))
+	backend := httptest.NewServer(mux)
 	t.Cleanup(backend.Close)
 	_, conn := pairForTest(t, backend.URL, filepath.Join(t.TempDir(), "config.json"))
 	receive(t, hello)
@@ -203,28 +186,21 @@ func TestPinnedSiteContinuesToBackendAndForeignSiteIsRefused(t *testing.T) {
 	}))
 	defer backend.Close()
 	// 安装包自带的站点直接放行，不需要再点“允许”；其它站点直接拒。
-	agent := &Agent{configPath: filepath.Join(t.TempDir(), "config.json"), pinnedOrigin: backend.URL, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{backend.URL}}, pendingOrigins: map[string]bool{}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: filepath.Join(t.TempDir(), "config.json"), pinnedOrigin: backend.URL, config: Config{ClientID: strings.Repeat("c", 32), TrustedOrigins: []string{backend.URL}}, pendingOrigins: map[string]bool{}, connections: make(map[*Conn]struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent.startConnections(ctx)
 	server := httptest.NewServer(http.HandlerFunc(agent.serveWS))
 	defer server.Close()
-	connect := func(origin string) *websocket.Conn {
-		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{"Origin": {origin}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = conn.WriteJSON(map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"})
-		return conn
-	}
-	foreign := connect("https://evil.example")
-	defer foreign.Close()
+	login := map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"}
+	foreign := dialPairing(t, server.URL, "https://evil.example", login)
+	defer foreign.close()
 	if status := readPairing(t, foreign); status["code"] != "permission_required" {
 		t.Fatalf("foreign site was not refused: %v", status)
 	}
 	// 后端登录接口之后回 404，应该如实报 backend_http，而不是声称已连接。
-	pinned := connect(backend.URL)
-	defer pinned.Close()
+	pinned := dialPairing(t, server.URL, backend.URL, login)
+	defer pinned.close()
 	if status := readPairing(t, pinned); status["code"] != "backend_http" || status["httpStatus"] != float64(404) {
 		t.Fatalf("pinned site failed silently or claimed success: %v", status)
 	}
@@ -234,41 +210,44 @@ func TestRemoteHTTPPairsAndReconnectsWithSavedCredential(t *testing.T) {
 	const origin = "http://vega.example"
 	clientID, token := strings.Repeat("c", 32), strings.Repeat("s", 43)
 	accepted := make(chan struct{}, 2)
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	socket := newChannelServer(func(peer *channelPeer, r *http.Request) {
+		message, ok := peer.poll()
+		if !ok {
+			return
+		}
+		var hello map[string]any
+		if json.Unmarshal(message.raw, &hello) != nil || hello["clientId"] != clientID {
+			return
+		}
+		_ = peer.send(map[string]string{"type": "ready", "userId": "alice", "clientId": clientID})
+		accepted <- struct{}{}
+		for {
+			if _, ok := peer.poll(); !ok {
+				return
+			}
+		}
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/local-agent/verify", func(w http.ResponseWriter, r *http.Request) {
 		if r.Host != "vega.example" || r.TLS != nil {
 			http.Error(w, "unexpected origin or TLS", 400)
 			return
 		}
-		if r.URL.Path == "/api/local-agent/verify" {
-			var body map[string]string
-			if json.NewDecoder(r.Body).Decode(&body) != nil || body["clientId"] != clientID {
-				http.Error(w, "invalid pair", 400)
-				return
-			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": clientID, "deviceToken": token})
+		var body map[string]string
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body["clientId"] != clientID {
+			http.Error(w, "invalid pair", 400)
 			return
 		}
-		if r.URL.Path != "/api/local-agent/socket" || r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("Origin") != "" || r.URL.RawQuery != "" {
+		_ = json.NewEncoder(w).Encode(map[string]string{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": clientID, "deviceToken": token})
+	})
+	mux.HandleFunc("/api/local-agent/socket", func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "vega.example" || r.TLS != nil || r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("Origin") != "" || r.URL.RawQuery != "" {
 			http.Error(w, "not authorized", 403)
 			return
 		}
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		var hello map[string]any
-		if conn.ReadJSON(&hello) != nil || hello["clientId"] != clientID {
-			return
-		}
-		_ = conn.WriteJSON(map[string]string{"type": "ready", "userId": "alice", "clientId": clientID})
-		accepted <- struct{}{}
-		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				return
-			}
-		}
-	}))
+		socket.ServeHTTP(w, r)
+	})
+	backend := httptest.NewServer(mux)
 	defer backend.Close()
 	// Route the non-loopback hostname to a local fixture without relying on DNS.
 	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -277,34 +256,27 @@ func TestRemoteHTTPPairsAndReconnectsWithSavedCredential(t *testing.T) {
 		}
 		return (&net.Dialer{}).DialContext(ctx, network, address)
 	}
-	previousHTTP, previousWS := http.DefaultTransport, websocket.DefaultDialer
+	previousHTTP := http.DefaultTransport
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy, transport.DialContext = nil, dial
-	dialer := *websocket.DefaultDialer
-	dialer.Proxy, dialer.NetDialContext = nil, dial
-	http.DefaultTransport, websocket.DefaultDialer = transport, &dialer
+	http.DefaultTransport = transport
 	defer func() {
-		http.DefaultTransport, websocket.DefaultDialer = previousHTTP, previousWS
+		http.DefaultTransport = previousHTTP
 		transport.CloseIdleConnections()
 	}()
 	path := filepath.Join(t.TempDir(), "config.json")
-	agent := &Agent{configPath: path, pinnedOrigin: origin, config: Config{ClientID: clientID, TrustedOrigins: []string{origin}}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: path, pinnedOrigin: origin, config: Config{ClientID: clientID, TrustedOrigins: []string{origin}}, connections: make(map[*Conn]struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent.startConnections(ctx)
 	pairing := httptest.NewServer(http.HandlerFunc(agent.serveWS))
 	defer pairing.Close()
-	browser, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(pairing.URL, "http"), http.Header{"Origin": {origin}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer browser.Close()
-	_ = browser.WriteJSON(map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"})
+	browser := dialPairing(t, pairing.URL, origin, map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"})
 	if status := readPairing(t, browser); status["type"] != "paired" || status["connected"] != true {
 		t.Fatalf("remote HTTP pairing failed: %v", status)
 	}
 	receive(t, accepted)
-	_ = browser.Close()
+	browser.close()
 	pairing.Close()
 	agent.mu.Lock()
 	config := agent.config
@@ -327,7 +299,7 @@ func TestRemoteHTTPPairsAndReconnectsWithSavedCredential(t *testing.T) {
 		t.Fatal("native connection did not stop")
 	}
 	waitStopped(agent)
-	restarted := &Agent{configPath: path, config: config, connections: make(map[*websocket.Conn]struct{})}
+	restarted := &Agent{configPath: path, config: config, connections: make(map[*Conn]struct{})}
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	restarted.startConnections(ctx)

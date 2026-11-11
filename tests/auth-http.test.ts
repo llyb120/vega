@@ -6,13 +6,56 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import WebSocket from "ws";
 import sharp from "sharp";
 import { Store } from "../server/core/store";
 import { sleep } from "../server/core/util";
 type Login = { cookie: string; csrf: string; id: string };
+/**
+ * 读一条 text/event-stream：按空行切帧，丢掉 `:` 开头的注释行（心跳），把每个 `data: ` 后的 JSON 交给 onMessage。
+ * 跨 chunk 拆开的帧留在 pending 里等下一块；onMessage 返回 true 表示读够了，立刻取消读流。
+ * 浏览器端同一份逻辑在 web/src/sse-socket.js，测试不共享模块，各自内联。
+ */
+async function readEvents(
+  response: Response,
+  onMessage: (value: any) => boolean | void,
+  signal?: AbortSignal,
+) {
+  const reader = response.body!.getReader(),
+    decoder = new TextDecoder();
+  const cancel = () => {
+    reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  let pending = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      pending = (pending + decoder.decode(value, { stream: true })).replace(
+        /\r\n/g,
+        "\n",
+      );
+      for (let cut; (cut = pending.indexOf("\n\n")) >= 0; ) {
+        const block = pending.slice(0, cut);
+        pending = pending.slice(cut + 2);
+        const data = block
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).replace(/^ /, ""))
+          .join("\n");
+        if (data && onMessage(JSON.parse(data)) === true) return;
+      }
+    }
+  } catch (error) {
+    // 收尾时自己取消读流不算失败；真正的断流由调用方按 ended/closed 判断。
+    if (!signal?.aborted) throw error;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    cancel();
+  }
+}
 test(
-  "deployed website login/RBAC: cookie,CSRF,private sessions,WebSocket revocation and no token bypass",
+  "deployed website login/RBAC: cookie,CSRF,private sessions,SSE stream revocation and no token bypass",
   { timeout: 60000, skip: process.env.VEGA_TEST_DEPLOYED !== "1" },
   async () => {
     const dir = await mkdtemp(join(tmpdir(), "vega-web-auth-")),
@@ -111,6 +154,8 @@ test(
           VEGA_DB: db,
           VEGA_SKILL_CACHE: join(dir, "skills"),
           VEGA_CHROMIUM_EXTERNAL: "1",
+          // 实时通道是 SSE：服务端按 VEGA_PUBLIC_URL 校验下行流的 Origin（没配就没有可信来源）。
+          VEGA_PUBLIC_URL: base,
         },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
@@ -118,7 +163,8 @@ test(
     let logs = "";
     child.stdout!.on("data", (c) => (logs += c));
     child.stderr!.on("data", (c) => (logs += c));
-    const sockets: WebSocket[] = [];
+    // 每条实时通道是一条 SSE 读流；收尾时统一断开（原来是关掉 WebSocket）。
+    const streams: AbortController[] = [];
     const req = async (
       path: string,
       method = "GET",
@@ -168,24 +214,37 @@ test(
     };
     const openStream = async (login: Login) => {
       const { ticket } = await ok("/events", "POST", {}, login),
-        ws = new WebSocket(
-          base.replace("http:", "ws:") + "/api/events?ticket=" + ticket,
-          { headers: { Cookie: login.cookie, Origin: base } },
+        controller = new AbortController(),
+        response = await fetch(base + "/api/events?ticket=" + ticket, {
+          headers: {
+            Cookie: login.cookie,
+            Origin: base,
+            Accept: "text/event-stream",
+          },
+          signal: controller.signal,
+        });
+      streams.push(controller);
+      if (response.status !== 200)
+        throw Error(
+          "events stream " + response.status + " " + (await response.text()),
         );
-      sockets.push(ws);
-      let text = "",
-        ended = false;
-      ws.on("message", (data) => (text += data.toString()));
-      ws.on("error", () => {});
-      const done = new Promise<void>((yes) =>
-        ws.once("close", () => {
-          ended = true;
-          yes();
-        }),
+      assert.match(
+        response.headers.get("content-type") || "",
+        /^text\/event-stream/,
       );
-      await new Promise<void>((yes, no) => {
-        ws.once("open", yes);
-        ws.once("error", no);
+      let text = "",
+        ended = false,
+        closed: number | undefined;
+      // 下行是 SSE：服务端结束时先发 closed 帧再断流，没有 WebSocket 可开。
+      const done = readEvents(
+        response,
+        (value) => {
+          text += JSON.stringify(value);
+          if (value?.type === "closed") closed = value.code;
+        },
+        controller.signal,
+      ).finally(() => {
+        ended = true;
       });
       for (let i = 0; i < 100 && !text.includes('"ready"'); i++)
         await sleep(10);
@@ -196,6 +255,9 @@ test(
         },
         get ended() {
           return ended;
+        },
+        get closed() {
+          return closed;
         },
         done,
       };
@@ -313,6 +375,8 @@ test(
       const config = {
         model: "test/m",
         contextMode: "acp",
+        // Every scene needs an explicit model; the default fallback was removed.
+        scenes: { lightweight: ["test/m"], coding: ["test/m"] },
         provider: {
           test: {
             api: "openai-completions",
@@ -534,7 +598,7 @@ test(
         own[worker.id] = (await ok(`/employees/${worker.id}/vault`, "POST", { name: worker.name + " service", condition: "authorized test", content: worker.id + "-secret" }, login)).id;
         assert.equal((await ok(`/employees/${worker.id}`, "GET", undefined, login)).canConfigure, true);
         const listed = await ok(`/employees/${worker.id}/vault`, "GET", undefined, login);
-        assert.deepEqual(listed.entries.map((entry: any) => [entry.id, entry.share]), [[own[worker.id], true]]);
+        assert.deepEqual(listed.entries.map((entry: any) => entry.id), [own[worker.id]], "only this employee's own entry is listed");
         assert(!JSON.stringify(listed).includes(worker.id + "-secret"));
         const entries = await ok(`/employees/${worker.id}`, "POST", { action: "vault_list" }, login);
         assert.deepEqual(entries.entries.map((entry: any) => entry.id), [own[worker.id]], "an employee only sees its own entries");
@@ -859,10 +923,15 @@ test(
       await Promise.race([
         streamB.done,
         sleep(1500).then(() => {
-          throw Error("Disabled user WebSocket was not revoked");
+          throw Error("Disabled user realtime stream was not revoked");
         }),
       ]);
       assert(streamB.ended);
+      assert.equal(
+        streamB.closed,
+        4401,
+        "禁用账号后服务端用 closed 帧结束实时流",
+      );
       let continued: any,
         privateMessages: any[] = [];
       for (let n = 0; n < 150; n++) {
@@ -948,7 +1017,7 @@ test(
       assert(!logs.includes("valid-admin-fixture-password"));
       assert(!logs.includes("valid-runner-one-password"));
     } finally {
-      for (const socket of sockets) socket.close();
+      for (const stream of streams) stream.abort();
       mock.closeAllConnections();
       await new Promise<void>((yes) => mock.close(() => yes()));
       if (child.exitCode === null) {

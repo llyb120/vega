@@ -17,8 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 type Config struct {
@@ -62,7 +60,7 @@ func newAgentAt(exeDir string) (*Agent, error) {
 	if _, err = rand.Read(token); err != nil {
 		return nil, err
 	}
-	a := &Agent{configPath: filepath.Join(dir, "trusted-sites.json"), dataDir: dir, pinnedOrigin: pin.Origin, configToken: hex.EncodeToString(token), connections: make(map[*websocket.Conn]struct{}), pendingOrigins: make(map[string]bool)}
+	a := &Agent{configPath: filepath.Join(dir, "trusted-sites.json"), dataDir: dir, pinnedOrigin: pin.Origin, configToken: hex.EncodeToString(token), connections: make(map[*Conn]struct{}), pendingOrigins: make(map[string]bool)}
 	data, err := os.ReadFile(a.configPath)
 	if err == nil {
 		err = json.Unmarshal(data, &a.config)

@@ -6,12 +6,41 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import WebSocket from "ws";
 import { Store } from "../server/core/store";
 import { sleep } from "../server/core/util";
 
+/** Reads an SSE response as JSON events, the way the page's fetch-based stream does. */
+async function stream(response: Response) {
+  const messages: any[] = [], reader = response.body!.getReader(), decoder = new TextDecoder();
+  let pending = "", closed = false;
+  void (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        let cut: number;
+        while ((cut = pending.indexOf("\n\n")) >= 0) {
+          const block = pending.slice(0, cut);
+          pending = pending.slice(cut + 2);
+          if (block.startsWith("data: ")) messages.push(JSON.parse(block.slice("data: ".length)));
+        }
+      }
+    } catch {} finally { closed = true; }
+  })();
+  return {
+    messages,
+    get closed() { return closed; },
+    until: async (ready: () => boolean) => {
+      for (let i = 0; i < 200 && !ready(); i++) await sleep(10);
+      assert(ready(), "stream timed out");
+    },
+    stop: () => reader.cancel().catch(() => {}),
+  };
+}
+
 test(
-  "deployed realtime events: ticket auth, events-only socket, replay cursor; API stays on HTTP",
+  "deployed realtime events: ticket auth, events-only stream, replay cursor; API stays on HTTP",
   { timeout: 60000, skip: process.env.VEGA_TEST_DEPLOYED !== "1" },
   async () => {
     const reserve = createServer();
@@ -42,7 +71,7 @@ test(
     let logs = "";
     child.stdout!.on("data", (data) => (logs += data));
     child.stderr!.on("data", (data) => (logs += data));
-    const sockets: WebSocket[] = [];
+    const opened: { stop: () => void }[] = [];
     const request = async (path: string, method = "GET", body?: any, login?: any) => {
       const response = await fetch(base + "/api" + path, {
         method,
@@ -80,44 +109,30 @@ test(
         (await request("/events", "POST", {}, { ...login, csrf: "" })).response.status,
         403,
       );
-      const open = async (cookie: string, origin = base, query = "") => {
+      const connect = async (cookie: string, origin = base, query = "") => {
         const ticket = await request("/events", "POST", {}, login);
         assert(ticket.response.ok, JSON.stringify(ticket.value) + logs);
-        const ws = new WebSocket(
-          base.replace("http:", "ws:") + "/api/events?ticket=" + ticket.value.ticket + query,
-          { headers: { cookie, origin } },
-        );
-        sockets.push(ws);
-        ws.on("error", () => {});
-        const messages: any[] = [];
-        ws.on("message", (data) => messages.push(JSON.parse(data.toString())));
-        await new Promise<void>((yes, no) => {
-          ws.once("open", yes);
-          ws.once("error", no);
-          ws.once("unexpected-response", (_req, res) => {
-            res.resume();
-            no(Error("upgrade status " + res.statusCode));
-          });
+        return await fetch(base + "/api/events?ticket=" + ticket.value.ticket + query, {
+          headers: { ...(cookie ? { cookie } : {}), origin },
         });
-        for (let i = 0; i < 100 && !messages.some((v) => v.type === "ready"); i++)
-          await sleep(10);
-        assert(messages.some((v) => v.type === "ready"));
-        return { ws, messages };
       };
-      await assert.rejects(() => open(""), /upgrade status 403/);
-      await assert.rejects(() => open(login.cookie, "https://evil.test"), /upgrade status 403/);
-      const { ws, messages } = await open(login.cookie);
-      const hello = messages.find((v) => v.type === "ready");
+      const open = async (cookie: string, origin = base, query = "") => {
+        const response = await connect(cookie, origin, query);
+        assert(response.ok, "stream refused: " + response.status + logs);
+        const page = await stream(response);
+        opened.push(page);
+        await page.until(() => page.messages.some((v: any) => v.type === "ready"));
+        return page;
+      };
+      assert.equal((await connect("")).status, 401, "a stream without the login cookie is refused as unauthenticated, never opened");
+      assert.equal((await connect(login.cookie, "https://evil.test")).status, 403);
+      const page = await open(login.cookie);
+      const hello = page.messages.find((v: any) => v.type === "ready");
       assert.equal(typeof hello.epoch, "string");
-      ws.send(JSON.stringify({ type: "request", id: "request-bootstrap", method: "GET", path: "/bootstrap" }));
-      for (let i = 0; i < 100 && !messages.some((v) => v.type === "error"); i++) await sleep(10);
-      assert.match(messages.find((v) => v.type === "error").reason, /只接收订阅/, "API calls are not tunnelled");
-      ws.send(JSON.stringify({ type: "subscribe", sessions: [seeded.id] }));
-      ws.send(JSON.stringify({ type: "ping" }));
-      for (let i = 0; i < 100 && !messages.some((v) => v.type === "pong"); i++) await sleep(10);
-      assert.equal(messages.find((v) => v.type === "pong").epoch, hello.epoch);
+      // Upstream is HTTP only: the stream never carries API calls, and no frames can be sent into it.
+      page.messages.length = 0;
       const replay = await open(login.cookie, base, "&since=" + hello.epoch + ":" + hello.seq);
-      assert.equal(replay.messages.find((v) => v.type === "ready").replayed, true);
+      assert.equal(replay.messages.find((v: any) => v.type === "ready").replayed, true);
       const history = await request("/sessions/" + seeded.id, "GET", undefined, login);
       assert.equal(history.response.ok, true);
       assert.equal(history.value.messages[0].text.length, 300000);
@@ -126,10 +141,13 @@ test(
       const incremental = await request("/sessions/" + seeded.id + "?after=1", "GET", undefined, login);
       assert.equal(incremental.value.context, undefined, "incremental reads skip the budget");
       const plain = await fetch(base + "/api/events", { headers: { cookie: login.cookie } });
-      assert.notEqual(plain.headers.get("content-type"), "text/event-stream");
-      ws.close();
+      assert.equal(plain.status, 403, "a stream without a ticket is refused");
+      assert.match(plain.headers.get("content-type") || "", /application\/json/, "refusals are JSON, never a stream");
+      const unauthenticated = await fetch(base + "/api/events?ticket=deadbeef");
+      assert.equal(unauthenticated.status, 401, "an anonymous stream is refused as unauthenticated");
+      page.stop();
     } finally {
-      for (const ws of sockets) ws.close();
+      for (const page of opened) page.stop();
       child.kill();
       await new Promise((yes) => child.once("exit", yes));
       await rm(dir, { recursive: true, force: true });

@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // The Node end-to-end probe runs this isolated client against temporary test services.
@@ -31,7 +29,7 @@ func TestRelayProbeClient(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 	saved := ServerCredential{Origin: args.Origin, UserID: args.UserID, Relay: strings.Split(args.Rule, ",")}
-	a := &Agent{context: ctx, config: Config{ClientID: args.ClientID, TrustedOrigins: []string{args.Origin}}, connections: make(map[*websocket.Conn]struct{})}
+	a := &Agent{context: ctx, config: Config{ClientID: args.ClientID, TrustedOrigins: []string{args.Origin}}, connections: make(map[*Conn]struct{})}
 	if a.startConnection(saved, args.Token) == nil {
 		t.Fatal("client did not start")
 	}

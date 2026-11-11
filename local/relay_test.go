@@ -15,8 +15,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 func TestRelayRulesAndAddressPolicy(t *testing.T) {
@@ -126,43 +124,37 @@ func TestRelayPumpStreamsBinaryBothWaysWithAcknowledgements(t *testing.T) {
 	request := []byte("request\x00payload")
 	response := bytes.Repeat([]byte{0, 1, 255, 17}, relayFrame/2+37)
 	result := make(chan []byte, 1)
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
+	backend := httptest.NewServer(newChannelServer(func(peer *channelPeer, r *http.Request) {
+		ready, ok := peer.poll()
+		if !ok || !bytes.Equal(ready.binary, []byte{2}) {
 			return
 		}
-		defer ws.Close()
-		ws.SetReadDeadline(time.Now().Add(4 * time.Second))
-		kind, frame, err := ws.ReadMessage()
-		if err != nil || kind != websocket.BinaryMessage || !bytes.Equal(frame, []byte{2}) {
-			return
-		}
-		if ws.WriteMessage(websocket.BinaryMessage, append([]byte{0}, request...)) != nil {
+		if peer.sendFrame(append([]byte{0}, request...)) != nil {
 			return
 		}
 		received := []byte{}
 		acknowledged := false
 		for len(received) < len(response) || !acknowledged {
-			_, frame, err = ws.ReadMessage()
-			if err != nil || len(frame) == 0 {
+			frame, ok := peer.poll()
+			if !ok || len(frame.binary) == 0 {
 				return
 			}
-			if frame[0] == 1 {
+			if frame.binary[0] == 1 {
 				acknowledged = true
 				continue
 			}
-			if frame[0] != 0 || len(frame) > relayFrame+1 {
+			if frame.binary[0] != 0 || len(frame.binary) > relayFrame+1 {
 				return
 			}
-			received = append(received, frame[1:]...)
-			if ws.WriteMessage(websocket.BinaryMessage, []byte{1}) != nil {
+			received = append(received, frame.binary[1:]...)
+			if peer.sendFrame([]byte{1}) != nil {
 				return
 			}
 		}
 		result <- received
 	}))
 	defer backend.Close()
-	ws, _, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(backend.URL, "http"), nil)
+	ws, _, err := DialContext(ctx, "http"+strings.TrimPrefix(backend.URL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

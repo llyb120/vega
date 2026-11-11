@@ -4,6 +4,28 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { LocalAgentPairing, canBridgeLocal, pairingStatusText } from "../web/src/local-agent.js";
 
+const encoder = new TextEncoder();
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+/** The page pairs by POSTing to loopback and reading one event stream back; keep it under test control. */
+function pairingStream() {
+  const streams: any[] = [];
+  return {
+    streams,
+    fetch: async (url: any, init: any = {}) => {
+      let controller!: ReadableStreamDefaultController<Uint8Array>;
+      const body = new ReadableStream<Uint8Array>({ start: (started) => { controller = started; } });
+      streams.push({ url: String(url), init, controller });
+      return { ok: true, status: 200, body };
+    },
+  };
+}
+const feed = (stream: any, value: unknown) => stream.controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`));
+function patchFetch(replacement: any) {
+  const original = globalThis.fetch;
+  globalThis.fetch = replacement;
+  return () => { globalThis.fetch = original; };
+}
+
 test("desktop and mobile indicators describe all online clients rather than the current device", () => {
   const app = readFileSync("web/src/App.vue", "utf8");
   assert.match(app, /:client-status="clientStatus"/, "the sidebar indicator renders App's clientStatus for every layout");
@@ -84,30 +106,27 @@ test("a manual switch updates the selected session only after success and keeps 
 
 test("pairing reports permission, verification and backend failures without mistaking them for online", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
-  const original = globalThis.WebSocket, sockets: any[] = [], statuses: any[] = [], requests: any[] = [];
-  class Socket {
-    onopen: any; onmessage: any; onclose: any; onerror: any;
-    constructor(public url: string) { sockets.push(this); }
-    send() {}
-    close() { this.onclose?.(); }
-  }
-  globalThis.WebSocket = Socket as any;
-  t.after(() => { globalThis.WebSocket = original; });
+  const { streams, fetch } = pairingStream();
+  t.after(patchFetch(fetch));
+  const statuses: any[] = [], requests: any[] = [];
   const pairing = new LocalAgentPairing(async (_path: string, _method: string, body: any) => { requests.push(body); return { ticket: "fixture" }; }, "alice", (status: any) => statuses.push(status));
   t.after(() => pairing.close());
-  await pairing.connect();
-  sockets[0].onopen();
-  sockets[0].onmessage({ data: JSON.stringify({ type: "status", code: "permission_required" }) });
+  const first = pairing.connect();
+  await settle();
+  assert.equal(streams.length, 1);
+  feed(streams[0], { type: "status", code: "permission_required" });
+  await first;
   assert.equal(statuses.at(-1).code, "permission_required");
   assert.match(pairingStatusText(statuses.at(-1)), /允许此站点/);
   t.mock.timers.tick(5000);
-  await Promise.resolve(); await Promise.resolve();
-  assert.equal(sockets.length, 2, "approval is retried with a fresh one-use ticket");
-  sockets[1].onopen();
+  await settle();
+  assert.equal(streams.length, 2, "approval is retried with a fresh one-use ticket");
   for (const code of ["authorizing", "backend_connecting"])
-    sockets[1].onmessage({ data: JSON.stringify({ type: "status", code }) });
+    feed(streams[1], { type: "status", code });
+  await settle();
   assert.equal((pairing as any).paired, undefined);
-  sockets[1].onmessage({ data: JSON.stringify({ type: "status", code: "backend_http", httpStatus: 404, deviceToken: "must-not-be-copied", message: "private server text" }) });
+  feed(streams[1], { type: "status", code: "backend_http", httpStatus: 404, deviceToken: "must-not-be-copied", message: "private server text" });
+  await settle();
   assert.match(pairingStatusText(statuses.at(-1)), /HTTP 404/);
   assert.match(pairingStatusText(statuses.at(-1)), /\/api\/local-agent\/socket/);
   assert(!JSON.stringify(statuses).includes("must-not-be-copied"));
@@ -117,29 +136,24 @@ test("pairing reports permission, verification and backend failures without mist
 
 test("pairing exposes local-network, credential-save and old-client failures and stops on terminal errors", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
-  const original = globalThis.WebSocket, sockets: any[] = [];
-  class Socket {
-    onopen: any; onmessage: any; onclose: any; onerror: any;
-    constructor() { sockets.push(this); }
-    send() {}
-    close() { this.onclose?.(); }
-  }
-  globalThis.WebSocket = Socket as any;
-  t.after(() => { globalThis.WebSocket = original; });
+  const { streams, fetch } = pairingStream();
+  t.after(patchFetch(fetch));
   for (const code of ["local_unavailable", "credential_save", "legacy_client"]) {
     const statuses: any[] = [];
     const pairing = new LocalAgentPairing(async () => ({ ticket: "fixture" }), "alice", (status: any) => statuses.push(status));
-    await pairing.connect();
-    const socket = sockets.at(-1);
-    if (code === "local_unavailable") socket.onerror();
-    else if (code === "legacy_client") socket.onmessage({ data: JSON.stringify({ type: "paired", instance: (pairing as any).instance, userId: "alice", clientId: "d".repeat(32) }) });
-    else socket.onmessage({ data: JSON.stringify({ type: "status", code }) });
+    const running = pairing.connect();
+    await settle();
+    const stream = streams.at(-1);
+    if (code === "local_unavailable") stream.controller.error(Error("connection refused"));
+    else if (code === "legacy_client") feed(stream, { type: "paired", instance: (pairing as any).instance, userId: "alice", clientId: "d".repeat(32) });
+    else feed(stream, { type: "status", code });
+    await running;
     assert.equal(statuses.at(-1).code, code);
     assert(!statuses.some((status) => status.code === "connected"));
     if (code === "credential_save") {
-      const count = sockets.length;
-      t.mock.timers.tick(60000); await Promise.resolve();
-      assert.equal(sockets.length, count);
+      const count = streams.length;
+      t.mock.timers.tick(60000); await settle();
+      assert.equal(streams.length, count);
       assert.match(pairingStatusText(statuses.at(-1)), /写入权限/);
     }
     pairing.close();
@@ -178,42 +192,37 @@ test("local pairing starts independently from the website event socket and refre
   assert.match(source, /canBridgeLocal\(\) && canExecute\.value && !localConnected\.value/);
   const onClose = source.slice(source.indexOf("  ws.onclose = (event) => {"), source.indexOf("async function attempt(fn)"));
   assert(!onClose.includes("localBridge?.close()"), "website event loss must not abort initial native pairing");
-  assert(onClose.includes("clientListReady.value = false"), "a lost event connection means unknown state, not proven offline");
+  assert(onClose.includes("eventsReady = false"), "a lost event stream is no longer live");
   assert.match(source, /await bootstrap\(\);\s*startLocalPairing\(\);/);
   assert(source.includes("{{ localPairingText }}") && source.includes("重新检测"));
 });
 
 test("the frontend pairs once and never relays jobs, holds device tokens or disconnects a native client", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
-  const original = globalThis.WebSocket;
-  const sent: any[] = [], calls: any[] = [], sockets: any[] = [], statuses: any[] = [];
-  class Socket {
-    onopen: any; onmessage: any; onclose: any; onerror: any;
-    constructor(public url: string) { sockets.push(this); }
-    send(value: string) { sent.push(JSON.parse(value)); }
-    close() {}
-  }
-  globalThis.WebSocket = Socket as any;
-  t.after(() => { globalThis.WebSocket = original; });
+  const { streams, fetch } = pairingStream();
+  t.after(patchFetch(fetch));
+  const calls: any[] = [], statuses: any[] = [];
   const pairing = new LocalAgentPairing(async (path: any, method: any, data: any) => {
     calls.push({ path, method, data });
     return { ticket: "one-time-login-proof" };
   }, "alice", (paired) => statuses.push(paired));
   t.after(() => pairing.close());
-  await pairing.connect();
-  const socket = sockets[0];
-  assert.equal(socket.url, "ws://127.0.0.1:47673/agent");
-  socket.onopen();
-  assert.deepEqual(sent[0], { type: "auth", ticket: "one-time-login-proof", userId: "alice" });
+  const running = pairing.connect();
+  await settle();
+  const stream = streams[0];
+  assert.equal(stream.url, "http://127.0.0.1:47673/agent");
+  assert.equal(stream.init.method, "POST");
+  assert.equal(stream.init.headers["Content-Type"], "text/plain");
+  assert.deepEqual(JSON.parse(stream.init.body), { type: "auth", ticket: "one-time-login-proof", userId: "alice" });
   const instance = (pairing as any).instance;
-  socket.onmessage({ data: JSON.stringify({ type: "paired", userId: "alice", instance, clientId: "d".repeat(32), connected: true }) });
+  feed(stream, { type: "paired", userId: "alice", instance, clientId: "d".repeat(32), connected: true });
+  await running;
   assert.deepEqual(statuses.map((status) => status.code), ["detecting", "connected"]);
-  socket.onclose();
   t.mock.timers.tick(30000);
-  await Promise.resolve(); await Promise.resolve();
+  await settle();
   pairing.close();
-  assert.equal(sockets.length, 1, "the page releases its handshake socket after pairing");
+  assert.equal(streams.length, 1, "the page releases its handshake stream after pairing");
   assert.deepEqual(calls.map((item) => item.path), ["/local-agent/ticket"]);
-  assert.equal(sent.length, 1);
+  assert.equal(JSON.parse(stream.init.body).ticket, "one-time-login-proof", "no device token ever travels through the page");
   assert.equal((pairing as any).forward, undefined, "job forwarding is not a browser responsibility");
 });

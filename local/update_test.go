@@ -16,8 +16,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // Exercise the real handoff in child processes, never the user's installed client or ports.
@@ -178,7 +176,7 @@ func TestUpdateIdleWaitsForJobsResultsQuietPeriodAndBrowserLease(t *testing.T) {
 	defer func() { localChrome = saved }()
 	now := time.Now()
 	runner := newJobRunner(context.Background(), true)
-	runner.conn = &websocket.Conn{}
+	runner.conn = &Conn{}
 	runner.lastActivity = now.Add(-2 * updateIdle)
 	connections := []*directConnection{{jobs: runner}}
 	if idleConnections(nil, now) || !idleConnections(connections, now) {
@@ -256,35 +254,36 @@ func TestClientReplacementAndRollback(t *testing.T) {
 func TestUpdatePrepareRequiresEveryBackend(t *testing.T) {
 	for _, ready := range []bool{true, false} {
 		t.Run(strconv.FormatBool(ready), func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-				if err != nil {
+			server := httptest.NewServer(newChannelServer(func(peer *channelPeer, r *http.Request) {
+				message, ok := peer.poll()
+				if !ok {
 					return
 				}
-				defer conn.Close()
 				var request job
-				if conn.ReadJSON(&request) != nil || request.Type != "update_prepare" {
+				if json.Unmarshal(message.raw, &request) != nil || request.Type != "update_prepare" {
 					return
 				}
 				response := "update_ready"
 				if !ready && r.URL.Path == "/last" {
 					response = "update_busy"
 				}
-				_ = conn.WriteJSON(map[string]string{"type": response})
+				_ = peer.send(map[string]string{"type": response})
 				if !ready && r.URL.Path == "/last" {
-					for conn.ReadJSON(&request) == nil {
-						_ = conn.WriteJSON(map[string]any{"type": "pong", "busy": false})
+					for {
+						if _, ok := peer.poll(); !ok {
+							return
+						}
+						_ = peer.send(map[string]any{"type": "pong", "busy": false})
 					}
-					return
 				}
-				_ = conn.ReadJSON(&request)
+				_, _ = peer.poll()
 			}))
 			defer server.Close()
 			agent := &Agent{direct: map[string]*directConnection{}}
 			var connections []*directConnection
 			var finishes []chan struct{}
 			for _, path := range []string{"/first", "/last"} {
-				conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+path, nil)
+				conn, _, err := Dial("http"+strings.TrimPrefix(server.URL, "http")+path, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -355,20 +354,18 @@ func TestConnectionInstancesResumeOnlyValidHandoff(t *testing.T) {
 		t.Run(instance, func(t *testing.T) {
 			clientID := strings.Repeat("c", 32)
 			accepted := make(chan string, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-				if err != nil {
+			server := httptest.NewServer(newChannelServer(func(peer *channelPeer, r *http.Request) {
+				message, ok := peer.poll()
+				if !ok {
 					return
 				}
-				defer conn.Close()
 				var hello struct{ Instance string }
-				if conn.ReadJSON(&hello) != nil {
+				if json.Unmarshal(message.raw, &hello) != nil {
 					return
 				}
-				_ = conn.WriteJSON(map[string]any{"type": "ready", "clientId": clientID, "userId": "alice", "resume": true, "autoUpdate": true, "sessionIdle": instance == strings.Repeat("a", 32), "busy": true})
+				_ = peer.send(map[string]any{"type": "ready", "clientId": clientID, "userId": "alice", "resume": true, "autoUpdate": true, "sessionIdle": instance == strings.Repeat("a", 32), "busy": true})
 				accepted <- hello.Instance
-				var value any
-				_ = conn.ReadJSON(&value)
+				_, _ = peer.poll()
 			}))
 			defer server.Close()
 			state, _ := json.Marshal(map[string]string{server.URL + "\x00alice": instance})
@@ -377,7 +374,7 @@ func TestConnectionInstancesResumeOnlyValidHandoff(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{server.URL}, Servers: []ServerCredential{{Origin: server.URL, UserID: "alice", Token: token}}}, connections: make(map[*websocket.Conn]struct{})}
+			agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{server.URL}, Servers: []ServerCredential{{Origin: server.URL, UserID: "alice", Token: token}}}, connections: make(map[*Conn]struct{})}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			agent.startConnections(ctx)

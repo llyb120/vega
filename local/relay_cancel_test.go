@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 func TestRelayRejectsUnexpectedAcknowledgementAndCancelsBlockedIO(t *testing.T) {
@@ -20,25 +18,19 @@ func TestRelayRejectsUnexpectedAcknowledgementAndCancelsBlockedIO(t *testing.T) 
 			remote, target := net.Pipe()
 			defer remote.Close()
 			defer target.Close()
-			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-				if err != nil {
-					return
-				}
-				defer ws.Close()
-				ws.SetReadDeadline(time.Now().Add(3 * time.Second))
-				if _, _, err = ws.ReadMessage(); err != nil {
+			backend := httptest.NewServer(newChannelServer(func(peer *channelPeer, r *http.Request) {
+				if _, ok := peer.poll(); !ok {
 					return
 				}
 				if operation == "cancel" {
 					cancel()
-				} else {
-					_ = ws.WriteMessage(websocket.BinaryMessage, []byte{1})
+					return
 				}
-				_, _, _ = ws.ReadMessage()
+				_ = peer.sendFrame([]byte{1})
+				_, _ = peer.poll()
 			}))
 			defer backend.Close()
-			ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(backend.URL, "http"), nil)
+			ws, _, err := Dial("http"+strings.TrimPrefix(backend.URL, "http"), nil)
 			if err != nil {
 				t.Fatal(err)
 			}

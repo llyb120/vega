@@ -18,6 +18,7 @@ import {
   browserControl,
 } from "../server/core/browser-preview";
 import { Chrome } from "../server/core/chrome";
+import { wire as streamWire, type Sink } from "../server/core/sse";
 import { sleep, type Obj } from "../server/core/util";
 class FixtureBridge extends ChromeBridge {
   ws!: WebSocket;
@@ -559,30 +560,39 @@ test(
       const ticket = await live.ticket(principal, tag),
         frames: Obj[] = [],
         messages: Obj[] = [];
-      const peer = {
-        id: "live-socket",
-        request: {
+      // The route's sequence: one-use ticket, one stream channel the page keeps open, then the session on its wire.
+      const request = {
           url: "http://localhost/api/chrome/live?ticket=" + ticket.ticket,
           headers: new Headers({
             origin: "http://localhost",
             cookie: "vega_session=fixture",
           }),
         },
-        close: () => {},
-        send: (raw: unknown) => {
-          const value = JSON.parse(String(raw));
-          messages.push(value);
-          if (value.type === "frame") {
-            frames.push(value);
-            queueMicrotask(async () =>
-              await live!.message(
-                                peer,
-                                JSON.stringify({ type: "frame_ack", frameId: value.frameId }),
-                              ),
-            );
-          }
-        },
-      };
+        { principal: viewer, ticket: granted } = await live.authorize(request, true),
+        channel = live.channels.create(viewer.hash, { lanes: 3 }),
+        sink: Sink = {
+          write: (chunk) => {
+            for (const block of chunk.split("\n\n")) {
+              if (!block.startsWith("data: ")) continue;
+              const value = JSON.parse(block.slice("data: ".length));
+              messages.push(value);
+              if (value.type === "frame") {
+                frames.push(value);
+                queueMicrotask(async () =>
+                  await live!.message(channel.id, { type: "frame_ack", frameId: value.frameId }),
+                );
+              }
+            }
+            return true;
+          },
+          end: () => {},
+          buffered: () => 0,
+          onclose: () => {},
+        };
+      channel.attach(0, sink);
+      // First downstream message names the channel; every upstream POST is routed by it.
+      const socket = streamWire(channel, request);
+      socket.send({ type: "channel", channel: channel.id });
       const until = async (predicate: () => boolean) => {
         for (let i = 0; i < 400; i++) {
           if (predicate()) return;
@@ -602,29 +612,26 @@ test(
       const beforeFrames = Number(
         (await store.one("SELECT COUNT(*) AS n FROM blobs"))!.n,
       );
-      await live.open(peer);
+      await live.open(socket, viewer, granted.tabTag);
       await until(() => frames.length >= 2);
       assert.equal(
         frames.at(-1)!.width,
         1568,
         "high-DPR frames are resized independently of CSS coordinates",
       );
-      await live.message(peer, JSON.stringify({ type: "mode", mode: "control" }));
+      await live.message(channel.id, { type: "mode", mode: "control" });
       await until(() =>
         messages.some((m) => m.type === "mode" && m.mode === "control"),
       );
       let sequence = 0;
       const input = async (action: Obj) => {
         const seq = ++sequence;
-        await live!.message(
-                    peer,
-                    JSON.stringify({
-                      type: "input",
-                      seq,
-                      frameId: frames.at(-1)!.frameId,
-                      action,
-                    }),
-                  );
+        await live!.message(channel.id, {
+          type: "input",
+          seq,
+          frameId: frames.at(-1)!.frameId,
+          action,
+        });
         await until(() =>
           messages.some((m) => m.type === "input_result" && m.seq === seq),
         );
@@ -685,13 +692,13 @@ test(
       await until(() => frames.at(-1)!.url === url + "/live-form");
       await input({ action: "click_at", ...(await point('input[aria-label="Query"]')) });
       await until(() => frames.at(-1)!.editable === true);
-      const liveSession = live.sessions.get(peer.id);
+      const liveSession = live.sessions.get(channel.id);
       await input({ action: "press", key: "Enter" });
       await until(() => frames.at(-1)!.url === url + "/live-submitted");
       const submittedFrame = frames.at(-1)!;
       await until(() => frames.at(-1)!.frameId > submittedFrame.frameId);
       assert.equal(liveSubmitted, 1, "Enter must submit once even when navigation interrupts live observation");
-      assert.equal(live.sessions.get(peer.id), liveSession, "navigation must retain the same connection and control lease");
+      assert.equal(live.sessions.get(channel.id), liveSession, "navigation must retain the same connection and control lease");
       assert.equal(liveSession!.locked, true);
       assert.equal(messages.some(m => m.type === "error"), false);
       await input({ action: "goto", url: url + "/live" });
@@ -704,9 +711,9 @@ test(
         frameId: frames.at(-1)!.frameId,
         action: { action: "click_at", ...(await point("button")) },
       };
-      await live.message(peer, JSON.stringify(duplicate));
+      await live.message(channel.id, duplicate);
       await engine.gate.run(async () => {});
-      assert.equal(submitted, 3, "duplicate WS input cannot submit twice");
+      assert.equal(submitted, 3, "duplicate live input cannot submit twice");
       assert.equal(
         Number((await store.one("SELECT COUNT(*) AS n FROM blobs"))!.n),
         beforeFrames,

@@ -13,8 +13,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // A multi-megabyte result over a slow uplink must not stall the socket: it is posted over HTTP while
@@ -24,7 +22,7 @@ func TestLargeResultUploadsOverHTTPWithoutBlockingHeartbeat(t *testing.T) {
 	pings := make(chan time.Time, 64)
 	inline := make(chan map[string]any, 8)
 	uploaded := make(chan map[string]any, 1)
-	accepted := make(chan *backendPeer, 2)
+	accepted := make(chan *channelPeer, 2)
 	instances := make(chan string, 2)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/local-agent/result", func(w http.ResponseWriter, r *http.Request) {
@@ -55,23 +53,25 @@ func TestLargeResultUploadsOverHTTPWithoutBlockingHeartbeat(t *testing.T) {
 		uploaded <- value
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
-	mux.HandleFunc("/api/local-agent/socket", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
+	mux.Handle("/api/local-agent/socket", newChannelServer(func(peer *channelPeer, r *http.Request) {
+		message, ok := peer.poll()
+		if !ok {
 			return
 		}
-		defer conn.Close()
 		var hello struct{ Type, ClientID, Instance string }
-		if conn.ReadJSON(&hello) != nil || hello.Type != "hello" {
+		if json.Unmarshal(message.raw, &hello) != nil || hello.Type != "hello" {
 			return
 		}
-		peer := &backendPeer{conn: conn}
 		_ = peer.send(map[string]any{"type": "ready", "userId": "alice", "clientId": clientID, "resume": true})
 		instances <- hello.Instance
 		accepted <- peer
 		for {
+			message, ok := peer.poll()
+			if !ok {
+				return
+			}
 			var value map[string]any
-			if conn.ReadJSON(&value) != nil {
+			if json.Unmarshal(message.raw, &value) != nil {
 				return
 			}
 			if value["type"] == "ping" {
@@ -81,12 +81,12 @@ func TestLargeResultUploadsOverHTTPWithoutBlockingHeartbeat(t *testing.T) {
 				inline <- value
 			}
 		}
-	})
+	}))
 	backend := httptest.NewServer(mux)
 	defer backend.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{}), context: ctx}
+	agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*Conn]struct{}), context: ctx}
 	connection := agent.startConnection(ServerCredential{Origin: backend.URL, UserID: "alice"}, token)
 	if connection == nil {
 		t.Fatal("connection did not start")
@@ -155,27 +155,29 @@ func TestLargeResultUploadsOverHTTPWithoutBlockingHeartbeat(t *testing.T) {
 func TestLargeResultFallsBackToSocketWhenUploadFails(t *testing.T) {
 	clientID, token := strings.Repeat("c", 32), strings.Repeat("t", 43)
 	inline := make(chan map[string]any, 8)
-	accepted := make(chan *backendPeer, 2)
+	accepted := make(chan *channelPeer, 2)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/local-agent/result", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upload broken", 503)
 	})
-	mux.HandleFunc("/api/local-agent/socket", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
+	mux.Handle("/api/local-agent/socket", newChannelServer(func(peer *channelPeer, r *http.Request) {
+		message, ok := peer.poll()
+		if !ok {
 			return
 		}
-		defer conn.Close()
 		var hello struct{ Type, ClientID, Instance string }
-		if conn.ReadJSON(&hello) != nil || hello.Type != "hello" {
+		if json.Unmarshal(message.raw, &hello) != nil || hello.Type != "hello" {
 			return
 		}
-		peer := &backendPeer{conn: conn}
 		_ = peer.send(map[string]any{"type": "ready", "userId": "alice", "clientId": clientID, "resume": true})
 		accepted <- peer
 		for {
+			message, ok := peer.poll()
+			if !ok {
+				return
+			}
 			var value map[string]any
-			if conn.ReadJSON(&value) != nil {
+			if json.Unmarshal(message.raw, &value) != nil {
 				return
 			}
 			if value["type"] == "ping" {
@@ -184,12 +186,12 @@ func TestLargeResultFallsBackToSocketWhenUploadFails(t *testing.T) {
 				inline <- value
 			}
 		}
-	})
+	}))
 	backend := httptest.NewServer(mux)
 	defer backend.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{}), context: ctx}
+	agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*Conn]struct{}), context: ctx}
 	if agent.startConnection(ServerCredential{Origin: backend.URL, UserID: "alice"}, token) == nil {
 		t.Fatal("connection did not start")
 	}
@@ -226,7 +228,7 @@ func TestResentResultGoesOverHTTP(t *testing.T) {
 	clientID, token := strings.Repeat("c", 32), strings.Repeat("t", 43)
 	inline := make(chan map[string]any, 8)
 	uploaded := make(chan map[string]any, 2)
-	accepted := make(chan *backendPeer, 4)
+	accepted := make(chan *channelPeer, 4)
 	var mu sync.Mutex
 	var pending []string
 	mux := http.NewServeMux()
@@ -239,40 +241,36 @@ func TestResentResultGoesOverHTTP(t *testing.T) {
 		uploaded <- value
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
-	mux.HandleFunc("/api/local-agent/socket", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
+	mux.Handle("/api/local-agent/socket", newChannelServer(func(peer *channelPeer, r *http.Request) {
+		message, ok := peer.poll()
+		if !ok {
 			return
 		}
-		defer conn.Close()
 		var hello struct{ Type, ClientID string }
-		if conn.ReadJSON(&hello) != nil || hello.Type != "hello" {
+		if json.Unmarshal(message.raw, &hello) != nil || hello.Type != "hello" {
 			return
 		}
-		peer := &backendPeer{conn: conn}
 		mu.Lock()
 		wanted := append([]string{}, pending...)
 		mu.Unlock()
 		_ = peer.send(map[string]any{"type": "ready", "userId": "alice", "clientId": clientID, "resume": true, "pending": wanted})
 		accepted <- peer
-		for {
-			var value map[string]any
-			if conn.ReadJSON(&value) != nil {
-				return
-			}
-			if value["type"] == "ping" {
-				_ = peer.send(map[string]string{"type": "pong"})
-				continue
-			}
-			inline <- value
-			return // drop the connection without acking, like the server does for an oversized frame
+		message, ok = peer.poll()
+		if !ok {
+			return
 		}
-	})
+		var value map[string]any
+		if json.Unmarshal(message.raw, &value) != nil || value["type"] == "ping" {
+			return
+		}
+		inline <- value
+		peer.stop() // drop the connection without acking, like the server does for an oversized frame
+	}))
 	backend := httptest.NewServer(mux)
 	defer backend.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{}), context: ctx}
+	agent := &Agent{config: Config{ClientID: clientID, TrustedOrigins: []string{backend.URL}}, connections: make(map[*Conn]struct{}), context: ctx}
 	if agent.startConnection(ServerCredential{Origin: backend.URL, UserID: "alice"}, token) == nil {
 		t.Fatal("connection did not start")
 	}

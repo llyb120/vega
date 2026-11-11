@@ -1,26 +1,38 @@
-import { defineWebSocketHandler } from "h3";
+import { defineEventHandler, createError } from "h3";
 import { app } from "../../../core/application";
-import type { ClientSockets } from "../../../core/client-socket";
+import { laneParams, openStream, wire, wireRequest } from "../../../core/sse";
 
-export default defineWebSocketHandler({
-  async upgrade(request) {
-    try { request.context.clientGrant = await app().clientSockets.authorize(request); }
-    catch { return new Response("Client credential invalid or revoked", { status: 403 }); }
-  },
-  async open(peer) {
-    try { await app().clientSockets.open(peer, peer.context.clientGrant as Awaited<ReturnType<ClientSockets["authorize"]>>); }
-    catch { peer.close(4403, "Client authorization failed"); }
-  },
-  async message(peer, message) { await app().clientSockets.message(peer, message.text()); },
-  close(peer, details) {
-    // 1009 means a frame was over CLIENT_SOCKET_LIMIT; without this line the only symptom is a silent
-    // drop-and-reconnect that never finishes its task.
-    if (details?.code && details.code !== 1000 && details.code !== 1005)
-      console.warn(`[Vega client] socket closed ${details.code}${details.reason ? " " + details.reason : ""}`);
-    app().clientSockets.close(peer.id);
-  },
-  error(peer, err) {
-    console.warn(`[Vega client] socket error: ${err?.message || err}`);
-    app().clientSockets.close(peer.id);
-  },
+const denied = (error: any): never => {
+  throw createError({ statusCode: 403, statusMessage: String(error?.message || "Client credential invalid or revoked").slice(0, 300) });
+};
+
+// Downstream half of the client control channel: queued jobs and acknowledgements reach the device as SSE.
+export default defineEventHandler(async (event) => {
+  const request = wireRequest(event),
+    { lane, channel } = laneParams(event);
+  if (lane > 0) {
+    const grant = await app().clientSockets.authorize(request).catch(denied),
+      { sink, body } = openStream(event);
+    try {
+      app().clientSockets.channels.owned(channel, grant.hash).attach(lane, sink);
+    } catch (error) {
+      denied(error);
+    }
+    return body;
+  }
+  const { clientSockets } = app(),
+    grant = await clientSockets.authorize(request).catch(denied),
+    { sink, body } = openStream(event);
+  let id = "";
+  const stream = clientSockets.channels.create(grant.hash, { lanes: 3, ongone: () => clientSockets.close(id) });
+  id = stream.id;
+  stream.attach(0, sink);
+  const socket = wire(stream, request);
+  socket.send({ type: "channel", channel: stream.id });
+  try {
+    await clientSockets.open(socket, grant);
+  } catch (error: any) {
+    stream.close(4429, String(error?.message || "Too many native client connections").slice(0, 200));
+  }
+  return body;
 });

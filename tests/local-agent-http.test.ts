@@ -3,14 +3,58 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import { createServer as tcpServer } from "node:net";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, copyFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import WebSocket from "ws";
 import { LocalAgentPairing } from "../web/src/local-agent.js";
 import { sleep } from "../server/core/util";
+
+/**
+ * 读一条 text/event-stream：按空行切帧，丢掉 `:` 开头的注释行（心跳），把每个 `data: ` 后的 JSON 交给 onMessage。
+ * 跨 chunk 拆开的帧留在 pending 里等下一块；onMessage 返回 true 表示读够了，立刻取消读流。
+ * 浏览器端同一份逻辑在 web/src/sse-socket.js，测试不共享模块，各自内联。
+ */
+async function readEvents(
+  response: Response,
+  onMessage: (value: any) => boolean | void,
+  signal?: AbortSignal,
+) {
+  const reader = response.body!.getReader(),
+    decoder = new TextDecoder();
+  const cancel = () => {
+    reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  let pending = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      pending = (pending + decoder.decode(value, { stream: true })).replace(
+        /\r\n/g,
+        "\n",
+      );
+      for (let cut; (cut = pending.indexOf("\n\n")) >= 0; ) {
+        const block = pending.slice(0, cut);
+        pending = pending.slice(cut + 2);
+        const data = block
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).replace(/^ /, ""))
+          .join("\n");
+        if (data && onMessage(JSON.parse(data)) === true) return;
+      }
+    }
+  } catch (error) {
+    // 收尾时自己取消读流不算失败；真正的断流由调用方自己判断。
+    if (!signal?.aborted) throw error;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    cancel();
+  }
+}
 
 test("native client pairs once, runs with every webpage closed, survives restarts and never replays lost operations", {
   skip: process.env.VEGA_TEST_LOCAL_AGENT !== "1", timeout: 90000,
@@ -50,16 +94,22 @@ test("native client pairs once, runs with every webpage closed, survives restart
     res.end("data: " + JSON.stringify({ choices: [{ index: 0, delta, finish_reason: "tool_calls" in delta ? "tool_calls" : "stop" }] }) + "\n\ndata: [DONE]\n\n");
   });
   await new Promise<void>((yes) => mock.listen(0, "127.0.0.1", yes));
-  const children: ChildProcess[] = [], sockets: WebSocket[] = [], events: any[] = [];
-  let logs = "", cookie = "", csrf = "";
+  const children: ChildProcess[] = [], events: any[] = [];
+  let logs = "", cookie = "", csrf = "", webpage: AbortController | undefined, webpageRead: Promise<void> | undefined;
   const backendEnv = { ...process.env, VEGA_DB: join(dir, "app.db"), VEGA_TOKEN: setupToken, VEGA_PUBLIC_URL: base, VEGA_BROWSER_MODE: "", NITRO_HOST: "127.0.0.1", NITRO_PORT: String(port), VEGA_SKILL_CACHE: join(dir, "skills") };
   const startBackend = () => {
     const child = spawn(process.execPath, [resolve(".output/server/index.mjs")], { windowsHide: true, stdio: "pipe", env: backendEnv });
     child.stdout!.on("data", (b) => logs += b); child.stderr!.on("data", (b) => logs += b);
     children.push(child); return child;
   };
+  // 客户端只从「站点下载的安装包」启动：exe 同目录要有 instance.json（local/instance.go），
+  // 否则它弹窗就退出，这里只会等到配对超时。拷一份到临时目录，别把站点信息写进仓库。
+  const clientExe = join(clientDir, process.platform === "win32" ? "vega-local.exe" : "vega-local");
+  await copyFile(binary, clientExe);
+  await writeFile(join(clientDir, "instance.json"), JSON.stringify({ origin: base }));
   const startClient = () => {
-    const child = spawn(binary, [], { cwd: clientDir, windowsHide: true, stdio: "ignore", env: { ...process.env, APPDATA: configDir, XDG_CONFIG_HOME: configDir } });
+    const child = spawn(clientExe, [], { cwd: clientDir, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, APPDATA: configDir, XDG_CONFIG_HOME: configDir } });
+    child.stdout!.on("data", (b) => logs += b); child.stderr!.on("data", (b) => logs += b);
     children.push(child); return child;
   };
   const stop = async (child: ChildProcess) => {
@@ -81,11 +131,12 @@ test("native client pairs once, runs with every webpage closed, survives restart
     await until(async () => { const value = await api("/sessions/" + id); return !value.running && value.messages.length > before && value.messages.at(-1)?.role === "assistant"; });
     return api("/sessions/" + id);
   };
-  const original = globalThis.WebSocket;
-  class LocalSocket extends WebSocket {
-    constructor(url: string) { super(url, { headers: { origin: base } }); sockets.push(this); }
-  }
-  globalThis.WebSocket = LocalSocket as any;
+  // 本机配对现在是「网页一次 POST + 客户端 SSE 回报」：浏览器会自动带上本站 Origin，Node 的 fetch 不会，这里替它补上。
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: any, init: any = {}) =>
+    String(input?.url ?? input).startsWith("http://127.0.0.1:47673/agent")
+      ? original(input, { ...init, headers: { ...init.headers, origin: base } })
+      : original(input, init)) as any;
   let pairing: LocalAgentPairing | undefined;
   try {
     await until(async () => { try { return (await fetch(base + "/api/auth/me")).ok; } catch { return false; } });
@@ -97,8 +148,11 @@ test("native client pairs once, runs with every webpage closed, survives restart
     const denied = await fetch(base + "/api/local-agent/ticket", { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ instance: "a".repeat(32) }) });
     assert.equal(denied.status, 403);
     const ticket = await api("/events", "POST", {});
-    const webpage = new WebSocket(base.replace("http:", "ws:") + "/api/events?ticket=" + ticket.ticket, { headers: { cookie, origin: base } });
-    sockets.push(webpage); webpage.on("message", (raw) => events.push(JSON.parse(raw.toString())));
+    // 网页那条实时通道也是 SSE：Cookie + Origin 走请求头（和浏览器一致），读流由测试自己管。
+    webpage = new AbortController();
+    const eventsResponse = await fetch(base + "/api/events?ticket=" + ticket.ticket, { headers: { cookie, origin: base, accept: "text/event-stream" }, signal: webpage.signal });
+    assert.equal(eventsResponse.status, 200);
+    webpageRead = readEvents(eventsResponse, (value) => { events.push(value); }, webpage.signal);
     await until(() => events.some((event) => event.type === "ready"));
     const serverSession = await api("/sessions", "POST", { cwd: serverDir });
     const pairingStates: any[] = [];
@@ -110,9 +164,11 @@ test("native client pairs once, runs with every webpage closed, survives restart
     await until(async () => (await api("/bootstrap")).clients.length === 1);
     const device = (await api("/bootstrap")).clients[0];
     assert.equal((await api("/sessions/" + serverSession.id)).session.localAgent, false);
-    pairing.close(); webpage.terminate();
-    assert.equal(sockets.filter((socket) => socket.readyState === WebSocket.OPEN).length, 0, "all frontend sockets are closed");
-    await api("/config", "PUT", { model: "test/m", provider: { test: { api: "openai-completions", baseURL: "http://127.0.0.1:" + (mock.address() as any).port, models: { m: { limit: { context: 128000, output: 1000 } } } } } });
+    pairing.close(); webpage.abort(); await webpageRead;
+    // 没有 WebSocket 了：关掉配对照它的下行 SSE 读流，网页那条 events 流也应该已经结束。
+    assert.equal((pairing as any).stream.signal.aborted, true, "配对的下行流随配对一起关闭");
+    assert.equal(webpage.signal.aborted, true, "网页那条 events 流也已关闭");
+    await api("/config", "PUT", { model: "test/m", scenes: { lightweight: ["test/m"], coding: ["test/m"] }, provider: { test: { api: "openai-completions", baseURL: "http://127.0.0.1:" + (mock.address() as any).port, models: { m: { limit: { context: 128000, output: 1000 } } } } } });
     await run(serverSession.id, "write server fixture");
     assert.match(await readFile(join(serverDir, "from-client.txt"), "utf8"), /local-success/);
     assert.equal(existsSync(join(clientDir, "from-client.txt")), false);
@@ -145,8 +201,8 @@ test("native client pairs once, runs with every webpage closed, survives restart
     await run(session.id, "continue after repair");
     assert.equal((await readFile(join(clientDir, "loss.txt"), "utf8")).trim(), "once", "a renewed device credential must never replay the old mutation");
   } finally {
-    pairing?.close(); globalThis.WebSocket = original;
-    for (const socket of sockets) socket.terminate();
+    pairing?.close(); globalThis.fetch = original;
+    webpage?.abort(); await webpageRead?.catch(() => {});
     for (const child of children) await stop(child);
     await new Promise<void>((yes) => mock.close(() => yes()));
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

@@ -18,8 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 //go:embed VERSION
@@ -190,7 +188,7 @@ func idleConnections(connections []*directConnection, now time.Time) bool {
 
 // Every backend must stop dispatching before any process exits; a raced job vetoes the update.
 func (a *Agent) prepareUpdate(ctx context.Context, connections []*directConnection) (func(), bool) {
-	var sockets []*websocket.Conn
+	var sockets []*Conn
 	undo := func() {
 		for _, socket := range sockets {
 			socket.Close() // Reconnect the same instance to release any server-side update reservation.

@@ -8,7 +8,6 @@ import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { sleep } from "../server/core/util";
-import WebSocket from "ws";
 test(
   "built Nitro deployment: bundled frontend/assets, auth, streaming agent, SQLite tasks, restart",
   { timeout: 45000, skip: process.env.VEGA_TEST_DEPLOYED !== "1" },
@@ -119,7 +118,7 @@ test(
     };
     let cookie = "",
       csrf = "",
-      realtime: WebSocket | undefined;
+      realtime: AbortController | undefined;
     const api = async (path: string, method = "GET", data?: any) => {
       const r = await fetch(base + "/api" + path, {
         method,
@@ -166,6 +165,8 @@ test(
       assert.equal(signed.user.role, "admin");
       const config = {
         model: "test/m",
+        // Every scene needs an explicit model; the default fallback was removed.
+        scenes: { lightweight: ["test/m"], coding: ["test/m"] },
         provider: {
           test: {
             api: "openai-completions",
@@ -180,32 +181,39 @@ test(
       assert.equal(saved.provider.test.apiKey, "__stored_secret__");
       const session = await api("/sessions", "POST", { cwd: dir });
       const { ticket } = await api("/events", "POST", {});
-      realtime = new WebSocket(
-        base.replace("http:", "ws:") + "/api/events?ticket=" + ticket,
-        { headers: { Cookie: cookie, Origin: base } },
+      // Realtime is one long GET; the body is an event stream and the POST above only minted its ticket.
+      const stopStream = new AbortController();
+      realtime = stopStream;
+      const stream = await fetch(base + "/api/events?ticket=" + ticket, {
+        headers: { Cookie: cookie, Origin: base },
+        signal: stopStream.signal,
+      });
+      assert.equal(stream.status, 200);
+      assert.match(
+        stream.headers.get("content-type") || "",
+        /^text\/event-stream/,
       );
+      assert.equal(stream.headers.get("x-accel-buffering"), "no");
       let events = "";
-      const reading = new Promise<void>((resolve, reject) => {
-        realtime!.on("message", (data) => {
-          events += data.toString();
-          if (events.includes('"type":"done"')) resolve();
-        });
-        realtime!.on("error", reject);
-      });
-      await new Promise<void>((yes, no) => {
-        realtime!.once("open", yes);
-        realtime!.once("error", no);
-      });
+      const reading = (async () => {
+        const reader = stream.body!.getReader(), decoder = new TextDecoder();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          events += decoder.decode(value, { stream: true });
+          if (events.includes('"type":"done"')) return;
+        }
+      })();
       await api(`/sessions/${session.id}/messages`, "POST", {
         text: "Write the local fixture once",
       });
       await Promise.race([
         reading,
         sleep(10000).then(() => {
-          throw Error("WebSocket completion not observed");
+          throw Error("Realtime completion not observed over the event stream");
         }),
       ]);
-      realtime.close();
+      stopStream.abort();
       assert(events.includes("tool_end"));
       assert.equal(
         await readFile(join(dir, "result.txt"), "utf8"),
@@ -279,7 +287,7 @@ test(
       );
       assert.equal((await api("/sessions/" + session.id)).messages.length, 4);
     } finally {
-      realtime?.close();
+      realtime?.abort();
       await stop();
       mock.closeAllConnections();
       await new Promise<void>((yes) => mock.close(() => yes()));

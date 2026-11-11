@@ -6,12 +6,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
-import WebSocket from "ws";
 import sharp from "sharp";
 import { sleep, type Obj } from "../server/core/util";
 
 test(
-  "deployed WebSocket browser: one-use cookie/Origin/CSRF login, bounded live frames, input acknowledgements, disconnect release and revoke",
+  "deployed live browser: one-use cookie/Origin/CSRF ticket, SSE frames, upstream input POSTs, disconnect release and revoke",
   {
     timeout: 60000,
     skip: process.env.VEGA_TEST_DEPLOYED !== "1",
@@ -51,11 +50,11 @@ test(
     child.stdout!.on("data", (data) => (logs += data));
     child.stderr!.on("data", (data) => (logs += data));
     const abort = new AbortController(),
-      sockets: WebSocket[] = [],
+      streams: AbortController[] = [],
       calls: Obj[] = [];
     const state = {
       url: "https://remote.test/",
-      title: "Remote WebSocket test",
+      title: "Remote SSE test",
       document: "document",
       stamp: "viewport",
       focus: { identity: 1, editable: true },
@@ -86,30 +85,89 @@ test(
       });
       return { response, value: await response.json() };
     };
-    const open = async (ticket: string, login: Obj, origin = base) => {
-      const ws = new WebSocket(
-        base.replace("http:", "ws:") + "/api/chrome/live?ticket=" + ticket,
-        { headers: { Cookie: login.cookie, Origin: origin } },
+    /**
+     * Opens the downstream SSE the way the page does: lane 0 with the one-use ticket, then every gesture is a
+     * plain POST carrying the channel id. `ended` is the equivalent of "the socket closed".
+     */
+    const open = async (ticket: string, login?: Obj, origin = base) => {
+      const controller = new AbortController();
+      streams.push(controller);
+      const response = await fetch(
+        base + "/api/chrome/live?ticket=" + ticket,
+        {
+          headers: {
+            Accept: "text/event-stream",
+            Origin: origin,
+            ...(login?.cookie ? { Cookie: login.cookie } : {}),
+          },
+          signal: controller.signal,
+        },
       );
-      sockets.push(ws);
-      const messages: Obj[] = [];
-      ws.on("error", () => {});
-      ws.on("message", (data) => {
-        const message = JSON.parse(data.toString());
-        messages.push(message);
-        if (message.type === "frame")
-          ws.send(
-            JSON.stringify({ type: "frame_ack", frameId: message.frameId }),
-          );
-      });
-      await new Promise<void>((yes, no) => {
-        ws.once("open", yes);
-        ws.once("error", no);
-        ws.once("unexpected-response", (_req, res) => {
-          res.resume();
-          no(Error("upgrade status " + res.statusCode));
+      if (!response.ok || !response.body) {
+        await response.body?.cancel();
+        throw Object.assign(
+          Error("live stream refused: HTTP " + response.status),
+          { status: response.status },
+        );
+      }
+      const messages: Obj[] = [],
+        channel = { id: "" };
+      let settled!: () => void;
+      const ended = new Promise<void>((yes) => (settled = yes));
+      let queue: Promise<unknown> = Promise.resolve();
+      const input = async (message: Obj) => {
+        const posted = await fetch(base + "/api/chrome/live/input", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(login?.cookie ? { Cookie: login.cookie } : {}),
+            ...(login?.csrf ? { "X-CSRF-Token": login.csrf } : {}),
+          },
+          body: JSON.stringify({ channel: channel.id, message }),
         });
-      });
+        const text = await posted.text();
+        if (!posted.ok)
+          throw Error("input refused: HTTP " + posted.status + " " + text);
+        return text;
+      };
+      const send = (value: Obj) => (queue = queue.then(() => input(value)));
+      void (async () => {
+        const reader = response.body!.getReader(),
+          decoder = new TextDecoder();
+        let pending = "";
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) return;
+            pending += decoder.decode(value, { stream: true });
+            for (let cut; (cut = pending.indexOf("\n\n")) >= 0; ) {
+              const block = pending.slice(0, cut);
+              pending = pending.slice(cut + 2);
+              const data = block
+                .split("\n")
+                .filter((line) => line.startsWith("data:"))
+                .map((line) => line.slice(5).replace(/^ /, ""))
+                .join("\n");
+              if (!data) continue;
+              const message = JSON.parse(data);
+              if (message.type === "channel") {
+                channel.id = String(message.channel);
+                continue;
+              }
+              messages.push(message);
+              if (message.type === "frame")
+                void send({
+                  type: "frame_ack",
+                  frameId: message.frameId,
+                }).catch(() => {});
+            }
+          }
+        } catch {
+          // An aborted stream is a deliberate disconnect, not a failure.
+        } finally {
+          settled();
+        }
+      })();
       const wait = async (
         type: string,
         predicate: (v: Obj) => boolean = () => true,
@@ -130,11 +188,13 @@ test(
         );
       };
       return {
-        ws,
+        channel,
         messages,
         wait,
-        send: (value: Obj) => ws.send(JSON.stringify(value)),
+        ended,
+        send,
         frame: () => messages.filter((m) => m.type === "frame").at(-1)!,
+        close: () => controller.abort(),
       };
     };
     try {
@@ -252,25 +312,41 @@ test(
         ).response.status,
         403,
       );
-      await assert.rejects(
-        () => open(first.value.ticket, { ...admin, cookie: "" }),
-        /upgrade status 403/,
-      );
-      await assert.rejects(
-        () => open(first.value.ticket, admin, "https://evil.test"),
-        /upgrade status 403/,
-      );
+      // A stream without the login cookie, or from another origin, never opens.
+      const anonymous = await open(first.value.ticket, {}).catch((e) => e),
+        crossOrigin = await open(first.value.ticket, admin, "https://evil.test").catch((e) => e);
+      assert.equal(anonymous.status, 401, "a stream without the session cookie is unauthorized");
+      assert.equal(crossOrigin.status, 403, "another origin cannot read this browser");
       const live = await open(first.value.ticket, admin);
       await live.wait("frame");
       await live.wait("frame", (m) => m.frameId > 1);
-      await assert.rejects(
-        () => open(first.value.ticket, admin),
-        /upgrade status 403/,
+      assert.match(live.channel.id, /^[A-Za-z0-9_-]{16,}$/, "the stream opens with its channel id");
+      // The ticket was consumed by the stream that is running: a second one is refused.
+      const reused = await open(first.value.ticket, admin).catch((e) => e);
+      assert.equal(reused.status, 403, "the ticket opened one stream and cannot open another");
+      // A different login cannot drive this channel even though it can read its id: upstream posts are owned.
+      assert.equal(
+        (await request("/users", "POST", { username: "intruder-live", password: "another-long-test-password", role: "operator" }, admin)).response.status,
+        200,
       );
-      live.send({ type: "mode", mode: "control" });
+      const intruder = await request("/auth/login", "POST", { username: "intruder-live", password: "another-long-test-password" });
+      assert(intruder.response.ok, JSON.stringify(intruder.value));
+      const hijack = await fetch(base + "/api/chrome/live/input", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: intruder.response.headers.get("set-cookie")!.split(";")[0],
+          "X-CSRF-Token": intruder.value.csrfToken,
+        },
+        body: JSON.stringify({ channel: live.channel.id, message: { type: "ping" } }),
+      });
+      await hijack.text();
+      assert.equal(hijack.ok, false, "another login cannot post into this channel");
+      assert.equal(live.messages.some((m) => m.type === "pong"), false, "and the viewer's session never sees it");
+      await live.send({ type: "mode", mode: "control" });
       await live.wait("mode", (m) => m.mode === "control");
       const input = async (seq: number, action: Obj) => {
-        live.send({
+        await live.send({
           type: "input",
           seq,
           frameId: live.frame().frameId,
@@ -279,7 +355,7 @@ test(
         return live.wait("input_result", (m) => m.seq === seq);
       };
       assert.equal(
-        (await input(1, { action: "type", text: "WebSocket中文" })).status,
+        (await input(1, { action: "type", text: "SSE中文" })).status,
         "executed",
       );
       assert.equal(
@@ -293,13 +369,13 @@ test(
         "executed",
       );
       for (let seq = 3; seq <= 20; seq++)
-        live.send({ type: "pointer", seq, dragSeq: 2, frameId: dragFrame, action: { action: "pointer", phase: "move", x: 100 + seq, y: 100 } });
-      live.send({ type: "pointer", seq: 21, dragSeq: 2, frameId: dragFrame, action: { action: "pointer", phase: "up", x: 150, y: 120 } });
+        void live.send({ type: "pointer", seq, dragSeq: 2, frameId: dragFrame, action: { action: "pointer", phase: "move", x: 100 + seq, y: 100 } });
+      void live.send({ type: "pointer", seq: 21, dragSeq: 2, frameId: dragFrame, action: { action: "pointer", phase: "up", x: 150, y: 120 } });
       assert.equal((await live.wait("pointer_result", m => m.seq === 21)).status, "executed");
       await live.wait("frame", m => m.inputSeq === 21);
       assert.equal((await input(22, { action: "pointer", phase: "down", x: 100, y: 100 })).status, "executed", "a second drag starts cleanly on the post-release frame");
       const releasesBeforeClose = calls.filter(c => c.method === "Input.dispatchMouseEvent" && c.params.type === "mouseReleased").length;
-      live.ws.close();
+      live.close();
       for (
         let i = 0;
         i < 100 &&
@@ -310,7 +386,7 @@ test(
       assert.equal(
         calls.filter(c => c.method === "Input.dispatchMouseEvent" && c.params.type === "mouseReleased").length,
         releasesBeforeClose + 1,
-        "disconnect releases the second held pointer and browser lease",
+        "dropping lane 0 releases the second held pointer and the browser lease",
       );
       const next = await request(
           "/chrome/live",
@@ -324,15 +400,11 @@ test(
         (await request("/auth/logout", "POST", {}, admin)).response.status,
         200,
       );
-      for (let i = 0; i < 100 && again.ws.readyState !== WebSocket.CLOSED; i++)
-        await sleep(10);
-      assert.equal(
-        again.ws.readyState,
-        WebSocket.CLOSED,
-        "logging out must revoke an existing WebSocket immediately",
-      );
+      // Logging out ends every lane with the same close code the WebSocket used to send.
+      assert.equal((await again.wait("closed")).code, 4401);
+      await again.ended;
     } finally {
-      for (const ws of sockets) ws.terminate();
+      for (const controller of streams) controller.abort();
       abort.abort();
       await poll?.catch(() => {});
       child.kill();

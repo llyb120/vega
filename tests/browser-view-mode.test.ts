@@ -15,7 +15,7 @@ function preview() {
     Date: { now: () => clock }, text: { value: "" },
     setTimeout: (fn: () => void, ms: number) => { const id = ++timerId; timers.set(id, { fn, at: clock + ms }); return id; },
     clearTimeout: (id: number) => timers.delete(id),
-    socket: { readyState: 1, bufferedAmount: 0, send: (raw: string) => sent.push(JSON.parse(raw)) }, WebSocket: { OPEN: 1 },
+    socket: { readyState: 1, bufferedAmount: 0, send: (raw: string) => sent.push(JSON.parse(raw)) }, SseSocket: { OPEN: 1 },
     outbox: [], inflight: 0, sequence: 0, error: { value: "" }, info: { value: "" }, remoteDrag: null, afterInput: 0,
   };
   state.remote = { get value() { return state.operating.value && state.liveState.value === "control"; } };

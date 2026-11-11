@@ -7,18 +7,43 @@ import sharp from "sharp";
 import { BrowserLive } from "../server/core/browser-live";
 import type { Auth, Principal } from "../server/core/auth";
 import type { Chrome } from "../server/core/chrome";
+import { wire as streamWire, type Request as LiveRequest, type Sink } from "../server/core/sse";
 import { Mutex, sleep, type Obj } from "../server/core/util";
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
+/** One lane of a stream response: every SSE frame written to it, plus a backlog the test controls. */
+function lane(onFrame?: (value: Obj) => void) {
+  const messages: Obj[] = [],
+    state = { ended: 0, buffered: 0, close: undefined as (() => void) | undefined };
+  const sink: Sink = {
+    write(chunk) {
+      for (const block of chunk.split("\n\n")) {
+        if (!block.startsWith("data: ")) continue;
+        const value = JSON.parse(block.slice("data: ".length));
+        messages.push(value);
+        if (value.type === "frame") onFrame?.(value);
+      }
+      return true;
+    },
+    end() {
+      state.ended++;
+    },
+    buffered: () => state.buffered,
+    onclose(fn) {
+      state.close = fn;
+    },
+  };
+  return { sink, messages, state };
+}
 test("live control idle and uncertain delivery release the shared gate without replay", async () => {
   const f = await fixture(),
     s = await f.open();
   await s.wait("frame");
   await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", (m) => m.mode === "control");
-  f.hub.sessions.get(s.socket.id)!.lastInput = Date.now() - 30001;
+  f.hub.sessions.get(s.channel.id)!.lastInput = Date.now() - 30001;
   await s.wait(
     "mode",
     (m) => m.mode === "view" && String(m.reason).includes("闲置"),
@@ -26,7 +51,7 @@ test("live control idle and uncertain delivery release the shared gate without r
   await f.chrome.tabGate("C1").run(async () => {});
   assert.equal(f.hub.controllers.size, 0);
   await s.message({ type: "mode", mode: "control" });
-  for (let i = 0; i < 100 && !f.hub.sessions.get(s.socket.id)!.locked; i++)
+  for (let i = 0; i < 100 && !f.hub.sessions.get(s.channel.id)!.locked; i++)
     await sleep(5);
   const original = f.chrome.cdp.bind(f.chrome);
   let attempts = 0;
@@ -63,7 +88,7 @@ for (const [stage, reason] of [
   await s.wait("frame");
   await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
-  const session = f.hub.sessions.get(s.socket.id)!;
+  const session = f.hub.sessions.get(s.channel.id)!;
   const evaluate = f.chrome.evaluate.bind(f.chrome), observe = f.chrome.observe.bind(f.chrome), cdp = f.chrome.cdp.bind(f.chrome);
   let navigating = false, afterShot = false, remaining = 3, enters = 0;
   f.chrome.key = async (_tag, key) => {
@@ -106,7 +131,7 @@ for (const [stage, reason] of [
   await s.wait("frame", m => m.frameId > frame.frameId);
   assert.equal(remaining, 0);
   assert.equal(enters, 1, "only read-only observation may retry, never the submitted key");
-  assert.equal(f.hub.sessions.get(s.socket.id), session);
+  assert.equal(f.hub.sessions.get(s.channel.id), session);
   assert.equal(session.locked, true);
   assert.deepEqual(s.closed, []);
   assert.equal(s.messages.some(m => m.type === "error"), false);
@@ -131,7 +156,7 @@ test("persistent navigation read failures are bounded and real extension disconn
     await s.wait("error", m => m.reason === reason);
     assert.equal(failures, reason.startsWith("Execution") ? 2 : 1);
     assert.equal(s.closed.at(-1)?.code, 1011);
-    assert.equal(f.hub.sessions.has(s.socket.id), false);
+    assert.equal(f.hub.sessions.has(s.channel.id), false);
   }
 });
 
@@ -141,7 +166,7 @@ test("control of another tab runs while an agent task owns a different tab", asy
     b = await f.open();
   await a.wait("frame");
   await b.wait("frame");
-  const session = f.hub.sessions.get(b.socket.id)!;
+  const session = f.hub.sessions.get(b.channel.id)!;
   session.tabTag = "C2";
   f.state.url = "https://other.test/";
   await b.message({ type: "mode", mode: "control" });
@@ -251,36 +276,41 @@ async function fixture() {
   } as unknown as Chrome;
   const hub = new BrowserLive(chrome, auth);
   cleanup.push(() => hub.close());
-  let socketId = 0;
+  /** One viewer: its ticket, its stream channel, lane 0 and the wire the route hands to the hub. */
   async function open(autoAck = true) {
     const ticket = await hub.ticket(principal, "C1"),
-      messages: Obj[] = [],
-      closed: Obj[] = [];
-    const request = {
-      url: "http://localhost/api/chrome/live?ticket=" + ticket.ticket,
-      headers: new Headers({
-        origin: "http://localhost",
-        cookie: "vega_session=cookie-token",
-      }),
-    };
-    const socket = {
-      id: "socket-" + ++socketId,
-      request,
-      send: (raw: unknown) => {
-        const message = JSON.parse(String(raw));
-        messages.push(message);
-        if (autoAck && message.type === "frame")
-          queueMicrotask(async () =>
-            await hub.message(
-                            socket,
-                            JSON.stringify({ type: "frame_ack", frameId: message.frameId }),
-                          ),
-          );
-      },
-      close: (code?: number, reason?: string) => closed.push({ code, reason }),
-    };
-    await hub.open(socket);
-    const message = async (value: Obj) => await hub.message(socket, JSON.stringify(value));
+      request: LiveRequest = {
+        url: "http://localhost/api/chrome/live?ticket=" + ticket.ticket,
+        headers: new Headers({
+          origin: "http://localhost",
+          cookie: "vega_session=cookie-token",
+        }),
+      };
+    // Same order as the route: verify and consume the one-use ticket, create the channel, run the session on it.
+    const { principal: who, ticket: granted } = await hub.authorize(request, true);
+    let id = "";
+    const channel = hub.channels.create(who.hash, {
+      lanes: 3,
+      // Losing lane 0 ends the session: capture, control lock and the viewer all go with it.
+      ongone: () => void hub.sessions.get(id)?.close(1000, "连接已关闭"),
+    });
+    id = channel.id;
+    const control = lane((value) => {
+      if (autoAck)
+        queueMicrotask(async () =>
+          await hub.message(channel.id, {
+            type: "frame_ack",
+            frameId: value.frameId,
+          }),
+        );
+    });
+    channel.attach(0, control.sink);
+    const socket = streamWire(channel, request);
+    // The first downstream message names the channel; upstream POSTs are routed by it.
+    socket.send({ type: "channel", channel: channel.id });
+    await hub.open(socket, who, granted.tabTag);
+    const messages = control.messages;
+    const message = async (value: Obj) => await hub.message(channel.id, value);
     const wait = async (
       type: string,
       predicate: (m: Obj) => boolean = () => true,
@@ -304,12 +334,19 @@ async function fixture() {
       );
     };
     return {
+      channel,
       socket,
+      control,
       ticket,
       messages,
-      closed,
       message,
       wait,
+      /** Endings the viewer saw: the server's last frame per lane, in order. */
+      get closed() {
+        return messages
+          .filter((m) => m.type === "closed")
+          .map((m) => ({ code: m.code, reason: m.reason }));
+      },
       frame: () => messages.filter((m) => m.type === "frame").at(-1)!,
     };
   }
@@ -361,6 +398,36 @@ test("live browser tickets require same-origin admin cookie, expire and are cons
   f.principal.user.role = "viewer";
   await assert.rejects(() => f.hub.ticket(f.principal, "C1"));
 });
+test("an extra lane re-uses the stream's login without a ticket and can only be taken by its owner", async () => {
+  const f = await fixture(),
+    laneURL = "http://localhost/api/chrome/live?channel=abc&lane=1";
+  assert.equal(
+    (await f.hub.identity({
+      url: laneURL,
+      headers: new Headers({ origin: "http://localhost", cookie: "vega_session=cookie-token" }),
+    })).hash,
+    f.principal.hash,
+    "a lane gets its identity from the cookie, never from another one-use ticket",
+  );
+  await assert.rejects(
+    () => f.hub.identity({ url: laneURL, headers: new Headers({ origin: "https://evil.test", cookie: "vega_session=cookie-token" }) }),
+    /不允许跨站连接/,
+  );
+  await assert.rejects(
+    () => f.hub.identity({ url: laneURL, headers: new Headers({ origin: "http://localhost" }) }),
+    /重新连接/,
+  );
+  const channel = f.hub.channels.create(f.principal.hash, { lanes: 1 }),
+    page = lane();
+  channel.attach(0, page.sink);
+  assert.equal(f.hub.channels.owned(channel.id, f.principal.hash), channel);
+  assert.throws(() => f.hub.channels.owned(channel.id, "other-hash"), /实时连接已失效/, "another login cannot attach a lane to this channel");
+  assert.throws(() => f.hub.channels.owned("forged-channel", f.principal.hash), /实时连接已失效/);
+  channel.close(1000, "测试结束");
+  assert.equal(page.state.ended, 1, "closing ends the response");
+  assert.deepEqual(page.messages.at(-1), { type: "closed", code: 1000, reason: "测试结束" });
+  assert.equal(f.hub.channels.size, 0, "a closed channel is forgotten");
+});
 test("live frames use acknowledgement backpressure without SQLite snapshots; control exclusively leases the shared agent gate", async () => {
   const f = await fixture(),
     s = await f.open(false),
@@ -388,6 +455,127 @@ test("live frames use acknowledgement backpressure without SQLite snapshots; con
   await s.message({ type: "mode", mode: "view" });
   await agent;
   assert.equal(agentRan, true);
+});
+test("a picture rides a data lane while control keeps lane 0 in its own order, even when that lane is backed up", async () => {
+  const f = await fixture(),
+    s = await f.open(false),
+    first = await s.wait("frame");
+  assert.equal(first.frameId, 1);
+  // The page attached the extra lane it is told to open; from then on the picture travels there.
+  const data = lane();
+  s.channel.requested.add(1);
+  s.channel.attach(1, data.sink);
+  await s.message({ type: "frame_ack", frameId: first.frameId });
+  for (let i = 0; i < 200 && !data.messages.some((m) => m.type === "frame"); i++)
+    await sleep(5);
+  const carried = data.messages.filter((m) => m.type === "frame");
+  assert(carried.length >= 1, "the picture appears on a lane");
+  assert(carried[0].frameId > first.frameId);
+  assert.equal(
+    s.messages.filter((m) => m.type === "frame").length,
+    1,
+    "and no longer queues behind the control messages",
+  );
+  // A backed-up picture lane must still carry the next frame and must never delay control.
+  data.state.buffered = 4 << 20;
+  assert.equal(s.socket.buffered, 4 << 20, "the wire reports the whole backlog");
+  const mark = s.messages.length,
+    pictures = carried.length;
+  await s.message({ type: "mode", mode: "control" });
+  await s.wait("mode", (m) => m.mode === "control");
+  await s.message({ type: "frame_ack", frameId: carried.at(-1)!.frameId });
+  for (let i = 0; i < 200 && data.messages.filter((m) => m.type === "frame").length === pictures; i++)
+    await sleep(5);
+  assert(
+    data.messages.filter((m) => m.type === "frame").length > pictures,
+    "a backed-up lane still delivers pictures instead of stalling them behind control",
+  );
+  const control = s.messages
+    .slice(mark)
+    .filter((m) => m.type !== "lane" && m.type !== "closed");
+  assert.deepEqual(
+    control.map((m) => [m.type, m.mode]),
+    [["mode", "waiting"], ["mode", "control"]],
+    "control keeps lane 0, in the order it was produced",
+  );
+});
+test("upstream messages of one channel are handled one at a time, in arrival order", async () => {
+  const f = await fixture(),
+    s = await f.open(),
+    session = f.hub.sessions.get(s.channel.id)!;
+  await s.wait("frame");
+  const original = session.message.bind(session);
+  let running = 0,
+    most = 0;
+  session.message = async (value: Obj) => {
+    running++;
+    most = Math.max(most, running);
+    await sleep(20);
+    try {
+      return await original(value);
+    } finally {
+      running--;
+    }
+  };
+  // Both arrive before either finishes: the second must wait for the first instead of interleaving.
+  await Promise.all([
+    f.hub.message(s.channel.id, { type: "ping" }),
+    f.hub.message(s.channel.id, { type: "ping" }),
+  ]);
+  assert.equal(most, 1, "the same channel's messages never run concurrently");
+  assert.equal(s.messages.filter((m) => m.type === "pong").length, 2);
+});
+test("an upstream message only reaches the session of its own channel and login", async () => {
+  const f = await fixture(),
+    s = await f.open();
+  await s.wait("frame");
+  const stranger = {
+    ...f.principal,
+    hash: "other-hash",
+    user: { id: "other", role: "admin" },
+  } as Principal;
+  await assert.rejects(
+    () => f.hub.messageByChannel(s.channel.id, stranger, { type: "ping" }),
+    /实时连接已失效/,
+  );
+  await assert.rejects(
+    () => f.hub.messageByChannel("forged-channel", f.principal, { type: "ping" }),
+    /实时连接已失效/,
+  );
+  assert.equal(
+    s.messages.some((m) => m.type === "pong"),
+    false,
+    "a foreign or forged channel never reaches the viewer's session",
+  );
+  await f.hub.messageByChannel(s.channel.id, f.principal, { type: "ping" });
+  await s.wait("pong");
+});
+test("silence no longer closes a live session, an unacknowledged picture does", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const f = await fixture(),
+    s = await f.open(false),
+    frame = await s.wait("frame");
+  assert.equal(frame.frameId, 1);
+  // The stream is the liveness signal: an idle viewer that acknowledges its picture stays connected.
+  await s.message({ type: "frame_ack", frameId: frame.frameId });
+  now += 25000;
+  await sleep(150);
+  assert.deepEqual(s.closed, [], "an idle viewer is not disconnected for being quiet");
+  assert.equal(f.hub.sessions.has(s.channel.id), true);
+  // A picture that is never acknowledged still has a bounded budget: the session ends and says why.
+  const stalled = await f.open(false),
+    picture = await stalled.wait("frame");
+  assert.equal(picture.frameId, 1);
+  now += 10001;
+  const error = await stalled.wait("error");
+  assert.match(String(error.reason), /画面传输超时/);
+  assert.equal(stalled.closed.at(-1)?.code, 1011);
+  assert.equal(stalled.control.state.ended, 1, "the response is ended, so the page sees the stream stop instead of a silent stall");
+  assert.equal(f.hub.sessions.has(stalled.channel.id), false, "the stale session is gone, not silently stalled");
+  // The viewer simply opens a new channel.
+  const again = await f.open();
+  await again.wait("frame");
 });
 test("live input maps displayed pixels, streams drag phases, types once and releases a held mouse on disconnect", async () => {
   const f = await fixture(),
@@ -435,7 +623,7 @@ test("live input maps displayed pixels, streams drag phases, types once and rele
     ["mouseMoved", "mousePressed", "mouseMoved", "mouseReleased"],
   );
   await input({ action: "pointer", phase: "down", x: 100, y: 100 });
-  await f.hub.sessions.get(s.socket.id)!.close();
+  await f.hub.sessions.get(s.channel.id)!.close();
   await f.chrome.tabGate("C1").run(async () => {});
   assert.equal(
     f.calls.filter((c) => c.method === "Input.dispatchMouseEvent").at(-1)
@@ -449,7 +637,7 @@ test("weak-network pointer samples coalesce server-side and release applies the 
   const frame = await s.wait("frame");
   await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
-  const session = f.hub.sessions.get(s.socket.id)!;
+  const session = f.hub.sessions.get(s.channel.id)!;
   await s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
   assert.equal((await s.wait("input_result", m => m.seq === 1)).status, "executed");
   let unblock!: () => void;
@@ -484,7 +672,7 @@ test("a queued weak-network release fails closed on navigation and does not repl
   await s.wait("mode", m => m.mode === "control");
   await s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
   await s.wait("input_result", m => m.seq === 1);
-  const session = f.hub.sessions.get(s.socket.id)!;
+  const session = f.hub.sessions.get(s.channel.id)!;
   let unblock!: () => void;
   const blocked = session.io.run(() => new Promise<void>(yes => { unblock = yes; }));
   while (!unblock) await sleep(1);
@@ -524,7 +712,7 @@ test("a held touch can start from its displayed frame after stream repaints with
   await s.wait("mode", m => m.mode === "control");
   await sleep(650);
   await s.wait("frame", m => m.frameId >= frame.frameId + 4);
-  const session = f.hub.sessions.get(s.socket.id)!;
+  const session = f.hub.sessions.get(s.channel.id)!;
   const starting = session.acknowledged.get(frame.frameId)!;
   assert(starting, "a long press must not lose its starting frame after only three repaints");
   let seq = 0;
@@ -552,7 +740,7 @@ test("live input still accepts an acknowledged frame within the ten-second fresh
   const frame = await s.wait("frame");
   await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
-  const session = f.hub.sessions.get(s.socket.id)!;
+  const session = f.hub.sessions.get(s.channel.id)!;
   const held = session.acknowledged.get(frame.frameId)!;
   held.at = Date.now() - 8000;
   await s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "press", key: "Enter" } });
@@ -564,7 +752,7 @@ test("live drag retains its accepted frame across scroll, expiry and acknowledge
   const frame = await s.wait("frame");
   await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
-  const session = f.hub.sessions.get(s.socket.id)!;
+  const session = f.hub.sessions.get(s.channel.id)!;
   let seq = 0;
   const input = async (phase: string) => {
     await s.message({ type: "input", seq: ++seq, frameId: frame.frameId, action: { action: "pointer", phase, x: 200, y: 100 } });
@@ -589,7 +777,7 @@ for (const change of ["document", "url", "width", "height", "viewport", "frameId
   const frame = await s.wait("frame");
   await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", m => m.mode === "control");
-  const session = f.hub.sessions.get(s.socket.id)!;
+  const session = f.hub.sessions.get(s.channel.id)!;
   await s.message({ type: "input", seq: 1, frameId: frame.frameId, action: { action: "pointer", phase: "down", x: 100, y: 100 } });
   assert.equal((await s.wait("input_result", m => m.seq === 1)).status, "executed");
   if (change === "document") session.observation!.pages[0].document = "new document";
@@ -609,7 +797,7 @@ test("live controls reject stale frames, changed focus, arbitrary scripts and du
   await s.wait("frame");
   await s.message({ type: "mode", mode: "control" });
   await s.wait("mode", (m) => m.mode === "control");
-  const session = f.hub.sessions.get(s.socket.id)!;
+  const session = f.hub.sessions.get(s.channel.id)!;
   let seq = 0;
   for (const action of [
     { action: "click_at", x: 1000, y: 2 },
@@ -674,7 +862,7 @@ test("a still page sends its picture once, then tiny same-picture frames at 2 fp
   const repeat = s.messages.filter((m) => m.type === "frame").slice(1);
   assert(repeat.length >= 1 && repeat.every((m) => m.same === true && m.data === undefined), "unchanged frames carry no image");
   assert(repeat.every((m) => m.width === first.width && m.height === first.height && m.url === first.url));
-  const session = f.hub.sessions.get(s.socket.id)!;
+  const session = f.hub.sessions.get(s.channel.id)!;
   session.lastChange = session.lastInput = Date.now() - 5000;
   const before = s.messages.filter((m) => m.type === "frame").length;
   await sleep(1100);
@@ -699,7 +887,7 @@ test("a still page sends its picture once, then tiny same-picture frames at 2 fp
 test("input brings the stream back to 10 fps immediately", async () => {
   const f = await fixture(), s = await f.open();
   await s.wait("frame");
-  const session = f.hub.sessions.get(s.socket.id)!;
+  const session = f.hub.sessions.get(s.channel.id)!;
   session.lastChange = session.lastInput = Date.now() - 5000;
   assert.equal(session.interval(), 500);
   await s.message({ type: "mode", mode: "control" });

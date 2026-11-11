@@ -5,13 +5,13 @@ import { connect, type Socket } from "node:net";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { createApp, createRouter, defineWebSocketHandler } from "h3";
-import nodeAdapter from "crossws/adapters/node";
-import WebSocket from "ws";
+import { createApp, createRouter, createError, defineEventHandler, getHeader, setHeader, toNodeListener } from "h3";
 import ts from "typescript";
 import { NetworkRelay } from "../server/core/network-relay";
 import { LocalAgents } from "../server/core/local-agent";
 import { Store } from "../server/core/store";
+import { encodeFrame, laneParams, openStream, SseChannels, wire, wireRequest } from "../server/core/sse";
+import { bodyJSON } from "../server/core/http-auth-routes";
 
 function read(socket: Socket, size: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -22,59 +22,106 @@ function read(socket: Socket, size: number): Promise<Buffer> {
     socket.on("readable", poll).once("close", closed); poll();
   });
 }
+
+async function route(file: string, application: unknown) {
+  const source = await readFile("server/routes/api/local-agent/" + file, "utf8");
+  const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
+  const module = { exports: {} as any };
+  new Function("require", "module", "exports", code)((name: string) => {
+    if (name === "h3") return { defineEventHandler, getHeader, setHeader, createError };
+    if (name === "../../../core/application") return { app: () => application };
+    if (name === "../../../core/sse") return { laneParams, openStream, wire, wireRequest };
+    if (name === "../../../core/http-auth-routes") return { bodyJSON };
+    throw Error("Unexpected route dependency: " + name);
+  }, module, module.exports);
+  return module.exports.default;
+}
+
+/** Reads one SSE response: every `data:` frame in arrival order, in the background. */
+function stream(response: Response) {
+  const frames: any[] = [];
+  let pending = "";
+  const reader = response.body!.getReader(), decoder = new TextDecoder();
+  void (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        pending += decoder.decode(value, { stream: true });
+        for (let end; (end = pending.indexOf("\n\n")) >= 0;) {
+          const block = pending.slice(0, end);
+          pending = pending.slice(end + 2);
+          if (block.startsWith("data: ")) frames.push(JSON.parse(block.slice("data: ".length)));
+        }
+      }
+    } catch { /* the response is aborted when its test ends */ }
+  })();
+  return frames;
+}
+
 async function fixture(t: TestContext) {
   const store = await Store.open(":memory:"), hub = new LocalAgents(), relay = new NetworkRelay(store, hub);
   const grant = { userId: "alice", clientId: "c".repeat(32), hash: "device-grant" };
-  const clients: WebSocket[] = [], requests: string[] = [];
-  let authorizationCalls = 0;
+  const requests: string[] = [], clients: { frames: any[]; stop: boolean }[] = [];
+  let opens = 0, posts = 0;
   const application = { engine: { relay }, clientSockets: { authorize: async (request: { headers: Headers }) => {
-    // A remote authorization store is slower than the client's first binary frame.
-    authorizationCalls++;
+    // A remote authorization store is slower than the client's first tunnel frame.
+    if (request.headers.get("content-type")) posts++; else opens++;
     await delay(40);
     assert.equal(request.headers.get("authorization"), "Bearer relay-test-credential");
     assert.equal(request.headers.get("origin"), null);
     return grant;
-  } } };
-  // Run the actual route with only its application singleton injected; retain real H3/crossws hooks.
-  const source = await readFile("server/routes/api/local-agent/relay.get.ts", "utf8");
-  const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
-  const module = { exports: {} as any };
-  new Function("require", "module", "exports", code)((name: string) => {
-    if (name === "h3") return { defineWebSocketHandler };
-    if (name === "../../../core/application") return { app: () => application };
-    throw Error("Unexpected route dependency: " + name);
-  }, module, module.exports);
+  }, channels: new SseChannels() } };
   const h3App = createApp();
-  h3App.use(createRouter().get("/api/local-agent/relay", module.exports.default));
-  const adapter = nodeAdapter(h3App.websocket);
-  const server = createServer();
-  server.on("upgrade", adapter.handleUpgrade);
-  server.listen(0, "127.0.0.1"); await once(server, "listening");
-  const url = `ws://127.0.0.1:${(server.address() as any).port}/api/local-agent/relay`;
+  h3App.use(createRouter()
+    .get("/api/local-agent/relay", await route("relay.get.ts", application))
+    .post("/api/local-agent/relay", await route("relay.post.ts", application)));
+  const server = createServer(toNodeListener(h3App));
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const url = `http://127.0.0.1:${(server.address() as any).port}/api/local-agent/relay`;
+  t.after(async () => {
+    for (const client of clients) client.stop = true;
+    await relay.close(); hub.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await store.close();
+  });
   hub.connect("alice", { clientId: grant.clientId, instance: "a".repeat(32), cwd: "/work", platform: "linux" }, {
     close() {},
+    // 一台假客户端：开下行 SSE，先用 POST 报就绪，之后每帧确认并把字节回声回去。
     send(job) {
       requests.push(job.id);
-      const ws = new WebSocket(url, { headers: { authorization: "Bearer relay-test-credential", "x-vega-relay": job.id } });
-      clients.push(ws);
-      ws.on("error", () => {});
-      ws.on("open", () => ws.send(Buffer.from([2])));
-      ws.on("message", (raw) => {
-        const data = raw as Buffer;
-        if (data[0] !== 0) return;
-        ws.send(Buffer.from([1]));
-        ws.send(data); // Stand in for the client's TCP target; keep the real wire protocol.
-      });
+      const headers = { authorization: "Bearer relay-test-credential", "x-vega-relay": job.id };
+      const state = { frames: [] as any[], stop: false };
+      clients.push(state);
+      const post = async (frame: Buffer) => {
+        const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ data: encodeFrame(frame) }) });
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), { ok: true });
+      };
+      void (async () => {
+        const response = await fetch(url, { headers });
+        assert.equal(response.status, 200);
+        state.frames = stream(response);
+        await post(Buffer.from([2])); // 目标连接就绪
+        let seen = 0;
+        while (!state.stop) {
+          await delay(5);
+          for (; seen < state.frames.length; seen++) {
+            const frame = state.frames[seen];
+            if (frame.type !== "relay") continue;
+            const data = Buffer.from(String(frame.data), "base64");
+            if (data[0] !== 0) continue;
+            await post(Buffer.from([1])); // 确认这一帧
+            await post(data);             // 目标回声
+          }
+        }
+      })().catch(() => {});
+      return state;
     },
   });
   await relay.configure(grant, ["internal.test:443"]);
-  t.after(async () => {
-    for (const client of clients) client.terminate();
-    adapter.closeAll(1000, "Test cleanup", true);
-    await relay.close(); hub.close();
-    await new Promise<void>(resolve => server.close(() => resolve()));
-    await store.close();
-  });
   const tunnel = async (proxy: string) => {
     const socket = connect(Number(new URL(proxy).port), "127.0.0.1");
     socket.on("error", () => {}); t.after(() => socket.destroy());
@@ -87,18 +134,20 @@ async function fixture(t: TestContext) {
     assert.equal((await read(socket, 10))[1], 0, "SOCKS connection must survive an immediate ready frame");
     return socket;
   };
-  return { relay, tunnel, requests, url, authorizationCalls: () => authorizationCalls };
+  const until = async (check: () => boolean) => { for (let i = 0; i < 400 && !check(); i++) await delay(5); assert(check()); };
+  return { relay, tunnel, requests, url, until, opens: () => opens, posts: () => posts, credential: { authorization: "Bearer relay-test-credential" } };
 }
 
-test("real WebSocket upgrade accepts an immediate ready frame with slow authorization", { timeout: 10000 }, async (t) => {
+test("the real relay route takes an immediate ready frame after slow authorization and returns tunnel bytes", { timeout: 15000 }, async (t) => {
   const f = await fixture(t), socket = await f.tunnel(await f.relay.proxy("alice"));
+  assert.equal(f.opens(), 1, "authorization runs once for the stream and open reuses that grant");
   const payload = Buffer.from([0, 255, 13, 10, 7]);
   socket.write(payload);
   assert.deepEqual(await read(socket, payload.length), payload);
-  assert.equal(f.authorizationCalls(), 1, "authorization must finish before upgrade, not run again in open");
+  assert(f.posts() >= 3, "就绪、确认与隧道数据都走上行 POST");
 });
 
-test("concurrent employee connections share one account gateway without mixing streams", { timeout: 10000 }, async (t) => {
+test("concurrent employee tunnels share one account gateway without mixing streams", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);
   const proxies = await Promise.all(Array.from({ length: 3 }, () => f.relay.proxy("alice")));
   assert.equal(new Set(proxies).size, 1, "one gateway for the account, not one per employee");
@@ -111,17 +160,22 @@ test("concurrent employee connections share one account gateway without mixing s
   assert.equal(new Set(f.requests).size, 3, "independent TCP streams, shared gateway");
 });
 
-test("real relay endpoint rejects missing credentials before opening a WebSocket", { timeout: 10000 }, async (t) => {
+test("the relay route refuses missing credentials before a stream and closes foreign or expired tunnels", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);
-  await new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(f.url);
-    ws.on("open", () => { ws.terminate(); reject(Error("Unauthorized upgrade accepted")); });
-    ws.on("error", reject);
-    ws.on("unexpected-response", (_request, response) => {
-      response.resume();
-      assert.equal(response.statusCode, 401);
-      resolve();
-    });
-  });
-  assert.equal(f.authorizationCalls(), 1);
+  const unauthorized = await fetch(f.url);
+  assert(unauthorized.status >= 400, "unauthorized stream refused with " + unauthorized.status);
+  assert(!String(unauthorized.headers.get("content-type")).includes("event-stream"));
+  await unauthorized.body?.cancel();
+  const posted = await fetch(f.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ data: encodeFrame(Buffer.from([2])) }) });
+  assert.equal(posted.status, 403);
+  assert.equal(f.opens(), 1, "被拒绝的 GET 只验一次凭据，也从未开过 flow");
+  assert.deepEqual(f.requests, [], "no tunnel was dispatched");
+  // 有凭据但 flow 不存在或不属于它：流照开，但立刻以 1008 结束，客户端不会误以为可以重连。
+  const response = await fetch(f.url, { headers: { ...f.credential, "x-vega-relay": "unknown-flow" } });
+  assert.equal(response.status, 200);
+  const frames = stream(response);
+  await f.until(() => frames.length >= 2);
+  assert.equal(frames[0].type, "channel");
+  assert.deepEqual(frames.at(-1), { type: "closed", code: 1008, reason: "Invalid relay connection" });
+  assert(f.opens() === 2, "被拒绝的隧道只验一次凭据");
 });

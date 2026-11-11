@@ -1,17 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import WebSocket, { WebSocketServer } from "ws";
+import WebSocket from "ws";
 import sharp from "sharp";
 import { zipSync, strToU8 } from "fflate";
 import { Store } from "../server/core/store";
 import { Experiences } from "../server/core/experiences";
+import { readEvents } from "../web/src/sse-socket.js";
 import { sleep } from "../server/core/util";
 
 test(
@@ -53,6 +54,18 @@ test(
     );
     const requests: any[] = [];
     const mock = createServer(async (req, res) => {
+      // 浏览器实时通道的夹具不在站点端口上（真实站点要有真浏览器才给得出画面），所以按 CORS 回。
+      res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "content-type, x-csrf-token");
+      res.setHeader("Access-Control-Max-Age", "0");
+      res.setHeader("Vary", "Origin");
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      if (req.url?.startsWith("/browser-live")) return void liveRoute(req, res);
       if (req.url === "/models") {
         res.setHeader("Content-Type", "application/json");
         res.end(
@@ -268,79 +281,144 @@ test(
       failRemote = false;
     const remoteInputs: any[] = [];
     const liveTickets = new Map<string, string>();
-    const liveServer = new WebSocketServer({
-      server: mock,
-      path: "/browser-live",
-    });
     const liveImage = (
       await sharp(png).jpeg({ quality: 70 }).toBuffer()
     ).toString("base64");
-    liveServer.on("connection", (socket, req) => {
-      const ticket = new URL(req.url!, "http://localhost").searchParams.get(
-          "ticket",
-        )!,
+    // 浏览器实时通道是 SSE：车道 0 发 channel/ready/mode/输入回执，画面帧走车道 1（未开时退回车道 0）。
+    type LiveSession = {
+      channel: string;
+      tabTag: string;
+      lane0: ServerResponse;
+      lane1?: ServerResponse;
+      timer: ReturnType<typeof setInterval>;
+      frameId: number;
+      inputSeq: number;
+      pending: boolean;
+      editable: boolean;
+      url: string;
+      closed: boolean;
+    };
+    const liveSessions = new Map<string, LiveSession>(),
+      liveStreams = new Set<ServerResponse>();
+    let liveChannels = 0;
+    const liveEmit = (lane: ServerResponse | undefined, value: unknown) => {
+      if (!lane || lane.writableEnded || lane.destroyed) return;
+      lane.write("data: " + JSON.stringify(value) + "\n\n");
+    };
+    const liveStream = (res: ServerResponse) => {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-store",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      liveStreams.add(res);
+      res.on("close", () => liveStreams.delete(res));
+    };
+    // 连接中断：不发 closed 帧直接断流，页面只能把在飞的输入当「结果不确定」，不得重发。
+    const liveAbort = (session: LiveSession) => {
+      session.closed = true;
+      clearInterval(session.timer);
+      liveSessions.delete(session.channel);
+      for (const lane of [session.lane0, session.lane1])
+        if (lane && !lane.destroyed) lane.destroy();
+    };
+    function liveFrame(session: LiveSession) {
+      if (session.pending || session.closed) return;
+      session.pending = true;
+      liveEmit(session.lane1 || session.lane0, {
+        type: "frame",
+        frameId: ++session.frameId,
+        inputSeq: session.inputSeq,
+        tabTag: session.tabTag,
+        title: session.tabTag,
+        url: session.url,
+        capturedAt: Date.now(),
+        editable: session.editable,
+        width: 1568,
+        height: 6000,
+        data: liveImage,
+      });
+    }
+    async function liveRoute(req: IncomingMessage, res: ServerResponse) {
+      const url = new URL(req.url!, "http://localhost");
+      if (url.pathname === "/browser-live/input") {
+        // 上行：每个手势一条 POST，body 是 { channel, message }。
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const body = JSON.parse(Buffer.concat(chunks).toString() || "{}"),
+          session = liveSessions.get(body.channel),
+          message: any = body.message || {};
+        res.setHeader("Content-Type", "application/json");
+        if (!session) {
+          res.writeHead(409);
+          res.end(JSON.stringify({ message: "实时连接已失效" }));
+          return;
+        }
+        if (message.type === "frame_ack") session.pending = false;
+        else if (message.type === "mode") liveEmit(session.lane0, message);
+        else if (["input", "pointer"].includes(message.type)) {
+          remoteInputs.push(message);
+          if (failRemote) {
+            liveAbort(session);
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          session.editable = true;
+          if (message.action.action === "goto") session.url = message.action.url;
+          setTimeout(() => {
+            session.inputSeq = message.seq;
+            liveEmit(session.lane0, {
+              type: message.type === "pointer" ? "pointer_result" : "input_result",
+              dragSeq: message.dragSeq,
+              seq: message.seq,
+              status: "executed",
+            });
+          }, 80);
+        }
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (Number(url.searchParams.get("lane") || 0) > 0) {
+        // 数据车道：对端带着 channel 另开一条流；夹具只认通道是否存在。
+        const session = liveSessions.get(url.searchParams.get("channel") || "");
+        if (!session) {
+          res.writeHead(409);
+          res.end();
+          return;
+        }
+        liveStream(res);
+        session.lane1 = res;
+        res.on("close", () => {
+          if (session.lane1 === res) session.lane1 = undefined;
+        });
+        return;
+      }
+      // 票据就是开流前那次 POST 发下来的；夹具拿它换回标签。
+      const ticket = url.searchParams.get("ticket") || "",
         tabTag = liveTickets.get(ticket)!;
       liveTickets.delete(ticket);
-      let frameId = 0,
-        inputSeq = 0,
-        pending = false,
-        editable = false,
-        pageURL = "https://example.test/" + "long/".repeat(1000);
-      const frame = () => {
-        if (pending || socket.readyState !== WebSocket.OPEN) return;
-        pending = true;
-        socket.send(
-          JSON.stringify({
-            type: "frame",
-            frameId: ++frameId,
-            inputSeq,
-            tabTag,
-            title: tabTag,
-            url: pageURL,
-            capturedAt: Date.now(),
-            editable,
-            width: 1568,
-            height: 6000,
-            data: liveImage,
-          }),
-        );
+      const session: LiveSession = {
+        channel: "ch" + ++liveChannels,
+        tabTag,
+        lane0: res,
+        timer: undefined as any,
+        frameId: 0,
+        inputSeq: 0,
+        pending: false,
+        editable: false,
+        url: "https://example.test/" + "long/".repeat(1000),
+        closed: false,
       };
-      const timer = setInterval(frame, 100);
-      socket.send(JSON.stringify({ type: "ready", tabTag, mode: "view" }));
-      frame();
-      socket.on("close", () => clearInterval(timer));
-      socket.on("message", (raw) => {
-        const message = JSON.parse(raw.toString());
-        if (message.type === "frame_ack") {
-          pending = false;
-          return;
-        }
-        if (message.type === "mode") {
-          socket.send(JSON.stringify(message));
-          return;
-        }
-        if (!["input", "pointer"].includes(message.type)) return;
-        remoteInputs.push(message);
-        if (failRemote) {
-          socket.terminate();
-          return;
-        }
-        editable = true;
-        if (message.action.action === "goto") pageURL = message.action.url;
-        setTimeout(() => {
-          inputSeq = message.seq;
-          if (socket.readyState === WebSocket.OPEN)
-            socket.send(
-              JSON.stringify({
-                type: message.type === "pointer" ? "pointer_result" : "input_result",
-                dragSeq: message.dragSeq,
-                seq: message.seq,
-                status: "executed",
-              }),
-            );
-        }, 80);
-      });
-    });
+      liveSessions.set(session.channel, session);
+      liveStream(res);
+      liveEmit(res, { type: "channel", channel: session.channel });
+      liveEmit(res, { type: "ready", tabTag, mode: "view" });
+      liveFrame(session);
+      // 首帧已经走车道 0；再请对端开一条数据车道，后续画面帧走它。
+      liveEmit(res, { type: "lane", open: 1 });
+      session.timer = setInterval(() => liveFrame(session), 100);
+    }
     const dialogs: { message: string; type: string }[] = [];
     const waiting = new Map<
         number,
@@ -770,7 +848,9 @@ test(
         platform: "Android",
       });
       await command("Page.addScriptToEvaluateOnNewDocument", {
-        source: `(()=>{window.__localClientAttempts=0;const Native=window.WebSocket;window.WebSocket=class extends Native{constructor(url,protocols){const u=new URL(url);if(u.port==='47673')window.__localClientAttempts++;if(u.pathname==='/api/chrome/live'){u.protocol='ws:';u.host='127.0.0.1:${(mock.address() as any).port}';u.pathname='/browser-live';}super(u.href,protocols);}send(data){const u=new URL(this.url),value=JSON.parse(data);if(u.pathname==='/api/events'&&value.type==='request'&&(value.path.startsWith('/chrome/')||['/providers/login','/providers/import'].includes(value.path))){void fetch('/api'+value.path,{method:value.method||'GET',headers:value.data===undefined?{}:{'Content-Type':'application/json'},body:value.data===undefined?undefined:JSON.stringify(value.data)}).then(async response=>{this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'response',id:value.id,status:response.status,statusText:response.statusText,contentType:response.headers.get('content-type')||'',body:await response.text()})}));}).catch(error=>{this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'response',id:value.id,status:0,error:error.message})}));});return;}super.send(data);}};})()`,
+        // 网页不再用 WebSocket：实时通道是 fetch 的 SSE。这里只把两件夹具接上——
+        // 本机客户端的环回地址计数，以及浏览器预览的实时通道（它的夹具在测试进程里，不在站点上）。
+        source: `(()=>{window.__localClientAttempts=0;window.__webSocketAttempts=0;const Native=window.WebSocket;window.WebSocket=class extends Native{constructor(...args){window.__webSocketAttempts++;super(...args);}};const real=window.fetch.bind(window),live='http://127.0.0.1:${(mock.address() as any).port}';window.fetch=(input,init)=>{const raw=typeof input==='string'||input instanceof URL?String(input):(input&&input.url)||'';let url;try{url=new URL(raw,location.href)}catch{return real(input,init)}if(url.port==='47673')window.__localClientAttempts++;if(url.pathname==='/api/chrome/live/input'||(url.pathname==='/api/chrome/live'&&String((init&&init.method)||'GET').toUpperCase()==='GET'))return real(live+url.pathname+url.search,init);return real(input,init)};})()`,
       });
       await command("Runtime.enable");
       await command("Page.enable");
@@ -947,21 +1027,31 @@ test(
       };
       const office = { clientId: "d".repeat(32), instance: "a".repeat(32), name: "Office PC", cwd: "C:\\office", platform: "windows", version: "0.3.5" };
       const home = { clientId: "e".repeat(32), instance: "b".repeat(32), name: "Home PC", cwd: "/home/project", platform: "linux", version: "0.3.5" };
-      const nativePeers: WebSocket[] = [];
+      // 本机客户端也是 SSE：下行是一条带设备凭据的 GET 流，上行每个消息一条同凭据的 POST。
+      const nativePeers: { terminate: () => void }[] = [];
       const connectNative = async (details: any) => {
         const { ticket } = await remoteApi("/local-agent/ticket", { instance: details.instance });
         const { deviceToken } = await remoteApi("/local-agent/verify", { ticket, clientId: details.clientId });
-        const native = new WebSocket(base.replace("http:", "ws:") + "/api/local-agent/socket", { headers: { authorization: "Bearer " + deviceToken } });
-        nativePeers.push(native);
+        const controller = new AbortController(), authorization = "Bearer " + deviceToken;
+        let channel = "";
+        const post = async (message: any) => {
+          const response = await fetch(base + "/api/local-agent/socket", { method: "POST", headers: { authorization, "content-type": "application/json" }, body: JSON.stringify({ channel, message }) });
+          assert.equal(response.ok, true, "native upstream " + response.status);
+        };
+        const response = await fetch(base + "/api/local-agent/socket", { headers: { authorization }, signal: controller.signal });
+        assert.equal(response.ok, true, "native stream " + response.status);
         await new Promise<void>((yes, no) => {
-          native.once("error", no);
-          native.once("open", () => native.send(JSON.stringify({ type: "hello", ...details })));
-          native.on("message", (raw) => {
-            const value = JSON.parse(raw.toString());
-            if (value.type === "ready") yes();
-            else if (value.op) native.send(JSON.stringify({ type: "result", id: value.id, result: { isDir: true, path: value.args.path } }));
-          });
+          void readEvents(response, (data: string) => {
+            const value = JSON.parse(data);
+            // 通道号到了才能发言：hello 必须在拿到 channel 之后发。
+            if (value.type === "channel") { channel = value.channel; void post({ type: "hello", ...details }); }
+            else if (value.type === "ready") yes();
+            else if (value.op) void post({ type: "result", id: value.id, result: { isDir: true, path: value.args.path } });
+            return false;
+          }, { signal: controller.signal }).catch(no);
         });
+        const native = { terminate: () => controller.abort() };
+        nativePeers.push(native);
         return native;
       };
       try {
@@ -1495,6 +1585,7 @@ test(
       await until(`document.querySelector('.shell')`);
       await layout("mobile login again");
       assert.deepEqual(errors, [], "runtime errors");
+      assert.equal(await evaluate("window.__webSocketAttempts"), 0, "网页不再建立 WebSocket");
     } finally {
       if (ws?.readyState === WebSocket.OPEN)
         await command("Browser.close", {}, "").catch(() => {});
@@ -1506,8 +1597,8 @@ test(
       waiting.clear();
       browser.kill();
       server.kill();
-      for (const socket of liveServer.clients) socket.terminate();
-      await new Promise<void>((yes) => liveServer.close(() => yes()));
+      for (const session of liveSessions.values()) liveAbort(session);
+      for (const stream of liveStreams) stream.destroy();
       await new Promise<void>((yes) => mock.close(() => yes()));
       await sleep(300);
       await rm(dir, {

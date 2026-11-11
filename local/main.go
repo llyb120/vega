@@ -17,8 +17,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/gorilla/websocket"
 )
 
 const (
@@ -35,7 +33,7 @@ type Agent struct {
 	pinnedOrigin    string
 	configToken     string
 	pendingOrigins  map[string]bool
-	connections     map[*websocket.Conn]struct{}
+	connections     map[*Conn]struct{}
 	direct          map[string]*directConnection
 	resumeInstances map[string]string
 	updating        bool
@@ -216,27 +214,30 @@ type jobStatus struct {
 	Thread   string `json:"thread"`
 }
 
+// serveWS 是网页在本机发起的配对：网页 POST 一条登录票据，这里用 SSE 一路回报进度。
 func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "GET required", 405)
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	// Unapproved sites receive only permission status; no login exchange or jobs.
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return validOrigin(r.Header.Get("Origin")) }}
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
 	origin := r.Header.Get("Origin")
-	conn.SetReadLimit(4096)
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	// 不认识的来源连状态都不给：与原来的握手来源校验一致。
+	if !validOrigin(origin) {
+		http.Error(w, "origin required", http.StatusForbidden)
+		return
+	}
+	// 浏览器一次只发一个票据：body 限 4 KiB，也不许一直不写完。
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(10 * time.Second))
 	var auth struct {
 		Type   string `json:"type"`
 		Ticket string `json:"ticket"`
 		UserID string `json:"userId"`
 	}
-	if conn.ReadJSON(&auth) != nil || auth.Type != "auth" || auth.UserID == "" {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	invalid := err != nil || json.Unmarshal(body, &auth) != nil || auth.Type != "auth" || auth.UserID == ""
+	conn := ServeStream(w, r, origin)
+	defer conn.Close()
+	if invalid {
 		a.noteSite(origin, "站点连上来但没发有效的登录票据")
 		pairingStatus(conn, connectionStatus{Code: "login_invalid"})
 		return
@@ -311,7 +312,7 @@ func (a *Agent) serveWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-func pairingStatus(conn *websocket.Conn, status connectionStatus) {
+func pairingStatus(conn *StreamWriter, status connectionStatus) {
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = conn.WriteJSON(struct {
 		Type string `json:"type"`

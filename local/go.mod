@@ -4,7 +4,6 @@ go 1.26.0
 
 require (
 	github.com/getlantern/systray v1.2.2
-	github.com/gorilla/websocket v1.5.3
 	github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808
 	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
 	golang.org/x/image v0.47.0

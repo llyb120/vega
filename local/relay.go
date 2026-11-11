@@ -16,8 +16,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 const relayFrame = 32 << 10
@@ -162,19 +160,13 @@ func (a *Agent) configureRelay(connection *directConnection, saved ServerCredent
 			return
 		}
 		address, _ := url.Parse(saved.Origin + "/api/local-agent/relay")
-		if address.Scheme == "https" {
-			address.Scheme = "wss"
-		} else {
-			address.Scheme = "ws"
-		}
-		dialer := *websocket.DefaultDialer
-		dialer.HandshakeTimeout = 10 * time.Second
-		ws, response, err := dialer.DialContext(flow, address.String(), http.Header{"Authorization": {"Bearer " + connection.token}, "X-Vega-Relay": {request.ID}})
+		// 隧道只有一条连接：下行 SSE 收到中继帧，上行同一地址 POST 帧。
+		ws, response, err := DialContext(flow, address.String(), http.Header{"Authorization": {"Bearer " + connection.token}, "X-Vega-Relay": {request.ID}})
 		if err != nil {
 			if response != nil {
 				_ = response.Body.Close()
 			}
-			fmt.Fprintf(os.Stderr, "vega-local: relay websocket %s failed: %v\n", address.String(), err)
+			fmt.Fprintf(os.Stderr, "vega-local: relay channel %s failed: %v\n", address.String(), err)
 			return
 		}
 		defer ws.Close()
@@ -189,7 +181,7 @@ func (a *Agent) configureRelay(connection *directConnection, saved ServerCredent
 		pumpRelay(flow, remote, ws)
 	}
 }
-func pumpRelay(ctx context.Context, remote net.Conn, ws *websocket.Conn) {
+func pumpRelay(ctx context.Context, remote net.Conn, ws *Conn) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cleanup := context.AfterFunc(ctx, func() { _ = remote.Close(); _ = ws.Close() })
@@ -199,7 +191,7 @@ func pumpRelay(ctx context.Context, remote net.Conn, ws *websocket.Conn) {
 		mu.Lock()
 		defer mu.Unlock()
 		_ = ws.SetWriteDeadline(time.Now().Add(30 * time.Second))
-		return ws.WriteMessage(websocket.BinaryMessage, data)
+		return ws.WriteMessage(BinaryMessage, data)
 	}
 	ws.SetReadLimit(relayFrame + 1)
 	if send([]byte{2}) != nil {
@@ -241,7 +233,7 @@ func pumpRelay(ctx context.Context, remote net.Conn, ws *websocket.Conn) {
 	for {
 		_ = ws.SetReadDeadline(time.Now().Add(5 * time.Minute))
 		kind, data, err := ws.ReadMessage()
-		if err != nil || kind != websocket.BinaryMessage || len(data) == 0 {
+		if err != nil || kind != BinaryMessage || len(data) == 0 {
 			return
 		}
 		if data[0] == 1 && len(data) == 1 {

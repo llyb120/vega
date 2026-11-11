@@ -8,14 +8,15 @@ import { once } from 'node:events';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createApp, createRouter, defineWebSocketHandler } from 'h3';
-import nodeAdapter from 'crossws/adapters/node';
+import { createApp, createRouter, createError, defineEventHandler, getHeader, setHeader, toNodeListener } from 'h3';
 import ts from 'typescript';
 import { Store } from '../server/core/store';
 import { Auth } from '../server/core/auth';
-import { ClientSockets } from '../server/core/client-socket';
+import { CLIENT_SOCKET_LIMIT, ClientSockets } from '../server/core/client-socket';
 import { LocalAgents } from '../server/core/local-agent';
 import { NetworkRelay } from '../server/core/network-relay';
+import { laneParams, openStream, wire, wireRequest } from '../server/core/sse';
+import { bodyJSON } from '../server/core/http-auth-routes';
 
 const execute = promisify(execFile), dir = await mkdtemp(join(tmpdir(), 'vega-relay-probe-'));
 const hostIP = Object.values(networkInterfaces()).flat().find(item => item?.family === 'IPv4' && !item.internal)?.address;
@@ -37,21 +38,29 @@ const store = await Store.open(':memory:'), auth = new Auth(store, 'relay-probe-
 const login = await auth.setup({ setupToken: 'relay-probe-setup', username: 'admin', password: 'Isolated relay probe password' });
 const hub = new LocalAgents(), relay = new NetworkRelay(store, hub);
 const clientSockets = new ClientSockets(store, auth, hub, () => false, relay);
-const application = { engine: { relay }, clientSockets }, h3App = createApp(), router = createRouter();
-for (const name of ['socket', 'relay']) {
-  const source = await readFile(`server/routes/api/local-agent/${name}.get.ts`, 'utf8');
+const application = { engine: { relay }, clientSockets };
+// Run the real routes with only the application singleton injected; h3 and the realtime transport stay real.
+const route = async (name: string, method: 'get' | 'post') => {
+  const source = await readFile(`server/routes/api/local-agent/${name}.${method}.ts`, 'utf8');
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
   const module = { exports: {} as any };
   new Function('require', 'module', 'exports', code)((path: string) => {
-    if (path === 'h3') return { defineWebSocketHandler };
+    if (path === 'h3') return { defineEventHandler, getHeader, setHeader, createError };
     if (path === '../../../core/application') return { app: () => application };
+    if (path === '../../../core/sse') return { laneParams, openStream, wire, wireRequest };
+    if (path === '../../../core/http-auth-routes') return { bodyJSON };
+    if (path === '../../../core/client-socket') return { CLIENT_SOCKET_LIMIT };
     throw Error('Unexpected import ' + path);
   }, module, module.exports);
-  router.get('/api/local-agent/' + name, module.exports.default);
+  return module.exports.default;
+};
+const h3App = createApp(), router = createRouter();
+for (const name of ['socket', 'relay']) {
+  router.get('/api/local-agent/' + name, await route(name, 'get'));
+  router.post('/api/local-agent/' + name, await route(name, 'post'));
 }
 h3App.use(router);
-const adapter = nodeAdapter(h3App.websocket), server = createServer();
-server.on('upgrade', adapter.handleUpgrade);
+const server = createServer(toNodeListener(h3App));
 let client: ReturnType<typeof spawn> | undefined, clientOutput = '';
 try {
   target.listen(0, hostIP); await once(target, 'listening');
@@ -80,7 +89,8 @@ try {
   console.log('PASS: SOCKS → real authenticated Go control/tunnel → client DNS → TCP HTTP target; 105000 response bytes');
 } finally {
   if (client) { client.stdin?.end(); await Promise.race([once(client, 'exit'), delay(1000)]); if (client.exitCode === null) client.kill(); }
-  clientSockets.closeAll(); hub.close(); await relay.close(); adapter.closeAll(1000, 'cleanup', true);
+  clientSockets.closeAll(); hub.close(); await relay.close();
+  server.closeAllConnections();
   await new Promise<void>(resolve => server.close(() => resolve()));
   target.closeAllConnections(); await new Promise<void>(resolve => target.close(() => resolve()));
   dns.close(); await store.close();

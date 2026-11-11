@@ -16,8 +16,6 @@ import (
 	"runtime"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 const reconnectGrace = 60 * time.Second
@@ -244,14 +242,8 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 		return false, false
 	}
 	u, _ := url.Parse(saved.Origin + "/api/local-agent/socket")
-	if u.Scheme == "https" {
-		u.Scheme = "wss"
-	} else {
-		u.Scheme = "ws"
-	}
-	dialer := *websocket.DefaultDialer
-	dialer.HandshakeTimeout = 8 * time.Second
-	conn, response, err := dialer.DialContext(ctx, u.String(), http.Header{"Authorization": {"Bearer " + connection.token}})
+	// 下行 SSE、上行 POST，同一个地址；重定向仍当失败上报，避免 HTTP/HTTPS 混用静默通过。
+	conn, response, err := DialContext(ctx, u.String(), http.Header{"Authorization": {"Bearer " + connection.token}})
 	if err != nil {
 		status := connectionStatus{Code: "backend_network"}
 		if response != nil {
@@ -359,14 +351,14 @@ type localJob struct {
 // Results larger than this go over HTTP so a big file read never holds the socket (and its heartbeat) for seconds.
 // Keep aligned with the server's CLIENT_SOCKET_LIMIT (1 MiB): viewport screenshots often land between
 // 256 KiB and 1 MiB; forcing those through HTTP made "连接仍正常" browser timeouts common when the
-// reverse proxy rejected the body or the uplink was slow, even though the WebSocket was fine.
+// reverse proxy rejected the body or the uplink was slow, even though the uplink itself was fine.
 const inlineResultLimit = 1 << 20
 
 type jobRunner struct {
 	running      int
 	ctx          context.Context
 	mu           sync.Mutex
-	conn         *websocket.Conn
+	conn         *Conn
 	tasks        map[string]*localJob
 	resumable    bool
 	sessionBusy  bool
@@ -388,7 +380,7 @@ type jobRunner struct {
 func newJobRunner(ctx context.Context, resumable bool) *jobRunner {
 	return &jobRunner{ctx: ctx, tasks: make(map[string]*localJob), resumable: resumable, lastActivity: time.Now()}
 }
-func runJobs(parent context.Context, conn *websocket.Conn) {
+func runJobs(parent context.Context, conn *Conn) {
 	ctx, cancel := context.WithCancel(parent)
 	runner := newJobRunner(ctx, false)
 	defer func() { cancel(); runner.close() }()
@@ -408,7 +400,7 @@ func (runner *jobRunner) close() {
 		runner.relayCancel()
 	}
 }
-func (runner *jobRunner) suspend(conn *websocket.Conn) {
+func (runner *jobRunner) suspend(conn *Conn) {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
 	if runner.conn != conn {
@@ -449,7 +441,7 @@ func (runner *jobRunner) writeRaw(data []byte) {
 		return
 	}
 	_ = runner.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if runner.conn.WriteMessage(websocket.TextMessage, data) != nil {
+	if runner.conn.WriteMessage(TextMessage, data) != nil {
 		_ = runner.conn.Close()
 	}
 }
@@ -472,7 +464,7 @@ func (runner *jobRunner) deliver(id string, task *localJob) {
 		if err != nil {
 			// Upload failed while the control socket may still be healthy. Keeping the result only
 			// for a future reconnect leaves the server waiting out the browser timeout with
-			// "连接仍正常". Settle on the WebSocket when possible; payloads above the socket limit
+			// "连接仍正常". Settle on the uplink when possible; payloads above the socket limit
 			// must become a small error (rewriting the full body would close the connection).
 			fmt.Fprintln(os.Stderr, "vega-local result upload failed:", err)
 			if runner.conn == nil {
@@ -497,7 +489,7 @@ func (runner *jobRunner) deliver(id string, task *localJob) {
 		delete(runner.tasks, id)
 	}()
 }
-func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
+func (runner *jobRunner) run(conn *Conn, pending, leases []string) {
 	runner.mu.Lock()
 	if runner.recovery != nil {
 		runner.recovery.Stop()
@@ -558,7 +550,7 @@ func (runner *jobRunner) run(conn *websocket.Conn, pending, leases []string) {
 		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		var request job
 		if err := conn.ReadJSON(&request); err != nil {
-			if websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+			if IsCloseError(err, CloseMessageTooBig) {
 				fmt.Fprintln(os.Stderr, "vega-local: server refused a frame as too large (1009); results retry over HTTP")
 			}
 			return

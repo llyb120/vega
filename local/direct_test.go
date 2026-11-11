@@ -10,23 +10,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
-type backendPeer struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
-}
-
-func (p *backendPeer) send(value any) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.conn.WriteJSON(value)
-}
 func receive[T any](t *testing.T, channel <-chan T) T {
 	t.Helper()
 	select {
@@ -41,37 +28,27 @@ func receive[T any](t *testing.T, channel <-chan T) T {
 func TestNativeClientContinuesAfterPairingPageClosesAndReconnectsAfterRestart(t *testing.T) {
 	clientID, token := strings.Repeat("c", 32), strings.Repeat("t", 43)
 	const supplement = "本机项目目录：D:\\code\\示例"
-	accepted := make(chan *backendPeer, 4)
+	accepted := make(chan *channelPeer, 4)
 	results := make(chan map[string]any, 4)
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/local-agent/verify" {
-			var body map[string]string
-			if json.NewDecoder(r.Body).Decode(&body) != nil || body["clientId"] != clientID {
-				http.Error(w, "invalid pair", 401)
-				return
-			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": clientID, "deviceToken": token})
+	mux := http.NewServeMux()
+	socket := newChannelServer(func(peer *channelPeer, r *http.Request) {
+		message, ok := peer.poll()
+		if !ok {
 			return
 		}
-		if r.URL.Path != "/api/local-agent/socket" || r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("Origin") != "" || r.URL.RawQuery != "" {
-			http.Error(w, "not authorized", 403)
-			return
-		}
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
 		var hello map[string]any
-		if conn.ReadJSON(&hello) != nil || hello["type"] != "hello" || hello["clientId"] != clientID || hello["version"] != clientVersion || hello["autoUpdate"] != true || hello["supplement"] != supplement {
+		if json.Unmarshal(message.raw, &hello) != nil || hello["type"] != "hello" || hello["clientId"] != clientID || hello["version"] != clientVersion || hello["autoUpdate"] != true || hello["supplement"] != supplement {
 			return
 		}
-		peer := &backendPeer{conn: conn}
 		_ = peer.send(map[string]string{"type": "ready", "userId": "alice", "clientId": clientID})
 		accepted <- peer
 		for {
+			message, ok := peer.poll()
+			if !ok {
+				return
+			}
 			var value map[string]any
-			if conn.ReadJSON(&value) != nil {
+			if json.Unmarshal(message.raw, &value) != nil {
 				return
 			}
 			if value["type"] == "ping" {
@@ -80,30 +57,42 @@ func TestNativeClientContinuesAfterPairingPageClosesAndReconnectsAfterRestart(t 
 				results <- value
 			}
 		}
+	})
+	mux.Handle("/api/local-agent/verify", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body["clientId"] != clientID {
+			http.Error(w, "invalid pair", 401)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"userId": "alice", "instance": strings.Repeat("b", 32), "clientId": clientID, "deviceToken": token})
 	}))
+	mux.Handle("/api/local-agent/socket", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("Origin") != "" || r.URL.RawQuery != "" {
+			http.Error(w, "not authorized", 403)
+			return
+		}
+		socket.ServeHTTP(w, r)
+	}))
+	backend := httptest.NewServer(mux)
 	defer backend.Close()
 	path := filepath.Join(t.TempDir(), "trusted-sites.json")
-	agent := &Agent{configPath: path, pinnedOrigin: backend.URL, config: Config{ClientID: clientID, Supplement: supplement, TrustedOrigins: []string{backend.URL}}, connections: make(map[*websocket.Conn]struct{})}
+	agent := &Agent{configPath: path, pinnedOrigin: backend.URL, config: Config{ClientID: clientID, Supplement: supplement, TrustedOrigins: []string{backend.URL}}, connections: make(map[*Conn]struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	agent.startConnections(ctx)
 	pairing := httptest.NewServer(http.HandlerFunc(agent.serveWS))
 	defer pairing.Close()
-	browser, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(pairing.URL, "http"), http.Header{"Origin": {backend.URL}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = browser.WriteJSON(map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"})
+	browser := dialPairing(t, pairing.URL, backend.URL, map[string]string{"type": "auth", "ticket": strings.Repeat("a", 72), "userId": "alice"})
 	paired := readPairing(t, browser)
 	if paired["type"] != "paired" || paired["connected"] != true || paired["deviceToken"] != nil {
 		t.Fatalf("unsafe pairing response: %v", paired)
 	}
-	_ = browser.Close()
+	browser.close()
 	pairing.Close() // There is now no frontend or loopback connection at all.
 	peer := receive(t, accepted)
 	dir := t.TempDir()
 	id := "01234567-0123-0123-0123-012345678901"
-	if err = peer.send(map[string]any{"id": id, "op": "file", "args": map[string]string{"op": "write", "cwd": dir, "path": "direct.txt", "content": "bmF0aXZl"}}); err != nil {
+	if err := peer.send(map[string]any{"id": id, "op": "file", "args": map[string]string{"op": "write", "cwd": dir, "path": "direct.txt", "content": "bmF0aXZl"}}); err != nil {
 		t.Fatal(err)
 	}
 	result := receive(t, results)
@@ -126,7 +115,7 @@ func TestNativeClientContinuesAfterPairingPageClosesAndReconnectsAfterRestart(t 
 	if err = json.Unmarshal(stored, &config); err != nil {
 		t.Fatal(err)
 	}
-	restarted := &Agent{configPath: path, config: config, connections: make(map[*websocket.Conn]struct{})}
+	restarted := &Agent{configPath: path, config: config, connections: make(map[*Conn]struct{})}
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	restarted.startConnections(ctx)

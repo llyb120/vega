@@ -1,19 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { build } from "vite";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import vue from "@vitejs/plugin-vue";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import WebSocket, { WebSocketServer } from "ws";
+import WebSocket from "ws";
 import sharp from "sharp";
 import { sleep, type Obj } from "../server/core/util";
 
 test(
-  "live browser component on real touch/desktop Chrome: continuous WS frames, input, URL draft, drag across repaint and no reconnect replay",
+  "live browser component on real touch/desktop Chrome: continuous SSE frames, input, URL draft, drag across repaint and no reconnect replay",
   {
     timeout: 60000,
     skip: process.env.VEGA_TEST_CHROME !== "1",
@@ -29,8 +29,7 @@ test(
     assert(binary);
     const dir = await mkdtemp(join(tmpdir(), "vega-live-ui-"));
     const inputs: Obj[] = [],
-      modes: Obj[] = [],
-      clients = new Set<WebSocket>();
+      modes: Obj[] = [];
     let frames = 0,
       broken = false,
       inputDelay = 100;
@@ -78,8 +77,142 @@ test(
         },
       },
     });
+    // 浏览器实时通道是 SSE：车道 0 只走控制帧（channel/ready/mode/input_result），并请对端再开一条数据车道
+    // 放画面帧；数据车道还没建立时大帧退回车道 0（协议允许的兜底）。
+    type LiveSession = {
+      channel: string;
+      tabTag: string;
+      lane0: ServerResponse;
+      lane1?: ServerResponse;
+      timer: ReturnType<typeof setInterval>;
+      frameId: number;
+      inputSeq: number;
+      pending: boolean;
+      editable: boolean;
+      url: string;
+      closed: boolean;
+    };
+    const live = new Map<string, LiveSession>(),
+      streams = new Set<ServerResponse>();
+    let channels = 0;
+    const emit = (lane: ServerResponse | undefined, value: unknown) => {
+      if (!lane || lane.writableEnded || lane.destroyed) return;
+      lane.write("data: " + JSON.stringify(value) + "\n\n");
+    };
+    const openStream = (res: ServerResponse) => {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-store",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      streams.add(res);
+      res.on("close", () => streams.delete(res));
+    };
+    const sendFrame = (session: LiveSession) => {
+      if (session.pending || session.closed) return;
+      session.pending = true;
+      frames++;
+      emit(session.lane1 || session.lane0, {
+        type: "frame",
+        frameId: ++session.frameId,
+        inputSeq: session.inputSeq,
+        tabTag: session.tabTag,
+        title: "远程网页",
+        url: session.url,
+        capturedAt: Date.now(),
+        editable: session.editable,
+        width: 900,
+        height: 2500,
+        data: image.toString("base64"),
+      });
+    };
+    // 模拟连接中断：不发 closed 帧直接断流，对端按 1006 处理，不会重放已发出的操作。
+    const abort = (session: LiveSession) => {
+      session.closed = true;
+      clearInterval(session.timer);
+      live.delete(session.channel);
+      for (const lane of [session.lane0, session.lane1])
+        if (lane && !lane.destroyed) lane.destroy();
+    };
     const app = createServer(async (req, res) => {
-      const path = new URL(req.url!, "http://localhost").pathname.slice(1);
+      const url = new URL(req.url!, "http://localhost"),
+        path = url.pathname.slice(1);
+      if (path === "api/chrome/live") {
+        if (Number(url.searchParams.get("lane") || 0) > 0) {
+          // 数据车道：对端用 channel 重新验证同一个身份再开一条流；夹具只认通道是否存在。
+          const session = live.get(url.searchParams.get("channel") || "");
+          if (!session) return void res.writeHead(409).end();
+          openStream(res);
+          session.lane1 = res;
+          res.on("close", () => {
+            if (session.lane1 === res) session.lane1 = undefined;
+          });
+          return;
+        }
+        // 夹具里票据就是标签本身。
+        const tabTag = url.searchParams.get("ticket")!,
+          session: LiveSession = {
+            channel: "ch" + ++channels,
+            tabTag,
+            lane0: res,
+            timer: undefined as any,
+            frameId: 0,
+            inputSeq: 0,
+            pending: false,
+            editable: false,
+            url: tabs[0].url,
+            closed: false,
+          };
+        live.set(session.channel, session);
+        openStream(res);
+        emit(res, { type: "channel", channel: session.channel });
+        emit(res, { type: "ready", mode: "view", tabTag });
+        sendFrame(session);
+        // 首帧已经落在车道 0；现在请对端再开一条数据车道，后面的画面帧走它。
+        emit(res, { type: "lane", open: 1 });
+        session.timer = setInterval(() => sendFrame(session), 80);
+        return;
+      }
+      if (path === "api/chrome/live/input") {
+        // 上行：每个手势一条 POST，body 是 { channel, message }，同一通道按到达顺序处理。
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const body = JSON.parse(Buffer.concat(chunks).toString() || "{}"),
+          session = live.get(body.channel),
+          message: Obj = body.message || {};
+        res.setHeader("Content-Type", "application/json");
+        if (!session) {
+          res.writeHead(409);
+          res.end(JSON.stringify({ message: "实时连接已失效，请重新连接" }));
+          return;
+        }
+        if (message.type === "frame_ack") session.pending = false;
+        else if (message.type === "mode") {
+          modes.push(message);
+          emit(session.lane0, message);
+        } else if (["input", "pointer"].includes(message.type)) {
+          inputs.push(message);
+          if (broken) {
+            abort(session);
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          session.editable = true;
+          if (message.action.action === "goto") session.url = message.action.url;
+          setTimeout(() => {
+            session.inputSeq = message.seq;
+            emit(session.lane0, {
+              type: message.type === "pointer" ? "pointer_result" : "input_result",
+              dragSeq: message.dragSeq,
+              seq: message.seq,
+              status: "executed",
+            });
+          }, inputDelay);
+        }
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
       if (!path || path === "live-fixture") {
         res.setHeader("Content-Type", "text/html");
         res.end(
@@ -106,80 +239,6 @@ test(
     await new Promise<void>((yes) => app.listen(0, "127.0.0.1", yes));
     const port = (app.address() as any).port,
       base = "http://127.0.0.1:" + port;
-    const liveServer = new WebSocketServer({
-      server: app,
-      path: "/api/chrome/live",
-    });
-    liveServer.on("connection", (socket, req) => {
-      clients.add(socket);
-      const tabTag = new URL(req.url!, "http://localhost").searchParams.get(
-        "ticket",
-      )!;
-      let pending = false,
-        frameId = 0,
-        inputSeq = 0,
-        editable = false,
-        url = tabs[0].url;
-      const send = () => {
-        if (pending || socket.readyState !== WebSocket.OPEN) return;
-        pending = true;
-        frames++;
-        socket.send(
-          JSON.stringify({
-            type: "frame",
-            frameId: ++frameId,
-            inputSeq,
-            tabTag,
-            title: "远程网页",
-            url,
-            capturedAt: Date.now(),
-            editable,
-            width: 900,
-            height: 2500,
-            data: image.toString("base64"),
-          }),
-        );
-      };
-      const timer = setInterval(send, 80);
-      socket.send(JSON.stringify({ type: "ready", mode: "view", tabTag }));
-      send();
-      socket.on("close", () => {
-        clients.delete(socket);
-        clearInterval(timer);
-      });
-      socket.on("message", (raw) => {
-        const m = JSON.parse(raw.toString());
-        if (m.type === "frame_ack") {
-          pending = false;
-          return;
-        }
-        if (m.type === "mode") {
-          modes.push(m);
-          socket.send(JSON.stringify(m));
-          return;
-        }
-        if (!["input", "pointer"].includes(m.type)) return;
-        inputs.push(m);
-        if (broken) {
-          socket.terminate();
-          return;
-        }
-        editable = true;
-        if (m.action.action === "goto") url = m.action.url;
-        setTimeout(() => {
-          inputSeq = m.seq;
-          if (socket.readyState === WebSocket.OPEN)
-            socket.send(
-              JSON.stringify({
-                type: m.type === "pointer" ? "pointer_result" : "input_result",
-                dragSeq: m.dragSeq,
-                seq: m.seq,
-                status: "executed",
-              }),
-            );
-        }, inputDelay);
-      });
-    });
     const chrome = spawn(
       binary,
       [
@@ -329,7 +388,7 @@ test(
       );
       const before = frames;
       await evaluate(
-        `window.__liveImage=document.querySelector('.browser-image img');window.__liveButton=document.querySelector('.browser-address button')`,
+        `window.__liveImage=document.querySelector('.browser-image img');window.__liveButton=document.querySelector('.browser-address .remote-toggle')`,
       );
       await sleep(250);
       assert(
@@ -345,7 +404,7 @@ test(
       );
       assert(
         await evaluate(
-          `window.__liveButton===document.querySelector('.browser-address button')`,
+          `window.__liveButton===document.querySelector('.browser-address .remote-toggle')`,
         ),
         "live frames must retain the control button",
       );
@@ -373,7 +432,7 @@ test(
       await sleep(100);
       assert.equal(modes.length, 0, "preview panning must not claim control");
       assert.equal(inputs.length, 0, "preview zoom and panning must not reach the webpage");
-      await tap(".browser-address button:nth-of-type(2)");
+      await tap(".browser-address .zoom-reset");
       assert(await evaluate(`document.querySelector('.browser-image img').style.transform.includes('scale(1)')`));
       const pinch = await evaluate(`(()=>{const e=document.querySelector('.browser-image');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return{x:r.x+r.width/2,y:(Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2}})()`);
       await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ id: 1, x: pinch.x - 25, y: pinch.y }, { id: 2, x: pinch.x + 25, y: pinch.y }] });
@@ -391,17 +450,20 @@ test(
       assert.notEqual(await evaluate(`document.querySelector('.browser-image img').style.transform`), beforePan, "one finger pans the zoomed preview");
       assert.equal(inputs.length, 0);
       assert.equal(modes.length, 0);
-      const geometry = () => evaluate(`(()=>{const image=document.querySelector('.browser-image'),controls=document.querySelector('.remote-controls'),panel=document.querySelector('.browser-panel');return{imageTop:image.getBoundingClientRect().top-panel.getBoundingClientRect().top,imageHeight:image.getBoundingClientRect().height,controlsHeight:controls.getBoundingClientRect().height,panelHeight:panel.getBoundingClientRect().height}})()`);
+      // 查看模式不渲染辅助输入（组件里是 v-if="selected && operating"），所以基线只比较画面本身的几何。
+      const geometry = () => evaluate(`(()=>{const image=document.querySelector('.browser-image'),controls=document.querySelector('.remote-controls'),panel=document.querySelector('.browser-panel'),box=image.getBoundingClientRect();return{imageTop:box.top-panel.getBoundingClientRect().top,imageWidth:box.width,imageHeight:box.height,controlsHeight:controls?controls.getBoundingClientRect().height:0,panelHeight:panel.getBoundingClientRect().height}})()`);
       const beforeControl = await geometry();
       const zoomedTransform = await evaluate(`document.querySelector('.browser-image img').style.transform`);
-      assert(beforeControl.controlsHeight > 0, "view mode reserves the auxiliary controls without enabling remote input");
-      assert.equal(await evaluate(`document.querySelector('.remote-text textarea').disabled`), true);
-      await tap(".browser-address button");
+      assert.equal(beforeControl.controlsHeight, 0, "view mode leaves the auxiliary controls out of the layout");
+      assert.equal(await evaluate(`!!document.querySelector('.remote-text textarea')`), false, "view mode offers no auxiliary input");
+      await tap(".browser-address .remote-toggle");
       await sleep(350);
-      assert.deepEqual(await geometry(), beforeControl, "starting control must not move or resize the browser image");
+      const controlling = await geometry();
+      assert(controlling.controlsHeight > 0, "control mode adds the auxiliary controls");
+      assert.equal(controlling.imageWidth, beforeControl.imageWidth, "starting control must not change the image width");
       assert.equal(await evaluate(`document.querySelector('.browser-image img').style.transform`), zoomedTransform, "starting control preserves pinch zoom and panning");
       assert.equal(modes.at(-1)?.mode, "control", JSON.stringify(modes));
-      assert.equal(await evaluate(`document.querySelector('.browser-address button').textContent.trim()`), "退出操作");
+      assert.equal(await evaluate(`document.querySelector('.browser-address .remote-toggle').textContent.trim()`), "退出操作");
       await until(`document.querySelector('.remote-text textarea')?.getClientRects().length>0`);
       assert.equal(await evaluate(`document.querySelector('.remote-input').open`), false, "auxiliary input is visible without opening advanced controls");
       const held = await evaluate(`(()=>{const e=document.querySelector('.browser-image');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return{x:r.x+r.width/2,y:(Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2}})()`);
@@ -429,7 +491,7 @@ test(
       );
       assert.equal(inputs[0].action.action, "click_at");
       await until(`!document.querySelector('.remote-text textarea').placeholder.startsWith('先点击')`);
-      assert.deepEqual(await geometry(), beforeControl, "selecting an editable target must not reflow the auxiliary controls");
+      assert.deepEqual(await geometry(), controlling, "selecting an editable target must not reflow the auxiliary controls");
       assert(Math.abs(inputs[0].action.x - expectedTap.x) < 3);
       assert(Math.abs(inputs[0].action.y - expectedTap.y) < 3);
       assert.equal(await contextMenu("touch"), true);
@@ -632,12 +694,15 @@ test(
           );
       }
       const desktopControl = await geometry();
-      await tap(".browser-address button");
-      await until(`document.querySelector('.browser-address button').textContent.trim()==='开始操作'`);
-      assert.deepEqual(await geometry(), desktopControl, "exiting desktop control keeps the image geometry");
-      await tap(".browser-address button");
+      assert(desktopControl.controlsHeight > 0, "desktop control shows the auxiliary controls");
+      await tap(".browser-address .remote-toggle");
+      await until(`document.querySelector('.browser-address .remote-toggle').textContent.trim()==='开始操作'`);
+      const noControls = await geometry();
+      assert.equal(noControls.controlsHeight, 0, "exiting desktop control returns the panel to the view layout");
+      assert.equal(noControls.imageWidth, desktopControl.imageWidth, "exiting control must not change the image width");
+      await tap(".browser-address .remote-toggle");
       await until(`document.querySelector('[aria-label="远程按键 回车"]').disabled===false`);
-      assert.deepEqual(await geometry(), desktopControl, "entering desktop control keeps the image geometry");
+      assert.equal((await geometry()).controlsHeight, desktopControl.controlsHeight, "re-entering desktop control restores the same auxiliary controls");
       await evaluate(`document.querySelector('.browser-image').focus()`);
       for (const key of "abc")
         await command("Input.dispatchKeyEvent", {
@@ -668,15 +733,15 @@ test(
       await until(
         `document.querySelector('[aria-label="远程按键 回车"]')?.disabled===false`,
       );
-      await tap(".browser-address button");
-      await until(`document.querySelector('.browser-address button').textContent.trim()==='开始操作'`);
+      await tap(".browser-address .remote-toggle");
+      await until(`document.querySelector('.browser-address .remote-toggle').textContent.trim()==='开始操作'`);
       const afterExit = inputs.length;
       await tap(".browser-image");
       await sleep(100);
       assert.equal(inputs.length, afterExit, "exit returns to view-only mode immediately");
       assert.equal(modes.at(-1)?.mode, "view");
-      await tap(".browser-address button");
-      await until(`document.querySelector('.browser-address button').textContent.trim()==='退出操作'`);
+      await tap(".browser-address .remote-toggle");
+      await until(`document.querySelector('.browser-address .remote-toggle').textContent.trim()==='退出操作'`);
       await until(`document.querySelector('[aria-label="远程按键 回车"]')?.disabled===false`);
       broken = true;
       const sent = inputs.length;
@@ -690,7 +755,9 @@ test(
         sent + 1,
         "disconnection must not replay input",
       );
-      assert.equal(clients.size, 0);
+      // 页面丢掉这条通道后不应该再占着下行连接（车道 0 和数据车道都断开）。
+      for (let i = 0; i < 100 && streams.size; i++) await sleep(20);
+      assert.equal(streams.size, 0);
       assert.deepEqual(errors, []);
     } finally {
       if (ws?.readyState === WebSocket.OPEN)
@@ -701,8 +768,8 @@ test(
         p.no(Error("Test closed"));
       }
       chrome.kill();
-      for (const c of clients) c.terminate();
-      await new Promise<void>((yes) => liveServer.close(() => yes()));
+      for (const session of live.values()) abort(session);
+      for (const lane of streams) lane.destroy();
       app.closeAllConnections();
       await new Promise<void>((yes) => app.close(() => yes()));
       await rm(dir, {
