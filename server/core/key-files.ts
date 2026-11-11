@@ -49,7 +49,6 @@ export class KeyFiles {
    * and private keys become 0600 files here for this run only. Returns ssh options ("" when unavailable).
    */
   async localSshCommand(agent: Agent, signal: AbortSignal) {
-    if (agent.sshKeys === false) return "";
     const answer = await this.hub.request(agent, "key", { op: "ssh" }, signal);
     const keys = Array.isArray(answer.keys) ? answer.keys : [];
     if (answer.error || !keys.length) return "";

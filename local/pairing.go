@@ -20,17 +20,21 @@ import (
 )
 
 type Config struct {
-	ClientID       string             `json:"clientId"`
-	Supplement     string             `json:"supplement,omitempty"`
-	Browser        string             `json:"browser,omitempty"` // cloud = 服务端浏览器（默认），local = 本机 Chrome 扩展
-	LoginState     *bool              `json:"loginState,omitempty"` // nil = 允许把本机登录态搬到服务端浏览器
-	SSHKeys        *bool              `json:"sshKeys,omitempty"`    // nil = 允许服务端 git over SSH 用本机 SSH 密钥
-	Prefer         string             `json:"prefer,omitempty"`  // client = 客户端优先（默认），cloud = 服务端优先
-	Offline        bool               `json:"offline,omitempty"` // 手动下线：不连站点、不接任务
-	Butterfly      bool               `json:"butterfly,omitempty"` // 显示任务栏蝴蝶与提示气泡；默认关
-	ConfirmSeconds int                `json:"confirmSeconds,omitempty"` // 动鼠标键盘前等几秒（0 = 用默认 15）
-	TrustedOrigins []string           `json:"trustedOrigins"`
-	Servers        []ServerCredential `json:"servers,omitempty"`
+	ClientID         string               `json:"clientId"`
+	Supplement       string               `json:"supplement,omitempty"`
+	Browser          string               `json:"browser,omitempty"`       // 旧字段，仅作尚未按牛马配置时的缺省
+	BrowserMaster    string               `json:"browserMaster,omitempty"` // 旧的账户级记忆，已改按牛马存
+	LoginState       *bool                `json:"loginState,omitempty"`    // 已废弃：始终允许借用登录态
+	SSHKeys          *bool                `json:"sshKeys,omitempty"`       // 已废弃：始终允许借用 ~/.ssh
+	Prefer           string               `json:"prefer,omitempty"`        // 旧字段，仅作尚未按牛马配置时的缺省
+	FsMaster         string               `json:"fsMaster,omitempty"`
+	EmployeeMasters  []EmployeeMasterPref `json:"employeeMasters,omitempty"`
+	SelectedEmployee string               `json:"selectedEmployee,omitempty"`
+	Offline          bool                 `json:"offline,omitempty"`        // 已废弃：进程开着即上线，忽略此字段
+	Butterfly        bool                 `json:"butterfly,omitempty"`      // 显示任务栏蝴蝶与提示气泡；默认关
+	ConfirmSeconds   int                  `json:"confirmSeconds,omitempty"` // 动鼠标键盘前等几秒（0 = 用默认 15）
+	TrustedOrigins   []string             `json:"trustedOrigins"`
+	Servers          []ServerCredential   `json:"servers,omitempty"`
 }
 
 // pinnedOrigin 是安装包自带的站点（只允许连它）；dataDir 是它自己的数据目录。
@@ -304,7 +308,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
     <label for="tab-client">本机</label>
     <label for="tab-access">授权</label>
     <label for="tab-computer">电脑</label>
-    <label for="tab-relay">中继与账户</label>
+    <label for="tab-relay">账户</label>
   </nav>
   <div class="panels">
   <section class="panel" id="panel-site">
@@ -328,52 +332,40 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   <section class="panel" id="panel-access">
 
   <section class="card">
-    <h2>浏览器优先</h2>
+    <h2>浏览器 Master</h2>
+    <small>按牛马配置。选定只把这头牛马的其余节点降为 Follower，不影响其它牛马。本机当浏览器 Master 时，不会把云端 Cookie 灌进本机 Chrome，也不会让本机流量改走云端。登录态默认允许被云端 Master 借用，不再单独开关。</small>
+    {{if .Employees}}
+    {{range $emp := .Employees}}
     <form method="post">
-      <label class="switch"><input type="checkbox" name="browserLocal" value="1"{{if .BrowserLocal}} checked{{end}}>优先用本机 Chrome</label>
-      <small>默认用服务端浏览器：任务在云端也能操作网页；服务端访问不到的地址自动经这台电脑的流量中继（见「中继与账户」的开关），本机站点的登录态按下方开关搬到服务端浏览器。勾选后在本机执行的任务改用本机 Chrome（需装 Nova Chrome 扩展）；新任务生效，已有任务不变。</small>
-      <div class="row"><button name="saveBrowser" value="1">保存浏览器优先</button></div>
+      <p><strong>{{$emp.Name}}</strong></p>
+      <input type="hidden" name="employeeId" value="{{$emp.ID}}">
+      {{range $.Nodes}}
+      <label class="switch"><input type="radio" name="browserMaster" value="{{.ID}}"{{if eq .ID $emp.BrowserMaster}} checked{{end}}>{{.Name}}{{if eq .ID "cloud"}}（云端）{{else if .Online}} · 在线{{else}} · 离线{{end}}</label>
+      {{end}}
+      <div class="row"><button name="saveBrowserMaster" value="1">保存这头牛马的浏览器 Master</button></div>
     </form>
-  </section>
-
-  <section class="card">
-    <h2>登录态</h2>
-    <form method="post">
-      <label class="switch"><input type="checkbox" name="loginState" value="1"{{if .LoginAllowed}} checked{{end}}>允许把本机站点的登录态搬到服务端浏览器</label>
-      <small>只搬任务授权站点上的 Cookie 与页面存储，不复制整个浏览器；复制不等于登录成功，服务端会打开页面核对结果。关掉后服务端浏览器不读本机登录信息，遇到要登录的站点会来问你。</small>
-      <div class="row"><button name="saveLogin" value="1">保存登录态设置</button></div>
-    </form>
-  </section>
-
-  <section class="card">
-    <h2>本地 SSH 密钥授权</h2>
-    <form method="post">
-      <label class="switch"><input type="checkbox" name="sshKeys" value="1"{{if .SSHAllowed}} checked{{end}}>允许服务端 git 用本机 ~/.ssh 的密钥</label>
-      <small>默认允许。任务在服务端执行时，git 走 SSH 会用这台电脑 <code>~/.ssh</code> 里的 config 和私钥：临时写成只有本轮能读的文件，本轮结束即删除，不长期保存。在本机执行的任务本来就用本机密钥。关掉后密钥不出这台电脑，服务端 git 只能用密码本里的 SSH 私钥，遇到要密钥的地址会来问你。</small>
-      <div class="row"><button name="saveSSH" value="1">保存 SSH 密钥授权</button></div>
-    </form>
+    {{end}}
+    {{else}}<p class="empty">连上站点后，可按牛马分别配置浏览器 Master。尚未列出牛马时无法保存。</p>{{end}}
   </section>
 
   </section>
   <section class="panel" id="panel-client">
 
   <section class="card">
-    <h2>执行位置</h2>
+    <h2>文件系统 Master</h2>
+    <small>按牛马配置，这是 read / write / edit / bash 实际执行的机器。选定只把这头牛马的其余节点降为 Follower，不影响其它牛马。要停接活，把这台设成 Follower，并把 Master 交给别的节点（没有别的可用节点时用云端）。进程开着就是上线，退出按还原点恢复。</small>
+    {{if .Employees}}
+    {{range $emp := .Employees}}
     <form method="post">
-      <label class="switch"><input type="checkbox" name="executionClient" value="1"{{if not .ExecutionCloud}} checked{{end}}>客户端优先：任务在本机执行</label>
-      <small>默认客户端优先。取消后改为服务端优先：新任务在云端执行，本机正在跑的任务会自动接力到云端继续，本机文件通过接力同步。</small>
-      <div class="row"><button name="saveExecution" value="1">保存执行位置</button></div>
+      <p><strong>{{$emp.Name}}</strong></p>
+      <input type="hidden" name="employeeId" value="{{$emp.ID}}">
+      {{range $.Nodes}}
+      <label class="switch"><input type="radio" name="fsMaster" value="{{.ID}}"{{if eq .ID $emp.FsMaster}} checked{{end}}>{{.Name}}{{if eq .ID "cloud"}}（云端）{{else if .Online}} · 在线{{else}} · 离线{{end}}</label>
+      {{end}}
+      <div class="row"><button name="saveFsMaster" value="1">保存这头牛马的文件系统 Master</button></div>
     </form>
-  </section>
-
-  <section class="card">
-    <h2>接单状态</h2>
-    <p>{{if .Offline}}当前<b>已下线</b>：不连接站点、不接任务；已在跑的任务由服务端接续。{{else}}当前<b>在线</b>：可以接任务。{{end}}</p>
-    <form method="post">
-      <div class="row">
-        {{if .Offline}}<button name="setOnline" value="1">上线（恢复接单）</button>{{else}}<button name="setOffline" value="1">下线（暂停接单）</button>{{end}}
-      </div>
-    </form>
+    {{end}}
+    {{else}}<p class="empty">连上站点后，可按牛马分别配置文件系统 Master。尚未列出牛马时无法保存。</p>{{end}}
   </section>
 
   <section class="card">
@@ -412,9 +404,8 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   <section class="panel" id="panel-relay">
 
   <section class="card">
-    <h2>流量中继</h2>
-    <p>按配对账户授权内网域名，该账户的服务端牛马浏览器和命令行自动使用本机网络，不改变任务执行位置。</p>
-    <small>每行填写一个精确域名或域名:端口，省略端口表示 80 和 443，最多 64 条。不支持通配符、IP、localhost 或 URL。命令行的 git over SSH 和 ssh 访问要另写域名:22。不写规则也可以：服务端连不上的域名会在直连失败后经本机重试一次；关闭开关则完全不做出口。请使用 HTTPS 站点保护隧道。</small>
+    <h2>账户配对</h2>
+    <p>这里只管理本机与站点账户的配对。云端当 Master 时，访不到的网络会自动单向借用本机网桥，不再单独配置流量中继。</p>
     {{range .Accounts}}
     <form method="post" class="account">
       <p>所属服务器地址：<strong><code>{{.Origin}}</code></strong><br>账户 ID：<code>{{.UserID}}</code><br>
@@ -422,12 +413,9 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
       </p>
       <input type="hidden" name="relayOrigin" value="{{.Origin}}">
       <input type="hidden" name="relayUser" value="{{.UserID}}">
-      <label class="switch"><input type="checkbox" name="relayOn" value="1"{{if .Enabled}} checked{{end}}>启用流量中继</label>
-      <small>开启后服务端连不上的地址自动经这台电脑重试，同一个地址不会每次先探一遍，不需要再填域名。客户端离线、端口不通或多个客户端配置冲突时拒绝连接，不回退公网。保存会断开受影响账户的现有浏览器网络连接，不自动重放请求。</small>
-      <div class="row"><button name="saveRelay" value="1">保存此账户的中继开关</button></div>
       <details><summary>移除此账户配对</summary>
-        <p>仅移除服务器 <code>{{.Origin}}</code> 下账户 <code>{{.UserID}}</code> 的本地配对和中继配置，并断开其连接；不会删除服务端账户，不影响其他配对或站点授权。</p>
-        <small>移除后，该账户已配置的服务端中继域名仍会拒绝直连；若只是关闭中继，请关掉上方开关后保存。网页仍登录此账户时可能再次配对。</small>
+        <p>仅移除服务器 <code>{{.Origin}}</code> 下账户 <code>{{.UserID}}</code> 的本地配对，并断开其连接；不会删除服务端账户，不影响其他配对或站点授权。</p>
+        <small>网页仍登录此账户时可能再次配对。</small>
         <div class="row"><button class="danger" name="removeAccount" value="1" aria-label="确认移除 {{.Origin}} 下账户 {{.UserID}} 的配对">确认移除此账户配对</button></div>
       </details>
     </form>
@@ -457,28 +445,14 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid form", 400)
 			return
 		}
-		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveRelay") == "1" || r.FormValue("saveBrowser") == "1" || r.FormValue("saveLogin") == "1" || r.FormValue("saveSSH") == "1" || r.FormValue("saveExecution") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" || r.FormValue("setOnline") == "1" || r.FormValue("setOffline") == "1" {
+		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveFsMaster") == "1" || r.FormValue("saveBrowserMaster") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" {
 			var err error
 			tab := "client"
-			if r.FormValue("saveBrowser") == "1" {
+			if r.FormValue("saveBrowserMaster") == "1" {
 				tab = "access"
-				place := "cloud"
-				if r.FormValue("browserLocal") == "1" {
-					place = "local"
-				}
-				err = a.saveBrowserPlace(place)
-			} else if r.FormValue("saveLogin") == "1" {
-				tab = "access"
-				err = a.saveLoginState(r.FormValue("loginState") == "1")
-			} else if r.FormValue("saveSSH") == "1" {
-				tab = "access"
-				err = a.saveSshKeys(r.FormValue("sshKeys") == "1")
-			} else if r.FormValue("saveExecution") == "1" {
-				place := "cloud"
-				if r.FormValue("executionClient") == "1" {
-					place = "client"
-				}
-				err = a.saveExecutionPlace(place)
+				err = a.saveBrowserMaster(strings.TrimSpace(r.FormValue("employeeId")), strings.TrimSpace(r.FormValue("browserMaster")))
+			} else if r.FormValue("saveFsMaster") == "1" {
+				err = a.saveFsMaster(strings.TrimSpace(r.FormValue("employeeId")), strings.TrimSpace(r.FormValue("fsMaster")))
 			} else if r.FormValue("saveButterfly") == "1" {
 				tab = "computer"
 				err = a.saveButterfly(r.FormValue("butterflyOn") == "1")
@@ -490,15 +464,8 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				err = a.saveConfirmSeconds(seconds)
-			} else if r.FormValue("setOnline") == "1" {
-				err = a.setOnline(true)
-			} else if r.FormValue("setOffline") == "1" {
-				err = a.setOnline(false)
 			} else if r.FormValue("saveSupplement") == "1" {
 				err = a.editSupplement(func(string) (string, bool, error) { return r.FormValue("supplement"), true, nil })
-			} else {
-				tab = "relay"
-				err = a.saveRelay(r.FormValue("relayOrigin"), r.FormValue("relayUser"), "", r.FormValue("relayOn") == "1")
 			}
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -612,15 +579,10 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 				status = "已连接"
 			}
 		}
-		enabled := saved.relayAllowed()
-		accounts = append(accounts, account{saved.Origin, saved.UserID, status, enabled})
+		accounts = append(accounts, account{saved.Origin, saved.UserID, status, true})
 	}
 	supplement := a.config.Supplement
-	browserLocal := browserPlace(a.config.Browser) == "local"
-	loginAllowed := a.config.loginAllowed()
-	sshAllowed := a.config.sshKeysAllowed()
-	executionCloud := executionPlace(a.config.Prefer) == "cloud"
-	offline := a.config.Offline
+	employees, nodes := a.pairingMasters()
 	butterfly := a.config.Butterfly
 	a.mu.Unlock()
 	tab := r.URL.Query().Get("tab")
@@ -636,17 +598,14 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		Supplement                         string
 		Pin                                string
 		LastSite                           string
-		BrowserLocal                       bool
-		LoginAllowed                       bool
-		SSHAllowed                         bool
-		ExecutionCloud                     bool
-		Offline                            bool
+		Employees                          []EmployeeMasterView
+		Nodes                              []RuntimeNode
 		Butterfly                          bool
 		ConfirmSeconds                     int
 		ConfirmMin, ConfirmMax             int
 		Tab                                string
 		Accounts                           []account
-	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, browserLocal, loginAllowed, sshAllowed, executionCloud, offline, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts})
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, employees, nodes, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts})
 }
 
 type loginProof struct {

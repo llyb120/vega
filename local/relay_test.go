@@ -3,13 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -45,7 +43,7 @@ func TestRelayRulesAndAddressPolicy(t *testing.T) {
 	}
 }
 
-func TestConnectionPageSavesAccountRelayAndSupplement(t *testing.T) {
+func TestConnectionPageSavesAccountPairingAndSupplement(t *testing.T) {
 	origin := "https://vega.example"
 	a := &Agent{configPath: filepath.Join(t.TempDir(), "trusted-sites.json"), config: Config{ClientID: strings.Repeat("a", 32), Supplement: "</textarea><script>bad</script>", TrustedOrigins: []string{origin}, Servers: []ServerCredential{{Origin: origin, UserID: "alice", Token: "secret-a"}, {Origin: origin, UserID: "bob", Token: "secret-b"}}}}
 	post := func(form url.Values, requestOrigin string) *httptest.ResponseRecorder {
@@ -60,35 +58,19 @@ func TestConnectionPageSavesAccountRelayAndSupplement(t *testing.T) {
 	if w := post(form, "https://evil.test"); w.Code != 403 {
 		t.Fatal(w.Code)
 	}
-	if w := post(form, "http://"+localAddress); w.Code != 303 {
-		t.Fatal(w.Body.String())
-	}
-	if a.config.Servers[0].RelayOn == nil || !*a.config.Servers[0].RelayOn || a.config.Servers[0].Token != "secret-a" {
+	if a.config.Servers[0].Token != "secret-a" || a.config.Servers[1].Token != "secret-b" {
 		t.Fatal("account isolation or credentials changed")
 	}
-	// 页面只剩开关：路由自动判断，保存开关不再留手写规则。
-	if len(a.config.Servers[0].Relay) != 0 || len(a.config.Servers[1].Relay) != 0 {
-		t.Fatal("hand-written rules must not survive the switch-only page")
-	}
-	data, _ := os.ReadFile(a.configPath)
-	var saved Config
-	if json.Unmarshal(data, &saved) != nil || saved.Servers[0].RelayOn == nil || !*saved.Servers[0].RelayOn {
-		t.Fatal("relay switch not persisted")
-	}
-	form.Set("relayUser", "unknown")
-	if w := post(form, "http://"+localAddress); w.Code != 400 {
-		t.Fatal("unknown account accepted")
-	}
-	form.Set("relayUser", "alice")
 	w := httptest.NewRecorder()
 	a.configure(w, httptest.NewRequest("GET", "http://"+localAddress+"/config/test", nil))
-	for _, text := range []string{"补充内容", "流量中继", "启用流量中继", "alice", "bob", "&lt;/textarea&gt;"} {
-		if !strings.Contains(w.Body.String(), text) {
+	page := w.Body.String()
+	for _, text := range []string{"补充内容", "账户配对", "alice", "bob", "&lt;/textarea&gt;"} {
+		if !strings.Contains(page, text) {
 			t.Errorf("missing %s", text)
 		}
 	}
-	if strings.Contains(w.Body.String(), "secret-") || strings.Contains(w.Body.String(), "<script>bad</script>") {
-		t.Fatal("credentials or unescaped content in page")
+	if strings.Contains(page, "启用流量中继") || strings.Contains(page, `name="relayOn"`) || strings.Contains(page, "secret-") || strings.Contains(page, "<script>bad</script>") {
+		t.Fatal("relay switch or credentials leaked into the page")
 	}
 	supplement := url.Values{"saveSupplement": {"1"}, "supplement": {"新项目目录\nD:\\code"}}
 	if w := post(supplement, "http://"+localAddress); w.Code != 303 || a.config.Supplement != supplement.Get("supplement") {
@@ -102,16 +84,8 @@ func TestConnectionPageSavesAccountRelayAndSupplement(t *testing.T) {
 	if w := post(supplement, "http://"+localAddress); w.Code != 303 || a.config.Supplement != "" {
 		t.Fatal("supplement not cleared")
 	}
-	form.Del("relayOn")
-	if w := post(form, "http://"+localAddress); w.Code != 303 {
-		t.Fatal(w.Body.String())
-	}
-	if a.config.Servers[0].relayAllowed() {
-		t.Fatal("switch off must stop this client being an egress")
-	}
-	// 旧配置里已有的规则仍能报给服务端，只是页面不再展示。
-	if err := a.saveRelay(origin, "alice", "git.internal\napi.internal:8080", true); err != nil || len(a.config.Servers[0].Relay) != 3 {
-		t.Fatal("saved rules must still reach the server")
+	if !a.config.Servers[0].relayAllowed() {
+		t.Fatal("中继开关已取消，必须允许借用网桥")
 	}
 }
 
@@ -192,8 +166,8 @@ func TestRelaySwitchAndPermits(t *testing.T) {
 		t.Fatal("legacy credentials with rules stay enabled")
 	}
 	legacy.RelayOn = &off
-	if legacy.relayAllowed() {
-		t.Fatal("switch off must stop relaying without clearing rules")
+	if !legacy.relayAllowed() {
+		t.Fatal("旧的关闭开关也必须视为允许")
 	}
 	legacy.RelayOn = &on
 	if !legacy.relayAllowed() {

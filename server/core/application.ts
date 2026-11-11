@@ -67,6 +67,20 @@ export async function initialize(pageScript: string) {
   }
   await engine.employee.start();
   engine.statusPush = (userId, clientId) => void application!.clientSockets.pushStatus(userId, clientId);
+  engine.runtimePush = (userId) => void application!.clientSockets.pushRuntime(userId);
+  application.clientSockets.runtime = {
+    view: (userId) => engine.runtimes.view(userId),
+    setMaster: async (userId, employeeId, kind, master) => {
+      const info = await engine.runtimes.employeeInfo?.(employeeId);
+      if (!info || info.ownerId !== userId) {
+        const employee = await engine.employee.for(employeeId);
+        const state = await employee.state({ runs: false });
+        if (state.ownerId !== userId) throw Error("只能配置自己的牛马");
+      }
+      await engine.runtimes.setMaster(employeeId, kind, master);
+      return engine.runtimes.view(userId);
+    },
+  };
   return application;
 }
 export async function employeeLive(employeeId?: string) {

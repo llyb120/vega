@@ -94,7 +94,7 @@ test("下线交接：客户端还连着就按本机现读的变动同步，没�
   const hard = world({ clientOnline: false });
   const resumed = await new TaskHandoffs(hard.deps).offline("c1", "u1");
   assert.deepEqual(resumed, { mode: "hard", tasks: 1, failed: [] });
-  assert.match((await new TaskHandoffs(hard.deps).record("t1"))!.note!, /按恢复点续做/);
+  assert.match((await new TaskHandoffs(hard.deps).record("t1"))!.note!, /以还原点为准，离线期间的新文件不在其中/);
 });
 
 test("handoff refuses instead of pretending when the cloud or the client is unavailable", async () => {
@@ -109,7 +109,7 @@ test("handoff refuses instead of pretending when the cloud or the client is unav
   const resumed = await new TaskHandoffs(gone.deps).toCloud("e1", "t1");
   assert.equal(gone.state.tasks[0].execution.localAgent, false);
   assert.deepEqual(resumed.base, [], "没有本机副本就不假装有基线");
-  assert.match(resumed.note!, /没有云端副本.*按恢复点续做.*task_ask_user/);
+  assert.match(resumed.note!, /以还原点为准，离线期间的新文件不在其中.*task_ask_user/);
 });
 
 test("a cloud restart without the local copy never overwrites the device's files when it comes back", async () => {
@@ -194,9 +194,7 @@ test("a task on the local client with a cloud browser takes the local login stat
   const session: any = { id: "s1", taskId: "t1", employeeId: "e1", localAgent: true, localBrowser: false, ownerId: "u1" };
   assert.equal(await handoffs.ensureBrowserState(session), undefined, "未配置授权站点时不动本机登录态");
   await handoffs.configure("e1", { sites: ["https://a.test"] });
-  w.deps.agents.active().loginState = false;
-  assert.equal(await handoffs.ensureBrowserState(session), undefined, "客户端关掉登录态开关就不搬");
-  delete w.deps.agents.active().loginState;
+  // 登录态开关已取消，客户端默认允许被借用。
   await assert.rejects(handoffs.ensureBrowserState(session), /浏览器不可用/);
   // 用本机浏览器、或在服务端执行时，不需要搬运登录态。
   assert.equal(await handoffs.ensureBrowserState({ ...session, localBrowser: true }), undefined);
@@ -238,13 +236,12 @@ test("non-terminal tasks whose client died move to the cloud by default; only an
   assert.equal(kept.state.tasks[0].execution.localAgent, true, "显式关闭自动接管时保留本地绑定");
 });
 
-test("a client that switches itself to server-first hands its tasks to the cloud", async () => {
+test("旧的服务端优先上报不再自动把任务交到云端，要改这头牛马的 Master 才会交接", async () => {
   const w = world({ clientOnline: true, prefer: "cloud" });
   w.local.put("/local/work/a.ts", "v1");
   const handoffs = new TaskHandoffs(w.deps);
   await handoffs.clients({ type: "clients_changed", targetUser: "u1" });
-  assert.equal(w.state.tasks[0].execution.localAgent, false, "客户端在线但选了服务端优先后自动接力");
-  assert.equal((await handoffs.record("t1"))!.source, "auto");
+  assert.equal(w.state.tasks[0].execution.localAgent, true, "prefer=cloud 不再作为派活或自动交接依据");
 });
 
 test("a task taken over automatically comes back to its device once that device returns", async () => {

@@ -20,6 +20,11 @@ const emit = defineEmits(["tab", "delete", "toggle-work", "menu"]);
 const menu = ref(null);
 const icons = { chat: "chat", tasks: "tasks", browser: "globe", duties: "repeat", memories: "memory", capabilities: "zap", vault: "key", settings: "settings" };
 function close(target) { if (target.value) target.value.open = false; }
+function masterName(employee, id) {
+  if (!id || id === "cloud") return "云端";
+  const node = employee.runtime?.nodes?.find((item) => item.id === id);
+  return node?.name || ("客户端 " + String(id).slice(0, 8));
+}
 </script>
 <template>
   <header class="employee-header">
@@ -29,6 +34,7 @@ function close(target) { if (target.value) target.value.open = false; }
       <div class="identity-text">
         <h2 class="truncate">{{ employee.name || "加载中…" }}</h2>
         <span :class="['identity-status', tone]" :title="employee.instruction || '把目标交给我，任务由我安排。'"><span class="dot" :class="[tone, { pulse: tone === 'info' }]" aria-hidden="true"></span>{{ status }}</span>
+        <p v-if="employee.runtime" class="master-line">文件系统 Master：{{ masterName(employee, employee.runtime.fsMaster) }} · 浏览器 Master：{{ masterName(employee, employee.runtime.browserMaster) }}</p>
       </div>
     </div>
     <nav class="employee-tabs" aria-label="牛马工作区">
@@ -100,4 +106,5 @@ function close(target) { if (target.value) target.value.open = false; }
   .popover-panel { width: min(300px, calc(100vw - 24px)); }
   .icon-summary { width: 40px; height: 40px; }
 }
+.master-line { margin: 2px 0 0; font-size: 12px; color: var(--muted, #667); }
 </style>

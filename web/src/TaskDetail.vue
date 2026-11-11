@@ -59,7 +59,7 @@ async function run(action) {
       <div class="detail-badges">
         <span :class="['badge', taskTone(task.status)]"><span :class="['dot', taskTone(task.status), { pulse: task.status === 'running' }]" aria-hidden="true"></span>{{ taskLabel(task.status) }}</span>
         <span v-if="task.dutyId" class="badge"><Icon name="repeat" :size="12" />职责触发</span>
-        <span class="badge"><Icon :name="task.execution?.localAgent ? 'laptop' : 'server'" :size="12" />{{ task.execution?.localAgent ? '客户端 · ' + (task.execution.clientName || '已绑定设备') : '服务端' }}</span>
+        <span class="badge"><Icon :name="task.execution?.localAgent || task.execution?.localBrowser ? 'laptop' : 'server'" :size="12" />文件系统 {{ task.execution?.localAgent ? (task.execution.clientName || '已绑定设备') : '云端' }} · 浏览器 {{ task.execution?.localBrowser ? (task.execution.browserClientName || task.execution.clientName || '已绑定设备') : '云端' }}</span>
         <time class="detail-time">{{ formatBeijing(task.createdAt) }}</time>
       </div>
       <h2 class="sr-only">任务详情</h2>
@@ -137,7 +137,6 @@ async function run(action) {
       <span class="spacer"></span>
       <span v-if="task.status === 'deferred'" class="hint">无需等待，牛马会按恢复点继续检查。</span>
       <template v-if="!readonly">
-        <button v-if="!ended" type="button" :disabled="busy || task.status === 'running'" :title="task.status === 'running' ? '等这一轮结束或先暂停任务，再交接执行权' : ''" @click="run(task.execution?.localAgent ? 'handoff-cloud' : 'handoff-local')"><Icon name="server" :size="14" />{{ task.execution?.localAgent ? '交给云端继续' : '接回本机' }}</button>
         <button v-if="task.status === 'running'" type="button" :disabled="busy" @click="run('stop')"><Icon name="stop" :size="14" />停止任务</button>
         <button v-else-if="!ended" type="button" :disabled="busy" @click="run('stop')"><Icon name="pause" :size="14" />暂停任务</button>
         <button v-if="resumable" type="button" class="primary" :disabled="busy" @click="run('resume')"><Icon name="play" :size="14" />继续任务</button>

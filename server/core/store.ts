@@ -61,8 +61,10 @@ export type Session = {
   taskId?: string;
   employeeId?: string;
   localAgent?: boolean;
-  /** 浏览器位置与执行位置解耦：由客户端自己的配置决定，只有用本机浏览器时才为 true。 */
+  /** 浏览器位置与执行位置解耦：由该牛马的浏览器 Master 决定，只有用本机浏览器时才为 true。 */
   localBrowser?: boolean;
+  /** 托管真正 Chromium 的客户端（浏览器 Master）；可以与文件系统 Master 不是同一台。 */
+  browserClientId?: string;
   localPlatform?: string;
   clientId?: string;
   clientName?: string;
@@ -495,9 +497,11 @@ export class Store {
           stageSource: key,
           ownerId: source.ownerId,
           localAgent: source.localAgent,
+          localBrowser: source.localBrowser,
           localPlatform: source.localPlatform,
           clientId: source.clientId,
           clientName: source.clientName,
+          browserClientId: source.browserClientId,
           executionCwds: source.executionCwds,
           readerIds: source.readerIds,
           model: inherit ? source.model : undefined,
@@ -517,9 +521,11 @@ export class Store {
       employeeId: source.employeeId,
       taskId: source.taskId,
       localAgent: source.localAgent,
+      localBrowser: source.localBrowser,
       localPlatform: source.localPlatform,
       clientId: source.clientId,
       clientName: source.clientName,
+      browserClientId: source.browserClientId,
       executionCwds: source.executionCwds,
       readerIds: source.readerIds,
       model: source.model,

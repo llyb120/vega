@@ -1014,8 +1014,7 @@ test(
       await until(`document.querySelector('.markdown-body img[alt="Markdown 图片"]')?.naturalWidth===1568`);
       assert(await evaluate(`(()=>{const e=document.querySelector('.markdown-body img[alt="Markdown 图片"]'),r=e.getBoundingClientRect();return e.complete&&r.width>0&&r.width<=e.parentElement.clientWidth+1&&Math.abs(r.height/r.width-6000/1568)<0.01})()`), "authenticated Markdown images load and fit the mobile bubble without distortion");
       assert.equal(await evaluate(`document.querySelector('.markdown-body img[alt="Markdown 图片"]').referrerPolicy`), "no-referrer");
-      assert.equal(await evaluate(`document.querySelector('.execution-switch').getAttribute('aria-checked')`), "false", "offline new sessions default to the server");
-      assert.equal(await evaluate(`document.querySelector('.execution-switch').disabled`), true, "an offline client cannot be selected");
+      assert.equal(await evaluate(`document.querySelector('.execution-switch')`), null, "website must not offer a 服务端/客户端 switch");
       assert.equal(await evaluate("window.__localClientAttempts"), 0, "mobile pages must not try their loopback client");
       const remoteLoginResponse = await fetch(base + "/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "phone-admin", password: "Phone-regression-password-2026" }) });
       const remoteLogin = await remoteLoginResponse.json(), remoteCookie = remoteLoginResponse.headers.get("set-cookie")!.split(";")[0];
@@ -1057,22 +1056,10 @@ test(
       try {
         const officeSocket = await connectNative(office);
         const homeSocket = await connectNative(home);
-        await until(`document.querySelector('.execution-switch')?.disabled===false`);
-        assert.equal(await evaluate(`document.querySelector('.execution-switch').getAttribute('aria-checked')`), "false", "remote clients coming online must not migrate a server conversation");
-        await tap(".execution-switch");
-        await until(`document.querySelector('.execution-client')?.value===${JSON.stringify(office.clientId)}`);
-        await fill('[aria-label="执行客户端"]', home.clientId);
-        await until(`document.querySelector('.chat-topbar p')?.textContent.includes('/home/project')||document.querySelector('.notice')?.textContent.includes('/home/project')`);
-        assert.equal(await evaluate(`document.querySelector('.execution-client').value`), home.clientId);
-        await layout("mobile remote client selection");
+        assert.equal(await evaluate(`document.querySelector('.execution-switch')`), null, "connecting clients must not bring back an execution switch");
+        await layout("mobile remote clients online");
         homeSocket.terminate();
-        await until(`document.querySelector('.execution-warning')?.textContent.includes('已离线')`);
-        assert.equal(await evaluate(`document.querySelector('.execution-client').value`), home.clientId);
-        assert.equal(await evaluate(`document.querySelector('.composer .primary').disabled`), true, "offline selected client must not use another online computer");
-        await tap(".execution-switch");
-        await until(`document.querySelector('.execution-switch').getAttribute('aria-checked')==='false'`);
         officeSocket.terminate();
-        await until(`document.querySelector('.execution-switch').disabled`);
         assert.equal(await evaluate("window.__localClientAttempts"), 0);
       } finally { for (const native of nativePeers) native.terminate(); }
       await tap('[aria-label="打开导航与会话"]');

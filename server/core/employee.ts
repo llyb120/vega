@@ -16,7 +16,7 @@ import { loadRows, baseRecord, saveRows } from "./employee-rows";
 import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
 
-export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId" | "clientName" | "localPlatform" | "ownerId">;
+export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId" | "clientName" | "browserClientId" | "localPlatform" | "ownerId"> & { browserClientName?: string };
 export type Owner = { token: string; name: string };
 export type Task = Obj & {
   id: string;
@@ -397,8 +397,10 @@ export type EmployeeRuntime = {
   config: () => Obj | Promise<Obj>;
   isolated?: boolean;
   presence?: () => Promise<Presence>;
-  /** 当前生效的客户端机器（开着 vega-local 的那台），用于把“客户端优先”落到具体执行位置；传 clientId 时只回答这台设备现在能否执行。 */
+  /** 已连接的客户端（含 Follower）。 */
   client?: (ownerId: string, clientId?: string) => { clientId: string; clientName?: string; localPlatform?: string; cwd: string; browser?: "local" | "cloud"; prefer?: "client" | "cloud" } | undefined;
+  /** 这头牛马自己的文件系统 / 浏览器 Master。 */
+  masters?: (employeeId: string) => { fsMaster: string; browserMaster: string };
   /** Group chats (groups.ts): task notices of tasks started in a group go back there; false when the group is gone. */
   groups?: {
     post: (group: NonNullable<Task["group"]>, employeeId: string, message: Message, wake: boolean) => Promise<boolean>;
@@ -765,18 +767,37 @@ export class Employee {
     if (migrated.changed || pruned.changed) await this.save(state);
     return state;
   }
-  /** 绑定新任务的执行位置：只看客户端自己的选择——客户端优先绑那台机器，服务端优先或没在线客户端就落云端。 */
+  /** 绑定新任务的执行位置：按这头牛马当前的文件系统 Master 和浏览器 Master（二者可以不同）。 */
   private bindExecution(state: EmployeeState): { execution: Execution; cwd?: string; note?: string } {
-    const client = this.runtime.client?.(state.ownerId);
-    if (client?.prefer === "cloud")
-      return { execution: { localAgent: false, localBrowser: false, ownerId: state.ownerId }, note: "客户端设置了服务端优先，任务在云端执行；本地文件通过接力同步。" };
-    if (client) {
-      // 浏览器位置由客户端自己的配置决定（客户端连接授权页），服务端不另行选择。
-      return { execution: { localAgent: true, localBrowser: client.browser !== "cloud", ...client, ownerId: state.ownerId }, cwd: client.cwd };
+    const masters = this.runtime.masters?.(this.employeeId) || { fsMaster: "cloud", browserMaster: "cloud" };
+    const fsMaster = masters.fsMaster || "cloud";
+    const browserMaster = masters.browserMaster || "cloud";
+    const fsAgent = fsMaster !== "cloud" ? this.runtime.client?.(state.ownerId, fsMaster) : undefined;
+    const browserAgent = browserMaster !== "cloud" ? this.runtime.client?.(state.ownerId, browserMaster) : undefined;
+    const localBrowser = browserMaster !== "cloud";
+    const browserClientId = localBrowser ? browserMaster : undefined;
+    if (fsMaster === "cloud") {
+      return {
+        execution: { localAgent: false, localBrowser, browserClientId, clientId: browserClientId, clientName: browserAgent?.clientName, browserClientName: browserAgent?.clientName, localPlatform: browserAgent?.localPlatform, ownerId: state.ownerId },
+        note: "文件系统 Master 为云端，任务在云端执行。" + (localBrowser ? "浏览器 Master 在本机，网页操作走那台客户端。" : ""),
+      };
     }
+    const note = fsAgent
+      ? (localBrowser && browserMaster !== fsMaster ? "文件系统与浏览器 Master 不在同一台设备。" : undefined)
+      : "文件系统 Master 当前离线，任务已绑定该客户端，上线后继续；不会改绑到其它设备或云端。";
     return {
-      execution: { localAgent: false, localBrowser: false, ownerId: state.ownerId },
-      note: "当前没有在线的客户端，先在服务端执行；客户端上线后可「接回本机」。",
+      execution: {
+        localAgent: true,
+        localBrowser,
+        browserClientId,
+        clientId: fsMaster,
+        clientName: fsAgent?.clientName,
+        browserClientName: browserAgent?.clientName,
+        localPlatform: fsAgent?.localPlatform,
+        ownerId: state.ownerId,
+      },
+      cwd: fsAgent?.cwd,
+      note,
     };
   }
   /** Read-modify-write of the whole employee (record, tasks, runs) in one transaction. */

@@ -35,6 +35,11 @@ export class ClientSockets {
   private timer: ReturnType<typeof setInterval>;
   /** 正在做下线交接的连接：同一条连接只交接一次。 */
   private goingOffline = new Set<string>();
+  /** 按牛马的 Master：由 application 注入，供 ready/pong 下发和 set_master 写入。 */
+  runtime?: {
+    view: (userId: string) => Promise<Obj>;
+    setMaster: (userId: string, employeeId: string, kind: "fs" | "browser", master: string) => Promise<Obj>;
+  };
   private onRevoke = async (userId: string) => await this.revoke(userId);
   constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>, private relay?: NetworkRelay, private userStop?: (session: string, reason: string) => boolean, private statusFor?: (userId: string, clientId: string) => Promise<Obj>, private offlineHandoff?: (userId: string, clientId: string) => Promise<Obj>) {
     auth.events.on("revoke", this.onRevoke);
@@ -117,6 +122,7 @@ export class ClientSockets {
         if (value.relay !== undefined) await this.relay?.configure(grant, value.relay, value.relayOn);
         // Read before connecting, so nothing awaits between connect and "ready" (queued jobs follow "ready").
         const busy = value.autoUpdate === true && value.resume === true && !!value.version ? await this.clientInUse(grant.clientId) : false;
+        const runtime = await this.runtimePayload(grant.userId);
         const previous = this.hub.active(grant.userId, grant.clientId);
         if (previous && previous.instance !== value.instance) this.hub.disconnect(grant.userId, previous.instance);
         connection.transport = {
@@ -127,7 +133,7 @@ export class ClientSockets {
         connection.details = { instance: value.instance, clientId: value.clientId, name: value.name, cwd: value.cwd, platform: value.platform, supplement: value.supplement, browser: value.browser, loginState: value.loginState, sshKeys: value.sshKeys, prefer: value.prefer, resume: value.resume === true, autoUpdate: value.autoUpdate === true && value.resume === true && !!value.version };
         const agent = this.hub.active(grant.userId, grant.clientId)!;
         accepted = true;
-        connection.socket.send({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}) });
+        connection.socket.send({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}), ...runtime });
         void this.pushStatus(grant.userId, grant.clientId);
         return;
       }
@@ -148,6 +154,16 @@ export class ClientSockets {
         accepted = true;
         void this.offline(socketId, connection);
         return;
+      } else if (value.type === "set_master") {
+        assert(this.runtime, "此节点尚不支持主从配置");
+        assert(typeof value.employeeId === "string" && value.employeeId, "请指定要配置的牛马");
+        assert(value.kind === "fs" || value.kind === "browser", "只能设置文件系统或浏览器 Master");
+        assert(value.master === "cloud" || (typeof value.master === "string" && /^[a-f0-9-]{32,36}$/.test(value.master)), "无效的 Master");
+        const view = await this.runtime.setMaster(grant.userId, value.employeeId, value.kind, value.master);
+        accepted = true;
+        connection.socket.send({ type: "runtime", ...view });
+        void this.pushStatus(grant.userId, grant.clientId);
+        void this.pushRuntime(grant.userId);
       } else if (value.type === "ping") {
         if (value.relay !== undefined) await this.relay?.configure(grant, value.relay, value.relayOn);
         if ("supplement" in value) {
@@ -172,7 +188,7 @@ export class ClientSockets {
         }
         if (!connection.updating) this.hub.connect(grant.userId, connection.details, this.liveTransport(grant.userId, connection));
         accepted = true;
-        connection.socket.send({ type: "pong", ...(connection.details.autoUpdate ? { busy: await this.clientInUse(grant.clientId) } : {}) });
+        connection.socket.send({ type: "pong", ...(connection.details.autoUpdate ? { busy: await this.clientInUse(grant.clientId) } : {}), ...(await this.runtimePayload(grant.userId)) });
         void this.pushStatus(grant.userId, grant.clientId);
       } else if (value.type === "user_stop") {
         // 用户在自己电脑上按了 Esc：只停他正在看得到的那个会话，不接受停止任意会话。
@@ -181,7 +197,7 @@ export class ClientSockets {
         accepted = true;
         connection.socket.send({ type: "user_stop", session: value.session, stopped });
       } else {
-        assert(value.type === "result", "Client may only send heartbeats, job results and user stops");
+        assert(value.type === "result", "Client may only send heartbeats, job results, master updates and user stops");
         this.hub.result(grant.userId, { id: value.id, result: value.result, instance: connection.details.instance });
         // Results also prove the control channel is alive; refresh the agent heartbeat so a burst of
         // results without an interleaved ping cannot expire the LocalAgents timer and suspend the client.
@@ -258,6 +274,20 @@ export class ClientSockets {
       if (status) connection.socket.send({ type: "task_status", status });
     }
   }
+  private async runtimePayload(userId: string) {
+    const view = await this.runtime?.view(userId).catch(() => undefined);
+    return view ? { runtime: view } : {};
+  }
+  /** 把最新的主从视图推给该账户下所有仍连着的客户端。 */
+  async pushRuntime(userId: string) {
+    const view = await this.runtime?.view(userId).catch(() => undefined);
+    if (!view) return;
+    for (const connection of this.connections.values()) {
+      if (connection.grant.userId !== userId || !connection.details) continue;
+      connection.socket.send({ type: "runtime", ...view });
+    }
+  }
+
   closeAll() {
     clearInterval(this.timer);
     this.auth.events.off("revoke", this.onRevoke);

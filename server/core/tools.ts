@@ -123,7 +123,7 @@ export class Tools {
   /** Proxy env for server shells when this account has an online relay client (intranet git, curl and ssh). */
   private async relayEnvironment() {
     const owner = this.session.ownerId;
-    if (!owner || this.session.localAgent || !(await this.engine.relay.enabled(owner))) return undefined;
+    if (!owner || this.session.localAgent || !(await this.engine.relay.enabled(owner, this.session.employeeId))) return undefined;
     return await relayShellEnvironment(await this.engine.relay.proxy(owner), this.engine.store.files.root, this.cloud);
   }
   /**
@@ -139,7 +139,7 @@ export class Tools {
   private localSshKeys(): Promise<string> {
     if (!this.localSsh) {
       const owner = this.session.ownerId,
-        agent = owner && !this.session.localAgent ? this.engine.localAgents.active(owner) : undefined;
+        agent = owner && !this.session.localAgent ? this.sshBorrowAgent(owner) : undefined;
       this.localSsh = agent ? this.keys.localSshCommand(agent, this.signal).catch(() => "") : Promise.resolve("");
     }
     return this.localSsh;
@@ -429,13 +429,16 @@ export class Tools {
     if (!this.session.clientId) throw new LocalAgentUnavailable("此历史会话尚未绑定客户端，请在输入框旁选择执行客户端后继续；不会自动选择设备或重试操作。");
     const agent = this.engine.localAgents.active(this.session.ownerId, this.session.clientId);
     if (!agent) {
-      // 同账号只允许一台设备干活：被新登录设备接管时，旧会话不会偷偷换到另一台执行。
       const online = !!this.session.ownerId && this.engine.localAgents.list(this.session.ownerId).length > 0;
       throw new LocalAgentUnavailable(online
-        ? "本会话绑定的客户端已被同账号下最新登录的设备接管，这台现在待命；本次未执行任何操作。请在新设备继续，或让新设备退出后回复「继续」。"
+        ? "本会话绑定的文件系统 Master 当前不在线；本次未执行任何操作，也不会改绑到其它设备或云端。请在该客户端上线后回复「继续」。"
         : undefined);
     }
     return agent;
+  }
+  /** 云端执行时借用一台已授权 SSH 的 Follower 密钥；多台时取第一台，不把本机 Master 的流量改走云端。 */
+  private sshBorrowAgent(ownerId: string) {
+    return this.engine.localAgents.list(ownerId).map((item) => this.engine.localAgents.active(ownerId, item.id)).find((agent) => agent && agent.sshKeys !== false);
   }
 
   private async credentialScope(a: Obj) {

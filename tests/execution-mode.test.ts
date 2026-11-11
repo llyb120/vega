@@ -31,7 +31,11 @@ test("client hints follow only the working device and owner, refresh live and ne
   const officeHint = "项目目录：D:\\code\\office\n辅助提示，不是切换工作目录。", homeHint = "Home-only hint", bobHint = "Bob-only hint";
   const hints = [officeHint, homeHint, bobHint];
   let system = "";
-  engine.providers.chat = async (_model, prompt) => { system = prompt; return { role: "assistant", text: "done" }; };
+  // 补充内容在动态段，随提示缓存冻结改挂到 user 消息上，不再出现在 system 前缀。
+  engine.providers.chat = async (_model, prompt, view: { text?: string }[] = []) => {
+    system = [prompt, ...view.map((m) => m.text || "")].join("\n");
+    return { role: "assistant", text: "done" };
+  };
   const run = async (session: any, expected: string) => {
     await engine.run(session.id, { role: "user", text: "Describe the current environment" });
     for (const hint of hints) assert.equal(system.includes(JSON.stringify(hint)), hint === expected);
@@ -44,10 +48,11 @@ test("client hints follow only the working device and owner, refresh live and ne
   const office = await store.newSession({ cwd: client.cwd, ownerId: "alice", clientId: client.clientId, localAgent: true });
   await run(office, officeHint);
 
-  // 同账号后登录的设备接管，用它自己的提示；待命设备的提示不再进入提示词。
+  // 两台设备可以同时在线，会话只吃自己绑定那台的提示，不再按最新登录把另一台打成待命。
   engine.localAgents.connect("alice", { ...client, clientId: "e".repeat(32), instance: "b".repeat(32), supplement: homeHint });
   const home = await store.newSession({ cwd: client.cwd, ownerId: "alice", clientId: "e".repeat(32), localAgent: true });
   await run(home, homeHint);
+  await run(office, officeHint);
 
   // 换账号互不影响。
   engine.localAgents.connect("bob", { ...client, supplement: bobHint });
@@ -217,17 +222,17 @@ test("switching between computers keeps independent paths and never substitutes 
     assert.equal(args.cwd, agent.cwd);
     return { isDir: true, path: args.path };
   };
-  // 不指定设备时用最新登录的那台，而不是报“多个客户端”。
-  const primary = await engine.switchExecution(session.id, true);
-  assert.equal(primary.clientId, home.clientId);
-  // 待命设备不能接执行权：不会偷偷换到旧那台。
-  await assert.rejects(engine.switchExecution(session.id, true, client.clientId), /未连接/);
+  // 有两台在线时必须指定设备，不再按最新登录自动挑，两台都可以指定。
+  await assert.rejects(engine.switchExecution(session.id, true), /多个客户端|请选择在线客户端/);
   const onHome = await engine.switchExecution(session.id, true, home.clientId);
+  assert.equal(onHome.clientId, home.clientId);
   assert.equal(onHome.clientName, home.name);
   onHome.cwd = "/home/office-project";
   await store.saveSession(onHome);
+  const onOfficeExplicit = await engine.switchExecution(session.id, true, client.clientId);
+  assert.equal(onOfficeExplicit.clientId, client.clientId);
 
-  // 生效设备退出后轮到旧设备，且两端路径各自保存。
+  // 只剩一台时可以不指定，且两端路径各自保存。
   engine.localAgents.disconnect("alice", home.instance);
   const onOffice = await engine.switchExecution(session.id, true);
   assert.equal(onOffice.clientId, client.clientId);

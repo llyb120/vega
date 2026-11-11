@@ -28,11 +28,8 @@ type ServerCredential struct {
 	RelayOn *bool    `json:"relayOn,omitempty"` // nil = never configured: this computer may relay
 }
 
-// relayAllowed: the switch is the only thing that stops this computer being an egress; rules just force a host
-// through it. Nil means never configured, which counts as allowed (the fallback needs no configuration).
-func (s ServerCredential) relayAllowed() bool {
-	return s.RelayOn == nil || *s.RelayOn
-}
+// relayAllowed 始终允许在云端为 Master 时单向借用本机网桥，不再读取已废弃的中继开关。
+func (s ServerCredential) relayAllowed() bool { return true }
 
 type connectionStatus struct {
 	Code       string `json:"code"`
@@ -148,7 +145,7 @@ func (a *Agent) startConnections(ctx context.Context) {
 func (a *Agent) startConnection(saved ServerCredential, token string) *directConnection {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.updating || a.config.Offline || !validOrigin(saved.Origin) {
+	if a.updating || !validOrigin(saved.Origin) {
 		return nil
 	}
 	trusted := false
@@ -188,11 +185,12 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	connection := &directConnection{origin: saved.Origin, token: token, instance: instance, jobs: newJobRunner(ctx, true), cancel: cancel, status: connectionStatus{Code: "backend_connecting"}, changed: make(chan struct{})}
 	connection.jobs.supplement = a.config.Supplement
 	connection.jobs.browser = browserPlace(a.config.Browser)
-	allowed := a.config.loginAllowed()
+	allowed := true
 	connection.jobs.loginState = &allowed
-	keys := a.config.sshKeysAllowed()
+	keys := true
 	connection.jobs.sshKeys = &keys
 	connection.jobs.prefer = executionPlace(a.config.Prefer)
+	connection.jobs.onRuntime = a.applyRuntime
 	a.configureRelay(connection, saved, ctx)
 	a.direct[key] = connection
 	go func() {
@@ -232,14 +230,10 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 }
 func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, connection *directConnection) (bool, bool) {
 	a.mu.Lock()
-	updating, offline := a.updating, a.config.Offline
+	updating := a.updating
 	a.mu.Unlock()
 	if updating {
 		return true, false
-	}
-	if offline {
-		// 已下线：不再重连。下线那一刻的连接留给站点交接，交接完由站点断开，这里只收尾。
-		return false, false
 	}
 	u, _ := url.Parse(saved.Origin + "/api/local-agent/socket")
 	// 下行 SSE、上行 POST，同一个地址；重定向仍当失败上报，避免 HTTP/HTTPS 混用静默通过。
@@ -277,15 +271,12 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	a.mu.Lock()
 	clientID, supplement := a.config.ClientID, a.config.Supplement
 	browser := browserPlace(a.config.Browser)
-	loginState := a.config.loginAllowed()
-	sshKeys := a.config.sshKeysAllowed()
 	a.mu.Unlock()
 	connection.jobs.mu.Lock()
 	rules := append([]string{}, connection.jobs.relayRules...)
-	relayOn := connection.jobs.relayOn
 	connection.jobs.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "loginState": loginState, "sshKeys": sshKeys, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "relayOn": relayOn, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true, "backgroundBash": true}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "loginState": true, "sshKeys": true, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "relayOn": true, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true, "backgroundBash": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true, false
 	}
@@ -295,6 +286,7 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 		Type, UserID, ClientID, Code, Message string
 		Resume, AutoUpdate, SessionIdle, Busy bool
 		Pending, Leases                       []string
+		Runtime                               *RuntimeView `json:"runtime"`
 	}
 	if conn.ReadJSON(&ready) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_protocol"})
@@ -312,6 +304,9 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	if ready.Type != "ready" || ready.UserID != saved.UserID || ready.ClientID != clientID {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_protocol"})
 		return true, false
+	}
+	if ready.Runtime != nil {
+		a.applyRuntime(*ready.Runtime)
 	}
 	a.mu.Lock()
 	a.connections[conn] = struct{}{}
@@ -375,6 +370,7 @@ type jobRunner struct {
 	relayOn      bool
 	relay        func(context.Context, job)
 	relayCancel  context.CancelFunc
+	onRuntime    func(RuntimeView)
 }
 
 func newJobRunner(ctx context.Context, resumable bool) *jobRunner {
@@ -525,19 +521,12 @@ func (runner *jobRunner) run(conn *Conn, pending, leases []string) {
 			case <-ticker.C:
 				runner.mu.Lock()
 				if runner.conn == conn {
-					message := map[string]any{"type": "ping", "supplement": runner.supplement, "prefer": executionPlace(runner.prefer)}
+					message := map[string]any{"type": "ping", "supplement": runner.supplement, "prefer": executionPlace(runner.prefer), "loginState": true, "sshKeys": true, "relayOn": true}
 					if runner.browser != "" {
 						message["browser"] = runner.browser
 					}
-					if runner.loginState != nil {
-						message["loginState"] = *runner.loginState
-					}
-					if runner.sshKeys != nil {
-						message["sshKeys"] = *runner.sshKeys
-					}
 					if runner.relay != nil {
 						message["relay"] = runner.relayRules
-						message["relayOn"] = runner.relayOn
 					}
 					runner.write(message)
 				}
@@ -562,6 +551,12 @@ func (runner *jobRunner) run(conn *Conn, pending, leases []string) {
 			if relay != nil {
 				go relay(ctx, request)
 			}
+			continue
+		}
+		if view, ok := runtimeFromJob(request); ok && runner.onRuntime != nil {
+			runner.onRuntime(view)
+		}
+		if request.Type == "runtime" {
 			continue
 		}
 		if request.Type == "pong" {

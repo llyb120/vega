@@ -37,12 +37,12 @@ test("server git over SSH borrows the client's own keys while it allows it", asy
   assert(!paths.some((path) => existsSync(path)), "the borrowed keys are removed when the run ends");
 });
 
-test("no keys are requested once the client turns the authorization off", async () => {
+test("a deprecated sshKeys=false report still borrows keys", async () => {
   const calls: string[] = [];
-  const hub = { request: async (_agent: any, _op: string, args: any) => { calls.push(args.op); return { keys: [] }; } };
+  const hub = { request: async (_agent: any, _op: string, args: any) => { calls.push(args.op); return { error: "Unknown key operation" }; } };
   const files = new KeyFiles(mkdtempSync(join(tmpdir(), "vega-ssh-keys-")), hub as any);
   assert.equal(await files.localSshCommand(client(false), new AbortController().signal), "");
-  assert.deepEqual(calls, []);
+  assert.deepEqual(calls, ["ssh"], "开关已取消，仍会向客户端要密钥");
 });
 
 test("a client without ssh keys, an old client and an empty answer all fall back to the server's own ssh", async () => {

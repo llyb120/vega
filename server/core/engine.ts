@@ -4,6 +4,7 @@ import { Fire } from "./fire";
 import { Groups } from "./groups";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
 import { TaskHandoffs } from "./handoffs";
+import { MasterRuntimes, CLOUD_MASTER } from "./master-runtime";
 import { builtinCommand, expandBuiltin } from "./builtins";
 import { requireSceneModel, sceneModels, sceneModelSelection, sceneAllowSpawn, maskedConfig, mergeSecrets, schedulerLimits, DEFAULT_GLOBAL_SLOTS, DEFAULT_PER_EMPLOYEE_SLOTS } from "./config";
 import { validateContextRules } from "../../shared/context-rules";
@@ -115,6 +116,8 @@ export class Engine {
   employee: Employee;
   /** 任务执行权调度：本地客户端与云端之间的交接、检查点与回传。 */
   handoffs!: TaskHandoffs;
+  /** 账户级文件系统 / 浏览器 Master。 */
+  runtimes!: MasterRuntimes;
   browsers: EmployeeBrowsers;
   relay: NetworkRelay;
   localBrowsers: LocalBrowsers;
@@ -126,6 +129,8 @@ export class Engine {
     this.emit(value as AgentEvent);
     // 客户端离线/回连由调度器统一处理：自动接管与增量回传不依赖界面点击。
     if ((value as Obj)?.type === "clients_changed") {
+      const owner = String((value as Obj).targetUser || "");
+      if (owner) this.runtimePush?.(owner);
       void this.handoffs?.clients(value as Obj).catch(() => {});
       // 回连的可能正是某个任务在等的设备：交回调度器，由它核对 waitClient 后继续。
       void this.employee?.all().then((all) => all.forEach((employee) => employee.schedule())).catch(() => {});
@@ -134,6 +139,7 @@ export class Engine {
   closing = false;
   /** 任务栏状态推送（application 注入 clientSockets.pushStatus）：任务/会话状态一变就下发给在线客户端。 */
   statusPush?: (userId: string, clientId?: string) => void;
+  runtimePush?: (userId: string) => void;
   executionSwitches = new Set<string>();
   mcpSessions = new Map<string, { key: string; client: MCP }>();
   async mcpFor(session: Session, config: Config) {
@@ -245,7 +251,7 @@ export class Engine {
       const source = await this.store.session(key);
       assert(!source.taskId && !source.employeeId, "牛马会话的执行位置由牛马任务控制");
       const ownerId = source.ownerId || requestingUser;
-      // 不指定设备时用当前生效的那台（同账号以最新登录为准）；显式指定但已待命就报错，不偷偷换设备。
+      // 不指定设备时，仅当正好有一台在线客户端才自动用它；有多台时必须显式选择。
       const agent = localAgent ? this.localAgents.active(ownerId, clientId) ?? (clientId === undefined ? this.localAgents.active(ownerId) : undefined) : undefined;
       assert(!localAgent || agent, "所选客户端未连接，或存在多个客户端；请选择在线客户端");
       if (!!source.localAgent === localAgent && (!localAgent || source.clientId === agent!.clientId)) return source;
@@ -274,8 +280,9 @@ export class Engine {
       session.executionCwds = { ...session.executionCwds, [previous]: session.cwd, [target]: cwd };
       session.cwd = cwd;
       session.localAgent = localAgent;
-      // 浏览器优先由客户端自己的配置决定：切到本机就按那台客户端的设置，切到服务端则一定用云端浏览器。
+      // 普通会话不是牛马任务：浏览器仍按这台客户端自己的选择；牛马任务由该牛马的浏览器 Master 绑定。
       session.localBrowser = !!agent && agent.browser !== "cloud";
+      session.browserClientId = session.localBrowser ? agent?.clientId : undefined;
       session.localPlatform = agent?.platform;
       session.clientId = agent?.clientId;
       session.clientName = agent?.name;
@@ -298,6 +305,7 @@ export class Engine {
     // Key files a crashed run left behind (KeyFiles removes them when a run ends).
     await rm(keyDir(store.files.root), { recursive: true, force: true });
     await engine.vault.key();
+    await engine.runtimes.loadAll();
     await engine.fire.recover();
     return engine;
   }
@@ -316,11 +324,12 @@ export class Engine {
       emit: (type, data, session?) => this.emit({ type, data, session }),
       config: () => this.config(),
       isolated: true,
-      // “客户端”就是当前开着 vega-local 的那台机器（最新登录生效），不是用户手里的手机/浏览器。
+      // 指定 clientId 时返回那台已连接的客户端（含 Follower）；不传则返回当前文件系统 Master（若在线）。
       client: (ownerId, clientId) => {
         const agent = clientId ? this.localAgents.active(ownerId, clientId) : this.localAgents.active(ownerId);
         return agent ? { clientId: agent.clientId, clientName: agent.name, localPlatform: agent.platform, cwd: agent.cwd, browser: agent.browser, prefer: agent.prefer } : undefined;
       },
+      masters: (employeeId) => this.runtimes.peek(employeeId),
       groups: {
         post: (group, employeeId, message, wake) => this.groups.post(group, employeeId, message, wake),
         taskContext: (groupId, employeeId) => this.groups.taskContext(groupId, employeeId),
@@ -330,11 +339,31 @@ export class Engine {
     };
     this.groups = new Groups(this);
     this.employee = new Employee(store, this.vault, runtime);
-    this.relay = new NetworkRelay(store, this.localAgents);
+    this.runtimes = new MasterRuntimes(store, this.localAgents, (value) => this.emit(value as any));
+    this.runtimes.listEmployees = async (ownerId) => {
+      const out: { id: string; name: string }[] = [];
+      for (const employee of await this.employee.all()) {
+        const state = await employee.state({ runs: false });
+        if (state.ownerId === ownerId) out.push({ id: employee.employeeId, name: state.name || employee.employeeId });
+      }
+      return out;
+    };
+    this.runtimes.employeeInfo = async (employeeId) => {
+      try {
+        const employee = await this.employee.for(employeeId);
+        const state = await employee.state({ runs: false });
+        return { ownerId: state.ownerId, name: state.name || employee.employeeId };
+      } catch { return undefined; }
+    };
+    this.localAgents.runtimes = this.runtimes;
+    this.relay = new NetworkRelay(store, this.localAgents, (userId, employeeId) => employeeId ? this.runtimes.cloudMayBorrow(employeeId, userId) : this.runtimes.ownerMayBorrow(userId));
     const browserOwner = async (id: string) => id.startsWith("user_") ? id.slice(5) : (await (await this.employee.for(id)).state()).ownerId;
     this.browsers = new EmployeeBrowsers(store, chrome.pageScript, async (id) => {
       const ownerId = await browserOwner(id);
-      return ownerId ? this.relay.proxy(ownerId) : undefined;
+      if (!ownerId) return;
+      const employeeId = id.startsWith("user_") ? undefined : id;
+      if (!(employeeId ? this.runtimes.cloudMayBorrow(employeeId, ownerId) : await this.runtimes.ownerMayBorrow(ownerId))) return;
+      return this.relay.proxy(ownerId);
     }, async (id) => cloudEnabled() ? cloudFor({ ownerId: await browserOwner(id) }) : undefined);
     this.localBrowsers = new LocalBrowsers(store, this.localAgents, chrome.pageScript);
     this.fire = new Fire(
@@ -357,7 +386,14 @@ export class Engine {
       },
       seal: (value, aad) => this.vault.sealObject(value, aad),
       open: (blob, aad) => this.vault.openObject(blob, aad),
+      masters: (employeeId) => this.runtimes.peek(employeeId),
     });
+    this.runtimes.beforeSwitch = async (employeeId, kind) => {
+      if (kind === "fs") await this.handoffs.assertIdle(employeeId);
+    };
+    this.runtimes.afterSwitch = async (employeeId, kind, from, to) => {
+      await this.handoffs.onMasterChange(employeeId, kind, from, to);
+    };
   }
   async config(session?: Session): Promise<Config> {
     await migrateEmployeeCapabilities(this.store);
@@ -460,7 +496,9 @@ export class Engine {
     }
     if (e.type === "clients_changed") {
       const data = e.data as Obj | undefined;
-      push(String(data?.userId || data?.user || ""), data?.clientId ? String(data.clientId) : undefined);
+      const owner = String((e as Obj).targetUser || data?.userId || data?.user || "");
+      push(owner, data?.clientId ? String(data.clientId) : undefined);
+      if (owner) this.runtimePush?.(owner);
       return;
     }
     // 会话级状态迁移：started/message_end/compacted/execution_changed/cancel 都会改变 running 档。
@@ -619,9 +657,9 @@ export class Engine {
   }
   async chromeFor(session: Session, signal?: AbortSignal) {
     if (session.agentChild) throw new Error("分身不能占用浏览器，也不能抢占父会话的 Chrome 会话。");
-    // 浏览器优先不等同于执行位置：由客户端自己的配置决定（默认服务端），只有它选了本机浏览器时才用客户端扩展。
+    // 浏览器 Master 与文件系统 Master 互相独立：本机浏览器不必要求执行权也在本机。
     if (session.localBrowser) {
-      assert(session.localAgent && session.clientId, "本机浏览器只在任务执行位置为本机时可用；执行权在云端时请改用云端浏览器（或先接回本机）。");
+      assert(session.browserClientId || session.clientId, "本机浏览器需要绑定浏览器 Master 客户端。");
       return this.localBrowsers.get(session, signal);
     }
     const ownerId = await this.browserOwnerId(session);

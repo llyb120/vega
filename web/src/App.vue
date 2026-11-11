@@ -208,10 +208,7 @@ const sessions = ref([]),
     get: () => composer.value.attachments,
     set: (items) => { composer.value.attachments = items; },
   }),
-  sending = ref(false),
-  draftExecution = ref(null),
-  draftClientId = ref(""),
-  switchingExecution = ref(false);
+  sending = ref(false);
 // shortcut: drafts live only in this page; add persistence if reload recovery is required.
 const drafts = new Map([["", composer.value]]);
 function restoreDraft() {
@@ -296,23 +293,6 @@ function emptyDuty() {
 const isRunning = computed(
   () => current.value && running.value[current.value.id],
 );
-const executionLocal = computed(
-  () => current.value ? !!current.value.localAgent : (draftExecution.value ?? localConnected.value),
-);
-const executionClientId = computed(
-  () => current.value ? (current.value.clientId || "") : (draftClientId.value || onlineClients.value[0]?.id || ""),
-);
-const selectedClient = computed(() => onlineClients.value.find((client) => client.id === executionClientId.value));
-const executionUnavailable = computed(() => executionLocal.value && !selectedClient.value);
-const executionBusy = computed(
-  () => switchingExecution.value || sending.value || isRunning.value || fireState.value?.status === "running",
-);
-const executionHint = computed(() => {
-  if (switchingExecution.value) return "正在校验执行环境，请稍候";
-  if (executionBusy.value) return "当前轮执行结束后可切换执行位置";
-  if (!executionLocal.value && !localConnected.value) return "当前在服务端执行；连接客户端后可切换";
-  return `当前在${executionLocal.value ? "客户端" : "服务端"}执行，点击切换；两端文件不会自动同步`;
-});
 const rootSessions = computed(() =>
   sessions.value.filter((s) => !s.stageSource),
 );
@@ -715,8 +695,6 @@ function resetLogin() {
   password.value = "";
   setupToken.value = "";
   current.value = null;
-  draftExecution.value = null;
-  draftClientId.value = "";
   onlineClients.value = [];
   sessionRequest++;
   sessionLoading.value = false;
@@ -815,47 +793,9 @@ async function selectSession(session) {
 }
 async function newSession() {
   await attempt(async () => {
-    const s = await api("/sessions", "POST", {
-      cwd: project.value,
-      localAgent: localConnected.value,
-      clientId: onlineClients.value[0]?.id,
-    });
-    draftExecution.value = null;
-    draftClientId.value = "";
+    const s = await api("/sessions", "POST", { cwd: project.value });
     await Promise.all([bootstrap(), selectSession(s)]);
   });
-}
-async function toggleExecution() {
-  await changeExecution(!executionLocal.value, selectedClient.value?.id || onlineClients.value[0]?.id);
-}
-async function changeClient(event) {
-  await changeExecution(true, event.target.value);
-  event.target.value = executionClientId.value;
-}
-async function changeExecution(localAgent, clientId) {
-  if (!canWriteCurrent.value || executionBusy.value) return;
-  if (localAgent && !onlineClients.value.some((client) => client.id === clientId)) {
-    error.value = "所选客户端未在线，请选择在线客户端";
-    return;
-  }
-  if (!current.value) {
-    draftExecution.value = localAgent;
-    draftClientId.value = localAgent ? clientId : "";
-    return;
-  }
-  const id = current.value.id, request = ++sessionRequest;
-  switchingExecution.value = true;
-  try {
-    await attempt(async () => {
-      const session = await api(`/sessions/${id}/execution`, "POST", { localAgent, clientId: localAgent ? clientId : undefined });
-      if (current.value?.id !== id || request !== sessionRequest) return;
-      current.value = session;
-      sessions.value = sessions.value.map((s) => s.id === id ? session : s);
-      notice.value = `已切换到${localAgent ? "客户端 " + session.clientName : "服务端"}，工作目录：${session.cwd}。两端文件不会自动同步。`;
-    });
-  } finally {
-    switchingExecution.value = false;
-  }
 }
 async function removeSession(s) {
   if (!confirm("删除该会话及其 Stage 和消息？此操作不可撤销。")) return;
@@ -884,11 +824,7 @@ async function removeSession(s) {
   });
 }
 async function send() {
-  if (!canWriteCurrent.value || switchingExecution.value) return;
-  if (executionUnavailable.value) {
-    error.value = "所选客户端已离线或尚未选择，请选择在线客户端，或手动切换到服务端；不会自动重试操作";
-    return;
-  }
+  if (!canWriteCurrent.value) return;
   if (sending.value || (!draft.value.trim() && !attachments.value.length))
     return;
   if (uploading.value) return;
@@ -902,16 +838,10 @@ async function send() {
   void scrollBottom();
   await attempt(async () => {
     if (!session) {
-      session = await api("/sessions", "POST", {
-        cwd: project.value,
-        localAgent: executionLocal.value,
-        clientId: executionLocal.value ? executionClientId.value : undefined,
-      });
+      session = await api("/sessions", "POST", { cwd: project.value });
       if (csrfToken.value !== account) return;
       drafts.set(session.id, pending);
       if (drafts.get("") === pending) drafts.delete("");
-      draftExecution.value = null;
-      draftClientId.value = "";
       if (!current.value && request === sessionRequest)
         await Promise.all([bootstrap(), selectSession(session)]);
       else await bootstrap();
@@ -1245,7 +1175,7 @@ async function loadEmployee() {
   if (user.value?.id !== owner || selectedEmployee.value !== id || request !== employeeLoadVersion) return;
   employeeSessionVersion.value++;
   if (employeeTab.value !== "settings" || employee.value.id !== id) employee.value = data;
-  else { employee.value.tasks = data.tasks; employee.value.busy = data.busy; employee.value.chatRunning = data.chatRunning; employee.value.executionClients = data.executionClients; employee.value.execution = data.execution; employee.value.avatar = data.avatar; }
+  else { employee.value.tasks = data.tasks; employee.value.busy = data.busy; employee.value.chatRunning = data.chatRunning; employee.value.executionClients = data.executionClients; employee.value.execution = data.execution; employee.value.avatar = data.avatar; employee.value.runtime = data.runtime; }
 }
 function employeeApi(path, method = "GET", data) {
   if (!selectedEmployee.value) throw Error("请先创建牛马");
@@ -1324,15 +1254,6 @@ async function resetEmployee(scope) {
 }
 async function employeeTaskAction(task, action, text) {
   return attempt(async () => {
-    if (action === "handoff-cloud" || action === "handoff-local") {
-      const to = action === "handoff-cloud" ? "to-cloud" : "to-local";
-      const record = await api(`/employees/${selectedEmployee.value}/tasks/${task.id}/handoff`, "POST", { action: to });
-      await refreshEmployee();
-      toast(to === "to-cloud"
-        ? (record?.base?.length ? "已交接：本机工作文件已同步，任务改为在云端继续；浏览器始终在云端。" : "已交接：没有可同步的本机文件，云端按恢复点续做（缺什么先核对，核验不了会问你）。")
-        : "已接回本机继续；云端成果已回传到本机。");
-      return true;
-    }
     if (action === "remove" && !confirm("永久删除此任务记录？")) return;
     if (action === "redispatch" && !confirm("重新派发为新任务？此前外部操作不会回滚。")) return;
     if (action === "seal" && !confirm("封存此任务？封存后不能再恢复、续做或重新派发，只能查看或删除。")) return;
@@ -1615,19 +1536,11 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             <div class="composer-bottom">
               <button type="button" class="attach icon" aria-label="添加附件" title="附件（图片或文件）" :disabled="uploading" @click="imageInput.click()"><Icon name="paperclip" /></button>
               <input ref="imageInput" type="file" multiple hidden @change="upload" />
-              <button type="button" class="execution-switch" role="switch" aria-label="客户端执行（关闭时在服务端执行）" :aria-checked="executionLocal" :class="{ local: executionLocal }" :title="executionHint" :disabled="executionBusy || (!executionLocal && !localConnected)" @click="toggleExecution">
-                <span :class="{ selected: !executionLocal }">服务端</span><span class="execution-track" aria-hidden="true"></span><span :class="{ selected: executionLocal }">客户端</span>
-              </button>
-              <select v-if="executionLocal" class="execution-client" aria-label="执行客户端" :value="executionClientId" :disabled="executionBusy" @change="changeClient">
-                <option v-if="!selectedClient" :value="executionClientId" disabled>{{ current?.clientName ? current.clientName + ' · 离线' : '请选择在线客户端' }}</option>
-                <option v-for="client in onlineClients" :key="client.id" :value="client.id">{{ client.name }} · {{ client.platform }} · {{ client.id.slice(0, 6) }} · 在线</option>
-              </select>
               <span class="hint">Enter 发送 · Shift + Enter 换行</span>
               <button v-if="isRunning" type="button" class="danger-text" @click="attempt(() => api(`/sessions/${current.id}/cancel`, 'POST', {}))"><Icon name="stop" :size="14" />停止</button>
-              <button class="primary" :disabled="sending || switchingExecution || uploading || executionUnavailable || (!draft.trim() && !attachments.length)">{{ uploading ? "读取附件…" : sending ? "提交中…" : isRunning ? "补充约束" : "发送" }}<Icon name="send" :size="14" /></button>
+              <button class="primary" :disabled="sending || uploading || (!draft.trim() && !attachments.length)">{{ uploading ? "读取附件…" : sending ? "提交中…" : isRunning ? "补充约束" : "发送" }}<Icon name="send" :size="14" /></button>
             </div>
           </form>
-          <p v-if="executionUnavailable" class="execution-warning" role="status">所选客户端已离线或尚未选择，请选择在线客户端或切换到服务端；不会自动切换或重试操作。</p>
         </div>
       </template>
       <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @read="unread.groupRead" />

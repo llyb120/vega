@@ -41,7 +41,7 @@ export type Agent = {
   reconnecting?: boolean;
   heartbeat?: ReturnType<typeof setTimeout>;
   transport?: { send: (job: Obj) => void; close: () => void };
-  /** 登录顺序：同一账号只有一个设备干活，以最新登录的为准。 */
+  /** 登录顺序：仅用于展示与并列连接，不再作为派活依据。 */
   order: number;
   /** New clients can yield a long exec after 10s and speak exec_poll / exec_kill. */
   backgroundBash?: boolean;
@@ -68,9 +68,9 @@ export function validateClient(a: Obj) {
 export class LocalAgents {
   private agents = new Map<string, Agent>();
   private tickets = new Map<string, { hash: string; instance: string; until: number }>();
-  /** 当前生效的设备（最近登录的那台）；其它设备在线但待命，它退出后才轮到下一台。 */
-  private primary = new Map<string, string>();
   private seq = 0;
+  /** 按牛马的主从：连接时用旧 prefer/browser 只给尚未配置的牛马做缺省。由 Engine 注入。 */
+  runtimes?: { applyClientReport: (userId: string, clientId: string, reported: { prefer?: "client" | "cloud"; browser?: "local" | "cloud" }) => Promise<unknown> };
   constructor(private emit: (value: Obj) => void = () => {}) {}
   ticket(principal: Principal, instance: unknown) {
     assert(typeof instance === "string" && /^[a-f0-9-]{32,36}$/.test(instance), "Invalid agent instance");
@@ -90,26 +90,26 @@ export class LocalAgents {
   }
   list(userId?: string) {
     const online: { id: string; name: string; cwd: string; platform: string; browser: "local" | "cloud"; active: boolean }[] = [];
-    const primary = userId ? this.primary.get(userId) : undefined;
     for (const agent of [...this.agents.values()]) {
       if (agent.userId !== userId) continue;
       this.expire(agent);
       if (!this.agents.has(agent.userId + ":" + agent.clientId)) continue;
-      online.push({ id: agent.clientId, name: agent.name, cwd: agent.cwd, platform: agent.platform, browser: agent.browser || "local", active: agent.clientId === primary });
+      online.push({ id: agent.clientId, name: agent.name, cwd: agent.cwd, platform: agent.platform, browser: agent.browser || "local", active: true });
     }
     return online;
   }
   /**
-   * 一个账号同时只有一个设备干活：以最新登录的为准，其余设备在线但待命。
-   * 不传 clientId 时返回当前生效设备；传入的不是生效设备就返回 undefined（不派发任何操作）。
+   * 已连接的客户端（含 Follower）。Follower 保持连接，可做视口、中继和登录借用，
+   * 文件/命令/浏览器的派活由账户级 Master 决定，不再按「最新登录」拦截。
+   * 不传 clientId 时返回当前文件系统 Master（若它在线）。
    */
   active(userId?: string, clientId?: string) {
     if (!userId) return;
-    const primary = this.primary.get(userId);
     if (clientId === undefined) {
-      if (!primary) return;
-      clientId = primary;
-    } else if (primary && clientId !== primary) return;
+      const connected = [...this.agents.values()].filter((item) => item.userId === userId);
+      if (connected.length !== 1) return;
+      clientId = connected[0].clientId;
+    }
     const key = userId + ":" + clientId;
     const agent = this.agents.get(key);
     if (!agent) return;
@@ -134,23 +134,17 @@ export class LocalAgents {
       assert(![...this.agents.values()].some((item) => item.userId === userId && item.instance === a.instance), "Agent instance already registered");
       agent = { userId, clientId, name: a.name?.trim() || "客户端 " + clientId.slice(0, 8), instance: a.instance, cwd: a.cwd, platform: a.platform, pending: new Map(), browserLeases: new Set(), onlineUntil: Date.now() + CLIENT_HEARTBEAT_TIMEOUT, transport, order: ++this.seq };
       this.agents.set(key, agent);
-      // 最新登录的设备接管本账号的工作；其余设备保持在线但待命。
-      this.primary.set(userId, clientId);
       this.emit({ type: "clients_changed", targetUser: userId });
     }
     agent.supplement = a.supplement || "";
     agent.backgroundBash = a.backgroundBash === true;
-    // 客户端配置决定浏览器优先；旧客户端不上报时按本机浏览器处理。
+    // 客户端配置决定浏览器位置；旧客户端不上报时按本机浏览器处理。
     agent.browser = a.browser === "cloud" ? "cloud" : "local";
-    agent.loginState = a.loginState !== false;
-    agent.sshKeys = a.sshKeys !== false;
-    // 客户端本地的执行位置：切成服务端优先后立即安排接力，切回客户端优先时已有任务不动。
+    agent.loginState = true;
+    agent.sshKeys = true;
     const prefer = a.prefer === "cloud" ? "cloud" : "client";
-    if (agent.prefer !== prefer) {
-      const changed = agent.prefer !== undefined;
-      agent.prefer = prefer;
-      if (changed && prefer === "cloud") this.emit({ type: "clients_changed", targetUser: userId });
-    }
+    agent.prefer = prefer;
+    void this.runtimes?.applyClientReport(userId, clientId, { prefer, browser: agent.browser });
     const recovering = agent.reconnecting, previous = agent.transport;
     if (transport) agent.transport = transport;
     // Ping/result refresh calls connect() without a transport. That must not clear a suspended
@@ -195,7 +189,7 @@ export class LocalAgents {
     }
     signal.throwIfAborted();
     assert(agent.pending.size < 16, "Too many local operations");
-    if (this.active(agent.userId, agent.clientId) !== agent) throw new LocalAgentUnavailable("另一台设备已登录并接管本账号的工作，此客户端处于待命状态，不会派发新操作；请在新设备继续，或让新设备退出后再用这台。");
+    if (this.active(agent.userId, agent.clientId) !== agent) throw new LocalAgentUnavailable();
     const id = randomUUID();
     return new Promise<Obj>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined, sent = false, settled = false, recovered = false;
@@ -273,16 +267,8 @@ export class LocalAgents {
       for (const pending of [...agent.pending.values()]) pending.reject(new LocalAgentUnavailable());
       try { agent.transport?.close(); } catch {}
       changed = true;
-      if (this.primary.get(userId) === agent.clientId) this.primary.delete(userId);
     }
-    if (changed) {
-      // 生效设备退出后，回退到最后登录的仍在线设备（旧设备可以重新工作）。
-      if (!this.primary.get(userId)) {
-        const next = [...this.agents.values()].filter((agent) => agent.userId === userId).sort((a, b) => b.order - a.order)[0];
-        if (next) this.primary.set(userId, next.clientId);
-      }
-      this.emit({ type: "clients_changed", targetUser: userId });
-    }
+    if (changed) this.emit({ type: "clients_changed", targetUser: userId });
   }
   close() {
     this.tickets.clear();

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"net/url"
@@ -11,26 +10,36 @@ import (
 	"testing"
 )
 
-func TestExecutionPlaceDefaultsToClientAndSavesCloud(t *testing.T) {
-	if executionPlace("") != "client" || executionPlace("cloud") != "cloud" || executionPlace("bogus") != "client" {
-		t.Fatal("unset or unknown values must mean client-first execution")
-	}
+func TestFsMasterIsSavedPerEmployee(t *testing.T) {
 	origin := "https://vega.example"
 	path := filepath.Join(t.TempDir(), "trusted-sites.json")
-	a := &Agent{configPath: path, config: Config{ClientID: strings.Repeat("a", 32), TrustedOrigins: []string{origin}}}
+	self := strings.Repeat("a", 32)
+	a := &Agent{configPath: path, config: Config{ClientID: self, TrustedOrigins: []string{origin}}}
 	if err := a.saveConfig(a.config); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.saveExecutionPlace("bogus"); err == nil || a.config.Prefer != "" {
-		t.Fatal("invalid location must be rejected without changing the config")
+	if err := a.saveExecutionPlace("cloud"); err == nil {
+		t.Fatal("旧的账户级执行位置接口必须要求指定牛马")
 	}
-	if err := a.saveExecutionPlace("cloud"); err != nil {
+	if err := a.saveFsMaster("", "cloud"); err == nil {
+		t.Fatal("未指定牛马不能保存文件系统 Master")
+	}
+	if err := a.saveFsMaster("emp-a", "cloud"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.saveFsMaster("emp-b", self); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
 	var saved Config
-	if err != nil || json.Unmarshal(data, &saved) != nil || saved.Prefer != "cloud" || len(saved.TrustedOrigins) != 1 {
-		t.Fatalf("execution location not persisted without losing the rest of the config: %v", err)
+	if err != nil || json.Unmarshal(data, &saved) != nil {
+		t.Fatalf("config not persisted: %v", err)
+	}
+	if got := a.rememberedEmployeeMaster("emp-a", "fs"); got != "cloud" {
+		t.Fatalf("emp-a fs master: %s", got)
+	}
+	if got := a.rememberedEmployeeMaster("emp-b", "fs"); got != self {
+		t.Fatalf("emp-b fs master: %s", got)
 	}
 
 	post := func(form url.Values) *httptest.ResponseRecorder {
@@ -41,53 +50,37 @@ func TestExecutionPlaceDefaultsToClientAndSavesCloud(t *testing.T) {
 		a.configure(w, r)
 		return w
 	}
-	if w := post(url.Values{"saveExecution": {"1"}, "executionClient": {"1"}}); w.Code != 303 || a.config.Prefer != "client" {
-		t.Fatalf("form must save the client-first choice: %d", w.Code)
+	if w := post(url.Values{"saveFsMaster": {"1"}, "employeeId": {"emp-a"}, "fsMaster": {self}}); w.Code != 303 {
+		t.Fatalf("form must save per-employee fs master: %d %s", w.Code, w.Body.String())
 	}
-	if w := post(url.Values{"saveExecution": {"1"}}); w.Code != 303 || a.config.Prefer != "cloud" {
-		t.Fatalf("unchecked box must mean server-first execution: %d", w.Code)
+	if a.rememberedEmployeeMaster("emp-a", "fs") != self || a.rememberedEmployeeMaster("emp-b", "fs") != self {
+		t.Fatal("saving emp-a must not clear emp-b")
 	}
-}
-
-func TestOfflineLeavesTheConnectionToTheHandoff(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "trusted-sites.json")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	a := &Agent{configPath: path, config: Config{ClientID: strings.Repeat("a", 32)}, direct: map[string]*directConnection{}}
-	if err := a.saveConfig(a.config); err != nil {
-		t.Fatal(err)
+	a.runtime = &RuntimeView{Employees: []EmployeeMasterView{
+		{ID: "emp-a", Name: "甲", FsMaster: "cloud", BrowserMaster: "cloud"},
+		{ID: "emp-b", Name: "乙", FsMaster: self, BrowserMaster: "cloud"},
+	}}
+	w := httptest.NewRecorder()
+	a.configure(w, httptest.NewRequest("GET", "http://"+localAddress+"/config/test?tab=client", nil))
+	page := w.Body.String()
+	if !strings.Contains(page, "文件系统 Master") || !strings.Contains(page, "甲") || !strings.Contains(page, "乙") {
+		t.Fatal("page must list each employee's filesystem Master")
 	}
-	connectionCtx, stop := context.WithCancel(ctx)
-	a.direct["https://vega.example\x00u1"] = &directConnection{jobs: newJobRunner(connectionCtx, true), cancel: stop}
-	if err := a.setOnline(false); err != nil {
-		t.Fatal(err)
-	}
-	if connectionCtx.Err() != nil {
-		t.Fatal("下线要先把连接留给站点交接，交接完由站点断开；立刻断开只能硬交接")
+	if strings.Contains(page, "接单状态") || strings.Contains(page, `name="setOffline"`) || strings.Contains(page, "保存执行位置") {
+		t.Fatal("page must not offer 接单状态 or the old execution-place switch")
 	}
 }
 
-func TestOfflineStopsTakingWorkAndComesBackOnline(t *testing.T) {
+func TestOfflineConfigIsIgnoredWhileProcessIsRunning(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "trusted-sites.json")
-	a := &Agent{configPath: path, config: Config{ClientID: strings.Repeat("a", 32)}, direct: map[string]*directConnection{}}
+	a := &Agent{configPath: path, config: Config{ClientID: strings.Repeat("a", 32), Offline: true, TrustedOrigins: []string{"https://vega.example"}}, direct: map[string]*directConnection{}}
 	if err := a.saveConfig(a.config); err != nil {
 		t.Fatal(err)
-	}
-	if err := a.setOnline(false); err != nil {
-		t.Fatal(err)
-	}
-	if !a.config.Offline {
-		t.Fatal("going offline must persist so a restart does not silently take work")
-	}
-	if a.startConnection(ServerCredential{Origin: "https://vega.example", UserID: "u1"}, "token") != nil {
-		t.Fatal("an offline client must not connect to any site")
 	}
 	w := httptest.NewRecorder()
 	a.configure(w, httptest.NewRequest("GET", "http://"+localAddress+"/config/test", nil))
-	if page := w.Body.String(); !strings.Contains(page, "已下线") || !strings.Contains(page, `name="setOnline"`) {
-		t.Fatal("page must show the offline state and offer coming back online")
-	}
-	if err := a.setOnline(true); err != nil || a.config.Offline {
-		t.Fatalf("coming back online must clear the flag: %v", err)
+	page := w.Body.String()
+	if strings.Contains(page, "已下线") || strings.Contains(page, `name="setOnline"`) || strings.Contains(page, `name="setOffline"`) {
+		t.Fatal("旧的上下线开关必须从页面移除，进程开着就是上线")
 	}
 }

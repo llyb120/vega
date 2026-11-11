@@ -61,11 +61,7 @@ func keyOperation(req keyReq) map[string]any {
 }
 
 // localSshKeys 是服务端 git over SSH 借用本机 ssh 时的取材处：只给 ~/.ssh/config 和私钥（不含 .pub、known_hosts）。
-// 关掉「本地 SSH 密钥授权」后一律拒绝：密钥不出这台机器。
 func localSshKeys() map[string]any {
-	if !sshKeysShared {
-		return failure("本地 SSH 密钥授权已关闭；请在客户端「授权」里打开，或改用密码本里的 SSH 私钥")
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return failure(err.Error())

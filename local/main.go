@@ -40,6 +40,7 @@ type Agent struct {
 	editing         bool
 	context         context.Context
 	lastSite        string
+	runtime         *RuntimeView
 }
 
 func main() {
@@ -145,7 +146,6 @@ func main() {
 	needsPairing := len(a.config.Servers) == 0
 	a.startConnections(ctx)
 	setSiteLabel(a.siteLabel())
-	setTrayOffline(a.config.Offline)
 	butterflySetEnabled(a.config.Butterfly)
 	setAppuseConfirmSeconds(a.config.ConfirmSeconds)
 	setSshKeysAllowed(a.config.sshKeysAllowed())
@@ -189,11 +189,7 @@ func main() {
 		os.Exit(0)
 	}
 	go a.autoUpdate(ctx, quit)
-	systrayRun(configure, quit, func(online bool) {
-		if err := a.setOnline(online); err != nil {
-			a.clientLog("上下线失败：%v", err)
-		}
-	})
+	systrayRun(configure, quit)
 }
 
 type job struct {
@@ -203,7 +199,20 @@ type job struct {
 	Op   string          `json:"op"`
 	Args json.RawMessage `json:"args"`
 	// task_status 推送：服务端算好的任务栏五档（对齐 Nova taskbar_status）。
-	Status *jobStatus    `json:"status"`
+	Status    *jobStatus           `json:"status"`
+	Runtime   *RuntimeView         `json:"runtime,omitempty"`
+	Nodes     []RuntimeNode        `json:"nodes,omitempty"`
+	Employees []EmployeeMasterView `json:"employees,omitempty"`
+}
+
+func runtimeFromJob(j job) (RuntimeView, bool) {
+	if j.Runtime != nil {
+		return *j.Runtime, true
+	}
+	if j.Type == "runtime" {
+		return RuntimeView{Nodes: j.Nodes, Employees: j.Employees}, true
+	}
+	return RuntimeView{}, false
 }
 
 type jobStatus struct {
