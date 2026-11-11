@@ -488,8 +488,7 @@ export default defineEventHandler(async (event) => {
       if (user.role !== "admin") check(!requested || requested === user.id, 403, "只能查看自己的用量");
       const from = query.get("from") ? Number(query.get("from")) : undefined;
       const to = query.get("to") ? Number(query.get("to")) : undefined;
-      const rows = await store.tokenUsage({ userId, from, to, limit: Number(query.get("limit") || 500) });
-      return { rows, self: user.id, admin: user.role === "admin" };
+      return { ...(await store.tokenUsageSummary({ userId, from, to })), self: user.id, admin: user.role === "admin" };
     }
     if (path[0] === "config" && method === "PUT")
       return engine.saveConfig(a as any);

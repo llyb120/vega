@@ -572,19 +572,28 @@ export class Store {
       JSON.stringify({ ...row, at, total }),
     );
   }
-  async tokenUsage(opts: { userId?: string; from?: number; to?: number; limit?: number } = {}) {
-    await this.ensureTokenUsageTable();
-    const limit = Math.min(Math.max(1, opts.limit || 500), 2000);
-    const params: unknown[] = [];
-    let sql = "SELECT id,user,at,data FROM token_usage";
-    const where: string[] = [];
-    if (opts.userId) { where.push("user=?"); params.push(opts.userId); }
+  private usageFilter(opts: { userId?: string; from?: number; to?: number }, withUser = true) {
+    const params: unknown[] = [], where: string[] = [];
+    if (withUser && opts.userId) { where.push("user=?"); params.push(opts.userId); }
     if (opts.from) { where.push("at>=?"); params.push(opts.from); }
     if (opts.to) { where.push("at<=?"); params.push(opts.to); }
-    if (where.length) sql += " WHERE " + where.join(" AND ");
-    sql += " ORDER BY at DESC,id DESC LIMIT ?";
-    params.push(limit);
-    const rows = await this.all(sql, ...params);
-    return rows.map((row) => ({ id: row.id, userId: row.user, ...(JSON.parse(row.data) as Obj) }));
+    return { filter: where.length ? " WHERE " + where.join(" AND ") : "", params };
+  }
+  /** Totals for every row in the range, summed in SQL so a range never loads its rows into the process. */
+  async tokenUsageSummary(opts: { userId?: string; from?: number; to?: number } = {}) {
+    await this.ensureTokenUsageTable();
+    const { filter, params } = this.usageFilter(opts);
+    const sum = (key: string) => `COALESCE(SUM(${this.json("$." + key)}),0) ${key}`;
+    const row = (await this.one(
+      `SELECT COUNT(*) n,${["input", "output", "cacheRead", "cacheWrite", "total"].map(sum).join(",")} FROM token_usage${filter}`,
+      ...params,
+    ))!;
+    const scope = this.usageFilter(opts, false);
+    const users = (await this.all(`SELECT DISTINCT user FROM token_usage${scope.filter} ORDER BY user`, ...scope.params)).map((item) => String(item.user));
+    return {
+      n: Number(row.n) || 0, input: Number(row.input) || 0, output: Number(row.output) || 0,
+      cacheRead: Number(row.cacheRead) || 0, cacheWrite: Number(row.cacheWrite) || 0, total: Number(row.total) || 0,
+      users,
+    };
   }
 }
