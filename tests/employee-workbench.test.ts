@@ -15,7 +15,7 @@ import { Employee, type EmployeeRuntime, type Task } from "../server/core/employ
 import { EmployeeBrowsers } from "../server/core/employee-browsers";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { privateWorker } from "../server/core/headless";
-import { Vault } from "../server/core/vault";
+import { Vault, vaultKind } from "../server/core/vault";
 import { sleep } from "../server/core/util";
 import { chromeCall, employeeCall } from "./public-call";
 
@@ -102,7 +102,7 @@ test("employees isolate state, business keys, conversations, owner access and cr
       assert.deepEqual((await other.execute("", { action: "vault_list" })).value.entries, []);
       await assert.rejects(other.execute("", { action: "vault_get", id: secret.id, text: "test" }), /Vault entry not found/);
     }
-    assert.equal((await store.object<any>(a.vault.kind, secret.id)).usedFor, "test");
+    assert.equal((await store.object<any>(vaultKind("alice"), secret.id)).usedFor, "test");
     assert.deepEqual(await store.objects("vault"), [], "nothing is written to the former global book");
     const reopened = new Employee(store, vault, employee.runtime);
     assert.equal((await (await reopened.for(a.employeeId)).vault.list())[0].id, secret.id);

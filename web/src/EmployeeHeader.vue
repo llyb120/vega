@@ -18,7 +18,7 @@ defineProps({
 });
 const emit = defineEmits(["tab", "delete", "toggle-work", "menu", "set-master"]);
 const menu = ref(null);
-const icons = { chat: "chat", tasks: "tasks", browser: "globe", duties: "repeat", memories: "memory", capabilities: "zap", vault: "key", settings: "settings" };
+const icons = { chat: "chat", tasks: "tasks", browser: "globe", duties: "repeat", memories: "memory", capabilities: "zap", settings: "settings" };
 function close(target) { if (target.value) target.value.open = false; }
 function masterName(employee, id) {
   if (!id || id === "cloud") return "云端";

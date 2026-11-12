@@ -11,9 +11,9 @@ import { Store } from "../server/core/store";
 const settings = readFileSync("web/src/SettingsView.vue", "utf8");
 const capabilities = readFileSync("web/src/EmployeeCapabilities.vue", "utf8");
 const providers = readFileSync("web/src/ProviderSettings.vue", "utf8");
-const employeeVault = readFileSync("web/src/EmployeeVault.vue", "utf8");
+const vaultSettings = readFileSync("web/src/VaultSettings.vue", "utf8");
 function vaultFunction(name: string, scope: any) {
-  const source = employeeVault.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
+  const source = vaultSettings.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
   assert(source, name);
   return runInNewContext(`(${source})`, scope);
 }
@@ -122,20 +122,25 @@ test("each MCP JSON keeps its complete config and stored secrets", async () => {
   assert.equal(JSON.parse(scope.mcp.value.local).command, "node");
 });
 
-test("MCP, skill and vault editors belong to the employee; system settings no longer hold a vault", () => {
-  assert.match(settings, /<PageHeader title="系统设置"/);
+test("the vault belongs to every account's settings; MCP and skill editors stay with the employee", () => {
+  assert.match(settings, /<PageHeader :title="admin \? '系统设置' : '设置'"/);
   assert.match(capabilities, /v-model="mcp\[key\]"[^>]*:aria-label="key \+ ' JSON配置'"/);
   assert(!settings.includes("saveMcp") && !settings.includes("/skills/upload"));
   assert(capabilities.includes('v-if="canEdit"') && capabilities.includes("v-else") && capabilities.includes("尚未配置 MCP"));
-  assert(!/vault|密码本/.test(settings));
-  assert.match(employeeVault, /const base = `\/employees\/\$\{props.employeeId\}\/vault`/);
-  assert.match(employeeVault, /@click="edit\(item\)"/);
-  assert.match(employeeVault, /@click="reset"/);
-  assert.match(employeeVault, /v-model="form.content" :required="!form.id"/);
-  assert.match(employeeVault, /form.id \? '保存修改' : '新增并加密保存'/);
+  assert.match(settings, /props\.admin \? ADMIN_SECTIONS : PERSONAL_SECTIONS/);
+  assert.match(settings, /<VaultSettings :api="api" :user-id="userId" :employees="employees \|\| \[\]"/);
+  assert.match(vaultSettings, /const base = "\/me\/vault"/);
+  assert.match(vaultSettings, /@click="edit\(item\)"/);
+  assert.match(vaultSettings, /@click="reset"/);
+  assert.match(vaultSettings, /v-model="form.content" :required="!form.id"/);
+  assert.match(vaultSettings, /form.id \? '保存修改' : '新增并加密保存'/);
+  assert.match(vaultSettings, /value="all".*所有牛马/s);
+  assert.match(vaultSettings, /value="specific".*指定牛马/s);
   const employeeSettings = readFileSync("web/src/EmployeeSettings.vue", "utf8");
   const app = readFileSync("web/src/App.vue", "utf8");
-  assert.match(app, /employee.value.canConfigure \? \[\['vault', '密码本'\]\]/);
+  assert(!/EmployeeVault|\['vault', '密码本'\]/.test(app), "the employee no longer has a vault tab");
+  assert.match(app, /<SettingsView v-else-if="view === 'settings'"/);
+  assert.match(app, /:employees="myEmployees"/);
   assert(!employeeSettings.includes("vaultIds") && !employeeSettings.includes("vaultEntries"));
   assert(!app.includes("vaultIds") && !app.includes("vaultEntries"));
 });
@@ -145,19 +150,29 @@ test("MCP JSON validation rejects malformed transports and options", () => {
   assert.doesNotThrow(() => validateMcpServer({ command: "node", args: [], env: {}, enabled: false }, "service"));
 });
 
-test("vault keeps the existing name/condition/content form without requiring website configuration", async () => {
+test("vault keeps the existing name/condition/content form and only saves the chosen scope", async () => {
   const form = { value: {} as any };
-  vaultFunction("edit", { form })({ id: "entry", type: "login", name: "account", condition: "仅用于合作伙伴身份验证，不用于业务站邮箱登录" });
+  vaultFunction("edit", { form })({ id: "entry", type: "login", name: "account", condition: "仅用于合作伙伴身份验证，不用于业务站邮箱登录", employees: ["e1"] });
   assert.equal(form.value.type, "login");
   assert.equal(form.value.condition, "仅用于合作伙伴身份验证，不用于业务站邮箱登录");
   assert.equal(form.value.content, "");
+  assert.equal(form.value.employees.join(","), "e1");
+  assert.equal(form.value.scope, "specific", "an entry limited to one employee reopens as 指定牛马");
   let body: any, path = "";
-  await vaultFunction("save", { form, base: "/employees/e1/vault", props: { api: async (p: string, _method: string, value: any) => { path = p; body = value; } }, run: async (fn: any) => fn(), reset() {}, load: async () => {}, emit() {}, disposed: false })();
-  assert.equal(path, "/employees/e1/vault");
+  form.value.scope = "all";
+  await vaultFunction("save", { form, base: "/me/vault", selected: () => [], props: { api: async (p: string, _method: string, value: any) => { path = p; body = value; } }, run: async (fn: any) => fn(), reset() {}, load: async () => {}, emit() {}, disposed: false })();
+  assert.equal(path, "/me/vault");
+  assert.equal(body.employees.length, 0, "所有牛马 is stored as an empty scope, never as a stale list");
   assert.equal(body.condition, form.value.condition);
   assert.equal(body.content, "");
-  assert.equal(body.site, undefined);
-  assert(!employeeVault.includes('v-model="form.site"'));
+  // 「指定牛马」without a selection must not silently widen the entry to every employee.
+  form.value.scope = "specific";
+  body = undefined;
+  const errors: string[] = [];
+  await vaultFunction("save", { form, base: "/me/vault", selected: () => [], props: { api: async () => { throw Error("must not save"); } }, run: async (fn: any) => fn(), reset() {}, load: async () => {}, emit: (type: string, message: string) => { if (type === "error") errors.push(message); }, disposed: false })();
+  assert.equal(body, undefined);
+  assert.match(errors[0], /至少一个牛马/);
+  assert(!vaultSettings.includes('v-model="form.site"'));
 });
 
 test("vault adds multiple entries and edits only the chosen one without exposing secrets", async () => {
@@ -178,7 +193,7 @@ test("vault adds multiple entries and edits only the chosen one without exposing
     await vault.remove(first.id);
     assert.equal((await vault.list()).length, 1);
     assert.equal((await vault.get(second.id, "test")).content, "new-secret");
-    vaultFunction("reset", { form })();
+    vaultFunction("reset", { form, blank: () => ({ type: "login", name: "", condition: "", content: "", scope: "all", employees: [] }) })();
     assert.equal((form.value as any).id, undefined);
   } finally { await store.close(); }
 });

@@ -33,7 +33,7 @@ import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, fo
 import { EmployeeBrowsers } from "./employee-browsers";
 import { NetworkRelay } from "./network-relay";
 import { LocalBrowsers } from "./local-browsers";
-import { Vault } from "./vault";
+import { Vault, migrateVaultOwnership } from "./vault";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
 
 /**
@@ -308,6 +308,7 @@ export class Engine {
     // Key files a crashed run left behind (KeyFiles removes them when a run ends).
     await rm(keyDir(store.files.root), { recursive: true, force: true });
     await engine.vault.key();
+    await migrateVaultOwnership(store);
     await engine.runtimes.loadAll();
     await engine.fire.recover();
     return engine;
@@ -586,7 +587,7 @@ export class Engine {
   }
   /**
    * 重置牛马: stop everything it is running, then drop every task (records, runs, task sessions, task-scoped temp
-   * credentials) and the chat history. Memories, settings, duties, the vault and the browser profile stay.
+   * credentials) and the chat history. Memories, settings, duties, the browser profile and the account's vault stay.
    */
   async resetEmployee(key: string) {
     const employee = await this.employee.for(key);

@@ -1,8 +1,9 @@
 <script setup vapor>
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import ProviderSettings from "./ProviderSettings.vue";
 import SceneSettings from "./SceneSettings.vue";
 import SchedulerSettings from "./SchedulerSettings.vue";
+import VaultSettings from "./VaultSettings.vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
 const props = defineProps({
@@ -11,16 +12,22 @@ const props = defineProps({
   models: Array,
   userId: String,
   tab: String,
+  admin: Boolean,
+  employees: Array,
 });
 const emit = defineEmits(["saved", "error", "notice", "tab"]);
-const sections = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"], ["scheduler", "任务调度", "tasks", "全站与单牛马并发上限"]];
+// 每个账号都有自己的设置页（密码本）；模型服务商、场景模型和任务调度只有管理员能改。
+const ADMIN_SECTIONS = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"], ["scheduler", "任务调度", "tasks", "全站与单牛马并发上限"], ["vault", "密码本", "key", "加密保存的账号、密钥和 SSH 私钥，可指定适用的牛马"]];
+const PERSONAL_SECTIONS = [["vault", "密码本", "key", "加密保存的账号、密钥和 SSH 私钥，可指定适用的牛马"]];
+const sections = computed(() => props.admin ? ADMIN_SECTIONS : PERSONAL_SECTIONS);
+const first = computed(() => props.admin ? "providers" : "vault");
 // The open section lives in the address (/settings/scenes) so refresh keeps it.
 const section = ref("providers");
-watch(() => props.tab, (tab) => { section.value = sections.some(([id]) => id === tab) ? tab : "providers"; }, { immediate: true });
-watch(section, (id) => { if (id !== (props.tab || "providers")) emit("tab", id === "providers" ? "" : id); });
+watch([() => props.tab, sections], ([tab, list]) => { section.value = list.some(([id]) => id === tab) ? String(tab) : first.value; }, { immediate: true });
+watch(section, (id) => { if (id !== (props.tab || first.value)) emit("tab", id === first.value ? "" : id); });
 </script>
 <template>
-  <PageHeader title="系统设置" :subtitle="sections.find((entry) => entry[0] === section)[3]" />
+  <PageHeader :title="admin ? '系统设置' : '设置'" :subtitle="sections.find((entry) => entry[0] === section)[3]" />
   <div class="settings-layout">
     <nav class="settings-nav" aria-label="设置分类">
       <button v-for="[id, label, icon] in sections" :key="id" type="button" :class="{ selected: section === id }" :aria-current="section === id ? 'page' : undefined" @click="section = id">
@@ -28,9 +35,12 @@ watch(section, (id) => { if (id !== (props.tab || "providers")) emit("tab", id =
       </button>
     </nav>
     <div class="settings-content">
-      <div :hidden="section !== 'providers'"><ProviderSettings :api="api" :config="config" :user-id="userId" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
-      <div :hidden="section !== 'scenes'"><SceneSettings :api="api" :config="config" :models="models" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
-      <div :hidden="section !== 'scheduler'"><SchedulerSettings :api="api" :config="config" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
+      <template v-if="admin">
+        <div :hidden="section !== 'providers'"><ProviderSettings :api="api" :config="config" :user-id="userId" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
+        <div :hidden="section !== 'scenes'"><SceneSettings :api="api" :config="config" :models="models" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
+        <div :hidden="section !== 'scheduler'"><SchedulerSettings :api="api" :config="config" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
+      </template>
+      <div :hidden="section !== 'vault'"><VaultSettings :api="api" :user-id="userId" :employees="employees || []" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
     </div>
   </div>
 </template>

@@ -19,7 +19,6 @@ import EmployeeMemories from "./EmployeeMemories.vue";
 import EmployeeSettings from "./EmployeeSettings.vue";
 import GroupChat from "./GroupChat.vue";
 import EmployeeCapabilities from "./EmployeeCapabilities.vue";
-import EmployeeVault from "./EmployeeVault.vue";
 import WorkPanel from "./WorkPanel.vue";
 import AppSidebar from "./AppSidebar.vue";
 import PageHeader from "./PageHeader.vue";
@@ -359,7 +358,7 @@ const historyTasks = computed(() =>
 const attentionTasks = computed(() => activeTasks.value.filter((task) => ["waiting", "approval"].includes(task.status)));
 const visibleEmployeeTasks = computed(() => employeeTaskFilter.value === "history" ? historyTasks.value : employeeTaskFilter.value === "attention" ? attentionTasks.value : activeTasks.value);
 const employeeStatus = computed(() => attentionTasks.value.length ? "需要你处理" : activeTasks.value.some((task) => task.status === "running") ? "正在工作" : "随时待命");
-const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['duties', '职责'], ['memories', '记忆'], ['capabilities', '技能 / MCP'], ...(employee.value.canConfigure ? [['vault', '密码本']] : []), ...(employee.value.canManage ? [['settings', '设置']] : [])]);
+const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['duties', '职责'], ['memories', '记忆'], ['capabilities', '技能 / MCP'], ...(employee.value.canManage ? [['settings', '设置']] : [])]);
 const employeeTone = computed(() => attentionTasks.value.length ? "warn" : activeTasks.value.some((task) => task.status === "running") ? "info" : "ok");
 const employeeCounts = computed(() => ({ tasks: attentionTasks.value.length || activeTasks.value.length, attention: attentionTasks.value.length, duties: employee.value.duties?.length || 0, memories: employee.value.memories?.length || 0 }));
 const workPanelVisible = computed(() => wide.value ? !workPanelHidden.value : workRailOpen.value);
@@ -1224,7 +1223,7 @@ async function createEmployee() {
 async function deleteEmployee() {
   if (employeeDeleting.value || !employee.value.id) return;
   const id = employee.value.id, name = employee.value.name, owner = user.value.id;
-  if (!confirm(`永久删除「${name}」？\n\n将删除该牛马的职责、记忆、密码本、所有任务和执行会话，并清除其浏览器登录数据。项目文件不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
+  if (!confirm(`永久删除「${name}」？\n\n将删除该牛马的职责、记忆、所有任务和执行会话，并清除其浏览器登录数据；「设置 → 密码本」里只指向它的条目也会删除。项目文件不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
   employeeDeleting.value = true;
   try {
     await api(`/employees/${id}?confirmed=true`, "DELETE");
@@ -1407,6 +1406,8 @@ async function applyRoute(route) {
   try {
     if (route.view === "group" && route.group && !groups.value.some((g) => g.id === route.group)) route = { view: "employee" };
     if (ADMIN_PAGES.includes(route.view) && !isAdmin.value) route = { view: "employee" };
+    // 非管理员只有「密码本」这一节：管理员的设置子页不冒充在地址里，回落设置首页。
+    if (route.view === "settings" && !isAdmin.value && route.sub) route = { view: "settings" };
     if (route.view === "group") openGroup(route.group);
     else if (route.view === "chat") {
       const session = route.session && sessions.value.find((s) => s.id === route.session);
@@ -1627,7 +1628,6 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
           <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
           <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" :search="memorySearch" /></div>
           <EmployeeCapabilities v-if="employeeTab === 'capabilities'" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
-          <EmployeeVault v-if="employeeTab === 'vault' && employee.canConfigure" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
           <EmployeeSettings
             v-if="employeeTab === 'settings' && employee.canManage"
             :employee="employee"
@@ -1647,7 +1647,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       <TokenStatsView v-else-if="view === 'usage'" :api="api" :admin="isAdmin" :self-id="user.id" />
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" :csrf="csrfToken" />
       <ExperiencesView v-else-if="view === 'experiences' && isAdmin" :api="api" :tab="pageSub" @tab="setPageTab" />
-      <SettingsView v-else-if="view === 'settings' && isAdmin" :api="api" :config="config" :user-id="user.id" :models="catalogModels" :tab="pageSub" @tab="setPageTab" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
+      <SettingsView v-else-if="view === 'settings'" :api="api" :config="config" :user-id="user.id" :models="catalogModels" :tab="pageSub" :admin="isAdmin" :employees="myEmployees" @tab="setPageTab" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
     </section>
     <div class="toasts" aria-live="polite">
       <div v-if="error" class="toast error" role="alert"><Icon name="alert" :size="16" /><span>{{ error }}</span><button type="button" class="icon" aria-label="关闭错误" @click="error = ''"><Icon name="close" :size="14" /></button></div>

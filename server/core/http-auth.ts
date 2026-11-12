@@ -119,6 +119,8 @@ export async function gate(event: H3Event, path: string) {
   if (/^\/api\/blobs\/[^/]+$/.test(path) && event.method === "GET") return;
   // Group chats check membership (and read-only accounts) themselves; everyone has an avatar of their own.
   if (/^\/api\/groups(?:\/|$)/.test(path)) return;
+  // 本人的密码本及其条目：密码本属于账号，不属于管理员。
+  if (/^\/api\/me\/vault(?:\/|$)/.test(path)) return;
   if (path === "/api/me/avatar" && event.method === "POST") return;
   if (/^\/api\/avatars\/users\/[^/]+$/.test(path) && event.method === "GET") return;
   if (/^\/api\/sessions\//.test(path) && event.method === "GET") return;

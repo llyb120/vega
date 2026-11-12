@@ -1219,7 +1219,7 @@ test(
         false,
       );
       await nav("设置");
-      await until(`[...document.querySelectorAll('.settings h3')].some(e=>e.textContent==='密码本')`);
+      await until(`[...document.querySelectorAll('.settings-content h3')].some(e=>e.textContent.startsWith('密码本'))`);
       await layout("vault settings");
       await nav("浏览器");
       await until(

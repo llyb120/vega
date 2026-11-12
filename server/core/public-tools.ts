@@ -275,10 +275,10 @@ export function employeeTools(ctx: ToolContext): Tool[] {
 }
 
 export function vaultTools(ctx: ToolContext): Tool[] {
-  // Each employee always uses its own book, whoever asked for the work; a plain session has no employee and no book.
+  // Each employee reads its owner's book, limited to the entries that apply to it; a plain session has no employee and no book.
   if (ctx.kind === "normal") return [];
   return [
-    tool("vault_list", "列出当前牛马自己密码本条目的 id、类型（login 账号密码 / token API 密钥或令牌 / ssh_key SSH 私钥 / general 万能）、名称和使用条件（不含凭据内容）。取用前先看 condition，选出唯一适用的条目。增删改只有牛马创建者能在牛马配置的「密码本」里操作。"),
+    tool("vault_list", "列出创建者密码本里适用于当前牛马的条目 id、类型（login 账号密码 / token API 密钥或令牌 / ssh_key SSH 私钥 / general 万能）、名称和使用条件（不含凭据内容）。取用前先看 condition，选出唯一适用的条目。增删改由本人在「设置 → 密码本」里操作。"),
     tool("vault_get",
       "按 credentialId 取一条凭据供本轮使用：purpose 写清本次用途及为什么符合该条 condition；系统结合当前页面核对条件，不符则拒绝且不取出。凭据内容不进入对话记录，只用于当前授权操作，不写进回复、记忆、计划或交接。ssh_key 类型不返回私钥原文：系统在当前执行位置（服务端或所选客户端）写入本轮临时私钥文件，返回 keyFile 和可直接用于 git 的 GIT_SSH_COMMAND，本轮结束自动删除。",
       { credentialId, purpose: str("本次用途及为什么符合使用条件，1–8000 字", { minLength: 1, maxLength: 8000 }), url: vaultUrl },

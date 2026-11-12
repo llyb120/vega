@@ -169,7 +169,7 @@ test("employee deletion removes its sessions/profile and its own vault and survi
     await assert.rejects(async () => await store.session(legacy.id), /not found/);
     await assert.rejects(access(profile));
     assert.equal(await readFile(join(dir, "project.txt"), "utf8"), "keep");
-    assert.deepEqual(await store.objects(a.vault.kind), [], "deleting an employee deletes its own vault");
+    assert.deepEqual((await engine.vault.book("alice").list()).map((entry: any) => entry.id), [kept.id], "deleting A drops only the entry scoped to it, in the shared account book");
     assert(!(await b.vault.list()).some((entry) => entry.id === credential.id));
     assert.deepEqual((await b.vault.list()).map((entry) => entry.id), [kept.id]);
     assert.equal((await (await engine.employee.for(b.employeeId)).state()).name, "Keep");

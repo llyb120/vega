@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../server/core/store";
-import { Vault } from "../server/core/vault";
+import { Vault, vaultKind } from "../server/core/vault";
 import { Engine } from "../server/core/engine";
 import { Catalog } from "../server/core/catalog";
 import { Subscriptions } from "../server/core/subscriptions";
@@ -62,7 +62,7 @@ test("a different actual login system rejects the requested credential before de
       return decision(false, "当前是合作伙伴认证，不是 DataBrain 邮箱登录");
     };
     await assert.rejects(get(entry.id, "处理 DataBrain 任务，现在需要登录"), /合作伙伴认证/);
-    assert.equal((await store.object<any>(vault.kind, entry.id)).usedAt, undefined);
+    assert.equal((await store.object<any>(vaultKind("owner"), entry.id)).usedAt, undefined);
   } finally { await engine.close(); await store.close(); }
 });
 
@@ -73,7 +73,7 @@ test("invalid or ambiguous condition checks fail closed instead of trying anothe
       const entry = await vault.save({ name: "account", condition: "only authorized operation", content: "not-released" });
       engine.providers.chat = async () => reply as any;
       await assert.rejects(get(entry.id));
-      assert.equal((await store.object<any>(vault.kind, entry.id)).usedAt, undefined);
+      assert.equal((await store.object<any>(vaultKind("owner"), entry.id)).usedAt, undefined);
     } finally { await engine.close(); await store.close(); }
   }
 });
@@ -87,7 +87,7 @@ test("approved website context is derived from the observed page, never from a r
     const result = await get(entry.id, "登录业务站邮箱入口");
     assert.equal(JSON.parse(result.secret!).scopeSite, "https://business.example");
     assert.equal((await vault.list())[0].site, undefined);
-    assert.equal((await store.object<any>(vault.kind, entry.id)).scopeSite, undefined, "approval context is not permanent configuration");
+    assert.equal((await store.object<any>(vaultKind("owner"), entry.id)).scopeSite, undefined, "approval context is not permanent configuration");
   } finally { await engine.close(); await store.close(); }
 });
 
@@ -100,7 +100,7 @@ test("condition edits during verification invalidate the approval before a secre
       return decision(true);
     };
     await assert.rejects(get(entry.id), /条件已变化/);
-    assert.equal((await store.object<any>(vault.kind, entry.id)).usedAt, undefined);
+    assert.equal((await store.object<any>(vaultKind("owner"), entry.id)).usedAt, undefined);
     assert.equal((await vault.get(entry.id, "explicit direct test")).content, "keep-encrypted");
   } finally { await engine.close(); await store.close(); }
 });
@@ -118,7 +118,7 @@ test("employee task vault reads pass the same semantic check before releasing a 
     const call = { id: "get", ...employeeCall({ action: "vault_get", id: entry.id, text: "按任务授权核对待办" }) };
     engine.providers.chat = async () => decision(false, "需要确认客户端类型");
     await assert.rejects(tools.execute(call, { supportsImages: true } as any), /客户端类型/);
-    assert.equal((await store.object<any>(employee.vault.kind, entry.id)).usedAt, undefined);
+    assert.equal((await store.object<any>(vaultKind("owner"), entry.id)).usedAt, undefined);
     engine.providers.chat = async () => decision(true);
     assert.equal(JSON.parse((await tools.execute(call, { supportsImages: true } as any)).secret!).content, "private-value");
     employee.busy.clear();

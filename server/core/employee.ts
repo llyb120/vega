@@ -433,17 +433,17 @@ export class Employee {
   lastActivity = Date.now();
   locked = false;
   nativePresence?: Presence;
-  /** This employee's own credential book; `vaults` only holds the shared key. */
-  vault: Vault;
+  /** 创建者的密码本，只看适用于这头牛马的条目；`vaults` 只持有共享密钥。 */
+  get vault(): Vault {
+    return this.vaults.scoped(this.employeeId, async () => (await this.profile()).ownerId || this.employeeId);
+  }
   constructor(
     public store: Store,
     public vaults: Vault,
     public runtime: EmployeeRuntime,
     public employeeId = "default",
     public root?: Employee,
-  ) {
-    this.vault = vaults.scoped(employeeId);
-  }
+  ) {}
   async all(): Promise<Employee[]> {
     const root = this.root || this;
     if (!root.membersLoaded) {
@@ -511,7 +511,8 @@ export class Employee {
     assert(this.deleting && !this.busy.size, "Employee deletion requires an idle employee");
     const state = await this.state();
     await this.store.transaction(async () => {
-      for (const kind of [this.vault.kind, "experience:" + this.employeeId, "skill:" + this.employeeId]) await this.store.removeKind(kind);
+      await this.vaults.book(state.ownerId || this.employeeId).dropEmployee(this.employeeId);
+      for (const kind of ["experience:" + this.employeeId, "skill:" + this.employeeId]) await this.store.removeKind(kind);
       await this.store.dropEmployeeRows(this.employeeId);
       await this.store.remove("employee-capabilities", this.employeeId);
       if (this.employeeId === "default") {
@@ -966,7 +967,7 @@ export class Employee {
           secret: JSON.stringify(value),
         };
       }
-      throw Error("密码本增删改只能由牛马创建者在牛马配置的「密码本」里操作");
+      throw Error("密码本增删改只能由本人在「设置 → 密码本」里操作");
     }
     let stop = false,
       pendingTell: { session: string; message: Message; group?: Task["group"] } | undefined,

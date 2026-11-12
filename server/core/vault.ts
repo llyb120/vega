@@ -47,11 +47,17 @@ export const decrypt = (key: Buffer, aad: string, blob: string) => {
     decipher.final(),
   ]);
 };
-/** Each employee keeps its own credential book in this object kind. */
-export const vaultKind = (employeeId: string) => "vault:" + employeeId;
+/** One credential book per account, shared by its employees; an entry's employees list limits who may use it. */
+export const vaultKind = (ownerId: string) => "vault:user:" + ownerId;
 export class Vault {
-  /** kind "vault" is the key holder; employees use scoped(). */
-  constructor(public store: Store, public kind = "vault", private keyLoad?: Promise<Buffer>) {}
+  /** kind "vault" is only the key holder; account books use vaultKind(ownerId), employees use scoped(). */
+  constructor(
+    public store: Store,
+    public kind = "vault",
+    private keyLoad?: Promise<Buffer>,
+    /** An employee's view: its owner's book, only entries that apply to it. */
+    private view?: { owner: () => Promise<string>; employeeId: string },
+  ) {}
   /** The encryption key: VEGA_VAULT_KEY, or one generated once and kept in settings. */
   key(): Promise<Buffer> {
     let key = this.keyLoad || keys.get(this.store);
@@ -61,9 +67,24 @@ export class Vault {
     }
     return (this.keyLoad = key);
   }
-  /** The credential book of one employee; same key and encryption, separate entries. */
-  scoped(employeeId: string) {
-    return new Vault(this.store, vaultKind(employeeId), this.key());
+  /** The credential book of one account (the settings page). */
+  book(ownerId: string) {
+    return new Vault(this.store, vaultKind(ownerId), this.key());
+  }
+  /** The entries one employee may use: its owner's book, filtered to those that apply to it. */
+  scoped(employeeId: string, owner: () => Promise<string>) {
+    return new Vault(this.store, "vault", this.key(), { owner, employeeId });
+  }
+  private async bookKind() {
+    return this.view ? vaultKind((await this.view.owner()) || this.view.employeeId) : this.kind;
+  }
+  private applies(entry: Obj) {
+    return !this.view || !entry.employees?.length || entry.employees.includes(this.view.employeeId);
+  }
+  /** One raw entry (secret included, never leaves the server) if this view may use it. */
+  private async stored(key: string) {
+    const entry = await this.store.object<Obj>(await this.bookKind(), key);
+    return entry && this.applies(entry) ? entry : undefined;
   }
   async sealObject(value: any, aad = "subscription") {
     return encrypt(await this.key(), aad, JSON.stringify(value));
@@ -72,7 +93,9 @@ export class Vault {
     return JSON.parse(decrypt(await this.key(), aad, raw).toString());
   }
   async list() {
-    return (await this.store.objects<any>(this.kind)).map(({ secret, ...e }) => ({ ...e, type: vaultType(e.type) }));
+    return (await this.store.objects<any>(await this.bookKind()))
+      .filter((entry) => this.applies(entry))
+      .map(({ secret, ...e }) => ({ ...e, type: vaultType(e.type) }));
   }
   async save(a: Obj) {
     assert(
@@ -91,24 +114,36 @@ export class Vault {
       "Vault content too long",
     );
     assert(a.type === undefined || VAULT_TYPES[a.type], "Unknown vault entry type");
-    const old = a.id ? await this.store.object<any>(this.kind, a.id) : undefined;
+    const kind = await this.bookKind();
+    const old = a.id ? await this.stored(String(a.id)) : undefined;
     if (a.id) assert(old, "Vault entry not found");
     assert(old || a.content, "New entry requires content");
     assert(old || (await this.list()).length < 200, "Vault capacity reached");
+    // An employee's own saves stay in its owner's book and apply to that employee only.
+    const declared = this.view ? [this.view.employeeId] : a.employees === undefined ? old?.employees : a.employees;
+    assert(
+      declared === undefined ||
+        (Array.isArray(declared) &&
+          declared.length <= 50 &&
+          declared.every((value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 64)),
+      "Invalid vault employees",
+    );
     const type = a.type ?? vaultType(old?.type);
     let content: string | undefined = a.content || undefined;
     // An entry becoming an SSH key must hold one, even when its stored content is kept.
-    if (type === "ssh_key") content = sshPrivateKey(content ?? decrypt(await this.key(), "vault", old.secret).toString());
+    if (type === "ssh_key") content = sshPrivateKey(content ?? decrypt(await this.key(), "vault", old!.secret).toString());
     const entry = {
       ...old,
       id: old?.id || id("v"),
       type,
       name: a.name,
       condition: a.condition,
-      secret: content ? encrypt(await this.key(), "vault", content) : old.secret,
+      // No list at all means every employee of the owner may use it.
+      employees: declared?.length ? declared : undefined,
+      secret: content ? encrypt(await this.key(), "vault", content) : old!.secret,
       createdAt: old?.createdAt || Date.now(),
     };
-    await this.store.save(this.kind, entry.id, entry);
+    await this.store.save(kind, entry.id, entry);
     return { id: entry.id };
   }
   async get(key: string, purpose: string, task = "") {
@@ -116,12 +151,12 @@ export class Vault {
       typeof purpose === "string" && purpose.trim(),
       "Vault purpose required",
     );
-    const e = await this.store.object<any>(this.kind, key);
+    const kind = await this.bookKind(), e = await this.stored(key);
     assert(e, "Vault entry not found");
     const content = decrypt(await this.key(), "vault", e.secret).toString();
     e.usedAt = Date.now();
     e.usedFor = purpose.slice(0, 100);
-    await this.store.save(this.kind, key, e);
+    await this.store.save(kind, key, e);
     return {
       id: e.id,
       type: vaultType(e.type),
@@ -132,9 +167,39 @@ export class Vault {
     };
   }
   async remove(key: string) {
-    assert(await this.store.object(this.kind, key), "Vault entry not found");
-    await this.store.remove(this.kind, key);
+    assert(await this.stored(key), "Vault entry not found");
+    await this.store.remove(await this.bookKind(), key);
   }
+  /** Deleting an employee drops its scope; entries that pointed at nothing else go with it, never widening to all. */
+  async dropEmployee(employeeId: string) {
+    const kind = await this.bookKind();
+    for (const entry of await this.store.objects<any>(kind)) {
+      if (!entry.employees?.includes(employeeId)) continue;
+      const employees = entry.employees.filter((value: string) => value !== employeeId);
+      if (employees.length) await this.store.save(kind, entry.id, { ...entry, employees });
+      else await this.store.remove(kind, entry.id);
+    }
+  }
+}
+
+/** Old per-employee books (vault:<employeeId>) fold into the owner's book, still visible to that employee only. */
+export async function migrateVaultOwnership(store: Store) {
+  if (await store.get("vault:owners", false)) return;
+  await store.transaction(async () => {
+    const kinds = (await store.all("SELECT DISTINCT kind FROM objects WHERE kind LIKE 'vault:%'"))
+      .map((row: any) => String(row.kind))
+      .filter((kind) => !kind.startsWith("vault:user:"));
+    for (const kind of kinds) {
+      const employeeId = kind.slice("vault:".length);
+      // The built-in legacy employee is a settings row, not an objects row.
+      const state = employeeId === "default" ? await store.get<any>("employee", undefined) : await store.object<any>("employee", employeeId);
+      const owner = state?.ownerId || employeeId;
+      for (const entry of await store.objects<any>(kind))
+        await store.save(vaultKind(owner), entry.id, { ...entry, employees: [employeeId] });
+      await store.removeKind(kind);
+    }
+    await store.put("vault:owners", true);
+  });
 }
 
 /** One key load per store, shared by every Vault on it (the engine loads it at startup). */

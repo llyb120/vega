@@ -211,13 +211,15 @@ test("removed Orbit is not exposed to the website or scheduler; prior data is re
   }
 });
 
-test("UI keeps all pages Vapor, settings last, separate experiences, no whole-page bounce and no directory/config JSON inputs", () => {
+test("UI keeps all pages Vapor, settings for every role, separate experiences, no whole-page bounce and no directory/config JSON inputs", () => {
   const app = readFileSync("web/src/App.vue", "utf8"),
     css = readFileSync("web/src/style.css", "utf8"),
     sidebar = readFileSync("web/src/AppSidebar.vue", "utf8"),
     nav = sidebar.slice(sidebar.indexOf("const adminNav ="), sidebar.indexOf("\n", sidebar.indexOf("const adminNav =")));
-  assert(nav.indexOf('"experiences"') >= 0 && nav.indexOf('"experiences"') < nav.lastIndexOf('"settings"'));
-  assert(nav.trimEnd().endsWith('"settings"]];') || /\["settings", [^\]]*\]\];$/.test(nav.trim()), "settings stays last");
+  // 设置页是所有角色的（密码本在这里），管理员导航只剩管理页。
+  assert(!nav.includes('"settings"'), "settings is not administrator-only");
+  assert(nav.includes('"experiences"') && nav.includes('"debug"') && nav.trimEnd().endsWith('"code"]];'));
+  assert(sidebar.indexOf("emit('navigate', 'settings')") > sidebar.indexOf("emit('navigate', 'usage')"), "settings follows the personal pages");
   assert(!app.includes("星轨"));
   assert(!app.includes("牛马工作目录"));
   assert(!app.includes("模型配置 JSON"));

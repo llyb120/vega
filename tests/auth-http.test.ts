@@ -592,33 +592,30 @@ test(
       const readAfterFailure = await ok(`/sessions/${teamChat.session.id}`, 'GET', undefined, admin);
       assert.equal(readAfterFailure.messages.at(-1).text, failedChat.messages.at(-1).text, 'the failure survives a new reader rather than depending on a transient event');
       assert.equal((await ok(`/employees/${team.id}`, 'GET', undefined, admin)).tasks.length, 0);
-      // Each employee's creator maintains that employee's own vault; nobody else reads or edits it.
+      // Each account keeps one vault; entries can be limited to some of that account's own employees.
       const own: Record<string, string> = {};
       for (const [worker, login] of [[team, admin], [workerA, a], [workerB, b]] as const) {
-        own[worker.id] = (await ok(`/employees/${worker.id}/vault`, "POST", { name: worker.name + " service", condition: "authorized test", content: worker.id + "-secret" }, login)).id;
+        own[worker.id] = (await ok("/me/vault", "POST", { name: worker.name + " service", condition: "authorized test", content: worker.id + "-secret", employees: [worker.id] }, login)).id;
         assert.equal((await ok(`/employees/${worker.id}`, "GET", undefined, login)).canConfigure, true);
-        const listed = await ok(`/employees/${worker.id}/vault`, "GET", undefined, login);
-        assert.deepEqual(listed.entries.map((entry: any) => entry.id), [own[worker.id]], "only this employee's own entry is listed");
+        const listed = await ok("/me/vault", "GET", undefined, login);
+        assert.deepEqual(listed.entries.map((entry: any) => entry.id), [own[worker.id]], "every account keeps only its own book");
+        assert.deepEqual(listed.entries[0].employees, [worker.id], "an entry remembers which employees it is limited to");
         assert(!JSON.stringify(listed).includes(worker.id + "-secret"));
         const entries = await ok(`/employees/${worker.id}`, "POST", { action: "vault_list" }, login);
-        assert.deepEqual(entries.entries.map((entry: any) => entry.id), [own[worker.id]], "an employee only sees its own entries");
+        assert.deepEqual(entries.entries.map((entry: any) => entry.id), [own[worker.id]], "an employee sees the owner's entries that apply to it");
         const value = await ok(`/employees/${worker.id}`, "POST", { action: "vault_get", id: own[worker.id], text: "authorized test" }, login);
         assert.equal(value.content, worker.id + "-secret");
       }
+      assert.equal((await req("/me/vault", "POST", { name: "foreign", condition: "test", content: "x", employees: [workerB.id] }, a)).r.status, 400, "an entry can only target your own employees");
+      assert.equal((await req("/me/vault", "GET", undefined, v)).r.status, 200, "a read-only account still manages its own book");
       assert.notEqual((await req(`/employees/${workerA.id}`, "POST", { action: "vault_get", id: own[workerB.id], text: "authorized test" }, a)).r.status, 200, "A cannot read B's entry by id");
-      assert.equal((await req(`/employees/${workerB.id}/vault`, "GET", undefined, a)).r.status, 404);
-      for (const login of [admin, b]) assert.notEqual((await req(`/employees/${workerA.id}/vault`, "GET", undefined, login)).r.status, 200);
-      assert.equal((await req(`/employees/${workerA.id}/vault`, "GET", undefined, admin)).r.status, 404, "an employee belongs to its owner alone: administrators cannot even see it");
       assert.equal((await req(`/employees/${workerA.id}`, "POST", { action: "vault_get", id: own[workerA.id], text: "authorized test" }, admin)).r.status, 404);
       assert.equal((await req(`/employees/${workerA.id}`, "GET", undefined, admin)).r.status, 404);
-      for (const login of [a, b, v]) {
-        assert.equal((await req(`/employees/${team.id}/vault`, "GET", undefined, login)).r.status, 404);
-        assert.equal((await req(`/employees/${team.id}/vault`, "POST", { name: "forbidden", condition: "test", content: "must not save" }, login)).r.status, login === v ? 403 : 404);
-        assert.equal((await req(`/employees/${team.id}/vault/${own[team.id]}`, "DELETE", undefined, login)).r.status, login === v ? 403 : 404);
-      }
-      assert.equal((await req("/vault", "GET", undefined, admin)).r.status, 404, "the global vault route is gone");
-      await ok(`/employees/${workerA.id}/vault/${own[workerA.id]}`, "DELETE", undefined, a);
-      assert.deepEqual((await ok(`/employees/${workerA.id}/vault`, "GET", undefined, a)).entries, []);
+      for (const login of [a, b, v, admin]) assert.equal((await req(`/employees/${team.id}/vault`, "GET", undefined, login)).r.status, 404, "the per-employee vault route is gone");
+      assert.equal((await req("/vault", "GET", undefined, admin)).r.status, 404, "there is no site-wide vault");
+      await ok(`/me/vault/${own[workerA.id]}`, "DELETE", undefined, a);
+      assert.deepEqual((await ok("/me/vault", "GET", undefined, a)).entries, []);
+      assert.deepEqual((await ok(`/employees/${workerA.id}`, "POST", { action: "vault_list" }, a)).entries, [], "a deleted entry is gone for the employee too");
       for (const [worker, login] of [[workerA, a], [workerB, b]] as const) {
         await ok(`/employees/${worker.id}`, "POST", { action: "add", kind: "todo", text: "isolated work", key: "same-key", nextCheckInMinutes: 60 }, login);
       }

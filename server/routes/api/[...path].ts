@@ -223,7 +223,7 @@ export default defineEventHandler(async (event) => {
       // Marking the chat read is reading: read-only accounts may do it.
       if (path[2] === "chat" && path[3] === "read" && path.length === 4 && method === "POST") return { seq: state.chatSession ? await store.markRead(user.id, state.chatSession) : 0 };
       if (method !== "GET") check(user.role !== "viewer", 403, "只读账号不能执行操作");
-      if (["capabilities", "skills", "mcp", "vault"].includes(path[2]))
+      if (["capabilities", "skills", "mcp"].includes(path[2]))
         return await employeeCapabilities(employee, user, method, path.slice(2), a);
       if (path[2] === "avatar") {
         if (method === "GET") {
@@ -338,11 +338,27 @@ export default defineEventHandler(async (event) => {
       if (path.length === 2 && method === "POST") {
         if (!await employee.manageable(user)) check(a.action === "list" || a.action === "memory_search" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
         // Same owner-only rule as the vault page: managing an employee does not open its vault.
-        if (typeof a.action === "string" && a.action.startsWith("vault_")) check(await canConfigureEmployee(employee, user), 403, "只有牛马创建者可以使用这个牛马的密码本");
+        if (typeof a.action === "string" && a.action.startsWith("vault_")) check(await canConfigureEmployee(employee, user), 403, "只有牛马创建者可以使用它的密码本条目");
         const result = await employee.execute("", await prepareDutyInput(engine, employee, a));
         return result.secret ? JSON.parse(result.secret) : result.value;
       }
       check(false, 404, "Employee route not found");
+    }
+    if (path[0] === "me" && path[1] === "vault") {
+      // 本人的密码本：名下牛马在任务里按适用范围取用；什么角色都只碰自己这一本。
+      const vault = engine.vault.book(user.id);
+      if (method === "GET" && path.length === 2) return { entries: await vault.list() };
+      if (method === "POST" && path.length === 2) {
+        if (a.employees !== undefined) {
+          assert(Array.isArray(a.employees) && a.employees.length <= 50 && a.employees.every((value) => typeof value === "string" && value), "employees 必须是牛马 ID 数组");
+          const mine = new Set((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map((employee) => employee.employeeId));
+          assert((a.employees as string[]).every((value) => mine.has(value)), "只能选择你自己的牛马");
+        }
+        return await vault.save({ id: a.id, type: a.type, name: a.name, condition: a.condition, content: a.content, employees: a.employees });
+      }
+      check(method === "DELETE" && path.length === 3, 404, "Vault route not found");
+      await vault.remove(decodeURIComponent(path[2]));
+      return { ok: true };
     }
     if (path[0] === "me" && path[1] === "avatar" && path.length === 2 && method === "POST")
       return await updateUserAvatar(store, user.id, a);

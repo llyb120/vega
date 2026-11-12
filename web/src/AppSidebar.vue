@@ -27,7 +27,7 @@ const props = defineProps({
 const emit = defineEmits(["choose", "open-group", "create", "navigate", "logout", "close", "expand", "retry-pairing", "select-session", "remove-session"]);
 const clientOpen = ref(false);
 const roleLabel = { admin: "管理员", operator: "操作用户", viewer: "只读用户" };
-const adminNav = [["experiences", "经验图谱", "graph"], ["debug", "调试会话", "code"], ["settings", "系统设置", "settings"]];
+const adminNav = [["experiences", "经验图谱", "graph"], ["debug", "调试会话", "code"]];
 function employeeTone(entry) { return entry.attentionTasks ? "warn" : entry.activeTasks ? "info" : ""; }
 function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionTasks} 项待你处理` : entry.activeTasks ? `${entry.activeTasks} 项进行中` : "空闲"; }
 const unreadLabel = (n) => n > 99 ? "99+" : String(n);
@@ -99,6 +99,7 @@ const unreadLabel = (n) => n > 99 ? "99+" : String(n);
     <nav class="sidebar-nav" aria-label="主导航">
       <button type="button" class="nav-item" :class="{ active: view === 'resources' }" :aria-current="view === 'resources' ? 'page' : undefined" title="资源" @click="emit('navigate', 'resources')"><span class="nav-icon"><Icon name="laptop" /></span><span class="nav-label">资源</span></button>
       <button type="button" class="nav-item" :class="{ active: view === 'usage' }" :aria-current="view === 'usage' ? 'page' : undefined" title="Token 统计" @click="emit('navigate', 'usage')"><span class="nav-icon"><Icon name="graph" /></span><span class="nav-label">Token 统计</span></button>
+      <button type="button" class="nav-item" :class="{ active: view === 'settings' }" :aria-current="view === 'settings' ? 'page' : undefined" title="设置" @click="emit('navigate', 'settings')"><span class="nav-icon"><Icon name="settings" /></span><span class="nav-label">设置</span></button>
       <template v-if="isAdmin">
         <div class="sidebar-section-head"><span class="nav-label">管理</span></div>
         <button v-for="[id, label, icon] in adminNav" :key="id" type="button" class="nav-item" :class="{ active: view === id }" :aria-current="view === id ? 'page' : undefined" :title="label" @click="emit('navigate', id)"><span class="nav-icon"><Icon :name="icon" /></span><span class="nav-label">{{ label }}</span></button>
