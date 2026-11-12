@@ -537,7 +537,27 @@ export default defineEventHandler(async (event) => {
       if (user.role !== "admin") check(!requested || requested === user.id, 403, "只能查看自己的用量");
       const from = query.get("from") ? Number(query.get("from")) : undefined;
       const to = query.get("to") ? Number(query.get("to")) : undefined;
-      return { ...(await store.tokenUsageSummary({ userId, from, to })), self: user.id, admin: user.role === "admin" };
+      // Sequential: both statements may create the usage table on a fresh database.
+      const summary = await store.tokenUsageSummary({ userId, from, to }),
+        tasks = await store.tokenUsageTasks({ userId, from, to, page: Number(query.get("page")) || 1 });
+      // The filter lists account names, not opaque ids; only administrators may see other accounts at all.
+      const names = new Map((await store.all("SELECT id,username FROM web_users")).map((row) => [String(row.id), String(row.username)]));
+      const employeeIds = [...new Set(tasks.tasks.map((row) => row.employee).filter(Boolean))],
+        employees = new Map<string, string>();
+      for (const id of employeeIds)
+        employees.set(id, await engine.employee.for(id).then((item) => item.profile()).then((profile) => profile.name, () => ""));
+      const rows = await Promise.all(tasks.tasks.map(async (row) => ({
+        ...row,
+        userName: names.get(row.user) || row.user,
+        employeeName: employees.get(row.employee) || "",
+        text: String(row.task ? (await store.employeeTask(row.task))?.task?.text || "" : "").slice(0, 200),
+      })));
+      return {
+        ...summary,
+        users: (user.role === "admin" ? summary.users : [user.id]).map((id) => ({ id, name: names.get(id) || id })),
+        taskPage: { tasks: rows, total: tasks.total, page: tasks.page, pageSize: tasks.pageSize },
+        self: user.id, admin: user.role === "admin",
+      };
     }
     if (path[0] === "config" && method === "PUT")
       return engine.saveConfig(a as any);

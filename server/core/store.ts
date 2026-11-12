@@ -606,4 +606,25 @@ export class Store {
       users,
     };
   }
+  /** One page of per-task totals; grouping, ordering and paging all run in SQL. */
+  async tokenUsageTasks(opts: { userId?: string; from?: number; to?: number; page?: number; pageSize?: number } = {}) {
+    await this.ensureTokenUsageTable();
+    const { filter, params } = this.usageFilter(opts);
+    const page = Math.max(Math.trunc(opts.page || 1), 1), pageSize = Math.min(Math.max(Math.trunc(opts.pageSize || 20), 1), 100);
+    const task = this.json("$.task"), employee = this.json("$.employee");
+    const sum = (key: string) => `COALESCE(SUM(${this.json("$." + key)}),0) ${key}`;
+    // Rows from plain chats carry no task: they group per user and 牛马 instead of being added together.
+    const group = `SELECT user,${task} task,${employee} employee,COUNT(*) n,MIN(at) firstAt,MAX(at) lastAt,${["input", "output", "cacheRead", "cacheWrite", "total"].map(sum).join(",")} FROM token_usage${filter} GROUP BY user,${task},${employee}`;
+    const rows = await this.all(`${group} ORDER BY total DESC,lastAt DESC LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, ...params);
+    const total = Number((await this.one(`SELECT COUNT(*) n FROM (${group}) g`, ...params))!.n);
+    return {
+      tasks: rows.map((row) => ({
+        user: String(row.user), task: row.task ? String(row.task) : "", employee: row.employee ? String(row.employee) : "",
+        n: Number(row.n) || 0, input: Number(row.input) || 0, output: Number(row.output) || 0,
+        cacheRead: Number(row.cacheRead) || 0, cacheWrite: Number(row.cacheWrite) || 0, total: Number(row.total) || 0,
+        first: Number(row.firstAt), last: Number(row.lastAt),
+      })),
+      total, page, pageSize,
+    };
+  }
 }

@@ -21,6 +21,28 @@ test("token usage is recorded per user and totalled over the whole range in SQL"
   }
 });
 
+test("token usage per task groups and pages in SQL", async () => {
+  const store = await Store.open(":memory:");
+  try {
+    await store.recordTokenUsage({ userId: "alice", at: 1000, task: "t1", employee: "e1", session: "s1", input: 10, output: 5, total: 15 });
+    await store.recordTokenUsage({ userId: "alice", at: 2000, task: "t1", employee: "e1", session: "s1", input: 1, output: 1, cacheRead: 3, total: 5 });
+    await store.recordTokenUsage({ userId: "alice", at: 3000, task: "t2", employee: "e1", session: "s2", input: 7, total: 7 });
+    await store.recordTokenUsage({ userId: "bob", at: 4000, session: "s3", input: 2, total: 2 });
+    const first = await store.tokenUsageTasks({ userId: "alice", pageSize: 1 });
+    assert.deepEqual(first.tasks, [{ user: "alice", task: "t1", employee: "e1", n: 2, input: 11, output: 6, cacheRead: 3, cacheWrite: 0, total: 20, first: 1000, last: 2000 }]);
+    assert.deepEqual([first.total, first.page, first.pageSize], [2, 1, 1]);
+    const rest = await store.tokenUsageTasks({ userId: "alice", page: 2, pageSize: 1 });
+    assert.deepEqual([rest.tasks[0].task, rest.tasks[0].total], ["t2", 7]);
+    assert.equal((await store.tokenUsageTasks({ userId: "alice", page: 3, pageSize: 1 })).tasks.length, 0);
+    // Rows without a task stay a separate bucket instead of being merged into another task.
+    const all = await store.tokenUsageTasks({ pageSize: 20 });
+    assert.equal(all.total, 3);
+    assert(all.tasks.some((row) => row.user === "bob" && !row.task && row.total === 2));
+  } finally {
+    await store.close();
+  }
+});
+
 test("opening an existing SCHEMA 6 database still gains the token_usage table without a schema bump", async () => {
   const store = await Store.open(":memory:");
   try {
