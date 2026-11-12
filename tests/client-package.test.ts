@@ -44,6 +44,7 @@ test("the install package carries the site's own origin next to the client binar
 test("only known client files can be packaged", async (t) => {
   fixture(t);
   assert.equal(clientBaseName("vega-local-linux-amd64.zip"), "vega-local-linux-amd64");
+  assert.equal(clientBaseName("vega-desktop-windows-amd64.exe.zip"), "vega-desktop-windows-amd64.exe");
   for (const bad of ["manifest.json", "../../etc/passwd", "../vega-local-linux-amd64", "vega-chrome.zip", ""])
     assert.throws(() => clientBaseName(bad), /Unknown client package/, bad);
   await assert.rejects(clientPackage("vega-local-solaris-sparc", "https://vega.example"), /Unknown client package/);

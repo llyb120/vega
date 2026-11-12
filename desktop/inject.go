@@ -26,10 +26,6 @@ const shimJS = `(function(){
       }
     };
   }
-  window.__VEGA_DESKTOP_OPEN_SETTINGS = function(){
-    if (window.runtime && window.runtime.EventsEmit) window.runtime.EventsEmit("vega:desktop-settings");
-    else if (window.WailsInvoke) window.WailsInvoke("EE" + JSON.stringify({name: "vega:desktop-settings", data: []}));
-  };
   if (window.wails && window.wails.flags) return;
   if (window.__VEGA_DESKTOP_DRAG__) return;
   window.__VEGA_DESKTOP_DRAG__ = true;

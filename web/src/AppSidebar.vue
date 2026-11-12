@@ -4,7 +4,6 @@ import Icon from "./Icon.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import GroupAvatar from "./GroupAvatar.vue";
 import UserAvatar from "./UserAvatar.vue";
-import { desktopMode, openDesktopSettings } from "./desktop.js";
 const props = defineProps({
   user: Object,
   isAdmin: Boolean,
@@ -160,7 +159,6 @@ function openClient() {
           <button type="button" class="icon circle-btn more-btn" :class="{ active: moreOpen }" aria-label="更多与设置" title="设置" :aria-expanded="moreOpen" @click="openSettingsMenu"><Icon name="settings" :size="17" /></button>
           <div v-if="moreOpen" class="more-popover" role="menu">
             <button v-for="[id, label, icon] in morePages" :key="id" type="button" role="menuitem" :class="{ active: view === id }" @click="go(id)"><Icon :name="icon" :size="16" /><span>{{ label }}</span></button>
-            <button v-if="desktopMode" type="button" role="menuitem" @click="moreOpen = false; openDesktopSettings()"><Icon name="laptop" :size="16" /><span>服务器地址</span></button>
             <button type="button" role="menuitem" @click="moreOpen = false; emit('logout')"><Icon name="logout" :size="16" /><span>退出登录</span></button>
           </div>
         </div>

@@ -20,14 +20,12 @@ var assets embed.FS
 var icon []byte
 
 func main() {
-	cfg, err := LoadConfig()
-	if err != nil {
-		log.Printf("load config: %v", err)
-		cfg = DefaultConfig()
-		cfg.ServerURL = ""
+	pin, pinErr := resolvePin()
+	if pinErr != nil {
+		log.Printf("instance: %v", pinErr)
 	}
-	app := NewApp(cfg)
-	err = wails.Run(&options.App{
+	app := NewApp(pin, pinErr)
+	err := wails.Run(&options.App{
 		Title:             "Vega",
 		Width:             1100,
 		Height:            760,
@@ -41,12 +39,12 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		OnStartup:        app.startup,
-		OnDomReady:       app.domReady,
-		Bind:             []interface{}{app},
-		CSSDragProperty:  "--wails-draggable",
-		CSSDragValue:     "drag",
-		BindingsAllowedOrigins: bindingsOrigins(cfg.ServerURL),
+		OnStartup:              app.startup,
+		OnDomReady:             app.domReady,
+		Bind:                   []interface{}{app},
+		CSSDragProperty:        "--wails-draggable",
+		CSSDragValue:           "drag",
+		BindingsAllowedOrigins: bindingsOrigins(pin.Origin),
 		Windows: &windows.Options{
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,

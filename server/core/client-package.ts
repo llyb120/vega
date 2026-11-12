@@ -9,7 +9,7 @@ import { assert } from "./util";
  * 只压一次：按 站点 + 文件 + 大小 + 修改时间 缓存，客户端升级后自动失效。
  */
 
-const CLIENT_NAME = /^vega-local-[a-z0-9._-]+$/i;
+const CLIENT_NAME = /^vega-(?:local|desktop)-[a-z0-9._-]+$/i;
 const CACHE_LIMIT = 24;
 const cache = new Map<string, Buffer>();
 const pending = new Map<string, Promise<Buffer>>();

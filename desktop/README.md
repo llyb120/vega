@@ -41,13 +41,16 @@ wails build -tags webkit2_41   # 输出在 desktop/build/bin/
 
 若发行版仍提供 `libwebkit2gtk-4.0-dev`，可以省略 `-tags webkit2_41`。
 
-第一次打开会询问 Vega 服务器地址，默认 `http://127.0.0.1:8080`。保存后窗口直接打开该网站，使用原来的账号登录。地址写在本机配置目录：
+和本机托盘客户端一样，正式使用请从网站「资源」页下载安装包（ZIP）。包里除了可执行文件，还有本站的 `instance.json`；解压后一起放在同一目录再启动，窗口会直接打开这个站点，不用填写地址。缺少 `instance.json` 时会拒绝启动，请回到站点重新下载，不要只拷走可执行文件。
 
-- Linux: `~/.config/vega-desktop/config.json`
-- macOS: `~/Library/Application Support/vega-desktop/config.json`
-- Windows: `%AppData%\vega-desktop\config.json`
+本地开发可以在 `desktop/` 下放一份 `instance.json`，或设置环境变量后启动：
 
-在侧栏底栏的设置菜单里可以再次修改「服务器地址」。
+```bash
+export VEGA_ORIGIN=http://127.0.0.1:8080
+wails dev -tags webkit2_41
+```
+
+把编译产物放到网站的客户端目录后，下载接口会按站点打 ZIP（例如 `web/dist/clients/vega-desktop-windows-amd64.exe`）。
 
 ## 编译 Windows（windows/amd64）
 

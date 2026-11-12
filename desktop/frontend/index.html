@@ -23,15 +23,9 @@
     </header>
     <main>
       <div class="mark" aria-hidden="true">V</div>
-      <h1>连接到 Vega</h1>
-      <p class="lead">桌面窗口会打开你已有的 Vega 网站。登录方式与浏览器相同，不会另建一套账号。</p>
-      <form id="form">
-        <label for="url">服务器地址</label>
-        <input id="url" name="url" type="url" required placeholder="http://127.0.0.1:8080" autocomplete="url" />
-        <p id="error" class="error" hidden></p>
-        <button type="submit" id="connect">连接</button>
-      </form>
-      <p class="hint">默认连接本机 <code>http://127.0.0.1:8080</code>。若 Vega 跑在别的机器或端口，改成实际地址即可。</p>
+      <h1 id="title">正在打开站点</h1>
+      <p class="lead" id="lead">这个窗口只连接下载安装包时的 Vega 站点，登录方式与浏览器相同。</p>
+      <p id="error" class="error" hidden></p>
     </main>
     <script src="main.js"></script>
   </body>

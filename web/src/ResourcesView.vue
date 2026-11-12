@@ -7,6 +7,10 @@ const clients = [
   { name: "macOS", arch: "Apple Silicon", file: "vega-local-darwin-arm64", description: "命令行客户端 · M 系列芯片" },
   { name: "macOS", arch: "Intel", file: "vega-local-darwin-amd64", description: "命令行客户端 · Intel 芯片" },
 ];
+const desktopClients = [
+  { name: "Windows", arch: "x64", file: "vega-desktop-windows-amd64.exe", description: "桌面聊天窗口，打开后直接进入本站" },
+  { name: "Linux", arch: "x64", file: "vega-desktop-linux-amd64", description: "桌面聊天窗口 · Intel / AMD" },
+];
 </script>
 
 <template>
@@ -20,6 +24,17 @@ const clients = [
           <div class="section-heading"><h3>{{ client.name }}</h3><span class="pill">{{ client.arch }}</span></div>
           <p class="hint">{{ client.description }}</p>
           <a class="client-download" :href="'/api/clients/' + client.file + '.zip'" :download="client.file + '.zip'" :aria-label="'下载 ' + client.name + ' ' + client.arch + ' 客户端安装包'">下载安装包（ZIP） ↓</a>
+        </article>
+      </div>
+    </section>
+    <section aria-labelledby="desktop-heading">
+      <h3 id="desktop-heading">桌面窗口</h3>
+      <p class="hint">在电脑上打开与网站相同的聊天窗口。安装包同样带有本站的 <code>instance.json</code>，启动后直接进入这个站点，不用再填地址。</p>
+      <div class="resource-grid">
+        <article v-for="client in desktopClients" :key="client.file" class="card">
+          <div class="section-heading"><h3>{{ client.name }}</h3><span class="pill">{{ client.arch }}</span></div>
+          <p class="hint">{{ client.description }}</p>
+          <a class="client-download" :href="'/api/clients/' + client.file + '.zip'" :download="client.file + '.zip'" :aria-label="'下载 ' + client.name + ' ' + client.arch + ' 桌面窗口安装包'">下载安装包（ZIP） ↓</a>
         </article>
       </div>
     </section>

@@ -49,14 +49,4 @@ export function windowClose() {
   return invoke("Quit", () => win.WailsInvoke?.("Q"));
 }
 
-export function openDesktopSettings() {
-  try {
-    if (typeof win.__VEGA_DESKTOP_OPEN_SETTINGS === "function") return win.__VEGA_DESKTOP_OPEN_SETTINGS();
-    if (typeof win.runtime?.EventsEmit === "function") return win.runtime.EventsEmit("vega:desktop-settings");
-    win.WailsInvoke?.("EE" + JSON.stringify({ name: "vega:desktop-settings", data: [] }));
-  } catch {
-    // Same as window controls: ignore a missing bridge.
-  }
-}
-
 watchDesktop();

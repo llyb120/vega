@@ -1,65 +1,91 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
-func TestNormalizeServerURL(t *testing.T) {
-	cases := []struct {
-		in, out string
-		ok      bool
-	}{
-		{"http://127.0.0.1:8080", "http://127.0.0.1:8080", true},
-		{"https://vega.example.com", "https://vega.example.com", true},
-		{"127.0.0.1:8080", "http://127.0.0.1:8080", true},
-		{"http://localhost:8080/", "http://localhost:8080", true},
-		{"", "", false},
-		{"ftp://example.com", "", false},
-		{"http://example.com/app", "", false},
-		{"http://example.com/?x=1", "", false},
+func TestValidOrigin(t *testing.T) {
+	ok := []string{"http://127.0.0.1:8080", "https://vega.example.com"}
+	bad := []string{"", "ftp://example.com", "http://example.com/app", "http://example.com/?x=1", "http://user:pass@example.com"}
+	for _, origin := range ok {
+		if !validOrigin(origin) {
+			t.Fatalf("expected valid origin %q", origin)
+		}
 	}
-	for _, tc := range cases {
-		got, err := NormalizeServerURL(tc.in)
-		if tc.ok {
-			if err != nil {
-				t.Fatalf("%q: unexpected error: %v", tc.in, err)
-			}
-			if got != tc.out {
-				t.Fatalf("%q: got %q, want %q", tc.in, got, tc.out)
-			}
-		} else if err == nil {
-			t.Fatalf("%q: expected error, got %q", tc.in, got)
+	for _, origin := range bad {
+		if validOrigin(origin) {
+			t.Fatalf("expected invalid origin %q", origin)
 		}
 	}
 }
 
-func TestBindingsOriginsIncludesConfigured(t *testing.T) {
-	got := bindingsOrigins("https://vega.example.com")
-	if !containsOrigin(got, "https://vega.example.com") {
-		t.Fatalf("missing configured origin in %q", got)
+func TestReadInstancePin(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := readInstancePin(dir); err == nil || !strings.Contains(err.Error(), "instance.json") {
+		t.Fatalf("missing pin: %v", err)
 	}
-	if !containsOrigin(got, "http://127.0.0.1:*") {
-		t.Fatalf("missing localhost wildcard in %q", got)
+	if err := os.WriteFile(filepath.Join(dir, instanceFileName), []byte(`{"origin":"https://vega.example"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := readInstancePin(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin.Origin != "https://vega.example" {
+		t.Fatalf("origin = %q", pin.Origin)
+	}
+	if err := os.WriteFile(filepath.Join(dir, instanceFileName), []byte(`{"origin":"http://example.com/path"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readInstancePin(dir); err == nil || !strings.Contains(err.Error(), "无效") {
+		t.Fatalf("invalid origin: %v", err)
 	}
 }
 
-func containsOrigin(list, want string) bool {
-	for _, item := range splitCSV(list) {
-		if item == want {
-			return true
-		}
+func TestResolvePinFromEnv(t *testing.T) {
+	t.Setenv("VEGA_ORIGIN", "https://vega.example")
+	pin, err := resolvePin()
+	if err != nil {
+		t.Fatal(err)
 	}
-	return false
+	if pin.Origin != "https://vega.example" {
+		t.Fatalf("origin = %q", pin.Origin)
+	}
+	t.Setenv("VEGA_ORIGIN", "not-a-url")
+	if _, err := resolvePin(); err == nil || !strings.Contains(err.Error(), "VEGA_ORIGIN") {
+		t.Fatalf("invalid env: %v", err)
+	}
 }
 
-func splitCSV(list string) []string {
-	var out []string
-	start := 0
-	for i := 0; i <= len(list); i++ {
-		if i == len(list) || list[i] == ',' {
-			if i > start {
-				out = append(out, list[start:i])
-			}
-			start = i + 1
-		}
+func TestResolvePinFromWorkingDirectory(t *testing.T) {
+	t.Setenv("VEGA_ORIGIN", "")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, instanceFileName), []byte(`{"origin":"http://127.0.0.1:8080"}`), 0600); err != nil {
+		t.Fatal(err)
 	}
-	return out
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	pin, err := resolvePin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin.Origin != "http://127.0.0.1:8080" {
+		t.Fatalf("origin = %q", pin.Origin)
+	}
+}
+
+func TestBindingsOriginsIncludesPinnedSite(t *testing.T) {
+	got := bindingsOrigins("https://vega.example")
+	if !strings.HasPrefix(got, "https://vega.example,") {
+		t.Fatalf("bindings = %q", got)
+	}
 }
