@@ -208,7 +208,11 @@ export default defineEventHandler(async (event) => {
       if (path.length === 1) {
         if (method === "GET") return Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
           const s = await employee.state();
-          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, ownerId: s.ownerId, mine: s.ownerId === user.id, chatSession: s.chatSession || "", unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, runningTasks: s.tasks.filter((t) => t.status === "running").length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
+          const last = s.chatSession ? await store.lastMessage(s.chatSession) : undefined;
+          const text = String(last?.text || "").trim();
+          const chars = [...text];
+          const lastText = !last ? "" : text ? (chars.length > 60 ? chars.slice(0, 60).join("") + "…" : text) : last.images?.length ? "[图片]" : last.files?.length ? "[文件]" : "";
+          return { id: s.id, name: s.name, avatar: s.avatar || "", instruction: s.instruction, ownerId: s.ownerId, mine: s.ownerId === user.id, chatSession: s.chatSession || "", unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0, lastText, canManage: await employee.manageable(user), activeTasks: s.tasks.filter((t) => !["done", "failed", "stopped", "cancelled"].includes(t.status)).length, runningTasks: s.tasks.filter((t) => t.status === "running").length, attentionTasks: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length };
         }));
         if (method === "POST") {
           check(user.role !== "viewer", 403, "Execution permission required");

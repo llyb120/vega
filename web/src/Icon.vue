@@ -50,6 +50,7 @@ const PATHS = {
   minus: "M5 12h14",
   hand: "M8 13V5.5a1.5 1.5 0 0 1 3 0V11M11 10V4.5a1.5 1.5 0 0 1 3 0V11M14 10.5V6a1.5 1.5 0 0 1 3 0v8a6 6 0 0 1-6 6h-.5a6 6 0 0 1-5-2.7L3 14a1.6 1.6 0 0 1 2.6-1.8L8 15",
   layers: "M12 3 2 8l10 5 10-5ZM2 13l10 5 10-5",
+  grid: "M4 4h7v7H4ZM13 4h7v7h-7ZM4 13h7v7H4ZM13 13h7v7h-7Z",
   plug: "M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0ZM12 17v5",
 };
 const props = defineProps({ name: String, size: { type: [Number, String], default: 18 } });

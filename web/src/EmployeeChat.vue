@@ -92,6 +92,17 @@ function quoteMessage(message) {
   void nextTick(() => input.value?.focus());
 }
 const findMessage = (seq) => [...(transcript.value?.querySelectorAll("[data-message-seq]") || [])].find((element) => Number(element.dataset.messageSeq) === seq);
+const showNewHint = computed(() => newAt.value >= 0 && !markGone.value);
+const runningLabel = computed(() => {
+  const task = (props.tasks || []).find((item) => item.status === "running");
+  const text = String(task?.title || task?.text || "").trim();
+  if (text) return [...text].slice(0, 28).join("");
+  return running.value ? "正在工作…" : "";
+});
+async function jumpToNew(smooth = true) {
+  await nextTick();
+  transcript.value?.querySelector(".chat-new")?.scrollIntoView({ block: "center", behavior: smooth ? "smooth" : "instant" });
+}
 async function jumpTo(seq) {
   await nextTick();
   // Quoted messages may be older than the loaded window: page back until the source is in the DOM.
@@ -134,15 +145,20 @@ function onScroll() {
   const first = messages.value[0]?.seq;
   void loadOlder().then(() => { if (messages.value[0]?.seq !== first) onScroll(); });
 }
+async function land() {
+  if (newAt.value >= 0 && !markGone.value) await jumpToNew(false);
+  else await scroll();
+}
 async function load() {
   let cached = false;
   try {
-    await history.load(async () => { cached = true; ready = true; await scroll(); });
+    await history.load(async () => { cached = true; ready = true; await land(); });
     if (disposed) return;
-    if (!cached || nearBottom()) await scroll();
+    if (!cached || nearBottom()) await land();
     ready = true;
     settled = true; baseSeq = lastSeq.value;
     await fillViewport();
+    if (newAt.value >= 0 && !markGone.value) await jumpToNew(false);
   } catch (e) { if (!disposed && !e.network) error.value = e.message; }
 }
 /** Fetch only messages after the newest one we hold; `apply` runs in the same tick as the merge. */
@@ -275,7 +291,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         </div>
         <template v-for="({ message, continued }, index) in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
         <p v-if="separatorLabel(displayed, index)" class="chat-date" role="separator">{{ separatorLabel(displayed, index) }}</p>
-        <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
+        <p v-if="newAt >= 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
         <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
         <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :self-tint="selfTint" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
         </template>
@@ -287,6 +303,16 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
             <div class="chat-bubble"><span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
           </div>
         </article>
+      </div>
+    </div>
+    <button v-if="showNewHint" type="button" class="new-hint" @click="jumpToNew(true)">
+      <span class="new-hint-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" /></span>
+      <span class="new-hint-pill">新消息提示</span>
+    </button>
+    <div v-if="running" class="run-chip-wrap">
+      <div class="run-chip">
+        <span class="run-chip-avatar" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" animate /></span>
+        <span class="truncate">{{ runningLabel }}</span>
       </div>
     </div>
     <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号只能查看这个牛马的对话和任务。</p>
@@ -304,7 +330,13 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
   </section>
 </template>
 <style scoped>
-.employee-chat { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--chat-bg, var(--surface)); }
+.employee-chat { position: relative; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--chat-bg, var(--surface)); }
+.new-hint { position: absolute; right: 20px; bottom: 92px; z-index: 6; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.new-hint-avatar { display: grid; place-items: center; width: 44px; height: 44px; overflow: hidden; border-radius: 14px; background: #fff; box-shadow: 0 6px 18px rgb(16 24 40 / 16%); }
+.new-hint-pill { padding: 6px 12px; border-radius: 999px; background: var(--user-bubble, #7c5cff); color: #fff; font-size: 12px; font-weight: 600; box-shadow: 0 6px 16px rgb(124 92 255 / 28%); white-space: nowrap; }
+.run-chip-wrap { flex: none; width: calc(100% - 40px); max-width: 860px; margin: 0 auto 8px; }
+.run-chip { display: flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%; padding: 6px 14px 6px 6px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); box-shadow: 0 2px 10px rgb(16 24 40 / 8%); color: var(--text-2); font-size: 13px; }
+.run-chip-avatar { display: grid; place-items: center; flex: none; width: 28px; height: 28px; overflow: hidden; border-radius: 8px; }
 .employee-chat > .banner { flex: none; }
 .chat-scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; scrollbar-width: thin; }
 .chat-column { max-width: 820px; margin: 0 auto; padding: 8px 24px 8px; }

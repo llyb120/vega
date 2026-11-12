@@ -52,9 +52,9 @@ function tick(now) {
 }
 function run() { if (!frame && typeof requestAnimationFrame === "function") frame = requestAnimationFrame(tick); }
 
-let lookTimer = 0, blinkTimer = 0, previous, onScreen = true, observer;
+let lookTimer = 0, blinkTimer = 0, previous, onScreen = true, observer, following = false;
 function glance() {
-  if (!playing.value) return;
+  if (!playing.value || following) return;
   const next = nextPose(look.value, previous);
   previous = look.value;
   turnTo(next, { jitter: 0.35, prepare: Math.random() < 0.7 });
@@ -93,10 +93,36 @@ onMounted(() => {
   // Turn from the typing row's last pose into the resting pose after the first paint.
   if (props.from && props.from !== props.pose) requestAnimationFrame(() => turnTo(props.pose));
 });
+function lookAtPointer(event) {
+  if (!root.value || reduced()) return;
+  const box = root.value.getBoundingClientRect();
+  if (!box.width || !box.height) return;
+  const dx = (event.clientX - (box.left + box.width / 2)) / (box.width / 2);
+  const dy = (event.clientY - (box.top + box.height / 2)) / (box.height / 2);
+  target = {
+    yaw: Math.max(-36, Math.min(36, dx * 28)),
+    pitch: Math.max(-24, Math.min(26, -dy * 22)),
+  };
+  look.value = "pointer";
+  run();
+}
+function onPointerEnter(event) {
+  following = true;
+  clearTimeout(lookTimer);
+  lookAtPointer(event);
+}
+function onPointerMove(event) {
+  if (following) lookAtPointer(event);
+}
+function onPointerLeave() {
+  following = false;
+  if (playing.value) lookTimer = setTimeout(glance, 240);
+  else turnTo(props.pose);
+}
 onBeforeUnmount(() => { stop(); if (frame) cancelAnimationFrame(frame); observer?.disconnect(); });
 </script>
 <template>
-  <svg ref="root" :class="['bot-avatar', { animate: playing }]" :data-playing="playing ? '' : undefined" viewBox="0 0 100 100" role="img" aria-hidden="true" :data-shape="geometry === BOT_SHAPE_GEOMETRY[shape] ? shape : 'round'" :data-pose="look" :data-color="color">
+  <svg ref="root" :class="['bot-avatar', { animate: playing }]" :data-playing="playing ? '' : undefined" viewBox="0 0 100 100" role="img" aria-hidden="true" :data-shape="geometry === BOT_SHAPE_GEOMETRY[shape] ? shape : 'round'" :data-pose="look" :data-color="color" @pointerenter="onPointerEnter" @pointermove="onPointerMove" @pointerleave="onPointerLeave">
     <defs>
       <radialGradient :id="uid + 'b'" gradientUnits="userSpaceOnUse" :cx="face.light.x" :cy="face.light.y" r="62" :fx="face.light.x" :fy="face.light.y">
         <stop offset="0" :stop-color="shade(color, 0.32)" /><stop offset="0.42" :stop-color="color" /><stop offset="0.8" :stop-color="shade(color, -0.22)" /><stop offset="1" :stop-color="shade(color, -0.42)" />

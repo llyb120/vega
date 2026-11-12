@@ -18,7 +18,7 @@ export function useUnread(app) {
           again = false;
           for (const row of await app().api("/employees")) {
             const e = entry(row.id);
-            if (e) Object.assign(e, { unread: viewing(row.id) ? 0 : row.unread, chatSession: row.chatSession });
+            if (e) Object.assign(e, { unread: viewing(row.id) ? 0 : row.unread, chatSession: row.chatSession, lastText: row.lastText ?? e.lastText });
           }
         } while (again);
       } finally { refreshing = null; }

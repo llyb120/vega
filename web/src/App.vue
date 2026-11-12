@@ -22,6 +22,8 @@ import EmployeeCapabilities from "./EmployeeCapabilities.vue";
 import EmployeeVault from "./EmployeeVault.vue";
 import WorkPanel from "./WorkPanel.vue";
 import AppSidebar from "./AppSidebar.vue";
+import CreateEmployeeDialog from "./CreateEmployeeDialog.vue";
+import AppSettingsModal from "./AppSettingsModal.vue";
 import WindowControls from "./WindowControls.vue";
 import { applyDesktopClass } from "./desktop.js";
 import PageHeader from "./PageHeader.vue";
@@ -69,6 +71,11 @@ function startLocalPairing() {
     void bridge.connect();
   }
 }
+function openSettings(tab = "account") {
+  settingsTab.value = tab || "account";
+  settingsOpen.value = true;
+  closeNavigation();
+}
 function retryLocalPairing() {
   localBridge?.close();
   localBridge = null;
@@ -89,6 +96,59 @@ const mobileTitles = {
   usage: "Token 统计",
   settings: "设置",
 };
+const SIDEBAR_RAIL = 72;
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 420;
+const SIDEBAR_COLLAPSE = 160;
+const SIDEBAR_DEFAULT = 280;
+const SIDEBAR_KEY = "vega.sidebar";
+function readSidebarPref() {
+  try {
+    const data = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || "");
+    return {
+      width: Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Number(data.width) || SIDEBAR_DEFAULT)),
+      collapsed: !!data.collapsed,
+    };
+  } catch {
+    return { width: SIDEBAR_DEFAULT, collapsed: false };
+  }
+}
+const sidebarPref = readSidebarPref();
+const sidebarWidth = ref(sidebarPref.width);
+const sidebarCollapsed = ref(sidebarPref.collapsed);
+const sidebarResizing = ref(false);
+const sidebarStyle = computed(() => narrow.value ? undefined : { width: `${sidebarCollapsed.value ? SIDEBAR_RAIL : sidebarWidth.value}px` });
+function saveSidebarPref() {
+  try { localStorage.setItem(SIDEBAR_KEY, JSON.stringify({ width: sidebarWidth.value, collapsed: sidebarCollapsed.value })); } catch {}
+}
+function onSidebarResizeDown(event) {
+  if (narrow.value) return;
+  event.preventDefault();
+  sidebarResizing.value = true;
+  const startX = event.clientX;
+  const startW = sidebarCollapsed.value ? SIDEBAR_RAIL : sidebarWidth.value;
+  const move = (ev) => {
+    const next = startW + ev.clientX - startX;
+    if (next < SIDEBAR_COLLAPSE) sidebarCollapsed.value = true;
+    else {
+      sidebarCollapsed.value = false;
+      sidebarWidth.value = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, next));
+    }
+  };
+  const up = () => {
+    sidebarResizing.value = false;
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    saveSidebarPref();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+function toggleSidebarRail() {
+  if (narrow.value) return;
+  sidebarCollapsed.value = !sidebarCollapsed.value;
+  saveSidebarPref();
+}
 function closeNavigation() {
   if (!navigationOpen.value) return;
   navigationOpen.value = false;
@@ -252,6 +312,9 @@ const employee = ref({
   employeeEvent = ref(null),
   employeeComposers = ref({}),
   creatingEmployee = ref(false),
+  createOpen = ref(false),
+  settingsOpen = ref(false),
+  settingsTab = ref("account"),
   newEmployeeName = ref(""),
   newEmployeeInstruction = ref(""),
   employeeSession = ref(""),
@@ -1214,13 +1277,19 @@ async function chooseEmployee(id) {
   closeNavigation();
   await refreshEmployee();
 }
-async function createEmployee() {
+async function createEmployee(payload = {}) {
   if (employeeSaving.value) return;
   employeeSaving.value = true;
   try { await attempt(async () => {
-    const created = await api("/employees", "POST", { name: newEmployeeName.value, instruction: newEmployeeInstruction.value, cwd: project.value });
+    const created = await api("/employees", "POST", {
+      name: String(payload.name || newEmployeeName.value).trim(),
+      instruction: payload.instruction || newEmployeeInstruction.value || "",
+      avatar: payload.avatar || "",
+      cwd: project.value,
+    });
     newEmployeeName.value = "";
     newEmployeeInstruction.value = "";
+    createOpen.value = false;
     await chooseEmployee(created.id);
   }); } finally { employeeSaving.value = false; }
 }
@@ -1416,7 +1485,7 @@ async function applyRoute(route) {
       if (session) await attempt(() => selectSession(session));
       else { current.value = null; view.value = "chat"; }
     } else if (route.view !== "employee") view.value = route.view;
-    else if (route.creating && canExecute.value) { creatingEmployee.value = true; openEmployee(); }
+    else if (route.creating && canExecute.value) { createOpen.value = true; }
     else {
       const id = employees.value.some((e) => e.id === route.employee) ? route.employee : selectedEmployee.value;
       if (id && (id !== selectedEmployee.value || creatingEmployee.value || employee.value.id !== id)) await chooseEmployee(id);
@@ -1477,7 +1546,8 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
     <aside
       id="navigation"
       ref="navigation"
-      :class="['sidebar', { 'mobile-open': navigationOpen }]"
+      :class="['sidebar', { 'mobile-open': navigationOpen, rail: !narrow && sidebarCollapsed, resizing: sidebarResizing }]"
+      :style="sidebarStyle"
       :role="navigationOpen ? 'dialog' : undefined"
       :aria-modal="navigationOpen ? true : undefined"
       aria-label="导航"
@@ -1485,6 +1555,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       @keydown="navigationKey"
     >
       <AppSidebar
+        :rail="!narrow && sidebarCollapsed"
         :user="user"
         :is-admin="isAdmin"
         :can-execute="canExecute"
@@ -1505,8 +1576,9 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
         :current-root="rootSession?.id"
         @choose="chooseEmployee"
         @open-group="openGroup"
-        @create="creatingEmployee = true; openEmployee()"
+        @create="createOpen = true"
         @navigate="view = $event"
+        @settings="openSettings"
         @logout="logout"
         @close="closeNavigation"
         @expand="openNavigation"
@@ -1514,6 +1586,15 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
         @select-session="(s) => { closeNavigation(); attempt(() => selectSession(s)); }"
         @remove-session="removeSession"
       />
+      <div
+        v-if="!narrow"
+        class="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整侧栏宽度"
+        @pointerdown="onSidebarResizeDown"
+        @dblclick="toggleSidebarRail"
+      ></div>
     </aside>
     <section class="workspace" :inert="navigationOpen">
       <template v-if="view === 'chat'">
@@ -1563,23 +1644,11 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" :tab="pageSub" @tab="setPageTab" />
       <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" @open="openEmployee($event)" />
       <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
-        <template v-if="(creatingEmployee || !employees.length)">
-          <PageHeader :title="canExecute ? '创建新牛马' : '数字牛马'" :subtitle="canExecute ? '取个名字，交代工作方向，就可以开始了。' : ''" :back="employees.length ? '返回' : ''" @back="creatingEmployee = false" />
+        <template v-if="!employees.length">
+          <PageHeader :title="canExecute ? '数字牛马' : '数字牛马'" :subtitle="canExecute ? '先创建一个牛马，就可以开始交代工作。' : '被拉进群聊后，可以在群里查看大家和牛马的协作。'" />
           <div class="page-scroll create-page">
-            <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭牛马错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
             <div v-if="!canExecute" class="empty-state"><Icon name="users" :size="28" /><strong>只读账号不能创建牛马</strong><span>被拉进群聊后，可以在群里查看大家和牛马的协作。</span></div>
-            <form v-else class="card create-card" @submit.prevent="createEmployee">
-              <div class="create-head"><span class="create-icon" aria-hidden="true"><Icon name="users" :size="22" /></span><div><h3>你想把什么交给他？</h3><p class="hint">仅你和管理员可见；需要和别人或别的牛马协作时，拉个群聊。</p></div></div>
-              <div class="form-grid">
-                <label>牛马名称<input v-model="newEmployeeName" required maxlength="80" placeholder="例如：研发助手、运营搭档" autofocus /></label>
-                <label>工作方向<textarea v-model="newEmployeeInstruction" rows="5" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
-              </div>
-              <ul class="create-facts">
-                <li><Icon name="check" :size="14" />创建后即可接活，无需设置启用或工作时间</li>
-                <li><Icon name="check" :size="14" />独立的记忆、任务列表和浏览器会自动准备</li>
-              </ul>
-              <div class="actions end"><button v-if="employees.length" type="button" class="ghost" @click="creatingEmployee = false">取消</button><button class="primary" :disabled="employeeSaving">{{ employeeSaving ? '正在创建…' : '创建牛马' }}</button></div>
-            </form>
+            <div v-else class="empty-state"><Icon name="users" :size="28" /><strong>还没有牛马</strong><span>取个名字、选个形象，就可以开始了。</span><button type="button" class="primary" @click="createOpen = true">创建新牛马</button></div>
           </div>
         </template>
         <template v-else>
@@ -1659,6 +1728,26 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       <div v-if="error" class="toast error" role="alert"><Icon name="alert" :size="16" /><span>{{ error }}</span><button type="button" class="icon" aria-label="关闭错误" @click="error = ''"><Icon name="close" :size="14" /></button></div>
       <div v-if="notice" class="toast notice" role="status"><Icon name="check" :size="16" /><span>{{ notice }}</span><button type="button" class="icon" aria-label="关闭提示" @click="notice = ''"><Icon name="close" :size="14" /></button></div>
     </div>
+    <CreateEmployeeDialog v-if="createOpen" :busy="employeeSaving" :error="employeeError" @create="createEmployee" @cancel="createOpen = false; employeeError = ''" />
+    <AppSettingsModal
+      v-if="settingsOpen"
+      :api="api"
+      :user="user"
+      :is-admin="isAdmin"
+      :tab="settingsTab"
+      :config="config"
+      :models="catalogModels"
+      :user-id="user.id"
+      :page-sub="pageSub"
+      @close="settingsOpen = false"
+      @tab="settingsTab = $event"
+      @error="error = $event"
+      @notice="notice = $event"
+      @signed-out="resetLogin"
+      @changed="attempt(bootstrap)"
+      @saved="config = $event"
+      @page-tab="setPageTab"
+    />
   </div>
 </template>
 

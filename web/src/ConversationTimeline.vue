@@ -30,7 +30,7 @@ watch(() => props.messages.at(-1)?.seq || 0, (seq) => {
 </script>
 <template>
   <section v-for="(turn, index) in turns" :key="turn.key" class="conversation-turn">
-    <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
+    <p v-if="newAt >= 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
     <article v-if="turn.user" class="message user">
       <UserMessage v-if="turn.user.text" :text="turn.user.displayText || turn.user.text" />
       <img v-for="(image, n) in turn.user.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="用户附图" />

@@ -34,6 +34,11 @@ const shown = computed(() => {
 const newFrom = seenSeq(props.user?.id, props.groupId);
 const markGone = ref(false);
 const newAt = computed(() => newFrom > 0 ? shown.value.findIndex(({ message }) => message.seq > newFrom) : -1);
+const showNewHint = computed(() => newAt.value >= 0 && !markGone.value);
+async function jumpToNew() {
+  await nextTick();
+  transcript.value?.querySelector(".chat-new")?.scrollIntoView({ block: "center", behavior: "smooth" });
+}
 const lastSeq = computed(() => messages.value.at(-1)?.seq || 0);
 let settled = false, baseSeq = 0;
 watch(lastSeq, (seq) => { if (settled && seq > baseSeq) markGone.value = true; });
@@ -185,7 +190,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
             <div class="chat-column">
               <div v-if="group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
               <template v-for="({ message, continued }, index) in shown" :key="message.seq">
-                <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
+                <p v-if="newAt >= 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
                 <p v-if="message.notice" class="group-notice">{{ message.text }}</p>
                 <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
               </template>
@@ -198,6 +203,10 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
               </article>
             </div>
           </div>
+          <button v-if="showNewHint" type="button" class="new-hint" @click="jumpToNew">
+            <span class="new-hint-avatar" aria-hidden="true"><GroupAvatar v-if="group" :group="group" /></span>
+            <span class="new-hint-pill">新消息提示</span>
+          </button>
           <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />只读账号只能查看群聊。</p>
           <form v-else class="chat-composer" @submit.prevent="send">
             <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon :name="isImage(file) ? 'image' : 'file'" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
@@ -254,7 +263,10 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
 .group-workspace { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 .header-avatar { display: inline-grid; width: 24px; height: 24px; border-radius: 6px; overflow: hidden; }
 .group-body { display: flex; flex: 1; min-height: 0; }
-.group-chat { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--surface); }
+.group-chat { position: relative; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--surface); }
+.new-hint { position: absolute; right: 20px; bottom: 92px; z-index: 6; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.new-hint-avatar { display: grid; place-items: center; width: 44px; height: 44px; overflow: hidden; border-radius: 14px; background: #fff; box-shadow: 0 6px 18px rgb(16 24 40 / 16%); }
+.new-hint-pill { padding: 6px 12px; border-radius: 999px; background: var(--user-bubble, #7c5cff); color: #fff; font-size: 12px; font-weight: 600; white-space: nowrap; }
 .chat-scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; }
 .chat-column { max-width: 820px; margin: 0 auto; padding: 16px 24px 8px; }
 .group-bulletin { display: flex; gap: 8px; margin: 0 0 16px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); color: var(--text-2); font-size: 12px; }

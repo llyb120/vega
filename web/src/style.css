@@ -232,29 +232,46 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
 .navigation-backdrop:hover:not(:disabled) { background: rgb(15 20 30 / 38%); }
 .mobile-header { display: none; }
 
-/* 侧边栏：≥1100 常驻；768–1099 图标栏（可展开为浮层）；<768 抽屉 */
+/* 侧边栏：桌面可拖动宽窄，收紧为图标栏；<768 为抽屉 */
 .sidebar { position: relative; z-index: 45; flex: none; width: var(--sidebar-w); height: 100%; border-right: 1px solid var(--border); background: var(--sidebar); }
+.sidebar:not(.resizing) { transition: width .18s ease; }
+.sidebar-resizer { position: absolute; top: 0; right: -3px; z-index: 6; width: 8px; height: 100%; cursor: col-resize; --wails-draggable: no-drag; }
+.sidebar-resizer:hover, .sidebar.resizing .sidebar-resizer { background: linear-gradient(to right, transparent 3px, var(--accent) 3px, var(--accent) 5px, transparent 5px); }
 .hide-mobile { display: inline; }
-@media (min-width: 768px) and (max-width: 1099px) {
-  .shell { padding-left: 64px; }
-  .sidebar { position: fixed; top: var(--app-top, 0px); left: 0; bottom: 0; width: 64px; transition: width .18s ease, box-shadow .18s ease; }
-  .sidebar.mobile-open { width: 280px; box-shadow: var(--sh-lg); }
-  .sidebar:not(.mobile-open) .nav-label, .sidebar:not(.mobile-open) .workspace-hero { display: none; }
-  .sidebar:not(.mobile-open) .rail-only { display: inline-flex; }
-  .sidebar:not(.mobile-open) .sidebar-toolbar, .sidebar:not(.mobile-open) .sidebar-section-head, .sidebar:not(.mobile-open) .footer-row { justify-content: center; padding-left: 0; padding-right: 0; }
-  .sidebar:not(.mobile-open) .sidebar-toolbar { padding-top: 10px; }
-  .sidebar:not(.mobile-open) .nav-item { justify-content: center; padding: 6px 0; }
-  .sidebar:not(.mobile-open) .sidebar-scroll, .sidebar:not(.mobile-open) .sidebar-footer { padding-left: 8px; padding-right: 8px; }
-  .sidebar:not(.mobile-open) .client-status, .sidebar:not(.mobile-open) .footer-user { display: none; }
-  .sidebar:not(.mobile-open) .more-wrap { margin: 0 auto; }
-  .sidebar.mobile-open .close-navigation { display: inline-flex; }
-  .sidebar.mobile-open .workspace-hero { display: grid; }
-}
+
+.sidebar.rail .nav-label,
+.sidebar.rail .hero-name,
+.sidebar.rail .sidebar-search,
+.sidebar.rail .sidebar-empty,
+.sidebar.rail .sidebar-toolbar,
+.sidebar.rail .sidebar-section-head,
+.sidebar.rail .sidebar-group,
+.sidebar.rail .user-name,
+.sidebar.rail .more-btn { display: none; }
+.sidebar.rail .rail-tools { display: flex; flex-direction: column; align-items: center; gap: 2px; width: 100%; }
+.sidebar.rail .rail-tools .circle-btn { background: transparent; border: 0; color: var(--muted); }
+.sidebar.rail .rail-tools .circle-btn:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
+.sidebar.rail .footer-row { flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; }
+.sidebar.rail .sidebar-footer { position: relative; padding: 8px 6px 14px; }
+.sidebar.rail .footer-user { flex: none; justify-content: center; width: 40px; height: 40px; padding: 0; }
+.sidebar.rail .more-wrap { position: static; width: 0; height: 0; }
+.sidebar.rail .more-popover { left: 8px; right: auto; bottom: 52px; width: 240px; }
+.sidebar.rail .workspace-hero { width: 100%; margin: 10px 0 0; padding: 4px 0 12px; border-radius: 0; border-bottom: 1px solid var(--border); }
+.sidebar.rail .workspace-hero:hover:not(:disabled), .sidebar.rail .workspace-hero.active { background: transparent; }
+.sidebar.rail .hero-avatar { width: 40px; height: 40px; box-shadow: none; }
+.sidebar.rail .hero-avatar .employee-picture { width: 40px; height: 40px; }
+.sidebar.rail .sidebar-scroll { padding: 8px; }
+.sidebar.rail .nav-item { justify-content: center; width: 44px; min-height: 44px; height: 44px; margin: 1px auto; padding: 0; border-radius: 14px; }
+.sidebar.rail .nav-item.active { background: var(--surface-2); }
+.sidebar.rail .quiet-section { width: 100%; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.sidebar.rail .hero-avatar .unread-dot { width: 12px; height: 12px; right: -1px; bottom: -1px; }
+
 @media (max-width: 767px) {
   .hide-mobile { display: none; }
   .sidebar { position: fixed; top: var(--app-top, 0px); left: 0; bottom: 0; width: min(300px, 86vw); transform: translateX(-102%); visibility: hidden; transition: transform .2s ease, visibility 0s linear .2s; }
   .sidebar.mobile-open { transform: none; visibility: visible; box-shadow: var(--sh-lg); transition: transform .2s ease; }
   .sidebar .close-navigation { display: inline-flex; }
+  .sidebar-resizer { display: none; }
 }
 
 /* 页面通用：页头 + 滚动区 */
@@ -315,8 +332,8 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
 
 /* ---------- Conversation timeline ---------- */
 /* 「新」分界：切进会话时上次看到的位置之后是新消息。 */
-.chat-new { display: flex; align-items: center; gap: 10px; margin: 2px 0 14px; color: var(--accent); font-size: 11px; font-weight: 600; }
-.chat-new::before, .chat-new::after { content: ""; flex: 1; height: 1px; background: currentColor; opacity: .3; }
+.chat-new { display: flex; align-items: center; gap: 12px; width: 100%; margin: 16px 0; color: #9aa3af; font-size: 12px; font-weight: 400; letter-spacing: .04em; }
+.chat-new::before, .chat-new::after { content: ""; flex: 1; height: 1px; background: #e6e8ec; opacity: 1; }
 /* 来了新消息就收起上次的分界；占位留着，收起时下面的内容不会跳。 */
 .chat-new.gone { visibility: hidden; }
 .conversation-turn + .conversation-turn { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
