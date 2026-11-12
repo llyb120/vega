@@ -48,7 +48,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .round:hover { background: #eaeaea; color: var(--ink); }
 .round .icon { width: 16px; height: 16px; stroke-width: 2; }
 .round.on { background: var(--sel); }
-.search-row { flex: none; padding: 0 14px 6px; }
+.search-row { flex: none; padding: 0 16px 6px; }
 .search-row input { width: 100%; height: 32px; padding: 0 12px; border: 1px solid #dedede; border-radius: 10px; background: var(--white); color: var(--ink); font: inherit; font-size: 13px; }
 .search-row input::placeholder { color: var(--faint); }
 .hero { display: grid; justify-items: center; flex: none; gap: 9px; padding: 22px 8px 0; color: inherit; }
@@ -105,7 +105,7 @@ body.resizing { cursor: col-resize; }
 .win-btns { display: flex; align-self: flex-start; height: 51px; }
 .win-btn { display: grid; place-items: center; width: 45px; height: 100%; color: #000; }
 .win-btn:hover { background: #ededed; }
-.win-btn.close:hover { background: #e81123; color: #fff; }
+.win-btn.close:hover { background: #eb1e2b; color: #fff; }
 .win-btn .icon { width: 10px; height: 10px; stroke-width: 1; }
 
 .stream { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; padding: 45px 12px 24px 16px; scrollbar-width: none; }
