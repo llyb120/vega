@@ -1,0 +1,22 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "Vega",
+  "outputfilename": "vega-desktop",
+  "frontend:dir": "frontend",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "wailsjsdir": "frontend",
+  "author": {
+    "name": "llyb120",
+    "email": "llyb120@gmail.com"
+  },
+  "info": {
+    "companyName": "Vega",
+    "productName": "Vega",
+    "productVersion": "0.2.0",
+    "copyright": "Vega",
+    "comments": "Vega desktop chat client"
+  }
+}

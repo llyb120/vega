@@ -13,3 +13,9 @@ local/vega-local*
 !local/vega-local.rc
 !local/vega-local.manifest
 .env
+
+# Wails desktop client
+desktop/build/bin/
+desktop/build/windows/*.syso
+desktop/frontend/wailsjs/
+desktop/frontend/node_modules/

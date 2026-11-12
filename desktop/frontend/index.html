@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Vega</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="titlebar">
+      <div class="titlebar-drag"></div>
+      <div class="window-controls">
+        <button type="button" id="min" aria-label="最小化" title="最小化">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 12h14" /></svg>
+        </button>
+        <button type="button" id="max" aria-label="最大化" title="最大化">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+        </button>
+        <button type="button" id="quit" class="close" aria-label="关闭" title="关闭">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+        </button>
+      </div>
+    </header>
+    <main>
+      <div class="mark" aria-hidden="true">V</div>
+      <h1>连接到 Vega</h1>
+      <p class="lead">桌面窗口会打开你已有的 Vega 网站。登录方式与浏览器相同，不会另建一套账号。</p>
+      <form id="form">
+        <label for="url">服务器地址</label>
+        <input id="url" name="url" type="url" required placeholder="http://127.0.0.1:8080" autocomplete="url" />
+        <p id="error" class="error" hidden></p>
+        <button type="submit" id="connect">连接</button>
+      </form>
+      <p class="hint">默认连接本机 <code>http://127.0.0.1:8080</code>。若 Vega 跑在别的机器或端口，改成实际地址即可。</p>
+    </main>
+    <script src="main.js"></script>
+  </body>
+</html>
