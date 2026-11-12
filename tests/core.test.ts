@@ -428,8 +428,9 @@ test("Go backup record and byte-identical vendored source digests are portable",
     readFileSync("reference/ported-assets.json", "utf8"),
   );
   for (const record of manifest) {
+    // 检出可能是 CRLF（Windows core.autocrlf）；指纹按内容算，换行风格不算改动。
     const hash = createHash("sha256")
-      .update(await readFile(record.path))
+      .update((await readFile(record.path, "utf8")).replace(/\r\n/g, "\n"), "utf8")
       .digest("hex")
       .toUpperCase();
     assert.equal(

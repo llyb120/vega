@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { ref } from "vue";
+import { computed, ref } from "vue";
 
 const source = readFileSync("web/src/EmployeeSessionView.vue", "utf8");
 function mount(api: (path: string) => Promise<any>, debug = true, failure = "") {
@@ -12,9 +12,9 @@ function mount(api: (path: string) => Promise<any>, debug = true, failure = "") 
     source.slice(source.indexOf("const props ="), source.indexOf("</script>")) +
       "\n({ refresh, exportSession, record, messages, raw, busy, error })",
     {
-      ref, Blob,
+      ref, computed, Blob,
       CHAT_PAGE_SIZE: 60,
-      mergeMessages: (a, b) => [...a, ...b],
+      mergeMessages: (a: any[], b: any[]) => [...a, ...b],
       nextTick: async () => {},
       encodeURIComponent,
       defineProps: () => props, defineEmits: () => () => {},

@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { renderMarkdown, renderInline, filesArchiveBase } from "../web/src/markdown.js";
 import { 
   toolCaption,
-  master,
   formatDuration,
   formatTokens,
   groupTurns,
@@ -128,7 +127,7 @@ test("tool captions surface bash commands and key args instead of bare tool name
     { role: "assistant", seq: 1, calls: [{ id: "c1", name: "bash", arguments: { command: "rg SourcesConfig" } }] },
     { role: "tool", seq: 2, callId: "c1", name: "bash", text: "hit" },
   ];
-  const items = timelineOf(messages)[0].items;
+  const items = (timelineOf(messages)[0] as any).items;
   assert.equal(items[0].arguments.command, "rg SourcesConfig");
   assert.deepEqual(processLiveLines(items), ["已完成 · rg SourcesConfig"]);
 });

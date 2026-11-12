@@ -12,7 +12,7 @@ function mount(api: any) {
   let dispose = () => {};
   const state = vm.runInNewContext(source.slice(source.indexOf("const props ="), source.indexOf("</script>")) +
     "\n({ refresh, loadOlder, onScroll, messages, transcript, record, hasMore, loadingOlder, running, busy, error })", {
-    ref, nextTick, CHAT_PAGE_SIZE, mergeMessages, encodeURIComponent,
+    ref, computed, nextTick, CHAT_PAGE_SIZE, mergeMessages, encodeURIComponent,
     defineProps: () => props, defineEmits: () => () => {}, watch: () => {}, onBeforeUnmount: (fn: any) => { dispose = fn; },
   });
   return { ...state, props, dispose: () => dispose() };

@@ -12,7 +12,7 @@
     "build:web": "vite build --config web/vite.config.js",
     "build": "npm run build:web && nitro build",
     "start": "node .output/server/index.mjs",
-    "test": "tsx --test tests/*.test.ts && node --test local/extension/vega-chrome/worker.test.mjs",
+    "test": "tsx --test tests/*.test.ts local/extension/vega-chrome/worker.test.mjs",
     "check": "tsc --noEmit"
   },
   "dependencies": {

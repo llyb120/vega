@@ -9,7 +9,7 @@ import { ChromeBridge } from "../server/core/chrome-bridge";
 import { LocalAgents, LocalAgentUnavailable } from "../server/core/local-agent";
 import { Tools } from "../server/core/tools";
 import { resolveModel } from "../server/core/config";
-import { chromeCall, employeeCall } from "./public-call";
+import { chromeCall } from "./public-call";
 
 const client = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Local PC", cwd: "C:\\only-on-client", platform: "windows" };
 async function fixture(t: TestContext) {
@@ -105,38 +105,36 @@ test("local navigation invalidates other sessions on the same client without sha
   assert(firstBrowser.observations.has(session.id + ":unrelated"));
 });
 
-test("employee relay keeps its task-bound local Chrome for new and legacy computer sessions", async (t) => {
+test("a computer task keeps its task-bound local Chrome for new and legacy sessions", async (t) => {
   for (const legacy of [false, true]) await t.test(legacy ? "legacy session" : "new session", async (t) => {
-    const { engine, store, calls } = await fixture(t), employee = engine.employee;
-    const config = { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true, modalities: { input: ["text", "image"] } } } } } };
+    const { engine, store, calls } = await fixture(t);
+    const employee = await engine.employee.for((await engine.employee.create({ name: "Chrome tester" }, "alice")).id);
+    const config = { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, model: "fixture/model", provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true, modalities: { input: ["text", "image"] } } } } } };
     await store.put("config", config);
     engine.catalog.resolve = async (_c, selection) => resolveModel(config, selection || config.scenes.lightweight[0]);
-    const execution = { localAgent: true, clientId: client.clientId, clientName: client.name, localPlatform: client.platform, ownerId: "alice" };
-    await employee.update((state) => { state.cwd = client.cwd; });
+    // task_relay_computer 已停用：执行位置由这头牛马的文件系统 / 浏览器 Master 决定。
+    await engine.runtimes.setMaster(employee.employeeId, "fs", client.clientId);
+    await engine.runtimes.setMaster(employee.employeeId, "browser", client.clientId);
     const added = await employee.execute("", { action: "add", kind: "todo", text: "Use the existing local Chrome tab" });
     const id = added.value.id;
     let turns = 0;
     engine.providers.chat = async () => {
-      if (++turns === 1) return { role: "assistant", calls: [{ id: "relay", ...employeeCall({ action: "relay", scene: "computer", text: "Inspect the existing local Chrome tab" }) }] };
-      if (turns === 2) return { role: "assistant", calls: [{ id: "local-tabs", ...chromeCall({ operation: "tabs" }) }] };
+      if (++turns === 1) return { role: "assistant", calls: [{ id: "local-tabs", ...chromeCall({ operation: "tabs" }) }] };
       return { role: "assistant", text: "Verified the selected local Chrome" };
     };
-    await employee.update((state) => { state.tasks[0].status = "running"; });
-    employee.busy.set(id, { computer: false, session: "" });
-    await employee.run(employee.task(await employee.state(), id));
-    assert.equal(employee.task(await employee.state(), id).side, "computer");
     let previous = "";
     if (legacy) {
-      previous = (await store.newSession({ ...execution, localAgent: false, cwd: process.cwd(), taskId: id, employeeId: employee.employeeId, scene: "computer", model: "fixture/model" })).id;
+      previous = (await store.newSession({ localAgent: false, cwd: process.cwd(), taskId: id, employeeId: employee.employeeId, scene: "computer", model: "fixture/model" })).id;
       await store.append(previous, { role: "user", text: "Previous server browser handoff" });
       await store.append(previous, { role: "assistant", text: "Previously observed a server tab; do not replay submissions" });
     }
     await employee.update((state) => {
-            state.cwd = process.cwd();
             const job = employee.task(state, id);
+            job.side = "computer";
             if (previous) job.computerSession = previous;
             job.status = "running";
           });
+    assert.equal(employee.task(await employee.state(), id).side, "computer", "电脑侧任务以 computer 执行");
     employee.busy.set(id, { computer: true, session: "" });
     await employee.run(employee.task(await employee.state(), id));
     const job = employee.task(await employee.state(), id), computer = await store.session(job.computerSession);
@@ -145,9 +143,8 @@ test("employee relay keeps its task-bound local Chrome for new and legacy comput
     assert.equal(computer.ownerId, "alice");
     assert.equal(computer.localPlatform, client.platform);
     assert.equal(computer.cwd, client.cwd);
-    assert.notEqual(job.workSession, job.computerSession);
-    assert.equal((await store.session(job.workSession)).localAgent, true);
-    assert.equal(job.side, "work");
+    assert(!job.workSession, "电脑侧任务不另建工作会话");
+    assert.equal(job.side, "work", "电脑会话结束后回到主任务等待交付");
     assert.match(job.answer, /Verified the selected local Chrome/);
     assert(calls.some((call) => call.operation === "tabs"));
     assert.equal(calls.at(-1).operation, "release");
@@ -208,7 +205,7 @@ test("competing sessions pause without input; releasing a turn admits the next s
 
 test("offline, unbound and old clients never fall back to any server browser", async (t) => {
   const { engine, session } = await fixture(t);
-  await assert.rejects(engine.chromeFor({ ...session, clientId: undefined }), /尚未绑定/);
+  await assert.rejects(engine.chromeFor({ ...session, clientId: undefined }), /绑定浏览器 Master/);
   engine.localAgents.request = async () => ({ error: "Unknown operation" });
   await assert.rejects(engine.chromeFor(session), /升级客户端/);
   assert.equal(engine.localAgents.active("alice", client.clientId)!.browserLeases.size, 0);
@@ -224,7 +221,7 @@ test("server sessions keep their server browser even when clients are online", a
 test("native browser leases survive model/tool roundtrips and release on completion, failure or cancellation", async (t) => {
   for (const mode of ["finish", "failure", "cancel"]) await t.test(mode, async (t) => {
     const { engine, store, session, calls } = await fixture(t);
-    const config = { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true, modalities: { input: ["text", "image"] } } } } } };
+    const config = { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, model: "fixture/model", provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true, modalities: { input: ["text", "image"] } } } } } };
     await store.put("config", config);
     engine.catalog.resolve = async (_c, selection) => resolveModel(config, selection || config.scenes.lightweight[0]);
     const next = await store.newSession({ localAgent: true, clientId: client.clientId, ownerId: "alice", cwd: client.cwd, scene: "computer" });

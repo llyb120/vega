@@ -115,8 +115,11 @@ test("markdown re-renders at most every interval while streaming and catches up 
     if (shown.value !== last) { renders++; last = shown.value; }
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
-  assert.ok(updates > 50, String(updates));
-  assert.ok(renders <= 12, `rendered ${renders} times for ${updates} tokens`);
+  const elapsed = Date.now() - started;
+  // Timer granularity differs by platform (a 2ms sleep rounds up to ~16ms on Windows), so the update
+  // count is not the point: the throttle is, and it must keep renders within one per interval.
+  assert.ok(updates > 5, `only ${updates} updates in ${elapsed}ms`);
+  assert.ok(renders <= Math.ceil(elapsed / 40) + 2, `rendered ${renders} times in ${elapsed}ms for ${updates} tokens`);
   streaming.value = false;
   assert.equal(shown.value, text.value, "the final text is shown at once");
 });

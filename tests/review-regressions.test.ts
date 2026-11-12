@@ -53,7 +53,7 @@ test("forked images survive deletion of the source and preview files stay user-s
   chrome.observe = async () => ({ id: "preview", tabTag: "C1", frames: [], pages: [{ url: "https://example.test" }], images: [], captured: Date.now() } as any);
   chrome.capture = async (owner, o) => { o.images = [{ path: await store.files.write(owner, "preview-0.webp", "x") }]; return { fullPage: false, scrollExpanded: undefined, fullPageFallback: undefined, documentSize: undefined, screenshotComplete: true, totalTiles: 1, nextTile: undefined }; };
   const shown = await chrome.feedback("browser-view:alice", "C1", {}, "screenshot");
-  const parts = (path: string) => path.slice(store.files.root.length + 1).split("/");
+  const parts = (path: string) => path.slice(store.files.root.length + 1).split(/[\\/]/);
   // The browser view's screenshot and DOM record are files of that user only.
   assert.deepEqual(parts(shown.images[0].path).slice(0, 2), ["views", "alice"]);
   assert.deepEqual(parts(shown.documentPath!).slice(0, 2), ["views", "alice"]);
@@ -64,7 +64,8 @@ test("forked images survive deletion of the source and preview files stay user-s
   await store.append(owner.id, { role: "tool", name: "chrome_screenshot", text: JSON.stringify({ images: [{ path: shot }] }), images: [{ mime: "image/webp", path: shot, url: store.files.url(shot) }] });
   const copy = await store.fork(owner.id), copied = (await store.messages(copy.id))[0];
   await store.deleteSession(owner.id);
-  assert(copied.images![0].path!.includes(copy.id) && copied.text!.includes(copy.id));
+  assert(copied.images![0].path!.includes(copy.id));
+  assert(copied.text!.includes(copy.id), "forked history must point at the copy's own files, including JSON nested inside tool text");
   assert.equal((await store.files.read(copied.images![0].path!)).toString(), "pixels");
   assert.equal(await auth.canFile(alice, parts(copied.images![0].path!)), true);
   assert.equal(await auth.canFile(bob, parts(copied.images![0].path!)), false);

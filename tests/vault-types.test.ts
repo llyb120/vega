@@ -79,7 +79,8 @@ test("vault_get of an ssh_key writes a 0600 file, returns GIT_SSH_COMMAND withou
     const file = got.value.keyFile;
     assert.equal(got.value.GIT_SSH_COMMAND, gitSshCommand(file));
     assert.match(got.value.GIT_SSH_COMMAND, /^ssh -i '.+' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes$/);
-    assert.equal(statSync(file).mode & 0o777, 0o600);
+    // Windows has no POSIX mode bits for regular files: every file reads as 0o666.
+    if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600);
     assert.equal(readFileSync(file, "utf8"), pem.trim() + "\n");
     assert.equal(redactor.text("cat says " + body), "cat says [credential redacted]");
     await tools.close();

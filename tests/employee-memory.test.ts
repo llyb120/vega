@@ -188,15 +188,20 @@ test("chat recall uses the last three user turns, so '好的，继续' keeps the
   const state = await employee.state();
   state.memories = [mem("pin", "convention", "回复一律用中文，结论先行", { pinned: true }), mem("oa", "environment", "OA 系统地址是 https://oa.example.test"), mem("ci", "procedure", "构建产物上传到制品库")];
   await employee.save(state);
-  const systems: string[] = [];
-  engine.providers.chat = async (_model, system) => { systems.push(system); return { role: "assistant", text: "好的。" }; };
+  const requests: string[] = [];
+  // Recalled memories ride on the dynamic segment appended to the last user message.
+  engine.providers.chat = async (_model, system, messages) => {
+    const latest = String([...(messages as any[])].reverse().find((message) => message.role === "user")?.text || "");
+    requests.push(system + "\n" + latest);
+    return { role: "assistant", text: "好的。" };
+  };
   try {
     await engine.run(chat.id, { role: "user", text: "登录 OA 系统，把待审批的单子整理成清单" });
     await engine.run(chat.id, { role: "user", text: "好的，继续" });
-    for (const system of systems) {
-      assert(system.includes("回复一律用中文，结论先行"));
-      assert(system.includes("https://oa.example.test"));
-      assert(!system.includes("构建产物上传到制品库"));
+    for (const request of requests) {
+      assert(request.includes("回复一律用中文，结论先行"));
+      assert(request.includes("https://oa.example.test"));
+      assert(!request.includes("构建产物上传到制品库"));
     }
   } finally { await engine.close(); await store.close(); }
 });
@@ -251,7 +256,9 @@ test("owner private chat definitions include memory_propose; guest chat context 
 test("employee memory tools propose/search/resolve and refresh prompt in the same turn", async () => {
   const { store, engine, employee, chat } = await fixture();
   let phase = "propose", requests = 0, memory = "";
-  engine.providers.chat = async (_model, system, _messages, definitions) => {
+  engine.providers.chat = async (_model, system, messages, definitions) => {
+    const latest = String([...(messages as any[])].reverse().find((message) => message.role === "user")?.text || "");
+    const requestText = system + "\n" + latest;
     assert(system.includes("主动积累") && system.includes("memory_propose"));
     assert(["memory_search", "memory_propose", "memory_manage"].every((name) => definitions.some((tool) => tool.name === name)));
     assert(!definitions.some((tool) => tool.name === "employee" || tool.name === "remember"));
@@ -260,12 +267,12 @@ test("employee memory tools propose/search/resolve and refresh prompt in the sam
       if (phase === "propose") return action("propose", { action: "memory_propose", claim: "Project Aurora uses the east region.", memoryKind: "convention", source: "ui" });
       return action("update", { action: "memory_propose", id: memory, claim: "Project Aurora now uses the west region.", memoryKind: "convention", source: "ui" });
     }
-    if (phase === "propose") assert(system.includes("Project Aurora uses the east region."));
+    if (phase === "propose") assert(requestText.includes("Project Aurora uses the east region."));
     if (phase === "update") {
-      assert(system.includes("Project Aurora now uses the west region."));
-      assert(!system.includes("Project Aurora uses the east region."));
+      assert(requestText.includes("Project Aurora now uses the west region."));
+      assert(!requestText.includes("Project Aurora uses the east region."));
     }
-    if (phase === "forget") assert(!system.includes("Project Aurora now uses the west region."));
+    if (phase === "forget") assert(!requestText.includes("Project Aurora now uses the west region."));
     return { role: "assistant", text: "记忆已处理。" };
   };
   try {
@@ -306,8 +313,9 @@ test("chat recalls older relevant memories outside recent noise", async () => {
         ];
       });
   let requests = 0;
-  engine.providers.chat = async (_model, system) => {
-    assert(system.includes("项目银河统一使用TypeScript并在原目录开发"));
+  engine.providers.chat = async (_model, system, messages) => {
+    const latest = String([...(messages as any[])].reverse().find((message) => message.role === "user")?.text || "");
+    assert((system + "\n" + latest).includes("项目银河统一使用TypeScript并在原目录开发"));
     return requests++ < 2 ? action("list-" + requests, { action: "list" }) : { role: "assistant", text: "沿用项目银河现有约定。" };
   };
   try {

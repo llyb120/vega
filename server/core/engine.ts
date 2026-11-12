@@ -375,7 +375,7 @@ export class Engine {
       (session, message) => this.run(session, message),
       (session) =>
         this.active.get(session)?.control.abort(Error("Fire paused")),
-      (type, data, session?) => this.emit({ type, data, session }),
+      (type: string, data: any, session?: string) => this.emit({ type, data, session }),
     );
     this.handoffs = new TaskHandoffs({
       store,
@@ -668,6 +668,16 @@ export class Engine {
   }
   async chromeFor(session: Session, signal?: AbortSignal) {
     if (session.agentChild) throw new Error("分身不能占用浏览器，也不能抢占父会话的 Chrome 会话。");
+    // 旧会话只记了执行位置：浏览器按同一设备补齐一次。只改传入的对象（可能是副本），不写库。
+    if (session.localBrowser === undefined && session.localAgent) {
+      const bound = session.browserClientId || session.clientId;
+      const agent = bound ? this.localAgents.active(await this.browserOwnerId(session), bound) : undefined;
+      // 设备明确要求浏览器在云端时才不继承；离线/未绑定时仍算本机，让下面报出真实原因而不是静默换服务端。
+      if (!agent || (agent.browser || "local") !== "cloud") {
+        session.localBrowser = true;
+        if (agent) session.browserClientId = agent.clientId;
+      }
+    }
     // 浏览器 Master 与文件系统 Master 互相独立：本机浏览器不必要求执行权也在本机。
     if (session.localBrowser) {
       assert(session.browserClientId || session.clientId, "本机浏览器需要绑定浏览器 Master 客户端。");

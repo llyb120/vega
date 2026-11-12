@@ -141,11 +141,13 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
     const migrated = await engine.employee.profile();
     assert.equal(migrated.cwd, ids.alice.cwd);
     assert.equal(migrated.executionCwds?.server, ids.alice.cwd);
-    let prompt = "";
-    engine.providers.chat = async (_model, system) => { prompt = system; return { role: "assistant", text: "recovered" }; };
+    // 动态段（含「当前工作目录」）由 attachDynamic 附在最后一条 user 消息后，system 里没有。
+    let request: any[] = [];
+    engine.providers.chat = async (_model, _system, messages) => { request = messages; return { role: "assistant", text: "recovered" }; };
     await engine.run(chat.id, { role: "user", text: "continue chatting" });
     assert.equal((await store.session(chat.id)).cwd, ids.alice.cwd);
-    assert(prompt.includes(ids.alice.cwd.replaceAll("\\", "/")));
+    const lastUser = request.findLast((message: any) => message.role === "user");
+    assert(String(lastUser?.text || "").includes(ids.alice.cwd.replaceAll("\\", "/")));
     assert.equal((await store.lastMessage(chat.id, "assistant"))?.text, "recovered");
     assert((await store.messages(chat.id)).some((message) => message.text === "keep this earlier reply"));
     assert.equal(engine.employee.task(await engine.employee.state(), job.value.id).cwd, process.cwd());

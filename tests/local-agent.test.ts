@@ -50,34 +50,33 @@ test("browser bridge routes only to its owner and instance, never another user o
   hub.close();
 });
 
-test("one account works on one device: the newest login wins and the older takes over when it leaves", async (t) => {
+test("one account can hold several connected devices, and each operation goes only to the device it is addressed to", async (t) => {
   const events: any[] = [], hub = new LocalAgents();
   t.after(() => hub.close());
   const other = { ...details, clientId: "e".repeat(32), instance: "b".repeat(32), name: "Home PC" };
   hub.connect("alice", details, wire(events));
   hub.connect("alice", other, wire(events, other.instance));
   hub.connect("bob", { ...details, instance: "c".repeat(32) }, wire(events, "c".repeat(32)));
-  assert.deepEqual(hub.list("alice").map((c) => [c.name, c.active]), [["Office PC", false], ["Home PC", true]]);
+  assert.deepEqual(hub.list("alice").map((c) => [c.name, c.active]), [["Office PC", true], ["Home PC", true]], "两台都已连接，不再按最新登录让旧设备待命");
   assert.equal(hub.list("bob").length, 1);
-  assert.equal(hub.active("alice")!.clientId, other.clientId, "以最新登录的设备为准");
-  assert.equal(hub.active("alice", details.clientId), undefined, "旧设备待命，不派发任何操作");
+  assert.equal(hub.active("alice"), undefined, "有多台时没有默认设备，必须显式指定");
+  const office = hub.active("alice", details.clientId)!, home = hub.active("alice", other.clientId)!;
+  assert.equal(office.clientId, details.clientId);
+  assert.equal(home.clientId, other.clientId);
   assert.throws(() => hub.connect("alice", { ...details, instance: "f".repeat(32) }));
   assert.throws(() => hub.connect("alice", { ...other, clientId: "0".repeat(32) }), /instance already registered/);
 
-  const office = (hub as any).agents.get("alice:" + details.clientId);
-  assert.throws(() => hub.request(office, "file", { op: "read" }, idle()), /待命/);
-  const home = hub.active("alice", other.clientId)!;
+  // 操作只发给被指定的那台，两台互不串。
   const job = hub.request(home, "file", { op: "read" }, idle());
-  assert.equal(events[0].data.instance, other.instance, "操作只发给最新登录的设备");
-  // 待命设备已发出的操作，结果仍要能回传：只停新派发，不丢掉在途结果。
-  let lateResult = "";
-  office.pending.set("late", { resolve: (r: any) => { lateResult = r.content; }, reject() {}, suspend() {}, resume() {} } as any);
-  hub.result("alice", { id: "late", instance: details.instance, result: { content: "late" } });
-  assert.equal(lateResult, "late");
-  hub.result("alice", { ...events[0].data, result: { content: "home" } });
+  assert.equal(events.at(-1).data.instance, other.instance, "操作只发给被指定的设备");
+  hub.result("alice", { ...events.at(-1).data, result: { content: "home" } });
   assert.deepEqual(await job, { content: "home" });
+  const officeJob = hub.request(office, "file", { op: "read" }, idle());
+  assert.equal(events.at(-1).data.instance, details.instance);
+  hub.result("alice", { ...events.at(-1).data, result: { content: "office" } });
+  assert.deepEqual(await officeJob, { content: "office" });
 
-  // 新设备退出后，旧设备（最后登录的那台）继续工作。
+  // 一台退出后剩下那台继续工作；只剩一台时它就是默认设备。
   hub.disconnect("alice", other.instance);
   assert.equal(hub.list("alice").length, 1);
   assert.equal(hub.active("alice")!.clientId, details.clientId);

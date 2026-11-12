@@ -282,6 +282,8 @@ test("removed image service is hidden and unavailable while reading image pixels
       image.toString("base64"),
     );
     const id = await store.blob("image/png", image);
+    // 归档 blob 需要授权或作为消息附件出现；这里显式授权本会话后读，验证归档图片仍可读。
+    await store.grantBlob(id, session.id);
     const archived = await tools.read({ path: "sqlite:blob/" + id });
     assert.equal(archived.images?.[0].blobId, id);
     assert.equal(archived.value.url, "/api/blobs/" + id);

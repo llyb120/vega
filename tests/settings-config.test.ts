@@ -37,6 +37,8 @@ test("model discovery uses the draft key or retains the unchanged saved key in e
       draft: { value: masked }, id: { value: "p" }, name: { value: "Provider" },
       preset: { value: "openai-compatible" }, apiType: { value: "openai-completions" },
       baseURL: { value: "https://provider.example/v1" }, source: { value: undefined },
+      // provider() reads these two computed values from ProviderSettings.vue (buddy = preset is CodeBuddy, site = login channel).
+      buddy: { get value() { return scope.preset.value === "codebuddy"; } }, site: { value: "global" },
       apiKey: { value: masked.options?.apiKey || masked.apiKey || "" },
       modelMap: { value: {} }, contextRules: { value: [] }, options: { value: "{}" }, headers: { value: "{}" },
       catalogContextModels, serializeContextRules,
@@ -74,6 +76,7 @@ test("provider rules serialize, reorder and preserve manual overrides without re
     draft: { value: { keep: true } }, id: { value: "p" }, name: { value: "Provider" },
     preset: { value: "openai-compatible" }, apiType: { value: "openai-completions" },
     baseURL: { value: "https://provider.example/v1" }, source: { value: undefined }, apiKey: { value: "__stored_secret__" },
+    buddy: { get value() { return scope.preset.value === "codebuddy"; } }, site: { value: "global" },
     options: { value: "{}" }, headers: { value: "{}" }, copy: structuredClone,
     contextRules: { value: [{ keyword: " haiku ", context: "100k" }, { keyword: "claude", context: "200K" }] },
     modelMap: { value: catalogContextModels({ alias: { name: "Claude Haiku", limit: { context: 400000, output: 32000 } } }) },

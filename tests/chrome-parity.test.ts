@@ -1,5 +1,6 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import sharp from "sharp";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
@@ -303,7 +304,7 @@ test("unchanged screenshots detect small pixel changes and keep frame streams se
   f.chrome.cdp = async (...args) => args[1] === "Page.captureScreenshot" ? { data: pixels.toString("base64") } : raw(...args);
   const first = await f.observe(); await f.chrome.capture("owner", first, {});
   // Screenshots are files in the owner session's directory, served under /api/files.
-  assert.equal(first.images[0].path, f.store.files.dir(await f.store.session("owner")) + "/" + first.images[0].imageId + ".webp");
+  assert.equal(first.images[0].path, join(f.store.files.dir(await f.store.session("owner")), first.images[0].imageId + ".webp"));
   assert.equal(first.images[0].url, f.store.files.url(first.images[0].path));
   assert.equal((await sharp(await f.store.files.read(first.images[0].path)).metadata()).format, "webp");
   const same = await f.observe(); await f.chrome.capture("owner", same, {}, first);
@@ -335,7 +336,7 @@ test("unchanged screenshots detect small pixel changes and keep frame streams se
   pixels = await sharp({ create: { width: 640, height: 480, channels: 3, background: "black" } }).png().toBuffer();
   const live2 = await f.observe(); await f.chrome.capture("browser-view:u", live2, {}, live1);
   assert.equal(live2.images[0].path, live1.images[0].path);
-  assert.equal(live2.images[0].path, f.store.files.dir("browser-view:u") + "/live-tab-0.webp");
+  assert.equal(live2.images[0].path, join(f.store.files.dir("browser-view:u"), "live-tab-0.webp"));
   assert.notEqual(live2.images[0].url, live1.images[0].url);
   assert.equal(live2.images[0].url, f.store.files.url(live2.images[0].path) + "?v=" + live2.id);
   const raw2 = await sharp(await f.store.files.read(live2.images[0].path)).raw().toBuffer();

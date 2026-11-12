@@ -13,11 +13,14 @@ import { relayProxyFile, relayShellEnvironment } from "../server/core/relay-prox
 
 const grant = { userId: "alice", clientId: "c".repeat(32), hash: "device-hash" };
 async function fixture(t: TestContext) {
-  const store = await Store.open(":memory:"), hub = new LocalAgents(), relay = new NetworkRelay(store, hub);
+  const store = await Store.open(":memory:"), hub = new LocalAgents();
+  // 中继开关已取消：借用条件只由「云端是否 Master」决定，用这个可变标志模拟本机当 Master。
+  let borrow = true;
+  const relay = new NetworkRelay(store, hub, () => borrow);
   const root = await mkdtemp(join(tmpdir(), "vega-relay-test-"));
   hub.connect(grant.userId, { clientId: grant.clientId, instance: "a".repeat(32), platform: "windows", cwd: "C:\\work" }, { send() {}, close() {} });
   t.after(async () => { hub.close(); await relay.close(); await store.close(); });
-  return { store, hub, relay, root };
+  return { store, hub, relay, root, setBorrow: (value: boolean) => { borrow = value; } };
 }
 function read(stream: NodeJS.ReadableStream, size: number): Promise<Buffer> {
   return new Promise((yes, no) => {
@@ -45,14 +48,14 @@ test("the shell environment points curl, git and ssh at the account gateway", as
   assert.equal(await relayProxyFile(f.root), file, "one file per files root");
 });
 
-test("server shells get the proxy whenever an enabled client is online, with or without rules", async (t) => {
+test("server shells get the proxy whenever a borrowable client is online, with or without rules", async (t) => {
   const f = await fixture(t);
-  assert.equal(await f.relay.enabled("alice"), false);
-  await f.relay.configure(grant, [], true);
-  assert.equal(await f.relay.enabled("alice"), true);
-  assert.equal(await f.relay.enabled("bob"), false);
-  await f.relay.configure(grant, [], false);
-  assert.equal(await f.relay.enabled("alice"), false);
+  assert.equal(await f.relay.enabled("alice"), false, "还没上报中继配置的客户端不参与兜底");
+  await f.relay.configure(grant, []);
+  assert.equal(await f.relay.enabled("alice"), true, "没有规则也能兜底借用（开关字段已取消）");
+  assert.equal(await f.relay.enabled("bob"), false, "没有在线客户端就没有代理");
+  f.setBorrow(false);
+  assert.equal(await f.relay.enabled("alice"), false, "本机是 Master 时不借云端出口");
 });
 
 test("the ProxyCommand relays a TCP stream through the gateway", async (t) => {

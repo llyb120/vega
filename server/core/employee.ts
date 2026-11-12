@@ -11,7 +11,7 @@ import { resolve, posix, win32 } from "node:path";
 import { realpath } from "node:fs/promises";
 import { assert, id, clone, clip, sleep, type Obj } from "./util";
 import { Vault, VAULT_USAGE } from "./vault";
-import { requireSceneModel, schedulerLimits } from "./config";
+import { requireSceneModel, schedulerLimits, type Config } from "./config";
 import { loadRows, baseRecord, saveRows } from "./employee-rows";
 import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
@@ -1176,7 +1176,7 @@ export class Employee {
               if (content && t.plan?.length && (t.planRevision || 0) === (t.revision || 0)) {
                 const open = t.plan
                   .map((step: Obj, index: number) => ({ step, index }))
-                  .filter(({ step }) => !PLAN_SETTLED.has(step.status));
+                  .filter(({ step }: { step: Obj }) => !PLAN_SETTLED.has(step.status));
                 if (open.length === 1 && open[0].step.status === "in_progress" && open[0].index === t.plan.length - 1) {
                   open[0].step.status = "completed";
                 }
@@ -1892,7 +1892,7 @@ export class Employee {
         }
       }
       if (!session) {
-        const model = requireSceneModel(cfg, scene);
+        const model = requireSceneModel(cfg as Config, scene);
         const created = await this.store.newSession({
           title: initial.name + " · " + [...planned.text.split("\n")[0]].slice(0, 30).join(""),
           cwd: planned.cwd,

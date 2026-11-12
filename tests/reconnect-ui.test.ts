@@ -77,7 +77,7 @@ test("every API call is plain HTTP, and writes still go out while realtime is di
   assert.equal(s.calls.length, 2, "a write is not blocked by a reconnecting event stream");
   await connected(s);
   await s.api("/employees/one/chat");
-  assert.equal(s.calls.filter((call) => (call.init.method || "GET") === "POST" && call.url.includes("/api/events")).length, 1, "the event stream never posts an uplink; only the one-time ticket is a POST");
+  assert.equal(s.calls.filter((call: any) => (call.init.method || "GET") === "POST" && call.url.includes("/api/events")).length, 1, "the event stream never posts an uplink; only the one-time ticket is a POST");
   s.context.fetch = async () => { throw Error("offline"); };
   await assert.rejects(s.api("/employees/one/messages", "POST", { text: "hello", clientMessageId: "stable-message-id" }), (error: any) => error.network === true);
   assert.equal(s.context.error.value, "");

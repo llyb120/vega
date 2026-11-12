@@ -82,45 +82,50 @@ test("employees are immediately available even with legacy disabled hours; duty 
   } finally { await engine.close(); await store.close(); }
 });
 
-test("the client's own execution preference never changes old, running, resumed or child tasks", async () => {
+test("configured Masters decide new tasks, and changing them never moves old, resumed or child tasks", async () => {
   const { store, engine } = await fixture();
   const client = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Office PC", cwd: "C:\\client-only", platform: "windows" };
   try {
     const employee = await engine.employee.for((await engine.employee.create({ name: "Developer" }, "alice")).id);
-    const original = await add(employee, "server work");
-    const session = await store.newSession({ employeeId: employee.employeeId, taskId: original.id, cwd: original.cwd, ownerId: "alice" });
-    await employee.update((state) => { state.tasks[0].workSession = session.id; state.tasks[0].status = "running"; });
-    employee.busy.set(original.id, { session: session.id, computer: false });
-    engine.active.set(session.id, { control: new AbortController(), steer: [] });
     engine.localAgents.connect("alice", client);
     engine.localAgents.request = async (_agent, op, args) => { assert.equal(op, "file"); assert.equal(args.op, "stat"); return { isDir: true, path: args.path }; };
-    assert.equal((await store.session(session.id)).localAgent, undefined);
-    assert.equal(engine.active.has(session.id), true);
-    assert.equal((await employee.state()).tasks[0].execution?.localAgent, false);
+    // 云端当 Master：新任务落服务端。
+    const original = await add(employee, "server work");
+    assert.equal(original.execution?.localAgent, false);
+    // 这头牛马的文件系统与浏览器 Master 都改成这台客户端：新任务在本机，浏览器也在本机。
+    await engine.runtimes.setMaster(employee.employeeId, "fs", client.clientId);
+    await engine.runtimes.setMaster(employee.employeeId, "browser", client.clientId);
     const local = await add(employee, "client work");
+    assert.equal(local.execution?.localAgent, true);
     assert.equal(local.execution?.clientId, client.clientId);
+    assert.equal(local.execution?.localBrowser, true);
+    assert.equal(local.execution?.browserClientId, client.clientId);
     assert.equal(local.cwd, client.cwd);
-    // 调用方会话（例如云端普通会话）会把自己的 cwd 带进来；客户端优先时仍必须落在客户端目录。
+    // 调用方会话（例如云端普通会话）会把自己的 cwd 带进来；客户端 Master 时仍必须落在客户端目录。
     const injected = await employee.execute("", { action: "add", kind: "todo", text: "client work from a cloud chat", cwd: "/workspace/.vega-users/alice/workspace" });
-    assert.equal(employee.task(await employee.state(), injected.value.id).cwd, client.cwd, "客户端优先忽略调用方会话的云端目录");
-    assert.equal(local.execution?.localBrowser, true, "客户端未配置浏览器位置时默认用本机浏览器");
-    // 浏览器位置由客户端自己的配置决定：客户端上报 cloud 后，新任务仍在本机执行，但浏览器在云端。
-    engine.localAgents.connect("alice", { ...client, browser: "cloud" });
+    assert.equal(employee.task(await employee.state(), injected.value.id).cwd, client.cwd, "客户端 Master 忽略调用方会话的云端目录");
+    // 浏览器 Master 单独切到云端：新任务仍在本机执行，浏览器在云端。
+    await engine.runtimes.setMaster(employee.employeeId, "browser", "cloud");
     const cloudBrowserTask = await add(employee, "client work with cloud browser");
     assert.equal(cloudBrowserTask.execution?.localAgent, true);
     assert.equal(cloudBrowserTask.execution?.localBrowser, false);
-    engine.localAgents.connect("alice", { ...client, browser: "local" });
+    // 子任务继承父任务的执行位置，不跟着当前 Master 变（add 子任务要求父任务在运行）。
+    await employee.update((state) => { state.tasks.find((task) => task.id === original.id)!.status = "running"; });
+    employee.busy.set(original.id, { computer: false, session: "" });
     const child = await employee.execute(original.id, { action: "add", kind: "todo", text: "child inherits server" });
     assert.equal(employee.task(await employee.state(), child.value.id).execution?.localAgent, false);
-    // 执行位置只由客户端自己上报：客户端改成服务端优先后，新任务落云端，已有任务的绑定不动。
-    engine.localAgents.connect("alice", { ...client, prefer: "cloud" });
-    const cloudTask = await add(employee, "client prefers the server");
+    // 切换 Master 前先让任务停下并释放占用（产品禁止在有任务运行时切换）。
+    employee.busy.clear();
+    await employee.update((state) => {
+      for (const task of state.tasks) if (!["done", "failed", "stopped", "cancelled", "sealed"].includes(task.status)) task.status = "stopped";
+    });
+    await engine.runtimes.setMaster(employee.employeeId, "fs", "cloud");
+    const cloudTask = await add(employee, "Master is the cloud again");
     assert.equal(cloudTask.execution?.localAgent, false);
+    // 已绑定的任务不跟着 Master 变。
     assert.equal(employee.task(await employee.state(), local.id).execution?.clientId, client.clientId);
     assert.equal(employee.task(await employee.state(), local.id).cwd, client.cwd);
-    engine.localAgents.connect("alice", { ...client, prefer: "client" });
-    engine.active.delete(session.id); employee.busy.clear();
-    await employee.update((state) => { state.tasks.find((task) => task.id === local.id)!.status = "stopped"; });
+    employee.busy.clear();
     await employee.control({ action: "resume", id: local.id });
     assert.equal(employee.task(await employee.state(), local.id).execution?.clientId, client.clientId);
     const localTask = employee.task(await employee.state(), local.id);
@@ -138,10 +143,10 @@ test("the client's own execution preference never changes old, running, resumed 
     await employee.run(localTask);
     employee.runtime.run = originalRun;
     engine.localAgents.disconnect("alice");
-    // 客户端不在线：新任务落服务端并说明原因，客户端回来后可接回本机。
-    const offlineTask = await add(employee, "client prefer without client");
+    // 客户端不在线：Master 解析回云端，新任务落服务端并说明原因。
+    const offlineTask = await add(employee, "Master set while the client is offline");
     assert.equal(offlineTask.execution?.localAgent, false);
-    assert.match(offlineTask.checkpoint || "", /当前没有在线的客户端/);
+    assert.match(offlineTask.checkpoint || "", /文件系统 Master 为云端/);
   } finally { engine.active.clear(); (await engine.employee.all()).forEach((employee) => employee.busy.clear()); await engine.close(); await store.close(); }
 });
 
@@ -155,7 +160,8 @@ test("employee deletion removes its sessions/profile and its own vault and survi
     const legacy = await store.newSession({ taskId: job.id, employeeId: a.employeeId, cwd: dir });
     await a.update((state) => { state.tasks[0].workSession = legacy.id; });
     await store.append(legacy.id, { role: "assistant", text: "private record" });
-    const profile = engine.browsers.profile(a.employeeId);
+    // 浏览器 profile 按账号共享：删单只牛马不能清掉兄弟牛马的登录态。
+    const profile = engine.browsers.profile(engine.browserProfileKey("alice"));
     await mkdir(profile, { recursive: true }); await writeFile(join(profile, "Cookies"), "private");
     await writeFile(join(dir, "project.txt"), "keep");
     const credential = await a.vault.save({ name: "removed with A", condition: "authorized", content: "gone" }), kept = await b.vault.save({ name: "B own", condition: "authorized", content: "keep" });
@@ -167,7 +173,8 @@ test("employee deletion removes its sessions/profile and its own vault and survi
     await assert.rejects(async () => await engine.employee.for(a.employeeId), /not found/);
     await assert.rejects(async () => await store.session(chat.id), /not found/);
     await assert.rejects(async () => await store.session(legacy.id), /not found/);
-    await assert.rejects(access(profile));
+    await access(profile);
+    assert.equal(await readFile(join(profile, "Cookies"), "utf8"), "private", "删单只牛马不碰账号共享的浏览器 profile");
     assert.equal(await readFile(join(dir, "project.txt"), "utf8"), "keep");
     assert.deepEqual((await engine.vault.book("alice").list()).map((entry: any) => entry.id), [kept.id], "deleting A drops only the entry scoped to it, in the shared account book");
     assert(!(await b.vault.list()).some((entry) => entry.id === credential.id));
@@ -177,7 +184,7 @@ test("employee deletion removes its sessions/profile and its own vault and survi
     assert(!(await engine.employee.all()).some((employee) => employee.employeeId === "default"));
     await engine.employee.start(); engine.employee.close();
     assert(!(await engine.employee.all()).some((employee) => employee.employeeId === "default"));
-    await assert.rejects(engine.browsers.get(a.employeeId), /deleted/);
+    await assert.rejects(engine.browsers.get(a.employeeId), /Employee not found|deleted/);
     await assert.rejects(async () => await a.update(() => {}), /being deleted/i);
   } finally {
     engine.active.clear(); await engine.close(); await store.close();
@@ -259,6 +266,7 @@ test("a task whose client drops recovers on that same device instead of asking t
   try {
     engine.localAgents.connect("alice", client);
     const employee = await engine.employee.for((await engine.employee.create({ name: "Recover" }, "alice")).id);
+    await engine.runtimes.setMaster(employee.employeeId, "fs", client.clientId);
     const job = await add(employee, "client work");
     assert.equal(job.execution?.clientId, client.clientId);
     const session = await store.newSession({ taskId: job.id, employeeId: employee.employeeId, ownerId: "alice", cwd: job.cwd, localAgent: true, clientId: client.clientId, scene: "lightweight", model: "fixture/model" });

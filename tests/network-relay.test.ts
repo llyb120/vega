@@ -20,13 +20,16 @@ function tunnel(id: string, sink?: (frame: Buffer) => void) {
 }
 const upstream = (bytes: Uint8Array | readonly number[]) => encodeFrame(Buffer.from(bytes));
 async function fixture(t: TestContext) {
-  const store = await Store.open(":memory:"), hub = new LocalAgents(), relay = new NetworkRelay(store, hub);
+  const store = await Store.open(":memory:"), hub = new LocalAgents();
+  // 中继开关已取消：借用条件只由「云端是否 Master」决定，用这个可变标志模拟本机当 Master。
+  let borrow = true;
+  const relay = new NetworkRelay(store, hub, () => borrow);
   let command: (job: any) => void = () => {};
   const transport = { send: (job: any) => command(job), close() {} };
   const details = { clientId: grant.clientId, instance: "a".repeat(32), platform: "windows", cwd: "C:\\work" };
   hub.connect(grant.userId, details, transport);
   t.after(async () => { hub.close(); await relay.close(); await store.close(); });
-  return { store, hub, relay, transport, details, onCommand: (handler: (job: any) => void) => { command = handler; } };
+  return { store, hub, relay, transport, details, setBorrow: (value: boolean) => { borrow = value; }, onCommand: (handler: (job: any) => void) => { command = handler; } };
 }
 function read(socket: Socket, size: number): Promise<Buffer> {
   return new Promise((yes, no) => {
@@ -264,7 +267,7 @@ test("a failed direct dial falls back to the account client with no rule configu
   assert.equal((await read(socket, 7)).toString(), "SSH-2.0");
 });
 
-test("one unreachable address is probed once, then reused until the relay policy changes", async (t) => {
+test("one unreachable address is probed once, then reused until borrowing is unavailable", async (t) => {
   const warn = t.mock.method(console, "warn", () => {}), f = await fixture(t);
   await f.relay.configure(grant, [], true);
   let jobs = 0;
@@ -283,19 +286,22 @@ test("one unreachable address is probed once, then reused until the relay policy
   }
   assert.equal(jobs, 2, "两个连接都由客户端承载");
   assert.equal(probes(), 1, "第二个连接直接复用记住的客户端路由，不再探测直连");
-  await f.relay.configure(grant, [], false);
+  // 本机当 Master（不可借云端出口）：记住的客户端路由作废，直连失败就报错，不再找客户端。
+  f.setBorrow(false);
   const socket = await socks(proxy, "only-client.internal", 22, t);
-  assert.equal((await read(socket, 10))[1], 4, "关掉中继后不再记着客户端路由");
+  assert.equal((await read(socket, 10))[1], 4, "不可借后不再记着客户端路由");
   assert.equal(jobs, 2);
 });
 
-test("without an enabled client a failed direct dial reports the SOCKS error instead of stalling", async (t) => {
+test("without a borrowable client a failed direct dial reports the SOCKS error instead of stalling", async (t) => {
   t.mock.method(console, "warn", () => {});
   const f = await fixture(t);
   let jobs = 0;
   f.onCommand(() => { jobs++; });
   await f.relay.configure(grant, [], false);
-  assert.equal(await f.relay.enabled("alice"), false);
+  assert.equal(await f.relay.enabled("alice"), true, "开关字段已取消：上报过配置且客户端在线就允许兜底借用");
+  f.setBorrow(false);
+  assert.equal(await f.relay.enabled("alice"), false, "本机是 Master 时不借云端出口");
   const socket = await socks(await f.relay.proxy("alice"), "only-client.internal", 22, t);
   assert.equal((await read(socket, 10))[1], 4);
   assert.equal(jobs, 0);

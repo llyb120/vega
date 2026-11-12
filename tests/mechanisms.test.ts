@@ -265,7 +265,7 @@ test("Responses reasoning survives new user turns and invalid continuation falls
   assert.deepEqual((await store.messages(session.id))[1].opaque, [reasoning], "wire normalization must not alter stored native state");
   assert.equal(count, 3);
 });
-test("employee external-job defer and Chrome relay reuse exactly two isolated sessions", async () => {
+test("employee external-job defer and same-session Chrome switch keep one task session", async () => {
   let calls = 0;
   const url = await http(async (req: any, res: any) => {
     const q = await body(req);
@@ -273,16 +273,15 @@ test("employee external-job defer and Chrome relay reuse exactly two isolated se
     if (calls === 1)
       completion(res, {
         tool_calls: [
-          call("relay", "employee", {
-            action: "relay",
+          call("scene", "switch_scene", {
             scene: "computer",
-            text: "inspect authorized page",
+            message: "inspect authorized page",
           }),
         ],
       });
     else if (calls === 2) {
       assert.equal(q.model, "vision");
-      assert(!q.messages.some((m: any) => m.role === "assistant"));
+      assert(!JSON.stringify(q.messages).includes("Chrome result"), "the computer scene starts before any Chrome result");
       completion(res, { content: "Chrome result" });
     } else if (calls === 3) {
       assert(JSON.stringify(q.messages).includes("Chrome result"));
@@ -332,13 +331,10 @@ test("employee external-job defer and Chrome relay reuse exactly two isolated se
   }
   const task = (await e.employee.state()).tasks.find((t) => t.id === key)!;
   assert.equal(task.status, "done");
-  assert(
-    task.workSession &&
-      task.computerSession &&
-      task.workSession !== task.computerSession,
-  );
-  assert.equal((await e.store.sessions()).length, 2);
-  assert.equal(calls, 5);
+  assert(task.workSession, "the task keeps its main session");
+  assert.equal((await e.store.sessions()).length, 1, "switch_scene runs in the same session instead of a second isolated one");
+  // 1 switch_scene + computer turn + deferred resume + progress + complete, then the closing turn.
+  assert.equal(calls, 6);
   assert.equal(e.employee.busy.size, 0);
 });
 test("all Vue components use Vapor compiler, not VDOM fallback", () => {

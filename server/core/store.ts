@@ -476,7 +476,11 @@ export class Store {
       const copy = await this.newSession({ ...source, title: source.title + "（分叉）", taskId: undefined, fireRoot: undefined, fireRole: undefined });
       // The copy owns its files: the copied history points at its own directory (copied below).
       const from = this.files.dir(source), to = this.files.dir(copy);
-      const moved = (text: string) => [[from, to], [JSON.stringify(from).slice(1, -1), JSON.stringify(to).slice(1, -1)]].reduce((t, [a, b]) => t.replaceAll(a, b), text);
+      // 消息里可能嵌着已序列化的 JSON（工具结果），路径反斜杠会被多层转义：先换最深的一层，再往外换。
+      const escaped = (value: string, depth: number) => value.replace(/\\/g, () => "\\".repeat(1 << depth));
+      const rules = new Map<string, string>();
+      for (let depth = 3; depth >= 0; depth--) rules.set(escaped(from, depth), escaped(to, depth));
+      const moved = (text: string) => { for (const [a, b] of rules) text = text.replaceAll(a, b); return text; };
       for (const m of await this.messages(key)) await this.append(copy.id, JSON.parse(moved(JSON.stringify(m))));
       await this.run("INSERT INTO blob_access SELECT blob_id,? FROM blob_access WHERE session=?", copy.id, key);
       await this.run("INSERT INTO folds SELECT ?,id,data FROM folds WHERE session=?", copy.id, key);

@@ -496,19 +496,30 @@ test("a genuinely new browser handoff is delivered even when its wording matches
   const job = await task(employee, "Original work");
   await employee.update((state) => { Object.assign(state.tasks[0], { side: "computer", handoff: "Inspect original job-123", handoffRevision: 1 }); });
   const prompts: string[] = [];
+  let revision = 0;
   runtime.run = async (session, prompt, _signal, input) => {
     await store.append(session, { role: "user", text: prompt, taskInput: input });
     if ((await store.session(session)).scene === "computer") {
       prompts.push(prompt);
       await store.append(session, { role: "assistant", text: "original job is still running" });
-    } else await employee.execute(job.id, { action: "relay", scene: "computer", text: "Inspect original job-123" });
+      return;
+    }
+    // task_relay_computer 已停用：交接就是任务侧的 handoff 和递增修订号（旧 relay 写的就是这组字段）。
+    revision++;
+    await employee.update((state) => {
+      Object.assign(employee.task(state, job.id), { side: "computer", handoff: "Inspect original job-123", handoffRevision: revision, status: "queued", nextCheckAt: 0 });
+    });
   };
   try {
     let current = await segment(employee, job);
     current = await segment(employee, current);
+    // 同一措辞的新交接：只递增修订号，也应再次送达电脑会话。
+    await employee.update((state) => {
+      Object.assign(employee.task(state, job.id), { side: "computer", handoff: "Inspect original job-123", handoffRevision: ++revision, status: "queued", nextCheckAt: 0 });
+    });
     current = await segment(employee, current);
-    assert.equal(prompts.length, 2);
-    assert(prompts.every((prompt) => prompt.includes("本次电脑交接：Inspect original job-123")));
+    assert.equal(prompts.length, 2, "each new handoff reaches the computer turn once");
+    assert(prompts.every((prompt) => prompt.includes("本次电脑交接：Inspect original job-123")), prompts.map((prompt) => prompt.slice(0, 500)).join("\n---\n"));
     assert.equal((await store.sessions()).length, 2, "the browser session itself is still reused");
   } finally { employee.close(); await store.close(); }
 });
@@ -535,18 +546,18 @@ test("orphaned runs are healed without restarting the service; a missing executi
   try {
     const job = await task(employee);
     await employee.update((s) => { s.enabled = true; s.workStart = s.workEnd = "00:00"; s.tasks[0].status = "running"; s.tasks[0].workSession = "missing-history"; });
-    employee.closed = false;
-    await employee.tick();
-    employee.closed = true;
-    clearTimeout(employee.timer);
-    let current = employee.task(await employee.state(), job.id);
-    assert.equal(current.status, "recovering");
     runtime.run = async (_session, prompt) => {
       assert.match(prompt, /原执行会话缺失/);
       await employee.execute(job.id, { action: "progress", text: "checked original receipt", plan: [{ content: "verify external state", status: "completed" }] });
       await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "original external state verified; no resubmission" });
     };
-    current = await segment(employee, current);
+    employee.closed = false;
+    await employee.tick();
+    // 孤儿修复后同轮就按首次恢复续做：等这轮跑完再断言。
+    for (let i = 0; i < 400 && (await employee.state()).tasks[0].status !== "done"; i++) await sleep(5);
+    employee.closed = true;
+    clearTimeout(employee.timer);
+    const current = employee.task(await employee.state(), job.id);
     assert.equal(current.id, job.id);
     assert.equal(current.status, "done");
     assert.notEqual(current.workSession, "missing-history");

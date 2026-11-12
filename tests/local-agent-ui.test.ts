@@ -53,55 +53,11 @@ test("phones and tablets do not bridge loopback clients but desktops can", () =>
   assert.match(readFileSync("web/src/App.vue", "utf8"), /!localBridge && canBridgeLocal\(\)/);
 });
 
-test("composer defaults follow connectivity only before creation and preserve explicit choices", () => {
-  const source = readFileSync("web/src/App.vue", "utf8");
-  const code = source.slice(source.indexOf("const executionLocal = computed("), source.indexOf("const executionBusy = computed("));
-  const state = { current: { value: null as any }, localConnected: { value: false }, draftExecution: { value: null as boolean | null }, draftClientId: { value: "" }, onlineClients: { value: [] as any[] }, computed: (fn: any) => ({ get value() { return fn(); } }) };
-  const { mode, client, unavailable } = vm.runInNewContext(code + "\n({mode:executionLocal,client:executionClientId,unavailable:executionUnavailable})", state);
-  assert.equal(mode.value, false);
-  state.localConnected.value = true;
-  state.onlineClients.value = [{ id: "office", name: "Office PC" }, { id: "home", name: "Home PC" }];
-  assert.equal(mode.value, true);
-  assert.equal(client.value, "office");
-  state.draftExecution.value = false;
-  assert.equal(mode.value, false);
-  state.current.value = { id: "server", localAgent: false };
-  assert.equal(mode.value, false);
-  state.current.value = { id: "client", localAgent: true, clientId: "home" };
-  assert.equal(client.value, "home");
-  state.onlineClients.value = [{ id: "office" }];
-  assert.equal(unavailable.value, true, "another online computer must not replace the selected offline one");
-  state.localConnected.value = false;
-  assert.equal(mode.value, true, "disconnect must never silently migrate a client session");
-  assert.match(source, /role="switch"[\s\S]*?:aria-checked="executionLocal"/);
-  assert.match(source, /:disabled="executionBusy \|\| \(!executionLocal && !localConnected\)"/);
-});
-
-test("a manual switch updates the selected session only after success and keeps the draft on failure", async () => {
-  const source = readFileSync("web/src/App.vue", "utf8");
-  const code = source.slice(source.indexOf("async function toggleExecution()"), source.indexOf("async function removeSession(s)"));
-  const original = { id: "server", cwd: "/server", localAgent: false };
-  let fail = true, calls = 0;
-  const state: any = {
-    current: { value: original }, canWriteCurrent: { value: true }, executionBusy: { value: false }, executionLocal: { value: false }, localConnected: { value: true },
-    draftExecution: { value: null }, draftClientId: { value: "" }, executionClientId: { value: "d".repeat(32) }, selectedClient: { value: { id: "d".repeat(32) } }, onlineClients: { value: [{ id: "d".repeat(32) }] }, error: { value: "" }, notice: { value: "" }, sessions: { value: [original] }, switchingExecution: { value: false }, sessionRequest: 0,
-    draft: { value: "unsent message" },
-    api: async (path: string, method: string, body: any) => { calls++; assert.equal(path, "/sessions/server/execution"); assert.equal(method, "POST"); assert.equal(body.localAgent, true); assert.equal(body.clientId, "d".repeat(32)); if (fail) throw Error("Client offline"); return { ...original, localAgent: true, cwd: "C:\\client" }; },
-  };
-  state.attempt = async (fn: any) => { try { await fn(); } catch (e: any) { state.error.value = e.message; } };
-  const toggle = vm.runInNewContext(code + "\ntoggleExecution", state);
-  await toggle();
-  assert.equal(state.current.value, original);
-  assert.equal(state.switchingExecution.value, false);
-  assert.equal(state.draft.value, "unsent message");
-  fail = false;
-  await toggle();
-  assert.equal(state.current.value.localAgent, true);
-  assert.equal(state.current.value.cwd, "C:\\client");
-  assert.match(state.notice.value, /不会自动同步/);
-  state.executionBusy.value = true;
-  await toggle();
-  assert.equal(calls, 2, "running work must not be moved across machines");
+test("execution position follows each employee's Master, so the website keeps no session-level client switcher", () => {
+  const app = readFileSync("web/src/App.vue", "utf8");
+  // 4497e39 起执行位置由每头牛马在客户端「连接授权」里配置的文件系统 Master 决定。
+  assert.doesNotMatch(app, /executionLocal|executionClientId|executionBusy|executionUnavailable|executionHint|toggleExecution|switchingExecution|draftExecution|draftClientId|selectedClient/);
+  assert.doesNotMatch(app, /\/execution/, "the page no longer posts a session execution switch");
 });
 
 test("pairing reports permission, verification and backend failures without mistaking them for online", async (t) => {

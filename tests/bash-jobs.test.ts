@@ -1,6 +1,8 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   BASH_YIELD_SECS,
   BASH_JOB_KEEP_MS,
@@ -134,7 +136,10 @@ test("backgroundBashMessage distinguishes detach from auto-delivered jobs", () =
 test("server shell backgrounds a command after 10s and auto-delivers the result", async () => {
   const session = "s-shell";
   const started = Date.now();
-  const outcome = await shell(process.cwd(), { command: "sleep 12 && echo yielded-ok", timeout: 30 }, new AbortController().signal, () => {}, undefined, undefined, session);
+  // A node child works under both sh and PowerShell; sleep/&& do not (&& is PowerShell 7 syntax),
+  // and an absolute path may not survive PowerShell 5.1's ANSI command-line code page.
+  const command = `node -e "setTimeout(() => console.log('yielded-ok'), 12000)"`;
+  const outcome = await shell(process.cwd(), { command, timeout: 30 }, new AbortController().signal, () => {}, undefined, undefined, session);
   const elapsed = Date.now() - started;
   assert.ok(elapsed >= 9000 && elapsed < 16000, `yield took ${elapsed}ms`);
   assert.equal(outcome.value.jobId, 1);
@@ -147,13 +152,14 @@ test("server shell backgrounds a command after 10s and auto-delivers the result"
 
 test("server shell timeout kills the background process", async () => {
   const session = "s-kill";
-  const marker = `/tmp/vega-bash-kill-${process.pid}-${Date.now()}`;
-  const outcome = await shell(process.cwd(), { command: `sleep 30; echo survived > ${marker}`, timeout: 12 }, new AbortController().signal, () => {}, undefined, undefined, session);
+  const name = `vega-bash-kill-${process.pid}-${Date.now()}`, marker = join(tmpdir(), name);
+  // Same portable child: it would write the marker after 30s, and the 12s timeout must kill it first.
+  // The child resolves the temp directory itself; an absolute path would cross PowerShell's code page.
+  const script = `setTimeout(() => require('fs').writeFileSync(require('path').join(require('os').tmpdir(), '${name}'), 'survived'), 30000)`;
+  const outcome = await shell(process.cwd(), { command: `node -e "${script}"`, timeout: 12 }, new AbortController().signal, () => {}, undefined, undefined, session);
   assert.equal(outcome.value.running, true);
   const delivered = await awaitPendingBash(session);
   assert.match(delivered || "", /命令超过 12s 未结束，已终止/);
   await new Promise((resolve) => setTimeout(resolve, 200));
-  const check = spawn("test", ["-f", marker]);
-  const code = await new Promise<number>((resolve) => check.on("close", (c) => resolve(c ?? 1)));
-  assert.notEqual(code, 0, "timeout must kill the process before it writes the marker");
+  assert.equal(existsSync(marker), false, "timeout must kill the process before it writes the marker");
 });

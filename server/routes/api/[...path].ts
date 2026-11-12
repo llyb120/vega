@@ -396,9 +396,12 @@ export default defineEventHandler(async (event) => {
         const localAgent = a.localAgent === true,
           agent = localAgent ? engine.localAgents.active(user.id, a.clientId) : undefined;
         assert(!localAgent || agent, "客户端未连接或存在多个客户端，请选择在线执行客户端");
+        // 浏览器位置与执行位置解耦：显式要求本机执行的兼容会话，默认也用这台客户端的浏览器。
+        const localBrowser = !!agent && (agent.browser || "local") !== "cloud";
         return await store.newSession({
                   cwd: localAgent ? agent!.cwd : a.cwd,
                   localAgent,
+                  ...(localBrowser ? { localBrowser, browserClientId: agent!.clientId } : {}),
                   localPlatform: localAgent ? agent!.platform : undefined,
                   clientId: localAgent ? agent!.clientId : undefined,
                   clientName: localAgent ? agent!.name : undefined,

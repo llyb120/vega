@@ -89,7 +89,8 @@ test("steer that arrives during run teardown is persisted and the session contin
     calls++;
     if (calls === 1) await gate;
     const latest = [...messages].reverse().find((message: any) => message.role === "user");
-    return { role: "assistant", text: latest?.text === "late steer" ? "saw late steer" : "first reply" };
+    // The dynamic prompt segment is appended to the last user message, so match its opening line.
+    return { role: "assistant", text: String(latest?.text || "").startsWith("late steer") ? "saw late steer" : "first reply" };
   };
   let injected = false;
   const release = engine.localBrowsers.release.bind(engine.localBrowsers);
@@ -131,7 +132,7 @@ test("steer during an in-flight model call waits for it to finish then injects b
     const latest = [...messages].reverse().find((message: any) => message.role === "user");
     seen.push(latest?.text || "");
     if (calls === 1) await gate;
-    return { role: "assistant", text: `ack:${latest?.text || ""}` };
+    return { role: "assistant", text: `ack:${String(latest?.text || "").split("\n")[0]}` };
   };
   const done = new Promise<void>((resolve) => engine.events.on("event", (event) => {
     if (event.type === "done" && event.session === chat.id) resolve();
@@ -144,7 +145,11 @@ test("steer during an in-flight model call waits for it to finish then injects b
     assert.equal(calls, 1, "provider is not interrupted mid-request");
     finish();
     await done;
-    assert.deepEqual(seen, ["alpha", "beta"], "after the current model call finishes, steer is injected for the next request");
+    assert.deepEqual(
+      seen.map((text) => text.split("\n")[0]),
+      ["alpha", "beta"],
+      "after the current model call finishes, steer is injected for the next request",
+    );
     assert.equal(calls, 2);
     assert.equal((await store.messages(chat.id)).filter((message) => message.role === "user").map((message) => message.text).join(","), "alpha,beta");
     assert.deepEqual(
@@ -183,7 +188,8 @@ test("task delivery quotes its originating chat message, carries a task link and
     let job = (await employee.state()).tasks[0];
     assert.equal(job.chatSource.session, chat.id);
     assert.equal(job.chatSource.seq, 1);
-    assert.equal((await store.messages(chat.id)).find((m) => m.tasks?.length)?.tasks?.[0].id, job.id);
+    // Scheduling records the task and its chat source only; task cards appear on the delivery message below.
+    assert.equal((await store.messages(chat.id)).find((m) => m.tasks?.length), undefined, "scheduling must not write a task card into the chat");
     const full = "Full verified evidence\n" + "Trace details that belong to the task record.\n".repeat(60);
     employee.runtime.run = async () => {
       await employee.execute(job.id, { action: "progress", text: "verified endpoint", plan: [{ content: "verify endpoint", status: "completed" }] });
@@ -312,7 +318,6 @@ test("scheduled execution records persist conclusions for stopping task tools wi
     { arguments: { action: "ask", text: "是否批准发布？" }, status: "approval", conclusion: /等待你确认：是否批准发布/ },
     { arguments: { action: "help", text: "请提供目标环境。" }, status: "waiting", conclusion: /需要你处理：请提供目标环境/ },
     { arguments: { action: "defer", text: "导出作业export-123已提交，只检查原作业。", nextCheckInMinutes: 5 }, status: "deferred", conclusion: /已挂起[\s\S]*export-123/ },
-    { arguments: { action: "relay", scene: "computer", text: "在已打开的网页检查结果，不重新提交。" }, status: "queued", conclusion: /已交接电脑会话[\s\S]*主任务尚未完成/ },
   ];
   for (const scenario of cases) {
     const { store, engine, employee } = await fixture();
@@ -354,7 +359,7 @@ test("quotes are resolved from the same conversation and the model gets the actu
       assert.match(input.text!, /引用的历史消息/);
       assert(input.text!.includes("the actual tail") && input.text!.includes("t-source"));
       assert(input.text!.includes("仅作上下文，不是新授权"));
-      assert(input.text!.endsWith("Please explain this finding"));
+      assert(input.text!.includes("[当前用户消息]\nPlease explain this finding"), "the user's own request is carried verbatim after the quoted source");
       assert(system.includes("用户引用某条消息时"));
       return { role: "assistant", text: "解释已核实的结论。" };
     };
@@ -475,7 +480,7 @@ test("clearEmployeeChat drops chat messages and folds but keeps the session and 
     engine.events.on("event", (event) => events.push(event));
     assert.deepEqual(await engine.clearEmployeeChat(employee.employeeId), { ok: true, cleared: true });
     assert.equal((await store.messages(chat.id)).length, 0);
-    assert.equal((await store.one("SELECT count(*) n FROM folds WHERE session=?", chat.id)).n, 0);
+    assert.equal((await store.one("SELECT count(*) n FROM folds WHERE session=?", chat.id))?.n, 0);
     assert.equal(await store.object("context-state", chat.id), undefined);
     assert.ok(await store.session(chat.id));
     assert.equal((await employee.state()).chatSession, chat.id);
