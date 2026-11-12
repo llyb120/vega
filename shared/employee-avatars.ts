@@ -68,21 +68,24 @@ export function userAvatarURL(userId?: string, avatar?: string) {
   return userId && avatar && /^blob-[a-f\d]{32}$/.test(avatar) ? `/api/avatars/users/${encodeURIComponent(userId)}?v=${avatar}` : "";
 }
 
-/** Ink that stays legible on a hex fill: bright colors (amber, sky) take dark text, deep ones white. */
-export function inkOn(hex: string) {
+/** 白字盖在这个填色上的对比度（WCAG）。用户气泡不用黑字，亮色只能压暗到白字可读。 */
+function onWhite(hex: string) {
   const [r, g, b] = [1, 3, 5].map(at => Number.parseInt(hex.slice(at, at + 2), 16) / 255)
     .map(value => value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b >= 0.3 ? "#1d1d21" : "#fff";
+  return 1.05 / (0.2126 * r + 0.7152 * g + 0.0722 * b + 0.05);
 }
 
-/** A chosen avatar color as a fill plus its ink; fills that take white text are deepened slightly so it stays readable. */
+/** A chosen avatar color as a fill plus its ink: bubbles always use white text, so a bright fill is deepened only as far as 4.5:1 needs. */
 export function bubbleTint(hex: string) {
   const dim = (amount: number) => "#" + hex.slice(1).replace(/../g, (pair) => Math.round(Number.parseInt(pair, 16) * amount).toString(16).padStart(2, "0"));
-  const fill = inkOn(hex) === "#fff" ? dim(0.88) : hex;
-  return { fill, ink: inkOn(fill) };
+  for (let amount = 1; amount > 0.4; amount -= 0.02) {
+    const fill = amount === 1 ? hex : dim(amount);
+    if (onWhite(fill) >= 4.5) return { fill, ink: "#fff" };
+  }
+  return { fill: dim(0.4), ink: "#fff" };
 }
 
-/** The fill and ink of my own message bubbles inside one employee's chat: exactly that employee's avatar color. */
+/** The fill and ink of my own message bubbles inside one employee's chat: that employee's avatar color, deepened only enough for white text. */
 export function avatarBubble(avatar: unknown, seed = "") {
   return bubbleTint((parseBotAvatar(avatar) || defaultBotAvatar(seed)).hex);
 }

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import sharp from "sharp";
-import { ZODIAC_AVATARS, BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS, isAvatarPreset, employeeAvatarURL, parseBotAvatar, defaultBotAvatar, botAvatarPreset, inkOn, bubbleTint, avatarBubble } from "../shared/employee-avatars";
+import { ZODIAC_AVATARS, BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS, isAvatarPreset, employeeAvatarURL, parseBotAvatar, defaultBotAvatar, botAvatarPreset, bubbleTint, avatarBubble } from "../shared/employee-avatars";
 import { BOT_SHAPE_GEOMETRY, BOT_POSES, LOOK_POSES, MESSAGE_POSE, projectFace, shade, nextPose, holdDuration, blinkPlan } from "../web/src/bot-avatar.js";
 import { updateEmployeeAvatar } from "../server/core/employee-avatar";
 import { Employee, type EmployeeRuntime } from "../server/core/employee";
@@ -152,11 +152,10 @@ test("invalid, oversized and disguised image uploads leave the current avatar an
 });
 
 test("my own message bubbles take the color of the employee I am talking to, one color per employee", () => {
-  // Bright fills keep dark text, deep fills white: the ink is what makes every color readable.
-  assert.equal(inkOn("#ffa424"), "#1d1d21");
-  assert.equal(inkOn("#30b4f0"), "#1d1d21");
-  assert.equal(inkOn("#1d1d21"), "#fff");
-  assert.equal(inkOn("#3878fb"), "#fff");
+  // 用户气泡一律白字：亮色（橙、琥珀、天蓝）压暗而不是换成黑字。
+  assert.equal(bubbleTint("#1d1d21").fill, "#1d1d21", "deep fills keep their exact color");
+  assert.notEqual(bubbleTint("#ffa424").fill, "#ffa424");
+  assert.equal(bubbleTint("#ffa424").ink, "#fff");
   const luminance = (hex: string) => {
     const full = hex.length === 4 ? "#" + hex.slice(1).replace(/./g, (digit) => digit + digit) : hex;
     const [r, g, b] = [1, 3, 5].map(at => Number.parseInt(full.slice(at, at + 2), 16) / 255)
@@ -165,7 +164,7 @@ test("my own message bubbles take the color of the employee I am talking to, one
   };
   for (const color of BOT_AVATAR_COLORS) {
     const { fill, ink } = bubbleTint(color.hex);
-    assert(["#1d1d21", "#fff"].includes(ink), color.id);
+    assert.equal(ink, "#fff", color.id);
     const [light, dark] = [luminance(fill), luminance(ink)].sort((a, b) => b - a);
     assert((light + 0.05) / (dark + 0.05) >= 4.5, `${color.id} bubble text is below WCAG AA`);
   }
