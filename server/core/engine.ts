@@ -562,9 +562,16 @@ export class Engine {
   }
   async removeEmployee(key: string, beforeRemove: () => Promise<void> = async () => {}) {
     const employee = await this.employee.for(key);
-    const sessions = await this.store.sessionsBy("employee", key);
+    const sessions = await this.store.sessionsBy("employee", key), ownerId = (await employee.profile()).ownerId;
     assert(!employee.deleting, "牛马正在删除，请勿重复操作");
     assert(!employee.busy.size && !sessions.some((session) => this.active.has(session.id)), "牛马仍在执行，请先停止任务和当前对话，再删除牛马");
+    // 每个账号至少留一只；旧版无主牛马不占任何账号的名额。
+    if (ownerId) {
+      let kept = false;
+      for (const other of await this.employee.all())
+        if (!kept && other.employeeId !== key && !other.deleting && (await other.profile()).ownerId === ownerId) kept = true;
+      assert(kept, "这是你唯一的牛马，不能删除；先新建一个牛马，或改用「重置」清空它的任务和对话");
+    }
     employee.deleting = true;
     try {
       await beforeRemove();

@@ -416,6 +416,8 @@ export class Employee {
   writers = new Map<string, { taskId: string; hold: boolean }>();
   members = new Map<string, Employee>();
   membersLoaded = false;
+  /** In-flight first-employee creation per owner, so two page loads cannot create two. */
+  ensuring = new Map<string, Promise<void>>();
   /** Employee ids to tick first on the next drain (fresh dispatches). */
   priority = new Set<string>();
   wakeAt = Infinity;
@@ -506,6 +508,20 @@ export class Employee {
     });
     await employee.emitChanged();
     return s;
+  }
+  /** 每个账号至少有一只牛马：新账号第一次进来建一只；Engine.removeEmployee 保证删不空。 */
+  ensureOwned(ownerId: string, name: string) {
+    const root = this.root || this, running = root.ensuring.get(ownerId);
+    if (running) return running;
+    const task = (async () => {
+      for (const employee of await root.all()) {
+        if (employee.deleting) continue;
+        if ((await employee.profile()).ownerId === ownerId) return;
+      }
+      await root.create({ name }, ownerId);
+    })().finally(() => root.ensuring.delete(ownerId));
+    root.ensuring.set(ownerId, task);
+    return task;
   }
   async forget() {
     assert(this.deleting && !this.busy.size, "Employee deletion requires an idle employee");
