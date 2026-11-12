@@ -493,7 +493,6 @@ $("createBtn").addEventListener("click", () => openURL({ url: ((state.client && 
 const openAccount = () => openURL({ url: (state.client && state.client.origin) || "" });
 $("accFace").addEventListener("click", openAccount);
 $("accBtn").addEventListener("click", openAccount);
-$("gearBtn").addEventListener("click", () => openURL({ config: true }));
 $("shareBtn").addEventListener("click", () => {
   const id = state.current.split(":")[1];
   const origin = (state.client && state.client.origin) || "";
@@ -545,7 +544,7 @@ window.addEventListener("blur", hideHover);
 
 /* ── 启动 ───────────────────────────────────────────── */
 function restoreSidebar() {
-  const width = Number(store.get("side-w", "318")) || 318;
+  const width = Number(store.get("side-w", "280")) || 280;
   app.style.setProperty("--side-w", Math.min(420, Math.max(200, width)) + "px");
 }
 async function boot() {
