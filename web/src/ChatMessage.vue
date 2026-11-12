@@ -94,10 +94,10 @@ async function runExport(format) {
   </article>
 </template>
 <style scoped>
-.chat-message { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 16px; min-width: 0; outline: none; }
+.chat-message { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 10px; min-width: 0; outline: none; }
 .chat-message.user { justify-content: flex-end; }
 /* Follow-up bubbles of one reply run sit tight under the first, without repeating avatar and name. */
-.chat-message.continued { margin-top: -10px; }
+.chat-message.continued { margin-top: -6px; }
 .chat-avatar.spacer { height: 0; background: none; }
 .chat-avatar { display: grid; place-items: center; flex: none; width: var(--chat-avatar); height: var(--chat-avatar); overflow: hidden; border-radius: 12px; background: var(--accent-soft); color: var(--accent-text); font-size: 16px; font-weight: 600; }
 /* One shrinkable column: grid items default to an automatic minimum of their min-content width, so a single
@@ -116,8 +116,9 @@ async function runExport(format) {
 .chat-reply { gap: 3px; min-height: 20px; padding: 0 4px; border: 0; background: transparent; color: var(--muted); font-size: 11px; font-weight: 400; opacity: 0; }
 .chat-message:hover .chat-reply, .chat-reply:focus-visible { opacity: 1; }
 .chat-reply:hover:not(:disabled) { background: var(--surface-2); color: var(--accent); }
-.chat-bubble { min-width: 0; padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: var(--surface-2); line-height: 1.65; overflow-wrap: anywhere; }
-.user .chat-bubble { border-radius: 14px 4px 14px 14px; background: var(--accent-soft); color: #13254f; }
+.chat-bubble { min-width: 0; padding: 10px 14px; border-radius: 18px; background: var(--assistant-bubble); line-height: 1.6; overflow-wrap: anywhere; }
+.user .chat-bubble { border-radius: 18px; background: var(--user-bubble); color: var(--user-bubble-text); }
+.user .chat-bubble.tinted { background: var(--user-bubble); color: var(--user-bubble-text); }
 /* A colored bubble keeps its links and mentions readable instead of accent-blue on the same color. */
 .chat-bubble.tinted :deep(a), .chat-bubble.tinted :deep(.mention) { color: inherit; text-decoration: underline; }
 .chat-bubble.failed { background: var(--danger-soft); box-shadow: inset 3px 0 var(--danger); }

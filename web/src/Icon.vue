@@ -47,6 +47,7 @@ const PATHS = {
   keyboard: "M3 6h18v12H3ZM7 10h.01M11 10h.01M15 10h.01M7 14h10",
   scroll: "M12 4v16M8 8l4-4 4 4M8 16l4 4 4-4",
   maximize: "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5",
+  minus: "M5 12h14",
   hand: "M8 13V5.5a1.5 1.5 0 0 1 3 0V11M11 10V4.5a1.5 1.5 0 0 1 3 0V11M14 10.5V6a1.5 1.5 0 0 1 3 0v8a6 6 0 0 1-6 6h-.5a6 6 0 0 1-5-2.7L3 14a1.6 1.6 0 0 1 2.6-1.8L8 15",
   layers: "M12 3 2 8l10 5 10-5ZM2 13l10 5 10-5",
   plug: "M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0ZM12 17v5",

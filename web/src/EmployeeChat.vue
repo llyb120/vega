@@ -8,7 +8,7 @@ import { employeeChatMessages, continuesPrevious } from "./conversation";
 import { createChatHistory } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
 import { markSeen, seenSeq } from "./seen.js";
-import { avatarBubble } from "../../shared/employee-avatars";
+import { beijingParts } from "../../shared/time";
 const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array, remember: Function });
 const emit = defineEmits(["task"]);
 const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
@@ -48,8 +48,33 @@ let settled = false, baseSeq = 0;
 watch(lastSeq, (seq) => { if (settled && seq > baseSeq) markGone.value = true; });
 watch(visible, (rows) => markSeen(props.userId, props.employeeId, rows.at(-1)?.seq));
 const typingContinued = computed(() => continuesPrevious(displayed.value.at(-1)?.message, { role: "assistant" }));
-// My own bubbles wear the color of the employee I am talking to, so each 牛马's chat looks different.
-const selfTint = computed(() => { const color = avatarBubble(props.avatar, props.employeeId); return { background: color.fill, color: color.ink }; });
+const pad2 = (n) => String(n).padStart(2, "0");
+function dateKey(at) {
+  if (!at) return "";
+  const p = beijingParts(at);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+function dateSeparator(at, now = Date.now()) {
+  if (!at) return "";
+  const p = beijingParts(at), n = beijingParts(now);
+  const hm = `${pad2(p.hour)}:${pad2(p.minute)}`;
+  if (p.year === n.year && p.month === n.month && p.day === n.day) return `今天 ${hm}`;
+  const y = beijingParts(now - 86400000);
+  if (p.year === y.year && p.month === y.month && p.day === y.day) return `昨天 ${hm}`;
+  if (p.year === n.year) return `${p.month + 1}月${p.day}日 ${hm}`;
+  return `${p.year}年${p.month + 1}月${p.day}日 ${hm}`;
+}
+function separatorLabel(rows, index) {
+  const curr = rows[index]?.message;
+  const prev = rows[index - 1]?.message;
+  if (!curr?.at) return "";
+  if (!prev?.at) return dateSeparator(curr.at);
+  if (dateKey(prev.at) !== dateKey(curr.at) || curr.at - prev.at >= 30 * 60 * 1000) return dateSeparator(curr.at);
+  return "";
+}
+
+// User bubbles follow the messenger look: a consistent purple, like the desktop reference.
+const selfTint = computed(() => ({ background: "var(--user-bubble)", color: "var(--user-bubble-text)" }));
 const history = createChatHistory({ api: (...args) => props.api(...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore, cache: createChatCache(props.userId, props.employeeId) });
 
 // Message avatars rest on one up-right glance. The reply that replaces the typing row starts from the typing
@@ -235,7 +260,7 @@ onMounted(load);
 onBeforeUnmount(() => { disposed = true; history.dispose(); });
 </script>
 <template>
-  <section class="employee-chat">
+  <section class="employee-chat chat-messenger">
     <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span><button type="button" class="icon" aria-label="关闭" @click="error = ''"><Icon name="close" :size="14" /></button></p>
     <div ref="transcript" class="chat-scroll" aria-live="polite" @scroll.passive="onScroll">
       <div class="chat-column">
@@ -249,6 +274,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
           </div>
         </div>
         <template v-for="({ message, continued }, index) in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
+        <p v-if="separatorLabel(displayed, index)" class="chat-date" role="separator">{{ separatorLabel(displayed, index) }}</p>
         <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
         <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
         <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :self-tint="selfTint" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
@@ -269,20 +295,20 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
       <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon :name="isImage(file) ? 'image' : 'file'" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
       <div class="composer-row">
         <input ref="fileInput" type="file" hidden multiple @change="upload" />
-        <button type="button" class="icon attach" aria-label="添加附件" title="附件（图片或文件）" @click="fileInput.click()"><Icon name="paperclip" /></button>
-        <textarea ref="input" v-model="draft" aria-label="给牛马的消息" placeholder="告诉我目标，剩下的交给我…" rows="1" @keydown="keydown"></textarea>
+        <button type="button" class="icon attach" aria-label="添加附件" title="附件（图片或文件）" @click="fileInput.click()"><Icon name="plus" /></button>
+        <textarea ref="input" v-model="draft" aria-label="给牛马的消息" :placeholder="'给 ' + name + ' 发消息'" rows="1" @keydown="keydown"></textarea>
         <button v-if="running" type="button" class="stop" title="停止本轮" @click="stop"><Icon name="stop" :size="14" /><span>停止本轮</span></button>
-        <button class="primary send" :disabled="!draft.trim() && !files.length" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
+        <button class="primary send" :disabled="!draft.trim() && !files.length" aria-label="发送" title="发送"><Icon name="send" :size="16" /></button>
       </div>
-      <p class="composer-hint">/new 开启新会话（不再参考之前的对话） · Enter 发送 · Shift + Enter 换行</p>
     </form>
   </section>
 </template>
 <style scoped>
-.employee-chat { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--surface); }
+.employee-chat { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--chat-bg, var(--surface)); }
 .employee-chat > .banner { flex: none; }
 .chat-scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overflow-anchor: none; scrollbar-width: thin; }
-.chat-column { max-width: 820px; margin: 0 auto; padding: 16px 24px 8px; }
+.chat-column { max-width: 820px; margin: 0 auto; padding: 8px 24px 8px; }
+.chat-date { margin: 18px auto 14px; color: var(--muted); font-size: 12px; font-weight: 400; text-align: center; }
 .chat-welcome { display: grid; gap: 8px; padding: 32px 0 24px; }
 .chat-welcome h3 { font-size: 20px; }
 .chat-welcome p { color: var(--text-2); }
@@ -298,7 +324,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
 .chat-typing .chat-content { display: grid; gap: 4px; min-width: 0; max-width: min(100% - var(--chat-avatar) - var(--chat-gap), 680px); }
 .chat-typing .chat-heading { display: flex; align-items: center; gap: 8px; min-height: 20px; color: var(--muted); font-size: 11px; }
 .chat-typing .chat-heading strong { color: var(--text-2); font-size: 12px; font-weight: 600; }
-.chat-typing .chat-bubble { justify-self: start; padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: var(--surface-2); line-height: 1.65; }
+.chat-typing .chat-bubble { justify-self: start; padding: 10px 14px; border-radius: 18px; background: var(--assistant-bubble); line-height: 1.6; }
 .typing-dots { display: flex; align-items: center; gap: 4px; height: 23px; }
 .typing-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: typing 1.2s ease-in-out infinite; }
 .typing-dots i:nth-child(2) { animation-delay: .15s; }
@@ -306,14 +332,15 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
 @media (prefers-reduced-motion: reduce) { .typing-dots i { animation: none; opacity: .7; } }
 @keyframes typing { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
 .readonly-note { display: flex; align-items: center; justify-content: center; gap: 6px; flex: none; padding: 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
-.chat-composer { flex: none; width: calc(100% - 48px); max-width: 772px; margin: 0 auto 12px; padding: 6px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--sh-sm); }
-.chat-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.chat-composer { flex: none; width: calc(100% - 40px); max-width: 860px; margin: 0 auto 14px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); box-shadow: none; }
+.chat-composer:focus-within { border-color: var(--border-strong); box-shadow: 0 0 0 3px rgb(16 24 40 / 4%); }
 .composer-row { display: flex; align-items: flex-end; gap: 4px; }
 .composer-row textarea { flex: 1; min-height: 36px; max-height: 200px; padding: 8px 4px; border: 0; box-shadow: none; resize: none; font-size: 14px; line-height: 1.45; }
 .composer-row textarea:focus, .composer-row textarea:focus-visible { box-shadow: none; outline: none; }
-.attach { width: 36px; min-height: 36px; color: var(--muted); }
-.send { width: 36px; min-height: 36px; padding: 0; border-radius: 10px; }
-.stop { min-height: 36px; padding: 0 10px; border-color: var(--border); color: var(--danger); font-size: 12px; }
+.attach { width: 36px; min-height: 36px; color: var(--text-2); border-radius: 50%; }
+.send { width: 36px; min-height: 36px; padding: 0; border-radius: 50%; background: var(--user-bubble); border-color: var(--user-bubble); color: var(--user-bubble-text); }
+.send:hover:not(:disabled) { filter: brightness(1.05); background: var(--user-bubble); border-color: var(--user-bubble); }
+.stop { min-height: 36px; padding: 0 10px; border-color: var(--border); color: var(--danger); font-size: 12px; border-radius: 999px; }
 .chat-notice { margin: 4px auto 14px; max-width: 80%; color: var(--muted); font-size: 11px; text-align: center; }
 .composer-hint { padding: 0 8px 0 44px; color: var(--faint); font-size: 11px; }
 .composer-quote { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 4px 4px 4px 10px; border-left: 3px solid var(--accent); border-radius: 4px var(--r-md) var(--r-md) 4px; background: var(--surface-2); color: var(--muted); }
@@ -327,7 +354,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
   .chat-welcome { padding: 16px 0; }
   .chat-welcome h3 { font-size: 18px; }
   .chat-typing { margin-bottom: 14px; }
-  .chat-composer { width: calc(100% - 16px); margin: 0 8px max(8px, env(safe-area-inset-bottom, 0px)); border-radius: 12px; }
+  .chat-composer { width: calc(100% - 16px); margin: 0 8px max(8px, env(safe-area-inset-bottom, 0px)); border-radius: 22px; }
   .composer-row textarea { font-size: 16px; padding: 7px 2px; }
   .attach, .send { width: 40px; min-height: 40px; }
   .stop span { display: none; }

@@ -22,6 +22,8 @@ import EmployeeCapabilities from "./EmployeeCapabilities.vue";
 import EmployeeVault from "./EmployeeVault.vue";
 import WorkPanel from "./WorkPanel.vue";
 import AppSidebar from "./AppSidebar.vue";
+import WindowControls from "./WindowControls.vue";
+import { applyDesktopClass } from "./desktop.js";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
 import DebugSessions from "./DebugSessions.vue";
@@ -123,6 +125,7 @@ function navigationKey(event) {
   }
 }
 onMounted(() => {
+  applyDesktopClass();
   const media = window.matchMedia("(max-width: 767px)"),
     full = window.matchMedia("(min-width: 1100px)"),
     wideMedia = window.matchMedia("(min-width: 1280px)"),
@@ -1440,6 +1443,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
 <template>
   <div v-if="authChecking" class="auth-splash" aria-busy="true"></div>
   <main v-else-if="!authenticated" class="login">
+    <div class="desktop-dragbar"><WindowControls /></div>
     <aside class="login-aside" aria-hidden="true">
       <div class="login-brand"><span class="brand-mark">V</span>Vega</div>
       <div class="login-pitch">
@@ -1468,6 +1472,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
     </div>
   </main>
   <div v-else class="shell">
+    <WindowControls floating />
     <button v-if="navigationOpen" class="navigation-backdrop" aria-label="关闭导航" tabindex="-1" @click="closeNavigation"></button>
     <aside
       id="navigation"
@@ -1592,6 +1597,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             :work-count="attentionTasks.length || activeTasks.length"
             @tab="employeeTabChanged"
             @delete="deleteEmployee"
+            @toggle-work="toggleWorkPanel"
             @menu="openNavigation"
             @set-master="setEmployeeMaster"
           />
