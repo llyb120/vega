@@ -57,7 +57,7 @@ export async function initialize(pageScript: string) {
       // Esc 叫停：客户端上报“用户亲手按了 Esc”，服务端停掉占用桌面的那个会话。
       engine.cancel(session, reason);
       return engine.active.has(session);
-    }, async (userId, clientId) => await engine.taskStatusFor(userId, clientId), async (userId, clientId) => await engine.handoffs.offline(clientId, userId)),
+    }, async (userId, clientId) => await engine.handoffs.offline(clientId, userId)),
     headless: new HeadlessBrowser(),
   };
   const dbPath = process.env.VEGA_DB || "vega.db";
@@ -66,7 +66,6 @@ export async function initialize(pageScript: string) {
     await bridge.start();
   }
   await engine.employee.start();
-  engine.statusPush = (userId, clientId) => void application!.clientSockets.pushStatus(userId, clientId);
   engine.runtimePush = (userId) => void application!.clientSockets.pushRuntime(userId);
   application.clientSockets.runtime = {
     view: (userId) => engine.runtimes.view(userId),

@@ -584,13 +584,6 @@ func (runner *jobRunner) run(conn *Conn, pending, leases []string) {
 			// 站点已完成下线交接，接着会断开这条连接；不再重连由 connectBackend 的下线判断负责。
 			continue
 		}
-		if request.Type == "task_status" {
-			// 服务端算好的任务栏五档（对齐 Nova taskbar_status）：本地 appuse 优先级更高。
-			if status := request.Status; status != nil {
-				butterflyChipStatus(status.Kind, status.Text, status.Trailing, status.Detail, status.Thread)
-			}
-			continue
-		}
 		if len(request.ID) != 36 {
 			return
 		}

@@ -126,7 +126,7 @@ func textEnsureWindow() error {
 	go func() {
 		runtime.LockOSThread()
 		instance, _, _ := procTextModule.Call(0)
-		name := butterflyUTF16("VegaClipboardRender")
+		name := windowsUTF16("VegaClipboardRender")
 		procedure := syscall.NewCallback(func(hwnd windows.Handle, message uint32, wparam, lparam uintptr) uintptr {
 			switch message {
 			case wmRenderAllFormats:
@@ -142,7 +142,7 @@ func textEnsureWindow() error {
 			value, _, _ := procTextDefWindowProc.Call(uintptr(hwnd), uintptr(message), wparam, lparam)
 			return value
 		})
-		class := chipWindowClass{Procedure: procedure, Instance: windows.Handle(instance), ClassName: name}
+		class := windowClassEx{Procedure: procedure, Instance: windows.Handle(instance), ClassName: name}
 		class.Size = uint32(unsafe.Sizeof(class))
 		if atom, _, _ := procTextRegisterClass.Call(uintptr(unsafe.Pointer(&class))); atom == 0 {
 			result <- fmt.Errorf("无法注册剪贴板窗口类")

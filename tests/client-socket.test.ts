@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Auth } from "../server/core/auth";
 import { Store } from "../server/core/store";
 import { CLIENT_HEARTBEAT_TIMEOUT, CLIENT_RECONNECT_GRACE, LocalAgents, LocalAgentUnavailable } from "../server/core/local-agent";
-import { ClientSockets } from "../server/core/client-socket";
+import { ClientSockets, MIN_CLIENT_VERSION } from "../server/core/client-socket";
 import { NetworkRelay } from "../server/core/network-relay";
 import type { SendOptions, Wire } from "../server/core/sse";
 
@@ -15,7 +15,7 @@ async function fixture(t: any, clientInUse: (clientId: string) => boolean = () =
   t.after(() => { if (minimum === undefined) delete process.env.VEGA_MIN_CLIENT_VERSION; else process.env.VEGA_MIN_CLIENT_VERSION = minimum; });
   const store = await Store.open(":memory:"), auth = new Auth(store, "client-pairing-fixture-token");
   const login = await auth.setup({ setupToken: "client-pairing-fixture-token", username: "admin", password: "Long pairing fixture password" });
-  const events: any[] = [], hub = new LocalAgents((event) => events.push(event)), relay = new NetworkRelay(store, hub), sockets = new ClientSockets(store, auth, hub, clientInUse, relay, undefined, undefined, offlineHandoff);
+  const events: any[] = [], hub = new LocalAgents((event) => events.push(event)), relay = new NetworkRelay(store, hub), sockets = new ClientSockets(store, auth, hub, clientInUse, relay, undefined, offlineHandoff);
   t.after(async () => { sockets.closeAll(); hub.close(); await relay.close(); await store.close(); });
   const ticket = () => hub.ticket(login.principal, details.instance).ticket;
   // 一条客户端控制通道 = 一个下行 Wire（消息对象，不再是 JSON 文本）＋ 一个上行 message(id, value)。
@@ -513,13 +513,13 @@ test("a node minimum client version refuses older clients with a visible reason"
     await f.sockets.message(socket.id, { type: "hello", ...details, version });
     assert.equal(socket.messages[0]?.type, "error", "older and version-less clients are refused before any job");
     assert.equal(socket.messages[0]?.code, "client_outdated");
-    assert.match(socket.messages[0]?.message, /0\.5\.0/);
+    assert.match(socket.messages[0]?.message, new RegExp(MIN_CLIENT_VERSION.replace(/\./g, "\\.")));
     assert.equal(f.hub.active(owner, details.clientId), undefined);
     assert.equal(socket.closed.length, 1);
   }
   const current = f.peer(paired.deviceToken, "current");
   await f.sockets.open(current);
-  await f.sockets.message(current.id, { type: "hello", ...details, version: "0.5.0" });
+  await f.sockets.message(current.id, { type: "hello", ...details, version: MIN_CLIENT_VERSION });
   assert.equal(current.messages[0]?.type, "ready");
   assert(f.hub.active(owner, details.clientId));
 });

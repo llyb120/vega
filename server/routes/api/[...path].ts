@@ -83,7 +83,7 @@ export default defineEventHandler(async (event) => {
     catch (e: any) { throw createError({ statusCode: 409, statusMessage: e.message }); }
   }
   if (path[0] === "local-agent" && path[1] === "chat" && method === "POST") {
-    // 蝴蝶面板（原生客户端）：设备凭据自己验，不用网站 cookie，只碰它自己的牛马/群聊。
+    // 桌面窗口（原生客户端）：设备凭据自己验，不用网站 cookie，只碰它自己的牛马/群聊。
     setHeader(event, "Cache-Control", "no-store");
     const request = { headers: new Headers(getRequestHeaders(event) as Record<string, string>), url: getRequestURL(event).href } as unknown as Request;
     let grant: { userId: string };
@@ -743,12 +743,41 @@ export default defineEventHandler(async (event) => {
 });
 
 /**
- * 蝴蝶面板（原生客户端凭据）的聊天接口：thread = "employee:<id>" | "group:<id>"。
- * 只做三件事：列会话、读历史（after/limit）、发一条用户消息。
+ * 桌面窗口（原生客户端凭据）的聊天接口：thread = "employee:<id>" | "group:<id>"。
+ * 列会话、读历史（after/limit）、发一条用户消息、读待确认卡的答复；图片另外验过权限再给像素。
  */
 async function clientChat(op: string, a: Obj, userId: string) {
   const { engine, store } = app(), user = await app().auth.user(userId);
   assert(user, "User not found");
+  if (op === "me") return { id: user.id, name: user.username };
+  if (op === "image") {
+    // 窗口里的图片：附件（blob）、存档截图（files）和牛马上传的头像，都先验权限再给像素。
+    const blobId = String(a.blobId || "");
+    if (blobId) {
+      check(/^blob-[a-f\d]{32}$/.test(blobId), 400, "Invalid image");
+      check(await app().auth.canBlob(user, blobId), 403, "Image not accessible");
+      const blob = await store.blobData(blobId);
+      assert(blob && /^image\//.test(blob.mime), "Image not found");
+      return { mime: blob.mime, data: Buffer.from(blob.data).toString("base64") };
+    }
+    const employeeId = String(a.employee || "");
+    if (employeeId) {
+      const employee = (await engine.employee.all()).find((e) => e.employeeId === employeeId);
+      assert(employee && await employee.accessible(user), "Employee not found");
+      const avatar = (await employee.profile()).avatar || "";
+      check(/^blob-[a-f\d]{32}$/.test(avatar), 404, "Avatar not found");
+      const blob = await store.blobData(avatar);
+      assert(blob && blob.mime === "image/webp", "Avatar not found");
+      return { mime: blob.mime, data: Buffer.from(blob.data).toString("base64") };
+    }
+    const parts = String(a.path || "").split("/").filter(Boolean);
+    check(parts.length > 0 && parts.length < 12, 400, "Invalid image path");
+    const file = store.files.fromUrl(parts);
+    check(await app().auth.canFile(user, parts), 403, "Image not accessible");
+    const mime = store.files.mime(file);
+    check(mime, 404, "Not an image");
+    return { mime, data: (await store.files.read(file)).toString("base64") };
+  }
   if (op === "threads") {
     const employees = await Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
       const s = await employee.state(), last = s.chatSession ? await store.lastMessage(s.chatSession) : undefined;

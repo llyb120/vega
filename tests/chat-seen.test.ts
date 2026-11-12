@@ -58,8 +58,8 @@ test("客户端和网页都画出「新」分界，并在这之后收起", async
   const app = await text("web/src/App.vue");
   assert.match(app, /newFrom\.value = seenSeq\(user\.value\.id, session\.id\)/, "进来时取上次看到的位置");
   assert.match(app, /next === "chat" && user\.value && current\.value\) newFrom\.value = seenSeq/, "切出再回来也能重新取");
-  const panel = await text("local/assistant_page.html");
-  assert.match(panel, /markGone \? " gone" : ""/);
-  assert.match(panel, /\.ta-new\.gone \{ visibility: hidden; \}/);
-  assert.match(panel, /state\.markGone = true;/, "面板来了新消息就收起");
+  const client = await text("local/ui/app.js");
+  assert.match(client, /firstNew >= 0 && !state\.markGone/, "窗口按同一份已读位置画分界");
+  assert.match(client, /state\.markGone = true;/, "窗口来了新消息就收起");
+  assert.match(await text("local/ui/style.css"), /\.new-line \{/);
 });

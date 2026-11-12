@@ -11,7 +11,8 @@ export const CLIENT_BODY_LIMIT = 48 << 20, CLIENT_SOCKET_LIMIT = 1 << 20;
 /** Node-level compatibility gate: this deployment refuses older clients instead of failing mid-job. */
 // 与 local/VERSION 同步：发布新客户端时一并抬高。环境变量覆盖；设成空串表示不限制。
 // 0.5.0：下线改为软交接，服务端需先交接再断开连接，旧客户端会立即拆连接所以必须拒绝。
-export const MIN_CLIENT_VERSION = "0.5.0";
+// 0.6.0：客户端主界面换成桌面窗口（蝴蝶与任务栏胶囊、task_status 推送一起移除），旧客户端不再适配。
+export const MIN_CLIENT_VERSION = "0.6.0";
 export const minClientVersion = () => process.env.VEGA_MIN_CLIENT_VERSION ?? MIN_CLIENT_VERSION;
 const triple = (value?: string) => (/^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(value || "") ? value!.split(".").map(Number) : undefined);
 /** Clients that never reported a version predate the gate, so they count as outdated. */
@@ -41,7 +42,7 @@ export class ClientSockets {
     setMaster: (userId: string, employeeId: string, kind: "fs" | "browser", master: string) => Promise<Obj>;
   };
   private onRevoke = async (userId: string) => await this.revoke(userId);
-  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>, private relay?: NetworkRelay, private userStop?: (session: string, reason: string) => boolean, private statusFor?: (userId: string, clientId: string) => Promise<Obj>, private offlineHandoff?: (userId: string, clientId: string) => Promise<Obj>) {
+  constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>, private relay?: NetworkRelay, private userStop?: (session: string, reason: string) => boolean, private offlineHandoff?: (userId: string, clientId: string) => Promise<Obj>) {
     auth.events.on("revoke", this.onRevoke);
     this.timer = setInterval(async () => {
       for (const [id, connection] of this.connections) {
@@ -134,7 +135,6 @@ export class ClientSockets {
         const agent = this.hub.active(grant.userId, grant.clientId)!;
         accepted = true;
         connection.socket.send({ type: "ready", userId: grant.userId, clientId: grant.clientId, ...(connection.details.autoUpdate ? { autoUpdate: true, sessionIdle: true, busy } : {}), ...(value.resume === true ? { resume: true, pending: [...agent.pending.keys()], leases: [...agent.browserLeases] } : {}), ...runtime });
-        void this.pushStatus(grant.userId, grant.clientId);
         return;
       }
       if (value.type === "update_prepare") {
@@ -162,7 +162,6 @@ export class ClientSockets {
         const view = await this.runtime.setMaster(grant.userId, value.employeeId, value.kind, value.master);
         accepted = true;
         connection.socket.send({ type: "runtime", ...view });
-        void this.pushStatus(grant.userId, grant.clientId);
         void this.pushRuntime(grant.userId);
       } else if (value.type === "ping") {
         if (value.relay !== undefined) await this.relay?.configure(grant, value.relay, value.relayOn);
@@ -189,7 +188,6 @@ export class ClientSockets {
         if (!connection.updating) this.hub.connect(grant.userId, connection.details, this.liveTransport(grant.userId, connection));
         accepted = true;
         connection.socket.send({ type: "pong", ...(connection.details.autoUpdate ? { busy: await this.clientInUse(grant.clientId) } : {}), ...(await this.runtimePayload(grant.userId)) });
-        void this.pushStatus(grant.userId, grant.clientId);
       } else if (value.type === "user_stop") {
         // 用户在自己电脑上按了 Esc：只停他正在看得到的那个会话，不接受停止任意会话。
         assert(typeof value.session === "string" && value.session, "user_stop requires a session");
@@ -265,15 +263,6 @@ export class ClientSockets {
     connection.socket.close(1000, "Client connection closed");
   }
 
-  /** 任务栏状态推送：engine 任务/会话状态一变就调，把五档算好的 Status 下发给这台客户端。 */
-  async pushStatus(userId: string, clientId?: string) {
-    if (!this.statusFor) return;
-    for (const connection of this.connections.values()) {
-      if (connection.grant.userId !== userId || (clientId && connection.grant.clientId !== clientId)) continue;
-      const status = await this.statusFor(connection.grant.userId, connection.grant.clientId).catch(() => undefined);
-      if (status) connection.socket.send({ type: "task_status", status });
-    }
-  }
   private async runtimePayload(userId: string) {
     const view = await this.runtime?.view(userId).catch(() => undefined);
     return view ? { runtime: view } : {};

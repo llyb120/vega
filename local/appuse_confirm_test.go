@@ -8,10 +8,9 @@ import (
 // quietConfirm 让确认走状态机但不动真实窗口，并返回一个“用户点了 / 到点了”的入口。
 func quietConfirm(t *testing.T) {
 	t.Helper()
-	quiet, card, timeout := butterflyQuiet, appuseConfirmCard, appuseConfirmTimeout
-	butterflyQuiet = true
+	card, timeout := appuseConfirmCard, appuseConfirmTimeout
 	appuseConfirmCard = func() bool { return true }
-	t.Cleanup(func() { butterflyQuiet, appuseConfirmCard, appuseConfirmTimeout = quiet, card, timeout })
+	t.Cleanup(func() { appuseConfirmCard, appuseConfirmTimeout = card, timeout })
 	appuseConfirmState.Lock()
 	appuseConfirmState.owner, appuseConfirmState.at, appuseConfirmState.askAfter = "", time.Time{}, time.Time{}
 	appuseConfirmState.answer = nil

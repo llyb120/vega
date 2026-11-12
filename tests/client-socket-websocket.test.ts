@@ -8,13 +8,13 @@ import { createApp, createRouter, createError, defineEventHandler, getHeader, se
 import ts from "typescript";
 import { Auth, digest } from "../server/core/auth";
 import { Store } from "../server/core/store";
-import { CLIENT_SOCKET_LIMIT, ClientSockets } from "../server/core/client-socket";
+import { CLIENT_SOCKET_LIMIT, ClientSockets, MIN_CLIENT_VERSION } from "../server/core/client-socket";
 import { LocalAgents } from "../server/core/local-agent";
 import { laneParams, openStream, wire, wireRequest } from "../server/core/sse";
 import { bodyJSON } from "../server/core/http-auth-routes";
 
 const clientId = "c".repeat(32), instance = "a".repeat(32);
-const hello = { type: "hello", clientId, instance, name: "Office PC", cwd: "/work", platform: "linux", version: "0.5.0", resume: true };
+const hello = { type: "hello", clientId, instance, name: "Office PC", cwd: "/work", platform: "linux", version: MIN_CLIENT_VERSION, resume: true };
 
 /** The two real route handlers with only the application singleton injected; h3 and the SSE helpers stay real. */
 async function route(file: string, application: unknown) {

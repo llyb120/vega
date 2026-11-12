@@ -1,6 +1,6 @@
 //go:build windows && !linux
 
-// Windows tray: connection status, settings and Quit.
+// Windows tray: the desktop window, settings and Quit.
 package main
 
 import (
@@ -17,10 +17,10 @@ var iconData []byte
 //go:embed icon-connected.ico
 var iconConnectedData []byte
 
-func systrayRun(configure, onQuit func()) {
+func systrayRun(open, configure, onQuit func()) {
 	systray.Run(func() {
 		systray.SetTitle("牵牛星")
-		mButterfly := systray.AddMenuItem("蝴蝶助理", "打开蝴蝶窗口（对话和设置都在里面）")
+		mWindow := systray.AddMenuItem("打开窗口", "牛马对话窗口")
 		mConfigure := systray.AddMenuItem("设置", "管理站点授权、按牛马配置主从和补充内容")
 		mQuit := systray.AddMenuItem("退出", "Stop local agent")
 		trayState.Lock()
@@ -30,8 +30,8 @@ func systrayRun(configure, onQuit func()) {
 		go func() {
 			for {
 				select {
-				case <-mButterfly.ClickedCh:
-					butterflyOpen()
+				case <-mWindow.ClickedCh:
+					open()
 				case <-mConfigure.ClickedCh:
 					configure()
 				case <-mQuit.ClickedCh:
@@ -48,9 +48,6 @@ var trayState struct {
 	ready     bool
 	connected bool
 	site      string
-	// 蝴蝶提示："" 无、running 正在操作电脑、needs_review 待用户核对。
-	notice     string
-	noticeText string
 }
 
 // setSiteLabel 让托盘标题带上站点，多个站点的客户端一眼能分。
@@ -74,13 +71,15 @@ func connectionTooltip(connected bool) string {
 	return base + " · 未连接"
 }
 
-// trayTooltip 把蝴蝶提示叠在连接状态上，鼠标停在托盘图标上就能看到。
-func trayTooltip(connected bool, notice, text string) string {
-	switch notice {
-	case "needs_review":
-		return "牵牛星 · 需要你核对：" + truncateRunes(text, 80)
-	case "running":
-		return "牵牛星 · 正在操作这台电脑"
+// trayTooltip 把窗口里的操作提示叠在连接状态上，鼠标停在托盘图标上就能看到。
+func trayTooltip(connected bool) string {
+	if notice := windowNoticeSnapshot(); notice != nil {
+		switch notice.Kind {
+		case "needs_review":
+			return "牵牛星 · 需要你核对：" + truncateRunes(notice.Text, 80)
+		case "running":
+			return "牵牛星 · 正在操作这台电脑"
+		}
 	}
 	return connectionTooltip(connected)
 }
@@ -91,19 +90,7 @@ func applyTrayAppearance(connected bool) {
 	} else {
 		systray.SetIcon(iconData)
 	}
-	systray.SetTooltip(trayTooltip(connected, trayState.notice, trayState.noticeText))
-}
-
-func butterflyTrayNotice(notice *butterflyNotice) {
-	trayState.Lock()
-	defer trayState.Unlock()
-	trayState.notice, trayState.noticeText = "", ""
-	if notice != nil {
-		trayState.notice, trayState.noticeText = notice.Kind, notice.Text
-	}
-	if trayState.ready {
-		applyTrayAppearance(trayState.connected)
-	}
+	systray.SetTooltip(trayTooltip(connected))
 }
 
 func truncateRunes(text string, limit int) string {

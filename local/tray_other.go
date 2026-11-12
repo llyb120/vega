@@ -11,8 +11,8 @@ import (
 
 // Non-Windows has no system tray here: run headless and log to stderr.
 // Quit with Ctrl+C / SIGTERM.
-func systrayRun(configure, onQuit func()) {
-	fmt.Fprintln(os.Stderr, "vega-local: running (no tray on this platform), Ctrl+C to quit")
+func systrayRun(open, configure, onQuit func()) {
+	fmt.Fprintln(os.Stderr, "vega-local: running (no tray on this platform), Ctrl+C to quit"); _ = open; _ = configure
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig

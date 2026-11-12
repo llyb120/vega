@@ -67,6 +67,7 @@ var (
 	procGlowPen       = glowGDI32.NewProc("CreatePen")
 	procGlowSelect    = glowGDI32.NewProc("SelectObject")
 	procGlowFillRect  = glowUser32.NewProc("FillRect")
+	procGlowClientRect = glowUser32.NewProc("GetClientRect")
 )
 
 type glowRect struct{ Left, Top, Right, Bottom int32 }
@@ -186,7 +187,7 @@ func glowThread() {
 	class := glowWindowClass{
 		Procedure: procedure,
 		Instance:  windows.Handle(instance),
-		ClassName: butterflyUTF16(glowClass),
+		ClassName: windowsUTF16(glowClass),
 	}
 	class.Size = uint32(unsafe.Sizeof(class))
 	if atom, _, _ := procGlowRegister.Call(uintptr(unsafe.Pointer(&class))); atom == 0 {
@@ -202,7 +203,7 @@ func glowThread() {
 	)
 	hwnd, _, _ := procGlowCreate.Call(
 		exLayered|exToolWnd|exTopmost|exTransp|exNoActive,
-		uintptr(unsafe.Pointer(butterflyUTF16(glowClass))),
+		uintptr(unsafe.Pointer(windowsUTF16(glowClass))),
 		0, wsPopup, 0, 0, 1, 1, 0, 0, instance, 0)
 	if hwnd == 0 {
 		return
@@ -358,7 +359,7 @@ func glowPaint(hwnd windows.Handle) {
 	}
 	defer func() { _, _, _ = procGlowEnd.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&paint))) }()
 	var client glowRect
-	_, _, _ = procChipClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&client)))
+	_, _, _ = procGlowClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&client)))
 	width, height := client.Right-client.Left, client.Bottom-client.Top
 	if width <= 0 || height <= 0 {
 		return
@@ -480,8 +481,8 @@ func glowLit() bool {
 // appuseUserEscaped 由钩子调用：停掉正在用桌面的那个会话。
 func appuseUserEscaped() {
 	owner := appuseDesktopOwner()
-	butterflyNotify("needs_review", "你按了 Esc 叫停操作电脑：本批剩余动作未执行，请核对屏幕上的实际结果")
-	butterflyClearIfKind("running")
+	windowNotify("needs_review", "你按了 Esc 叫停操作电脑：本批剩余动作未执行，请核对屏幕上的实际结果")
+	windowClearIfKind("running")
 	if owner == "" {
 		return
 	}

@@ -184,7 +184,7 @@ func appuseExecute(raw json.RawMessage) map[string]any {
 	defer appuseMu.Unlock()
 	// 只有会动鼠标键盘、会抢焦点的操作才提醒；纯截图不该打扰用户。
 	if request.Operation == "act" || request.Operation == "activate" {
-		butterflyNotify("running", appuseRunningText(request.Operation))
+		windowNotify("running", appuseRunningText(request.Operation))
 		glowHold()
 		defer glowRelease()
 	}
@@ -211,7 +211,7 @@ func appuseRunningText(operation string) string {
 	return "正在用鼠标键盘操作这台电脑（appuse act），期间请不要抢鼠标"
 }
 
-// appuseAnnounce 根据结果收尾蝴蝶提示：可能已部分执行就留着让用户核对，其他情况收起“正在操作”。
+// appuseAnnounce 根据结果收尾窗口提示：可能已部分执行就留着让用户核对，其他情况收起“正在操作”。
 func appuseAnnounce(result map[string]any) {
 	if status, _ := result["status"].(string); status == "needs_review" {
 		reason := ""
@@ -221,10 +221,10 @@ func appuseAnnounce(result map[string]any) {
 				break
 			}
 		}
-		butterflyNotify("needs_review", "appuse 可能已经部分执行："+appuseShort(reason)+"；请核对屏幕上的实际结果")
+		windowNotify("needs_review", "appuse 可能已经部分执行："+appuseShort(reason)+"；请核对屏幕上的实际结果")
 		return
 	}
-	butterflyClearIfKind("running")
+	windowClearIfKind("running")
 }
 
 func appuseShort(text string) string {

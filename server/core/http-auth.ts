@@ -76,7 +76,7 @@ export async function gate(event: H3Event, path: string) {
   if ((path === "/api/local-agent/socket" || path === "/api/local-agent/relay") && ["GET", "POST"].includes(event.method)) return;
   // Large results arrive here with the device credential, which the route verifies itself (no website cookie).
   if (path === "/api/local-agent/result" && event.method === "POST") return;
-  // 蝴蝶面板的聊天接口：同样只认设备凭据（原生客户端不带 Origin、不带 cookie）。
+  // 桌面窗口的聊天接口：同样只认设备凭据（原生客户端不带 Origin、不带 cookie）。
   if (path.startsWith("/api/local-agent/chat/") && event.method === "POST") return;
   sameOrigin(event);
   if (path === "/api/health") {

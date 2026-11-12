@@ -140,8 +140,6 @@ export class Engine {
     }
   });
   closing = false;
-  /** 任务栏状态推送（application 注入 clientSockets.pushStatus）：任务/会话状态一变就下发给在线客户端。 */
-  statusPush?: (userId: string, clientId?: string) => void;
   runtimePush?: (userId: string) => void;
   executionSwitches = new Set<string>();
   mcpSessions = new Map<string, { key: string; client: MCP }>();
@@ -166,76 +164,6 @@ export class Engine {
     return false;
   }
 
-  /**
-   * 任务栏蝴蝶的五档状态（对齐 Nova taskbar_status::snapshot）：
-   * 待确认 > 桌面操作/运行中任务 > 未读结论/错误 > 空闲。客户端只负责画。
-   * kind: idle | running | waiting | done | error；text 主文案，trailing 右上角徽标，
-   * detail 气泡卡副标题，thread 双击要打开的会话。
-   */
-  async taskStatusFor(userId: string, clientId: string): Promise<Obj> {
-    const employees = await this.employee.all();
-    // 这台 client 上正在跑的会话 -> 所属牛马任务。
-    const runningOnClient = new Set<string>();
-    for (const key of [...this.active.keys(), ...this.fire.running.keys()]) {
-      const session = await this.store.session(key);
-      if (session.localAgent && session.clientId === clientId && session.employeeId) runningOnClient.add(session.employeeId);
-    }
-    let waiting: Obj | undefined, running: Obj | undefined, done: Obj | undefined;
-    const now = Date.now();
-    for (const employee of employees) {
-      let state;
-      try {
-        state = await employee.state({ runs: false });
-      } catch { continue; }
-      if (state.ownerId !== userId) continue;
-      for (const task of state.tasks) {
-        // 待确认（approval/waiting）优先级最高。
-        if ((task.status === "approval" || task.status === "waiting") && !waiting) {
-          waiting = {
-            kind: "waiting",
-            text: task.approval ? "等待你确认" : "需要你的输入",
-            trailing: undefined,
-            detail: task.approval || task.waiting || excerptText(task.text, 80),
-            thread: task.workSession || task.computerSession || state.chatSession,
-            employee: state.name,
-            task: task.id,
-          };
-        }
-        // 在这台 client 上运行中的任务。
-        if (!ended(task.status) && runningOnClient.has(state.id) && !running) {
-          const elapsed = now - (task.startedAt || task.createdAt || now);
-          running = {
-            kind: "running",
-            text: task.progress?.current || excerptText(task.text, 60),
-            trailing: elapsed > 0 ? elapsedLabel(elapsed) : undefined,
-            detail: task.approval || task.waiting,
-            thread: task.workSession || task.computerSession || state.chatSession,
-            employee: state.name,
-            task: task.id,
-          };
-        }
-        // 最近结束（未读结论）：done 成功 / error 失败。
-        if (ended(task.status) && task.finishedAt && !done) {
-          const ok = task.status === "done";
-          done = {
-            kind: ok ? "done" : "error",
-            text: ok ? "完成了一项工作" : "一项工作中断",
-            trailing: ago(now - task.finishedAt),
-            detail: excerptText(task.summary || task.result || task.text, 100),
-            thread: task.workSession || task.computerSession || state.chatSession,
-            employee: state.name,
-            task: task.id,
-            at: task.finishedAt,
-          };
-        }
-      }
-    }
-    // 五档只取一条：waiting > running > done/error > idle。
-    if (waiting) return waiting;
-    if (running) return running;
-    if (done) return done;
-    return { kind: "idle", text: "空闲" };
-  }
   async releaseSession(key: string) {
     const entry = this.mcpSessions.get(key);
     this.mcpSessions.delete(key);
@@ -473,7 +401,7 @@ export class Engine {
       return;
     if (!redact) {
       this.events.emit("event", e);
-      this.notifyTaskbar(e);
+      this.notifyClients(e);
       return;
     }
     let data = redact.value(e.data);
@@ -486,29 +414,15 @@ export class Engine {
         outcome: { ...data.outcome, images: e.data.outcome.images },
       };
     this.events.emit("event", { ...e, data });
-    this.notifyTaskbar(e);
+    this.notifyClients(e);
   }
 
-  /** 任务栏蝴蝶要跟着任务/会话状态走：只对状态迁移事件重算并下发，不在 text_delta 这类高频事件上查库。 */
-  private notifyTaskbar(e: AgentEvent) {
-    if (!this.statusPush) return;
-    const push = (userId?: string, clientId?: string) => userId && this.statusPush?.(userId, clientId);
-    if (e.type === "employee_changed") {
-      const data = e.data as Obj | undefined;
-      void this.employee?.for(String(data?.employeeId || "")).then((employee) => employee.state({ runs: false })).then((state) => push(state.ownerId)).catch(() => {});
-      return;
-    }
-    if (e.type === "clients_changed") {
-      const data = e.data as Obj | undefined;
-      const owner = String((e as Obj).targetUser || data?.userId || data?.user || "");
-      push(owner, data?.clientId ? String(data.clientId) : undefined);
-      if (owner) this.runtimePush?.(owner);
-      return;
-    }
-    // 会话级状态迁移：started/message_end/compacted/execution_changed/cancel 都会改变 running 档。
-    if (["started", "message_end", "compacted", "execution_changed", "finished"].includes(e.type) && e.session) {
-      void this.store.session(e.session).then((session) => push(session.ownerId, session.clientId)).catch(() => {});
-    }
+  /** 客户端连上来/断开时要重算主从视图（不在 text_delta 这类高频事件上查库）。 */
+  private notifyClients(e: AgentEvent) {
+    if (e.type !== "clients_changed" || !this.runtimePush) return;
+    const data = e.data as Obj | undefined;
+    const owner = String((e as Obj).targetUser || data?.userId || data?.user || "");
+    if (owner) this.runtimePush(owner);
   }
   cancel(session: string, reason = "Cancelled by user") {
     cancelSessionBash(session);

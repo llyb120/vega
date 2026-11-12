@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vega</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false"><defs>
+  <symbol id="i-search" viewBox="0 0 24 24"><path d="M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM20 20l-4-4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+  <symbol id="i-min" viewBox="0 0 10 10"><path d="M0 5h10"/></symbol>
+  <symbol id="i-max" viewBox="0 0 10 10"><path d="M0 0h10v10H0Z"/></symbol>
+  <symbol id="i-close" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0 0 10"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></symbol>
+  <symbol id="i-tasks" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6ZM14 3v4h4"/></symbol>
+  <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4 7v6c0 4 3.5 7 8 8 4.5-1 8-4 8-8V7Z"/></symbol>
+</defs></svg>
+
+<div class="app" id="app">
+  <aside class="side" id="side">
+    <div class="side-top">
+      <button type="button" class="round" id="searchBtn" aria-label="搜索" title="搜索"><svg class="icon"><use href="#i-search"/></svg></button>
+      <button type="button" class="round" id="createBtn" aria-label="发起群聊" title="发起群聊"><svg class="icon"><use href="#i-plus"/></svg></button>
+    </div>
+    <div class="search-row" id="searchRow" hidden>
+      <input id="searchInput" type="search" aria-label="搜索牛马或群聊" placeholder="搜索牛马或群聊" autocomplete="off">
+    </div>
+    <button type="button" class="hero" id="hero" hidden>
+      <span class="hero-face" id="heroFace"></span>
+      <span class="hero-name" id="heroName"></span>
+    </button>
+    <div class="rail" id="rail">
+      <div class="rail-list" id="empList"></div>
+      <div class="rail-list groups" id="grpList"></div>
+    </div>
+    <div class="foot">
+      <button type="button" class="acc-face" id="accFace" aria-label="账号" title="账号"></button>
+      <button type="button" class="acc-pill" id="accBtn"><span class="acc-name" id="accName"></span><span class="acc-state" id="accState"></span></button>
+      <button type="button" class="gear" id="gearBtn" aria-label="设置" title="设置"><svg class="icon"><use href="#i-gear"/></svg></button>
+    </div>
+    <div class="splitter" id="splitter" title="拖动调整侧栏；双击收起"></div>
+  </aside>
+
+  <main class="main" id="main">
+    <div class="titlebar" id="titlebar">
+      <div class="title-drag" id="titleDrag"></div>
+      <div class="pill" id="pill" hidden>
+        <span class="pill-face" id="pillFace"></span>
+        <span class="pill-name" id="pillName"></span>
+      </div>
+      <div class="title-tools">
+        <button type="button" class="share" id="shareBtn" aria-label="在网页打开" title="在网页打开"><svg class="icon"><use href="#i-share"/></svg></button>
+        <div class="win-btns">
+          <button type="button" class="win-btn" data-win="min" aria-label="最小化" title="最小化"><svg class="icon"><use href="#i-min"/></svg></button>
+          <button type="button" class="win-btn" data-win="max" aria-label="最大化" title="最大化"><svg class="icon"><use href="#i-max"/></svg></button>
+          <button type="button" class="win-btn close" data-win="close" aria-label="关闭" title="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="stream" id="stream">
+      <div class="welcome" id="welcome">选一个牛马开始<small>左栏点一个牛马或群聊，就能在这里交代工作</small></div>
+    </div>
+    <button type="button" class="new-pill" id="newPill" hidden><svg class="icon"><use href="#i-arrow-down"/></svg><span id="newPillText">1 条新消息</span></button>
+
+    <form class="composer" id="composer" autocomplete="off">
+      <button type="button" class="cbtn" id="attachBtn" aria-label="附件" title="附件"><svg class="icon"><use href="#i-plus"/></svg></button>
+      <textarea class="input" id="input" rows="1" placeholder="给牛马发消息…" spellcheck="true"></textarea>
+      <button type="submit" class="send" id="sendBtn" aria-label="发送" title="发送" disabled><svg class="icon"><use href="#i-send"/></svg></button>
+    </form>
+
+    <section class="confirm" id="confirmCard" hidden role="dialog" aria-modal="true" aria-label="操作电脑前确认">
+      <div class="confirm-head"><svg class="icon"><use href="#i-shield"/></svg><strong>牛马要操作这台电脑</strong></div>
+      <p class="confirm-text" id="confirmText"></p>
+      <div class="confirm-actions">
+        <button type="button" class="btn primary" data-confirm="allow">现在接管</button>
+        <button type="button" class="btn" data-confirm="reject">我在用</button>
+      </div>
+      <span class="confirm-count" id="confirmCount"></span>
+    </section>
+
+    <div class="notice" id="notice" hidden><span id="noticeText"></span><button type="button" class="notice-x" id="noticeClose" aria-label="知道了">×</button></div>
+    <div class="banner" id="banner" hidden></div>
+  </main>
+</div>
+<div class="toast" id="toast" hidden></div>
+<div class="hover-card" id="hoverCard" hidden><span class="hover-face" id="hoverFace"></span><span class="hover-text"><strong id="hoverName"></strong><small id="hoverLine"></small></span></div>
+<script src="markdown.js"></script>
+<script src="bot-avatar.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
