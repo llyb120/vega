@@ -8,11 +8,13 @@ package main
 // 单独开进程：WebView2 是第三方 COM 组件，初始化失败也只关掉这一个小窗，不带走托盘和正在跑的任务。
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,13 +25,14 @@ import (
 )
 
 const (
-	butterflyPanelTitle = "蝴蝶助理 · BOT 会话"
-	// Nova taskbar-bubble 是 560px 宽的气泡；vega 助理同样贴蝴蝶上方、失焦收起。
-	butterflyPanelWidth  = 640
-	butterflyPanelHeight = 640
-	// Nova 靠窗口自带的透明边距当间隙；我们没有透明边，就留真实间隙，别贴住任务栏。
-	butterflyPanelMargin = 8
-	butterflyPanelGap    = 10
+	butterflyPanelTitle = "Vega 蝴蝶助理"
+	// 现在是普通窗口，不是气泡：默认给够面积放得下对话和设置，用户拖过就按上次的大小打开。
+	butterflyPanelWidth        = 900
+	butterflyPanelHeight       = 720
+	butterflyPanelMinWidth     = 560
+	butterflyPanelMinHeight    = 420
+	butterflyPanelMargin       = 8
+	butterflyPanelGeometryFile = "panel-window.json"
 )
 
 var (
@@ -41,7 +44,6 @@ var (
 	procPanelShow       = panelUser32.NewProc("ShowWindow")
 	procPanelForefront  = panelUser32.NewProc("SetForegroundWindow")
 	procPanelCursor     = panelUser32.NewProc("GetCursorPos")
-	procPanelRegion     = panelUser32.NewProc("SetWindowRgn")
 	procPanelMonitor    = panelUser32.NewProc("MonitorFromPoint")
 	procPanelInfo       = panelUser32.NewProc("GetMonitorInfoW")
 	procPanelFind       = panelUser32.NewProc("FindWindowW")
@@ -50,14 +52,12 @@ var (
 	procPanelForeground = panelUser32.NewProc("GetForegroundWindow")
 	procPanelAncestor   = panelUser32.NewProc("GetAncestor")
 	procPanelDpi        = panelUser32.NewProc("GetDpiForWindow")
-	procPanelVisible    = panelUser32.NewProc("IsWindowVisible")
 	procPanelAttach     = panelUser32.NewProc("AttachThreadInput")
 	procPanelFocus      = panelUser32.NewProc("SetFocus")
 	procPanelThread     = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
 	procPanelOwner      = panelUser32.NewProc("GetWindowThreadProcessId")
 	procPanelQuit       = panelUser32.NewProc("PostQuitMessage")
-	procPanelRgn        = windows.NewLazySystemDLL("gdi32.dll").NewProc("CreateRoundRectRgn")
-	procPanelCorner     = windows.NewLazySystemDLL("dwmapi.dll").NewProc("DwmSetWindowAttribute")
+	procPanelRect       = panelUser32.NewProc("GetWindowRect")
 )
 
 // 同一个面板只允许拉起一个：双击蝴蝶会连着触发两次，而 WebView2 起来之前还找不到窗口。
@@ -66,7 +66,7 @@ var butterflyPanelSpawn struct {
 	opened bool
 }
 
-// 面板此刻是否摆在屏幕上（决定失焦要不要收回去）。
+// 面板此刻是否摆在屏幕上（只用于日志/调试；窗口不再失焦自动收起）。
 var panelShowState struct {
 	sync.Mutex
 	at time.Time
@@ -214,125 +214,123 @@ func butterflyPanelRun(url string) bool {
 	return panelHostStart(url) // 阻塞到窗口销毁
 }
 
-// butterflyPanelBlurWatch 失焦收起（Nova bubble 的 blur()）：已经摆出来的面板一旦不是前台
-// （也不是它弹出的文件框/子窗口），就收回屏幕外，下次点蝴蝶秒开。
-func butterflyPanelBlurWatch(hwnd windows.Handle) {
-	ticker := time.NewTicker(180 * time.Millisecond)
-	defer ticker.Stop()
-	for range ticker.C {
-		panelShowState.Lock()
-		at := panelShowState.at
-		panelShowState.Unlock()
-		if at.IsZero() || time.Since(at) < 500*time.Millisecond {
-			continue
-		}
-		fg, _, _ := procPanelForeground.Call()
-		if fg == 0 {
-			continue
-		}
-		// GA_ROOTOWNER=3：前台是面板的文件选择器/弹窗时不算失焦。
-		root, _, _ := procPanelAncestor.Call(fg, 3)
-		if fg == uintptr(hwnd) || root == uintptr(hwnd) {
-			continue
-		}
-		_, _, _ = procPanelPost.Call(uintptr(hwnd), panelParkMsg, 0, 0)
+// panelTarget 面板这次要显示的页面：主进程在打开前把地址写到这里（同一个数据目录）。
+func panelTarget() string {
+	data, err := os.ReadFile(filepath.Join(butterflyPanelDataDir(), "panel-target.txt"))
+	if err != nil {
+		return ""
 	}
+	target := strings.TrimSpace(string(data))
+	// 只认本机客户端自己的页面。
+	if !strings.HasPrefix(target, "http://"+localAddress+"/") {
+		return ""
+	}
+	return target
 }
 
-// butterflyPanelChrome 去掉标题栏、置顶、不进任务栏，圆角交给系统。
+// panelNavigate 需要时把面板翻到另一个页面（对话 ↔ 设置）。
+func panelNavigate(hwnd windows.Handle) {
+	target := panelTarget()
+	if target == "" || target == panelCurrentURL {
+		return
+	}
+	if browser := panelHostBrowser(); browser != nil {
+		panelCurrentURL = target
+		browser.Navigate(target)
+		panelLog("面板翻到 %s", target)
+		return
+	}
+	panelHost.Lock()
+	panelHost.want = target
+	panelHost.Unlock()
+}
+
+// butterflyPanelChrome 现在它是一个普通窗口：标题栏、可缩放、不置顶、不自动收起；
+// 仍不进任务栏（入口是任务栏蝴蝶和图盘），免得屏幕外预热时多出一个按钮。
 func butterflyPanelChrome(hwnd windows.Handle) {
 	gwlStyle, gwlExStyle := ^uintptr(15), ^uintptr(19) // GWL_STYLE = -16, GWL_EXSTYLE = -20
 	const (
-		wsPopup      = 0x80000000
+		wsOverlapped = 0x00CF0000 // WS_OVERLAPPEDWINDOW：标题栏 + 边框 + 可缩放 + 最小/最大化
+		wsClip       = 0x02000000 // WS_CLIPCHILDREN：WebView2 自己画，别让父窗口刷背景
 		wsVisible    = 0x10000000
-		wsThickFrame = 0x00040000
-		wsCaption    = 0x00C00000
 		exTopmost    = 0x00000008
 		exToolWindow = 0x00000080
 		exAppWindow  = 0x00040000
 	)
-	style, _, _ := procPanelStyle.Call(uintptr(hwnd), gwlStyle)
-	_, _, _ = procPanelSetStyle.Call(uintptr(hwnd), gwlStyle, (style&^(wsCaption|wsThickFrame))|wsPopup|wsVisible)
+	_, _, _ = procPanelSetStyle.Call(uintptr(hwnd), gwlStyle, wsOverlapped|wsClip|wsVisible)
 	ex, _, _ := procPanelStyle.Call(uintptr(hwnd), gwlExStyle)
-	_, _, _ = procPanelSetStyle.Call(uintptr(hwnd), gwlExStyle, (ex|exTopmost|exToolWindow)&^exAppWindow)
-	// Win11 让 DWM 画圆角（有抗锯齿还有阴影）；只有 Win10 才用 SetWindowRgn 硬裁剪——
-	// 那条路径没有抗锯齿，白底页面的圆角四边会留白边。
-	if !butterflyPanelRounded(hwnd) {
-		dpi := butterflyDPI()
-		round := butterflyScale(12, dpi)
-		region, _, _ := procPanelRgn.Call(0, 0, uintptr(butterflyScale(butterflyPanelWidth, dpi)), uintptr(butterflyScale(butterflyPanelHeight, dpi)), uintptr(round*2), uintptr(round*2))
-		if region != 0 {
-			_, _, _ = procPanelRegion.Call(uintptr(hwnd), region, 1)
-		}
-	}
+	_, _, _ = procPanelSetStyle.Call(uintptr(hwnd), gwlExStyle, (ex|exToolWindow)&^exTopmost&^exAppWindow)
 	_, _, _ = procPanelPlace.Call(uintptr(hwnd), 0, 0, 0, 0, 0, 0x0020|0x0002|0x0001|0x0004) // FRAMECHANGED|NOMOVE|NOSIZE|NOZORDER
 }
 
-// butterflyPanelRounded 让 DWM 给整个窗口画圆角（Win11 22000+）。返回 false 表示系统没这个能力。
-func butterflyPanelRounded(hwnd windows.Handle) bool {
-	if chipBuild() < 22000 {
-		return false
-	}
-	const (
-		dwmwCornerPreference = 33 // DWMWA_WINDOW_CORNER_PREFERENCE
-		dwmwBorderColor      = 34 // DWMWA_BORDER_COLOR
-		dwmwColorNone        = 0xFFFFFFFE
-	)
-	preference := int32(2) // DWMWCP_ROUND
-	hr, _, _ := procPanelCorner.Call(uintptr(hwnd), dwmwCornerPreference, uintptr(unsafe.Pointer(&preference)), unsafe.Sizeof(preference))
-	if hr != 0 {
-		return false
-	}
-	// 圆角自带的 1px 描边也去掉：那圈线沿着四边和圆角绕一圈，就是“白边”。
-	none := uint32(dwmwColorNone)
-	_, _, _ = procPanelCorner.Call(uintptr(hwnd), dwmwBorderColor, uintptr(unsafe.Pointer(&none)), unsafe.Sizeof(none))
-	return true
+// panelGeometry 用户拖过的窗口位置与大小：下次还按它打开（仍然收口在工作区内）。
+type panelGeometry struct {
+	X, Y, Width, Height int32
 }
 
-// butterflyPanelFrame 面板落点，对齐 Nova 的 bubble::frame：居中在蝴蝶上方、贴住工作区下沿，
-// 四周留 margin；高度放不下就缩，永远不会压到任务栏和托盘图标。
-func butterflyPanelFrame(anchor, work appuseWinRect, dpi uint32) (x, y, width, height int32) {
+func panelGeometryPath(dir string) string { return filepath.Join(dir, butterflyPanelGeometryFile) }
+
+func loadPanelGeometry(dir string) (panelGeometry, bool) {
+	data, err := os.ReadFile(panelGeometryPath(dir))
+	if err != nil {
+		return panelGeometry{}, false
+	}
+	var geometry panelGeometry
+	if json.Unmarshal(data, &geometry) != nil || geometry.Width < butterflyPanelMinWidth || geometry.Height < butterflyPanelMinHeight {
+		return panelGeometry{}, false
+	}
+	return geometry, true
+}
+
+// savePanelGeometry 窗口挪完就记下来；写不了就算了，下次用默认位置。
+func savePanelGeometry(dir string, hwnd windows.Handle) {
+	rect := appuseWinRect{}
+	if ok, _, _ := procPanelRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rect))); ok == 0 {
+		return
+	}
+	data, err := json.Marshal(panelGeometry{rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(panelGeometryPath(dir), data, 0o600)
+}
+
+// butterflyPanelFrame 面板落点：用户拖过就把记住的大小位置当默认（仍收口在工作区内），
+// 否则按默认尺寸居中放在工作区里——它是窗口，不再贴着任务栏弹。
+func butterflyPanelFrame(anchor, work appuseWinRect, saved *panelGeometry, dpi uint32) (x, y, width, height int32) {
 	margin := butterflyScale(butterflyPanelMargin, dpi)
-	gap := butterflyScale(butterflyPanelGap, dpi)
-	width = butterflyScale(butterflyPanelWidth, dpi)
-	height = butterflyScale(butterflyPanelHeight, dpi)
+	width, height = butterflyScale(butterflyPanelWidth, dpi), butterflyScale(butterflyPanelHeight, dpi)
+	if saved != nil {
+		width, height = saved.Width, saved.Height
+	}
 	if limit := work.Right - work.Left - 2*margin; limit > 0 && width > limit {
 		width = limit
 	}
-	if limit := work.Bottom - work.Top - 2*margin - gap; limit > 0 && height > limit {
+	if limit := work.Bottom - work.Top - 2*margin; limit > 0 && height > limit {
 		height = limit
 	}
-	center := work.Right - margin - width/2 // 找不到蝴蝶就贴屏幕右侧
-	if anchor.Right > anchor.Left {
-		center = (anchor.Left + anchor.Right) / 2
+	x = work.Left + (work.Right-work.Left-width)/2
+	y = work.Top + (work.Bottom-work.Top-height)/2
+	// 记住的位置还在工作区里就用它（换显示器/分辨率变小了就回到居中）。
+	if saved != nil && saved.X >= work.Left && saved.Y >= work.Top && saved.X+saved.Width <= work.Right && saved.Y+saved.Height <= work.Bottom {
+		x, y = saved.X, saved.Y
 	}
-	x = center - width/2
 	if x < work.Left+margin {
 		x = work.Left + margin
-	}
-	if x+width > work.Right-margin {
-		x = work.Right - margin - width
-	}
-	// 任务栏在上边时面板贴工作区上沿，否则贴下沿上方；gap 就是和任务栏之间的空隙。
-	y = work.Bottom - height - gap
-	if anchor.Right > anchor.Left {
-		if above := anchor.Top - height - gap; above >= work.Top+margin && above < y {
-			y = above
-		}
-		if anchor.Top+anchor.Bottom < work.Top+work.Bottom {
-			y = work.Top + gap
-		}
 	}
 	if y < work.Top+margin {
 		y = work.Top + margin
 	}
-	if y+height > work.Bottom-gap {
-		y = work.Bottom - gap - height
+	if x+width > work.Right-margin {
+		x = work.Right - margin - width
+	}
+	if y+height > work.Bottom-margin {
+		y = work.Bottom - margin - height
 	}
 	return x, y, width, height
 }
 
-// butterflyPanelPlace 贴在任务栏蝴蝶上方：找不到蝴蝶就退到鼠标所在屏幕的右下角。
+// butterflyPanelPlace 摆到蝴蝶所在屏幕的中间：找不到蝴蝶就用鼠标所在的屏幕。
 // 顺手把前台抢过来——面板是新进程，没有输入记录，得借当前前台的输入状态才抢得到。
 func butterflyPanelPlace(hwnd windows.Handle) {
 	anchor, chip := butterflyAnchor()
@@ -364,8 +362,14 @@ func butterflyPanelPlace(hwnd windows.Handle) {
 	if work.Right == 0 && work.Bottom == 0 {
 		_, _, _ = procButterflyParams.Call(0x0030, 0, uintptr(unsafe.Pointer(&work)), 0) // SPI_GETWORKAREA
 	}
-	x, y, width, height := butterflyPanelFrame(anchor, work, dpi)
-	_, _, _ = procPanelPlace.Call(uintptr(hwnd), ^uintptr(0), uintptr(x), uintptr(y), uintptr(width), uintptr(height), 0x0040|0x0020|0x0004) // SHOWWINDOW|FRAMECHANGED|NOZORDER（尺寸变了要重建 DWM 表面）
+	saved, hasSaved := loadPanelGeometry(butterflyPanelDataDir())
+	var geometry *panelGeometry
+	if hasSaved {
+		geometry = &saved
+	}
+	x, y, width, height := butterflyPanelFrame(anchor, work, geometry, dpi)
+	// SHOWWINDOW|FRAMECHANGED|NOZORDER：已经是普通窗口，位置和大小都按记住的来。
+	_, _, _ = procPanelPlace.Call(uintptr(hwnd), ^uintptr(0), uintptr(x), uintptr(y), uintptr(width), uintptr(height), 0x0040|0x0020|0x0004)
 	panelClaimForeground(hwnd)
 	panelShowState.Lock()
 	panelShowState.at = time.Now()

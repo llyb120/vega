@@ -33,6 +33,9 @@ type Config struct {
 	Offline          bool                 `json:"offline,omitempty"`        // 已废弃：进程开着即上线，忽略此字段
 	Butterfly        bool                 `json:"butterfly,omitempty"`      // 显示任务栏蝴蝶与提示气泡；默认关
 	ConfirmSeconds   int                  `json:"confirmSeconds,omitempty"` // 动鼠标键盘前等几秒（0 = 用默认 15）
+	// BrowserMode 是 chrome_* 用哪个浏览器：空/headless = 客户端自己拉起的无头 Chrome（默认），
+	// real = 用户自己打开、装了 Vega Chrome 扩展的浏览器。
+	BrowserMode      string               `json:"browserMode,omitempty"`
 	TrustedOrigins   []string             `json:"trustedOrigins"`
 	Servers          []ServerCredential   `json:"servers,omitempty"`
 }
@@ -291,7 +294,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
 #tab-site:checked~.panels #panel-site,#tab-client:checked~.panels #panel-client,#tab-access:checked~.panels #panel-access,#tab-computer:checked~.panels #panel-computer,#tab-relay:checked~.panels #panel-relay{display:block}
 </style>
 <main>
-  <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p></div></div>
+  <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p>{{if .AssistantURL}}<p><a href="{{.AssistantURL}}">← 回到蝴蝶对话</a></p>{{end}}</div></div>
 
   {{if .Approved}}<div class="flash ok" role="status"><strong>站点权限已保存。</strong>请回到 Vega 查看登录验证与后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输。</div>{{end}}
   {{if .Revoked}}<div class="flash warn" role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</div>{{end}}
@@ -347,6 +350,17 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
     </form>
     {{end}}
     {{else}}<p class="empty">连上站点后，可按牛马分别配置浏览器 Master。尚未列出牛马时无法保存。</p>{{end}}
+  </section>
+
+  <section class="card">
+    <h2>浏览器</h2>
+    <form method="post">
+      <small>chrome_* 工具用哪个浏览器。无头：客户端自己拉起一个隐藏的 Chrome，启动时先尝试复制本机 Chrome 的登录态；Chrome 开着时它的 Cookie 库是独占的、复制不到，改由装在本机 Chrome 里的 Vega 扩展双向同步（要有后台页签，每 10 分钟或每轮操作结束后同步一次，只补对方缺少或已过期的 Cookie），也不影响你自己开着的页面；有头：用你自己打开、装了扩展的 Chrome。</small>
+      <label class="switch"><input type="radio" name="browserMode" value="headless"{{if .HeadlessBrowser}} checked{{end}}>无头（默认）：客户端自己的隐藏 Chrome</label>
+      <label class="switch"><input type="radio" name="browserMode" value="real"{{if not .HeadlessBrowser}} checked{{end}}>有头：用我自己开的 Chrome</label>
+      {{if and .HeadlessBrowser .HeadlessNotice}}<p><small aria-live="polite">{{.HeadlessNotice}}</small></p>{{end}}
+      <div class="row"><button name="saveBrowserMode" value="1">保存浏览器设置</button></div>
+    </form>
   </section>
 
   <section class="card">
@@ -454,7 +468,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid form", 400)
 			return
 		}
-		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveFsMaster") == "1" || r.FormValue("saveBrowserMaster") == "1" || r.FormValue("updateExtension") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" {
+		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveFsMaster") == "1" || r.FormValue("saveBrowserMaster") == "1" || r.FormValue("updateExtension") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" || r.FormValue("saveBrowserMode") == "1" {
 			var err error
 			tab := "client"
 			if r.FormValue("saveBrowserMaster") == "1" {
@@ -468,6 +482,9 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			} else if r.FormValue("saveButterfly") == "1" {
 				tab = "computer"
 				err = a.saveButterfly(r.FormValue("butterflyOn") == "1")
+			} else if r.FormValue("saveBrowserMode") == "1" {
+				tab = "access"
+				err = a.saveBrowserMode(strings.TrimSpace(r.FormValue("browserMode")))
 			} else if r.FormValue("saveConfirm") == "1" {
 				tab = "computer"
 				seconds, convErr := strconv.Atoi(strings.TrimSpace(r.FormValue("confirmSeconds")))
@@ -597,7 +614,13 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	employees, nodes := a.pairingMasters()
 	extension := a.lastExtension
 	butterfly := a.config.Butterfly
+	headlessBrowserMode := a.config.BrowserMode != "real"
+	assistantURL := a.assistantBase()
 	a.mu.Unlock()
+	headlessNotice := ""
+	if h := headlessBrowser.Load(); h != nil {
+		headlessNotice = h.currentNotice()
+	}
 	extensionDir := a.extensionDir()
 	tab := r.URL.Query().Get("tab")
 	switch tab {
@@ -621,7 +644,10 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		Accounts                           []account
 		Extension                          string
 		ExtensionDir                       string
-	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, employees, nodes, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts, extension, extensionDir})
+		HeadlessBrowser                    bool
+		HeadlessNotice                     string
+		AssistantURL                       string
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, employees, nodes, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts, extension, extensionDir, headlessBrowserMode, headlessNotice, assistantURL})
 }
 
 type loginProof struct {

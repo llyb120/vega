@@ -165,7 +165,7 @@ Codex / Claude Code / Devin 的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DEVIN_CONF
 ### Chrome（兼容入口）
 
 1. Chrome 与 Nitro 桥接必须在同一电脑/回环环境，运行 Nitro。
-2. 打开 `chrome://extensions`，开启开发者模式，加载项目 `local/extension/vega-chrome`；部署产物在 `.output/public/extension/vega-chrome`，资源页也下载同一个包。扩展同时内置在本机客户端里，「连接授权 → 授权 → 浏览器扩展」可以把它重新装到本机 Chrome（要求这头牛马的文件系统 Master 与浏览器 Master 都是本机）。
+2. 用本机客户端并保持默认的**无头浏览器**时不需要这一步：客户端自己解压内置扩展并装进它拉起的隐藏 Chrome。要改走你自己开的 Chrome（「连接授权 → 浏览器」选「用我自己开的 Chrome」）时，才需打开 `chrome://extensions`，开开发者模式，加载项目 `local/extension/vega-chrome`；部署产物在 `.output/public/extension/vega-chrome`，资源页也下载同一个包。扩展同时内置在本机客户端里，「连接授权 → 授权 → 浏览器扩展」可以把它重新装到本机 Chrome（要求这头牛马的文件系统 Master 与浏览器 Master 都是本机）。
 3. Vega 的扩展有自己的 ID（manifest `key`）和端口 47753–47762，只与 Vega 客户端配对；Nova 的扩展用 47653–47662，两边同时安装也不会互相连接。`VEGA_CHROME_PORT` 可指定单一回环端口。
 4. 无痕操作须在扩展详情开启无痕权限；多浏览器同时连接时优先 Chrome。控制目标始终是已观察到的稳定 tag，不猜当前激活页。
 
@@ -178,6 +178,8 @@ Codex / Claude Code / Devin 的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DEVIN_CONF
 WS连接先通过带CSRF校验的POST取得15秒有效、一次性且绑定当前账号和浏览器实例的票据；握手同时校验Cookie和Origin，注销/撤权会关闭已连接通道。慢客户端每次只保留一张待确认画面，不积压帧或点击；实时画面不写入SQLite。输入按连接序号去重，并校验用户实际显示过的帧、网页/视口和焦点，断线和结果不确定时不重放；原HTTP截图/操作接口仍保留，继续使用原像素校验规则。
 
 手动控制期间独占**该标签页**的 Chrome 操作锁，同一标签页的 agent 后续操作等待；不同标签页的人工控制与 agent 任务互不阻塞，多 tab 可同时查看或操作。退出、断线、页面隐藏或30秒未操作会释放控制权，并在必要时松开鼠标。手动操作会使同页 agent 的旧观察失效，但纯查看不会覆盖 agent 的 ref/截图。获取后台/最小化标签画面可能会显示 Chrome 窗口并切到该页。
+
+**客户端无头浏览器（默认）**：本机客户端 `vega-local` 自己拉起一份隐藏的 Chrome（独立 profile 在客户端数据目录，首次启动从本机 Chrome 复制 Cookie/Local State，闲置 15 分钟后回收（正在操作浏览器的那一轮不回收）），通过 CDP 装好内置的 Vega 扩展。浏览器工具因此不需要你打开窗口或手动装扩展，也不会碰你自己的标签页和窗口；登录态留在这个 profile 里，客户端重启后仍在。要改走你自己打开的 Chrome，在客户端「连接授权 → 浏览器」选「用我自己开的 Chrome」；两种方式不自动互相回退，选中的浏览器连不上时该步直接报未执行。Windows 按 `VEGA_CHROME_PATH` 或常见安装路径找 chrome.exe，Linux/macOS 找不到时用同一变量指定。Chrome 运行时 Cookies 数据库被独占，首次启动那次复制往往拿不到东西；这时客户端通过扩展在你自己的 Chrome 与无头浏览器之间**双向**同步登录态：你 Chrome 里的 Cookie 进无头 profile，你在无头浏览器里新登录的站点也写回你自己的 Chrome。两个方向都只补对方缺少的（或对方那份已过期的），有效会话互不覆盖；写回去不需要新开窗口或页签，客户端只借用后台页签附着一次就松开。同时连了多个浏览器时只跟 Google Chrome 优先的那一个同步（一个无头 profile 不吃多份登录，也不会把 A 的登录写进 B）；你在 Chrome 里退出登录后，客户端不会再把它种回去；每轮操作结束只在无头里真的多了新登录时才再写一次。前提是你的 Chrome 里装了 Vega Chrome 扩展（客户端「连接授权 → 授权 → 更新浏览器扩展」），并且有至少一个后台页签可借读（当前激活的那个不算）；只同步 Cookie，不含 localStorage、IndexedDB 和密码。同一无头实例每 10 分钟最多同步一次，每轮浏览器操作结束后也会再同步一次，每次启动新实例再同步一次，结果写在设置页「浏览器」卡片和 client.log 里。
 
 **无头模式**：设置 `VEGA_BROWSER_MODE=isolated` 后，服务启动一个私有无头 Chrome（与 Docker 同一套扩展协议、独立 profile 目录 `<数据库目录>/chromium`），不占宿主桌面。Linux/Windows/macOS 都支持；Windows 上通过 `VEGA_CHROME_PATH` 指定 chrome.exe，未设置时自动探测常见安装路径。无头实例可多 tab 并行截图和输入；cookie/登录态持久在私有 profile，不与用户日常浏览器共享。Docker 模式同样使用此变量，行为一致。
 

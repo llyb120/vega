@@ -150,13 +150,23 @@ func main() {
 	butterflySetEnabled(a.config.Butterfly)
 	setAppuseConfirmSeconds(a.config.ConfirmSeconds)
 	setSshKeysAllowed(a.config.sshKeysAllowed())
+	// 默认用客户端自己的无头 Chrome；设置里选「我自己的 Chrome」就不拉起。
+	a.applyBrowserMode()
+	go headlessReclaim(ctx)
 	if needsPairing {
 		go func() {
 			time.Sleep(1 * time.Second)
 			openBrowser(a.pinnedOrigin)
 		}()
 	}
-	configure := func() { openBrowser("http://" + localAddress + "/config/" + a.configToken) }
+	configure := func() {
+		url := "http://" + localAddress + "/config/" + a.configToken
+		// 设置也在蝴蝶窗口里开：先把目标页写给面板，面板不在时退回系统浏览器。
+		butterflyPanelTarget(a.dataDir, url)
+		if !butterflyPanelOpen(url) {
+			openBrowser(url)
+		}
+	}
 	// 面板在启动时就预热好（窗口停屏幕外、页面先加载），点蝴蝶秒开，没有初始化白框。
 	go func() {
 		time.Sleep(2 * time.Second)
@@ -169,6 +179,7 @@ func main() {
 			return
 		}
 		// 蝴蝶面板里就是网页里的 BOT 会话；WebView2 不可用时退回系统浏览器。
+		butterflyPanelTarget(a.dataDir, url)
 		if !butterflyPanelOpen(url) {
 			openBrowser(url)
 		}
@@ -176,6 +187,7 @@ func main() {
 	fmt.Fprintln(os.Stderr, "vega-local: connection settings at http://"+localAddress+"/config/"+a.configToken)
 	a.clientLog("本地端口 %s 已启用（浏览器需在同一台电脑打开站点）", localAddress)
 	quit := func() {
+		headlessStop()
 		butterflyPanelClose()
 		cancel()
 		a.mu.Lock()

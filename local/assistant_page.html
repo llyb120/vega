@@ -66,19 +66,19 @@
 
   /* 不透明窗口，不留那圈 8px 透明边——卡片直接顶满窗口。 */
   .tb-shell { display: flex; flex-direction: column; height: 100vh; padding: 0; }
+  /* 面板是普通窗口：页面铺满客户区，不再画气泡卡片那圈圆角/描边/阴影。 */
   .tb-card {
     --accent: var(--gray);
     position: relative; flex: 1; min-height: 0;
     display: flex; flex-direction: column; gap: 10px;
     padding: 14px 16px 12px;
-    border-radius: 16px;
+    border-radius: 0;
     color: var(--fg);
     font: 13px/1.55 "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
     background:
       radial-gradient(90% 40% at 100% 0%, color-mix(in srgb, var(--brand) 10%, transparent), transparent 70%),
       linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
-    border: 1px solid rgb(var(--ink) / 0.09);
-    box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    border: 0;
     user-select: none; cursor: default;
   }
   .tb-card.running { --accent: var(--blue); }
@@ -351,6 +351,7 @@
         <div class="tb-state" id="who">Vega 助理</div>
         <div class="tb-time" id="sub">选一个牛马或群聊</div>
       </div>
+      <button class="tb-close" id="settings" title="设置">⚙</button>
       <button class="tb-close" id="close" title="收起">×</button>
     </div>
 
@@ -565,6 +566,7 @@ const el = {
   plus: document.getElementById("plus"),
   menu: document.getElementById("menu"),
   error: document.getElementById("error"),
+  settings: document.getElementById("settings"),
   close: document.getElementById("close")
 };
 
@@ -1009,6 +1011,10 @@ el.stream.addEventListener("scroll", () => {
   el.latest.hidden = state.stick;
 });
 el.close.addEventListener("click", () => { fetch(API + "close", { method: "POST" }).catch(() => {}); });
+// 设置就在这个窗口里：同一个本地令牌，/assistant/<token>/ → /config/<token>。
+el.settings.addEventListener("click", () => {
+  location.href = location.pathname.replace("/assistant/", "/config/").replace(/\/$/, "");
+});
 el.plus.addEventListener("click", (event) => {
   event.stopPropagation();
   el.menu.hidden = !el.menu.hidden;

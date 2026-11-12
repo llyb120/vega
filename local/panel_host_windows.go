@@ -34,7 +34,16 @@ var panelHost struct {
 	sync.Mutex
 	hwnd    windows.Handle
 	browser *edge.Chromium
-	pending bool // 预热还没好就被点了：等 WebView2 就绪再摆出来
+	pending bool   // 预热还没好就被点了：等 WebView2 就绪再摆出来
+	want    string // 预热还没好时要翻到的页面
+}
+
+// panelCurrentURL WebView2 当前加载的页面（翻页前比对，避免每次点开都重载）。
+var panelCurrentURL string
+
+// panelMinMaxInfo 是 MINMAXINFO 的布局：五个 POINT，只有 MinTrackSize 用得上。
+type panelMinMaxInfo struct {
+	Reserved, MaxSize, MaxPosition, MinTrackSize, MaxTrackSize appuseWinPoint
 }
 
 func panelHostWindow() windows.Handle {
@@ -51,7 +60,9 @@ func panelHostBrowser() *edge.Chromium {
 
 // panelHostWndProc 面板窗口的消息：尺寸变了把 WebView2 的 bounds 同步过去，
 // 显示/收起由客户端的信号触发，关窗走正常的销毁流程。
-func panelHostWndProc(hwnd windows.Handle, message uint32, wparam, lparam uintptr) uintptr {
+// lparam 按结构体指针接（和键盘钩子一样）：我们处理的几条消息里它要么是 MINMAXINFO，要么不用，
+// 不用时只原样转给 DefWindowProc，不当作整数解引用。
+func panelHostWndProc(hwnd windows.Handle, message uint32, wparam uintptr, lparam *panelMinMaxInfo) uintptr {
 	switch message {
 	case 0x0005: // WM_SIZE
 		if browser := panelHostBrowser(); browser != nil {
@@ -60,6 +71,15 @@ func panelHostWndProc(hwnd windows.Handle, message uint32, wparam, lparam uintpt
 		return 0
 	case 0x0014: // WM_ERASEBKGND：别用系统背景刷，省得闪白
 		return 1
+	case 0x0232: // WM_EXITSIZEMOVE：用户拖完/缩放完，把大小位置记下来
+		savePanelGeometry(butterflyPanelDataDir(), hwnd)
+		return 0
+	case 0x0024: // WM_GETMINMAXINFO：别把窗口缩成一条线（尺寸按 DPI 缩放）
+		if lparam != nil {
+			dpi := butterflyDPI()
+			lparam.MinTrackSize = appuseWinPoint{X: butterflyScale(butterflyPanelMinWidth, dpi), Y: butterflyScale(butterflyPanelMinHeight, dpi)}
+		}
+		return 0
 	case panelShowMsg:
 		browser := panelHostBrowser()
 		if browser == nil {
@@ -68,6 +88,7 @@ func panelHostWndProc(hwnd windows.Handle, message uint32, wparam, lparam uintpt
 			panelHost.Unlock()
 			return 0
 		}
+		panelNavigate(hwnd)
 		_ = browser.NotifyParentWindowPositionChanged()
 		butterflyPanelPlace(hwnd)
 		return 0
@@ -84,7 +105,7 @@ func panelHostWndProc(hwnd windows.Handle, message uint32, wparam, lparam uintpt
 		_, _, _ = procPanelQuit.Call(0)
 		return 0
 	}
-	result, _, _ := procChipDefProc.Call(uintptr(hwnd), uintptr(message), wparam, lparam)
+	result, _, _ := procChipDefProc.Call(uintptr(hwnd), uintptr(message), wparam, uintptr(unsafe.Pointer(lparam)))
 	return result
 }
 
@@ -113,17 +134,17 @@ func panelHostStart(url string) bool {
 	height := butterflyScale(butterflyPanelHeight, dpi)
 	parkX, parkY := int32(panelParkX), int32(panelParkY)
 	const (
-		wsPopup    = 0x80000000
-		wsVisible  = 0x10000000
-		exTopmost  = 0x00000008
-		exTool     = 0x00000080
-		exNoRedraw = 0x00200000
+		wsOverlapped = 0x00CF0000 // WS_OVERLAPPEDWINDOW
+		wsClip       = 0x02000000 // WS_CLIPCHILDREN
+		wsVisible    = 0x10000000
+		exTool       = 0x00000080
+		exNoRedraw   = 0x00200000
 	)
 	hwnd, _, last := procChipCreate.Call(
-		exTopmost|exTool|exNoRedraw,
+		exTool|exNoRedraw, // 不进任务栏：入口是任务栏蝴蝶和托盘
 		uintptr(unsafe.Pointer(butterflyUTF16(butterflyPanelClass))),
 		uintptr(unsafe.Pointer(butterflyUTF16(butterflyPanelTitle))),
-		wsPopup|wsVisible,
+		wsOverlapped|wsClip|wsVisible,
 		uintptr(parkX)&0xFFFFFFFF, uintptr(parkY)&0xFFFFFFFF,
 		uintptr(width), uintptr(height),
 		0, 0, uintptr(instance), 0)
@@ -134,9 +155,8 @@ func panelHostStart(url string) bool {
 	panelHost.Lock()
 	panelHost.hwnd = windows.Handle(hwnd)
 	panelHost.Unlock()
+	// 普通窗口：系统标题栏、可缩放、不置顶，不再做无边框气泡那套。
 	butterflyPanelChrome(windows.Handle(hwnd))
-	// 先给个占位：让 DWM 立刻有圆角表面，避免第一次显示时先直角再收圆。
-	butterflyPanelRounded(windows.Handle(hwnd))
 
 	// 停在工作区外的窗口会被系统判成“被遮挡”，WebView2 会停画；关掉这类节流。
 	_ = os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
@@ -162,13 +182,17 @@ func panelHostStart(url string) bool {
 	}
 	chromium.Resize()
 	chromium.Navigate(url)
-	go butterflyPanelBlurWatch(windows.Handle(hwnd))
+	panelCurrentURL = url
 	panelLog("面板预热完成：%s", url)
 	panelHost.Lock()
-	pending := panelHost.pending
-	panelHost.pending = false
+	pending, want := panelHost.pending, panelHost.want
+	panelHost.pending, panelHost.want = false, ""
 	panelHost.Unlock()
 	if pending {
+		if want != "" && want != panelCurrentURL {
+			panelCurrentURL = want
+			chromium.Navigate(want)
+		}
 		butterflyPanelPlace(windows.Handle(hwnd))
 	}
 	var message chipMsg

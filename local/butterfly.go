@@ -4,6 +4,8 @@ package main
 // 真实鼠标键盘在动、操作可能已经部分执行时，用户必须在自己电脑上看得见，而不是只写在会话记录里。
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -47,6 +49,15 @@ func butterflyOpen() {
 	if open != nil {
 		open()
 	}
+}
+
+// butterflyPanelTarget 把面板这次要显示的页面写给面板进程（同一个数据目录，面板没开也无所谓）。
+// 面板是独立进程，靠这个文件在「对话」和「设置」之间翻页。
+func butterflyPanelTarget(dir, url string) {
+	if dir == "" || url == "" {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, "panel-target.txt"), []byte(url), 0o600)
 }
 
 // assistantURL 蝴蝶面板打开的地址：本地内置的助理界面（不用登录网站，也不加载站点前端）。
