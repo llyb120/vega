@@ -170,7 +170,7 @@ test("employee chat delegates evidence-dependent questions, follows an existing 
     assert(system.includes("用户明确要求只讨论、不执行时遵守") && system.includes("不得擅自重启用户停止的任务或绕过审批"));
     assert(system.includes("自动安排只读调查") && system.includes("不要重复派单"));
     assert(!definitions.some((tool) => ["bash", "write", "edit", "switch_scene"].includes(tool.name) || tool.name.startsWith("chrome_")));
-    const last = messages.at(-1)!;
+    const last = messages.filter(m => m.runtime !== "dynamic").at(-1)!;
     if (last.role === "user" && last.text?.includes("1+1")) return { role: "assistant", text: "2" };
     if (last.role === "user") return follow("inspect", { action: "list" });
     const result = JSON.parse(last.text!);
@@ -430,7 +430,7 @@ test("real executor recovery preserves committed tool outcomes and consumes each
   const inputs: string[] = [];
   engine.events.on("event", (event) => { if (event.type === "tool_start" && event.data.name === "write") writes++; });
   engine.providers.chat = async (_model, _system, messages) => {
-    const input = messages.findLast((message) => message.role === "user")!;
+    const input = messages.findLast((message) => message.role === "user" && message.runtime !== "dynamic" && message.runtime !== "turn_aborted")!;
     if (inputs.at(-1) !== input.text) inputs.push(input.text!);
     if (phase++ === 0) return { role: "assistant", calls: [{ id: "write-once", name: "write", arguments: { path: "proof.txt", content: "do not repeat" } }] };
     if (phase === 2) throw new ProviderError("connection interrupted after write", 400);
@@ -477,7 +477,7 @@ test("a supplement delivered by a completion guard is not re-injected after anot
       return { role: "assistant", calls: [{ id: "guard", ...employeeCall({ action: "complete", deliverableRef: [], text: "old goal done" }) }] };
     }
     if (requests === 2) throw new ProviderError("interrupted after receiving supplement", 400);
-    assert(!messages.findLast((message) => message.role === "user")!.text!.includes("latest requirement"));
+    assert(!messages.findLast((message) => message.role === "user" && message.runtime !== "dynamic")!.text!.includes("latest requirement"));
     assert(messages.some((message) => message.role === "tool" && message.taskInput?.answer?.includes("latest requirement")));
     await employee.execute(job.id, { action: "progress", text: "latest goal verified", plan: [{ content: "latest requirement", status: "completed" }] });
     return { role: "assistant", calls: [{ id: "finish", ...employeeCall({ action: "complete", deliverableRef: [], text: "latest goal verified" }) }] };

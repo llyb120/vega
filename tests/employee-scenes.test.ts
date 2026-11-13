@@ -226,11 +226,11 @@ test("explicit caller work still resumes in order across coding and lightweight 
     if (requests === 2) return call("light-block", "switch_scene", { scene: "lightweight", message: "先做普通协调", resume: "回到代码验证B" });
     if (requests === 3) return { role: "assistant", text: "普通协调完成。" };
     if (requests === 4) {
-      assert(messages.at(-1)!.text!.includes("回到代码验证B"));
+      assert(messages.findLast(m => m.role === "user" && m.runtime !== "dynamic")!.text!.includes("回到代码验证B"));
       return { role: "assistant", text: "代码验证已完成。" };
     }
     if (requests === 5) {
-      assert(messages.at(-1)!.text!.includes("最后核对原作业状态A"));
+      assert(messages.findLast(m => m.role === "user" && m.runtime !== "dynamic")!.text!.includes("最后核对原作业状态A"));
       return verified();
     }
     assert(requests === 6);

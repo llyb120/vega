@@ -89,6 +89,8 @@ export type Session = {
   boostFrozen?: boolean;
   /** Whether spawn_agent tools were in the schema at session start (kept stable mid-session). */
   allowSpawnFrozen?: boolean;
+  /** Persisted before a run; a restart can mark an interrupted turn even without pending tool calls. */
+  turnInProgress?: boolean;
   /** Frozen switch_scene.enum for this session (configured scenes at start; not mutated mid-session). */
   sceneEnumFrozen?: string[];
   /** Parent session id when this is a 分身 Stage. */
@@ -319,6 +321,9 @@ export class Store {
       // 已读位置是按 seq 记的：新历史从 1 重新数，旧位置留着会让以后的未读永远算成 0。
       await this.run("DELETE FROM objects WHERE kind='read' AND id LIKE ?", "%/" + key);
       await this.remove("context-state", key);
+      const session = await this.session(key);
+      session.turnInProgress = false;
+      await this.saveSession(session);
       await this.run("UPDATE sessions SET updated=? WHERE id=?", Date.now(), key);
     });
   }
@@ -475,7 +480,7 @@ export class Store {
     const source = await this.session(key);
     assert(!source.taskId && !source.employeeId, "Employee history must continue through its workspace");
     const copy = await this.transaction(async () => {
-      const copy = await this.newSession({ ...source, title: source.title + "（分叉）", taskId: undefined, fireRoot: undefined, fireRole: undefined });
+      const copy = await this.newSession({ ...source, turnInProgress: false, title: source.title + "（分叉）", taskId: undefined, fireRoot: undefined, fireRole: undefined });
       // The copy owns its files: the copied history points at its own directory (copied below).
       const from = this.files.dir(source), to = this.files.dir(copy);
       // 消息里可能嵌着已序列化的 JSON（工具结果），路径反斜杠会被多层转义：先换最深的一层，再往外换。

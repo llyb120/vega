@@ -74,12 +74,13 @@ test("export replay: 429 inside computer keeps the caller's resume, the browser 
     if (phase === 6) return { role: "assistant", text: "浏览器勘察完成：7 张截图已保存。" };
     if (phase === 7) {
       assert.equal(model.selection, "p/light", "caller work runs on the caller's scene model");
-      assert(messages.at(-1)!.text!.includes("Continue only caller retained work") && messages.at(-1)!.text!.includes("交付完整测试方案正文"));
+      const caller = messages.findLast(m => m.role === "user" && m.runtime !== "dynamic")!.text!;
+      assert(caller.includes("Continue only caller retained work") && caller.includes("交付完整测试方案正文"));
       return { role: "assistant", text: BODY };
     }
     if (phase === 8) {
       bodySeq = (await store.messages((await employee.state()).tasks[0].workSession!)).findLast(m => m.text === BODY)!.seq!;
-      const prompt = messages.findLast(m => m.role === "user")!.text!;
+      const prompt = messages.findLast(m => m.role === "user" && m.runtime !== "dynamic")!.text!;
       assert(prompt.includes(`#${bodySeq}`) && prompt.includes("不要重写"), "the nudge points at the saved body instead of pasting it back");
       assert(!prompt.includes("TC46"), "the body is not echoed into the resume prompt");
       return plan("completed", "completed");
@@ -157,7 +158,8 @@ test("stopped mid-computer and resumed: retained work survives, task_complete fr
     if (phase === 7) {
       assert.equal(model.selection, "p/light", "returned to the caller before delivering");
       assert(lastTool(messages, "task_complete").error);
-      assert(messages.at(-1)!.text!.includes("task_complete was not executed") && messages.at(-1)!.text!.includes("写出完整清单正文"));
+      const caller = messages.findLast(m => m.role === "user" && m.runtime !== "dynamic")!.text!;
+      assert(caller.includes("task_complete was not executed") && caller.includes("写出完整清单正文"));
       return { role: "assistant", text: BODY, calls: [{ id: "done", ...employeeCall({ action: "complete", text: "清单已写出。", summary: "清单已交付。" }) }] };
     }
     throw Error("unexpected extra model turn " + phase);
@@ -247,7 +249,7 @@ test("returning to a caller scene whose models were removed says so once and con
     }
     if (phase === 3) {
       assert.equal(model.selection, "p/vision");
-      assert.match(messages.at(-1)!.text!, /无法返回「lightweight」（场景「lightweight」未配置模型），留在当前「computer」场景完成下面的调用方工作[\s\S]*整理结论/);
+      assert.match(messages.findLast(m => m.role === "user" && m.runtime !== "dynamic")!.text!, /无法返回「lightweight」（场景「lightweight」未配置模型），留在当前「computer」场景完成下面的调用方工作[\s\S]*整理结论/);
       return plan("completed");
     }
     if (phase === 4) return call("done", "employee", { action: "complete", deliverableRef: [], text: "结论已整理。", summary: "完成。" });

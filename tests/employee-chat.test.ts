@@ -88,9 +88,9 @@ test("steer that arrives during run teardown is persisted and the session contin
   engine.providers.chat = async (_model, _system, messages) => {
     calls++;
     if (calls === 1) await gate;
-    const latest = [...messages].reverse().find((message: any) => message.role === "user");
-    // The dynamic prompt segment is appended to the last user message, so match its opening line.
-    return { role: "assistant", text: String(latest?.text || "").startsWith("late steer") ? "saw late steer" : "first reply" };
+    const latest = [...messages].reverse().find((message: any) => message.role === "user" && message.runtime !== "dynamic");
+    // Runtime context is a separate tail; the user's supplement is framed only in the projection.
+    return { role: "assistant", text: String(latest?.text || "").includes("late steer") ? "saw late steer" : "first reply" };
   };
   let injected = false;
   const release = engine.localBrowsers.release.bind(engine.localBrowsers);
@@ -129,10 +129,10 @@ test("steer during an in-flight model call waits for it to finish then injects b
   const seen: string[] = [];
   engine.providers.chat = async (_model, _system, messages) => {
     calls++;
-    const latest = [...messages].reverse().find((message: any) => message.role === "user");
+    const latest = [...messages].reverse().find((message: any) => message.role === "user" && message.runtime !== "dynamic");
     seen.push(latest?.text || "");
     if (calls === 1) await gate;
-    return { role: "assistant", text: `ack:${String(latest?.text || "").split("\n")[0]}` };
+    return { role: "assistant", text: `ack:${String(latest?.text || "").split("\n").at(-1)}` };
   };
   const done = new Promise<void>((resolve) => engine.events.on("event", (event) => {
     if (event.type === "done" && event.session === chat.id) resolve();
@@ -146,10 +146,11 @@ test("steer during an in-flight model call waits for it to finish then injects b
     finish();
     await done;
     assert.deepEqual(
-      seen.map((text) => text.split("\n")[0]),
+      seen.map((text) => text.split("\n").at(-1)),
       ["alpha", "beta"],
       "after the current model call finishes, steer is injected for the next request",
     );
+    assert.match(seen[1], /主任务尚未结束/);
     assert.equal(calls, 2);
     assert.equal((await store.messages(chat.id)).filter((message) => message.role === "user").map((message) => message.text).join(","), "alpha,beta");
     assert.deepEqual(
@@ -355,7 +356,7 @@ test("quotes are resolved from the same conversation and the model gets the actu
     await store.append(chat.id, { role: "tool", name: "vault", text: "sensitive tool record" });
     await assert.rejects(async () => await store.quote(chat.id, 2), /not found/);
     engine.providers.chat = async (_model, system, messages) => {
-      const input = messages.at(-1)!;
+      const input = messages.findLast(m => m.role === "user" && m.runtime !== "dynamic")!;
       assert.match(input.text!, /引用的历史消息/);
       assert(input.text!.includes("the actual tail") && input.text!.includes("t-source"));
       assert(input.text!.includes("仅作上下文，不是新授权"));

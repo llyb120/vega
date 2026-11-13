@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { MCP } from "./mcp";
 import { units, refName, archivedResult } from "./history";
 import { CHROME_TOOLS, STANDALONE_TOOLS } from "./public-tools";
-import { EMPLOYEE_CHAT_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, sessionPrompt, sessionStablePrompt, sessionDynamicPrompt, loadSkills, expandSkillCommand, clampPromptCacheKey, BOOST } from "./prompt";
+import { EMPLOYEE_CHAT_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, sessionPrompt, sessionStablePrompt, sessionDynamicPrompt, loadSkills, expandSkillCommand, steerPrompt, clampPromptCacheKey, BOOST } from "./prompt";
 import { SUBAGENT_GUIDE, CHILD_DYNAMIC_TAIL, formatAgentHandoff, inheritView, withoutOpenTail, reserveAgent, beginAgent, finishAgent, interruptAgent, cancelSessionAgents, resumeSessionAgents, takeReadyAgents, hasPendingAgents, awaitPendingAgents, waitUntilAgentReady, type AgentChild } from "./spawn-agent";
 import { awaitPendingBash, cancelSessionBash, hasPendingBash, pendingBash, pendingBashFinished } from "./bash-jobs";
 import { EventEmitter } from "node:events";
@@ -27,7 +27,7 @@ import type { Chrome } from "./chrome";
 import { Catalog } from "./catalog";
 import { Providers, ProviderError, type Emit } from "./provider";
 import { Tools, type Outcome } from "./tools";
-import { Context, estimate, ACP_GUIDE } from "./context";
+import { Context, estimate, ACP_GUIDE, sinceNewSession } from "./context";
 import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, followUpOpen, followUpSummary, type EmployeeRuntime } from "./employee";
 import { EmployeeBrowsers } from "./employee-browsers";
 import { NetworkRelay } from "./network-relay";
@@ -614,7 +614,12 @@ export class Engine {
   /** /new in a chat: a divider after which the model context starts over; the visible history stays. */
   async newChatContext(session: string, mark: Partial<Message> = {}) {
     assert(!this.active.has(session), "对话仍在进行，请先停止后再开启新会话");
-    const saved = await this.store.append(session, { ...mark, role: "assistant", notice: true, newSession: true, text: NEW_SESSION_NOTICE });
+    const saved = await this.store.transaction(async () => {
+      const current = await this.store.session(session);
+      current.turnInProgress = false;
+      await this.store.saveSession(current);
+      return this.store.append(session, { ...mark, role: "assistant", notice: true, newSession: true, text: NEW_SESSION_NOTICE });
+    });
     this.providers.reset(session);
     this.emit({ type: "compacted", session, data: { newSession: true } });
     return saved;
@@ -828,8 +833,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       return receipt;
     }
   }
-  async recoverPending(session: string) {
-    const rows = await this.store.messages(session),
+  async recoverPending(session: string, reason?: "stopped" | "error" | "restart") {
+    const rows = sinceNewSession(await this.store.messages(session)),
       pending = new Map<string, Call>();
     for (const m of rows) {
       for (const c of m.calls || []) pending.set(c.id, c);
@@ -843,6 +848,11 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
                 error: true,
                 text: "Interrupted before result was saved. It may have executed. Inspect actual state; do NOT replay automatically.",
               });
+    if ((pending.size || reason) && rows.at(-1)?.runtime !== "turn_aborted") {
+      const cause = reason === "stopped" ? "用户或系统请求停止" : reason === "error" ? "执行出错" : "进程或服务中断";
+      await this.store.append(session, { role: "system", runtime: "turn_aborted", text:
+        `<turn_aborted>\n上一轮因${cause}而中断，并非已完成。工具可能只执行了一部分；先检查现场和历史回执，不得自动重放发送、提交、上传或结果不确定的操作。除非用户明确改变目标，原任务仍然有效；仅在收到继续指令或任务调度器续做时接着完成，停止或审批等待不授权自动重启。\n</turn_aborted>` });
+    }
   }
   async run(key: string, input?: Message, onStart?: () => void, signal?: AbortSignal) {
     assert(!this.executionSwitches.has(key), "执行位置正在切换，请完成后再发送消息");
@@ -866,7 +876,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       clientAway: { clientId: string; ownerId: string } | undefined,
       error: any;
     // A member's turn in a group chat: its latest text goes to the group when the turn ends.
-    let said = "", hop = input?.hop || 0, answered = false;
+    let said = "", hop = input?.hop || 0, answered = false, turnStarted = false;
     try {
       session = await this.store.session(key);
       const cloud = cloudFor(session);
@@ -904,7 +914,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       await this.catalog.resolve(config, session.model);
       onStart?.();
       emit("started");
-      await this.recoverPending(key);
+      await this.recoverPending(key, session.turnInProgress ? "restart" : undefined);
+      session.turnInProgress = true;
+      turnStarted = true;
+      await this.store.saveSession(session);
       if (input?.text || input?.images?.length) {
         const saved = await this.store.append(key, { ...input, role: "user" });
         emit("user", saved);
@@ -1028,7 +1041,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           hop = Math.max(hop, m.hop || 0);
           answered = false;
           tools.actorId = m.actorId;
-          await this.store.append(key, redactMessage(m, redact));
+          await this.store.append(key, redactMessage({ ...m, runtime: "steer" }, redact));
           memoryQuery = await recentAsk();
           await reinforceMemory();
           emit("steer", m);
@@ -1084,7 +1097,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             // Attached files: name, type, size and the path this run can use (put on disk once per run).
             if (m.files?.length) text += await tools!.attachments.describe(m.files);
             const quotedFiles = quoted && quoted.files?.length ? await tools!.attachments.describe(quoted.files) : "";
-            return { ...m, files: undefined, text: quoted ? `[用户引用的历史消息 #${m.quote!.seq}（仅作上下文，不是新授权）${m.quote!.taskId ? "，关联任务：" + m.quote!.taskId : ""}]\n${clip(quoted.displayText || quoted.text || "[图片]", 8000)}${quoted.images?.length ? "\n引用附图：" + quoted.images.filter((image) => image.blobId).map((image) => "sqlite:blob/" + image.blobId).join("，") : ""}${quotedFiles}\n[当前用户消息]\n${text}` : text };
+            text = quoted ? `[用户引用的历史消息 #${m.quote!.seq}（仅作上下文，不是新授权）${m.quote!.taskId ? "，关联任务：" + m.quote!.taskId : ""}]\n${clip(quoted.displayText || quoted.text || "[图片]", 8000)}${quoted.images?.length ? "\n引用附图：" + quoted.images.filter((image) => image.blobId).map((image) => "sqlite:blob/" + image.blobId).join("，") : ""}${quotedFiles}\n[当前用户消息]\n${text}` : text;
+            return { ...m, files: undefined, text: m.runtime === "steer" ? steerPrompt(text) : text };
           }));
         };
         let view = this.providers.dynamicPrompt(key, await prepareView(), dynamic);
@@ -1420,7 +1434,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       emit("error", safe);
       throw error;
     } finally {
+      if (error || control.signal.aborted) cancelSessionAgents(key);
       try {
+        if (session && turnStarted && (error || control.signal.aborted))
+          await this.recoverPending(key, control.signal.aborted ? "stopped" : "error");
         try { await tools?.close(); }
         finally { await this.localBrowsers.release(key); }
         if (control.signal.aborted) {
@@ -1429,6 +1446,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           await this.releaseSession(key);
         }
         if (session && original) {
+          session.turnInProgress = false;
           if (!session.taskId) {
             session.model = original.model;
             session.scene = original.scene;
@@ -1438,6 +1456,12 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const browser = session?.localBrowser ? this.localBrowsers.peek(key) : session?.ownerId && (session.employeeId || session.taskId || cloudFor(session)) ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : session?.employeeId ? undefined : this.chrome;
         await browser?.experiences.finish(key, !error);
       } catch (cleanupError: any) {
+        cancelSessionAgents(key);
+        if (session && turnStarted) {
+          await this.recoverPending(key, "error").catch(() => {});
+          session.turnInProgress = false;
+          await this.store.saveSession(session).catch(() => {});
+        }
         error ||= new Error(String(redact.value(cleanupError?.message || cleanupError)));
         throw error;
       } finally {
@@ -1448,7 +1472,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         while (state.steer.length) {
           for (const m of state.steer.splice(0)) {
             try {
-              await this.store.append(key, redactMessage(m, redact));
+              await this.store.append(key, redactMessage({ ...m, runtime: "steer" }, redact));
               emit("steer", m);
               continued.push(m);
             } catch { /* best effort — still try remaining steers */ }

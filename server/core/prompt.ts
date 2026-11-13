@@ -163,6 +163,9 @@ export function attachDynamic(messages: Message[], text: string, snapshots = new
   return messages.length ? messages.flatMap((m, i) => [m, ...(snapshots.get(anchors[i]) || [])]) : snapshots.get("empty") || messages;
 }
 
+export const steerPrompt = (text: string) =>
+  `[轮中补充]\n主任务尚未结束。以下是用户在执行中补充的要求；除非明确改变目标，否则继续原任务。明确的停止、取消或目标变更优先，不能把补充当成无关的新任务。\n${text}`;
+
 export function ponytailText(config: Config) {
   return config.ponytail && config.ponytail !== "off" ? PONYTAIL_RULES + config.ponytail : "";
 }

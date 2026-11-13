@@ -25,7 +25,7 @@ export function validTaskName(name: string) {
 export function userTurns(view: Message[]): number[] {
   const indexes: number[] = [];
   view.forEach((message, index) => {
-    if (message.role === "user") indexes.push(index);
+    if (message.role === "user" && message.runtime !== "turn_aborted" && message.runtime !== "dynamic") indexes.push(index);
   });
   return indexes;
 }

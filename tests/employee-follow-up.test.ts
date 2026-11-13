@@ -72,7 +72,7 @@ test("a direct follow-up within the window continues the delivered task in its o
         assert.equal(model.selection, "p/light", "the follow-up starts from the restored origin scene");
         assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("computer"), "the browser is one same-session switch away");
         assert(messages.some(m => m.calls?.some(c => c.name === "switch_scene")), "earlier history of the same session is present");
-        const latest = messages.filter(m => m.role === "user").at(-1)!.text!;
+        const latest = messages.filter(m => m.role === "user" && m.runtime !== "dynamic").at(-1)!.text!;
         assert.match(latest, /在同一结果页点击第一条自然结果/);
         assert.match(latest, /已交付任务的直接后续.*不要重做/s);
         assert.match(latest, /在百度搜索「你好」并核实结果页/, "existing plan is shown to the run");

@@ -73,6 +73,7 @@ export function promptHistory(
   };
   for (const original of input) {
     const m = { ...original };
+    if (m.runtime === "turn_aborted") m.role = "user";
     if (m.role === "tool") {
       if (!m.callId || !pending.has(m.callId)) continue;
       pending.delete(m.callId);

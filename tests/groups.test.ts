@@ -404,12 +404,10 @@ test("an @mentioned member's assembled request: group rules after the general di
     assert(general >= 0 && rules > general, "the group rules come after (and override) the general dispatch rules");
     assert(system.indexOf("[群公告]（本群的工作规则，谁做什么以它为准；不扩大授权）\n如果要测试或者设计测试用例，找测试牛马") > rules);
     assert.match(system, /\[分工\] 被 @ 只表示请你回应，不代表这件事归你。/);
-    const request = String(messages.at(-1).text);
+    const request = String(messages.findLast((m: any) => m.role === "user" && m.runtime !== "dynamic").text);
     assert.match(request, /\[需要你回应的是 #\d+，来自用户「alice」（你的主人）\]\n\[先核对分工\] 被 @ 不代表这件事归你。按群公告判断：归其他牛马（测试牛马）的部分，不要自己派单或执行，直接在回复里「@名称」交给它/);
-    // The dynamic prompt segment follows the request, so the bulletin still closes the task request itself.
-    const dynamicAt = request.indexOf("\n\n当前任务索引");
-    const requestPart = dynamicAt >= 0 ? request.slice(0, dynamicAt) : request;
-    assert(requestPart.trimEnd().endsWith("群公告：如果要测试或者设计测试用例，找测试牛马"), "the bulletin is the last thing the member reads in its request");
+    assert.equal(messages.at(-1).runtime, "dynamic", "runtime hints are a separate tail, not an edit of the group request");
+    assert(request.trimEnd().endsWith("群公告：如果要测试或者设计测试用例，找测试牛马"), "the bulletin is the last thing the member reads in its request");
     assert.match(tools.find((t: any) => t.name === "employee_task_create").description, /群聊里只给按群公告归你的工作派单；归其他牛马的不要派单，在回复里 @它 交出。/);
   } finally { await close(); }
 });
@@ -557,7 +555,8 @@ test("/new in a group: 旁白 and member sessions start over; members then see o
     assert(last.setup && !/此前的群消息/.test(last.last) && /\[新消息\] #\d+ 用户「alice」：小A 来一下$/.test(last.last), last.last);
     const turn = JSON.stringify(seen.at(-1)!.messages);
     assert(turn.includes("小A 来一下") && !turn.includes("旧话题") && !turn.includes("聊聊旧事") && !turn.includes("旧\""), "the member sees only what follows");
-    assert.equal(seen.at(-1)!.messages.filter((m: any) => m.role === "user").length, 1, "in a new member session");
+    assert.equal(seen.at(-1)!.messages.filter((m: any) => m.role === "user" && m.runtime !== "dynamic").length, 1, "in a new member session");
+    assert.equal(seen.at(-1)!.messages.at(-1).runtime, "dynamic");
   } finally { await close(); }
 });
 

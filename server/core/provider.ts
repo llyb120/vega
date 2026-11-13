@@ -202,8 +202,12 @@ export async function bodyFor(
       }
       if (!content.length) continue;
       const last = messages.at(-1);
-      if (last?.role === role) last.content.push(...content);
-      else messages.push({ role, content });
+      if (last?.role === role) {
+        // Tool results must stay paired; only real user-text boundaries need a separator.
+        if (role === "user" && m.role === "user" && m.text && last.content.some((part: Obj) => part.type === "text"))
+          last.content.push({ type: "text", text: "\n\n[以下是另一条消息]\n\n" });
+        last.content.push(...content);
+      } else messages.push({ role, content });
     }
     body.messages = messages;
     if (tools.length)

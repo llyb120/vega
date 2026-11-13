@@ -49,13 +49,21 @@ test("retained runtime snapshots and notices enter token accounting exactly once
   assert.equal(await restored.promptTokens(base), raw * 2);
 });
 
-test("Responses keeps user-bound dynamic snapshots through tool rounds, notices and the next user turn", { timeout: 15000 }, async (t) => {
+for (const [api, label] of [["openai-responses", "Responses"], ["openai-completions", "Chat Completions"]] as const)
+test(`${label} keeps user-bound dynamic snapshots through tool rounds, notices and the next user turn`, { timeout: 15000 }, async (t) => {
   const { store, engine, session } = await fixture(t), requests: any[] = [], views: Message[][] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(chunk);
     requests.push(JSON.parse(Buffer.concat(chunks).toString()));
     const n = requests.length, events: any[] = [];
+    if (api === "openai-completions") {
+      const tool = [1, 2, 4].includes(n);
+      const delta = tool ? { content: "checking " + n, tool_calls: [{ index: 0, id: "call-" + n, type: "function", function: { name: "read", arguments: JSON.stringify({ path: "package.json", offset: 1, limit: 1 }) } }] } : { content: "done" };
+      response.setHeader("Content-Type", "text/event-stream");
+      response.end("data: " + JSON.stringify({ choices: [{ index: 0, delta, finish_reason: tool ? "tool_calls" : "stop" }], usage: { prompt_tokens: 10000, completion_tokens: 10 } }) + "\n\ndata: [DONE]\n\n");
+      return;
+    }
     if (n === 6) { response.writeHead(404); response.end("previous response not found"); return; }
     if ([1, 2, 4].includes(n)) events.push({ type: "response.output_item.done", output_index: 0, item: { type: "function_call", call_id: "call-" + n, name: "read", arguments: JSON.stringify({ path: "package.json", offset: 1, limit: 1 }) } });
     else events.push({ type: "response.output_text.delta", delta: "done" });
@@ -66,7 +74,7 @@ test("Responses keeps user-bound dynamic snapshots through tool rounds, notices 
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
   const cfg = structuredClone(config);
-  cfg.provider.p.api = "openai-responses";
+  cfg.provider.p.api = api;
   cfg.provider.p.baseURL = "http://127.0.0.1:" + (server.address() as any).port;
   await store.put("config", cfg);
   let runtimeLabel = "runtime-v1";
@@ -88,12 +96,25 @@ test("Responses keeps user-bound dynamic snapshots through tool rounds, notices 
   await engine.run(session.id, { role: "user", text: "first task" });
   await engine.run(session.id, { role: "user", text: "follow-up" });
   assert.equal(requests.length, 5);
-  assert.deepEqual(requests.map(request => request.previous_response_id), [undefined, "response-1", "response-2", "response-3", "response-4"]);
-  assert.deepEqual(requests[1].input.map((item: any) => item.type || item.role), ["function_call_output", "user"]);
-  assert.match(requests[1].input[1].content[0].text, /fixture notice/);
-  assert.deepEqual(requests[2].input.map((item: any) => item.type || item.role), ["function_call_output", "user"]);
-  assert.deepEqual(requests[3].input.map((item: any) => item.type || item.role), ["user", "user"]);
-  assert.deepEqual(requests[4].input.map((item: any) => item.type || item.role), ["function_call_output"]);
+  if (api === "openai-responses") {
+    assert.deepEqual(requests.map(request => request.previous_response_id), [undefined, "response-1", "response-2", "response-3", "response-4"]);
+    assert.deepEqual(requests[1].input.map((item: any) => item.type || item.role), ["function_call_output", "user"]);
+    assert.match(requests[1].input[1].content[0].text, /fixture notice/);
+    assert.deepEqual(requests[2].input.map((item: any) => item.type || item.role), ["function_call_output", "user"]);
+    assert.deepEqual(requests[3].input.map((item: any) => item.type || item.role), ["user", "user"]);
+    assert.deepEqual(requests[4].input.map((item: any) => item.type || item.role), ["function_call_output"]);
+  } else {
+    assert.deepEqual(requests[0].messages.map((message: any) => message.role), ["system", "user", "user"]);
+    for (let i = 1; i < requests.length; i++) {
+      const previous = requests[i - 1];
+      assert.deepEqual(requests[i].messages.slice(0, previous.messages.length), previous.messages, `request ${i + 1} must retain the serialized prefix, including prior tool calls and results`);
+      assert.deepEqual(requests[i].tools, requests[0].tools);
+      assert.equal(requests[i].prompt_cache_key, requests[0].prompt_cache_key);
+    }
+    assert.match(requests[0].messages[2].content, /runtime-v1/);
+    assert.match(requests[1].messages.at(-1).content, /fixture notice/);
+    assert.match(requests[3].messages.at(-1).content, /runtime-v2/);
+  }
   const firstDynamic = views[0].find(message => message.runtime === "dynamic")!;
   assert.match(firstDynamic.text!, /runtime-v1/);
   assert.deepEqual(views[1].slice(0, views[0].length), views[0]);
@@ -105,6 +126,7 @@ test("Responses keeps user-bound dynamic snapshots through tool rounds, notices 
   assert(!canonical.some(message => message.runtime === "dynamic"));
   assert.deepEqual(canonical.filter(message => message.role === "user").map(message => message.text), ["first task", "follow-up"]);
   assert(canonical.every(message => !message.text?.includes("fixture notice")));
+  if (api !== "openai-responses") return;
   await engine.run(session.id, { role: "user", text: "fallback" });
   assert.equal(requests.length, 7, "an unavailable continuation falls back only once");
   assert.equal(requests[5].previous_response_id, "response-5");

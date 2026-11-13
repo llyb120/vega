@@ -44,6 +44,7 @@ test("inheritView supports omit, none, and turn:N, and falls back to full histor
   assert.equal(inheritView(view, "turn:9").length, 5);
   assert.equal(inheritView(view, "nope").length, 5);
   assert.equal(inheritView(view, "turn:1").length, 2);
+  assert.deepEqual(userTurns([view[0], { role: "user", text: "aborted", runtime: "turn_aborted" }, { role: "user", text: "dynamic", runtime: "dynamic" }, view[2]]), [0, 3], "host runtime messages are not user turns");
 });
 
 test("withoutOpenTail drops an in-flight assistant tool call so the child does not see unread results", () => {

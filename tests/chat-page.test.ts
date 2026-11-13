@@ -33,9 +33,9 @@ test("清空聊天也清掉已读位置，新历史里的消息重新算未读",
 });
 
 test("chat history without paging parameters returns the full history unchanged", async () => {
-  const { store, id } = await fixture(250);
+  const { store, id } = await fixture(600);
   const result = await chatHistory(store, id, q());
-  assert.equal(result.messages.length, 250);
+  assert.equal(result.messages.length, 600);
   assert.equal((result as any).hasMore, undefined);
   assert.deepEqual(result.messages, await store.messages(id));
 });
