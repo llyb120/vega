@@ -415,7 +415,7 @@ export class Tools {
         items: { type: "integer", minimum: 1 },
         maxItems: 64,
         description:
-          "Earlier successful calls in this batch (1-based). Omit when independent: independent calls run concurrently, up to 4 at a time (browser, unknown and side-effecting calls stay ordered). UI/agent/MCP results require review and cannot be prerequisites.",
+          "Earlier successful calls in this batch (1-based). Omit when independent: independent calls run concurrently, up to 8 at a time (browser, unknown and side-effecting calls stay ordered). UI/agent/MCP results require review and cannot be prerequisites.",
       };
     }
     if (this.session.employeeId && !this.session.taskId)

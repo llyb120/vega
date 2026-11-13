@@ -93,7 +93,7 @@ docker run -d --name vega --shm-size=1g \
 
 | 模块 | 实现 |
 |---|---|
-| Lyra agent | 持久会话、流式文本/思考/工具事件、取消、执行中插入消息、模型重试/场景候选降级、工具最多 4 并发、1 基 `_after`、文件身份冲突与串行屏幕资源、只读模式、技能索引和 `/skill:name` |
+| Lyra agent | 持久会话、流式文本/思考/工具事件、取消、执行中插入消息、模型重试/场景候选降级、工具最多 8 并发、1 基 `_after`、文件身份冲突与串行屏幕资源、只读模式、技能索引和 `/skill:name` |
 | provider | OpenAI Chat Completions、Responses、Anthropic Messages；多工具分片、原生参数、厂商 thinking 格式、签名思考/无签名重试、缓存断点、图片历史、输出预算、代理动态切换 |
 | Responses | 每会话 4 scope / 总计 512 的 30 分钟 continuation 缓存、前缀/认证指纹、lease 防旧请求覆盖、无效 previous_response_id 仅完整重试一次、场景/压缩后重置；普通跨轮保留原生推理状态，`store:false` 回放不携带上游 item ID |
 | 本地订阅 | CodeBuddy、WorkBuddy、Devin 原生接入，及 Codex / Claude Code 只读 CLI 订阅或自定义 API；不是用通用 API 地址冒充专有协议 |

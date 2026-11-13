@@ -14,7 +14,7 @@ function run(calls: Call[], execute: (call: Call) => Promise<any>, cwd = process
   return Engine.prototype.batch.call(engine, tools, calls, {} as any, new Set(calls.map((c) => c.name)), onSettled) as Promise<any[]>;
 }
 
-test("independent calls overlap up to 4 and each result keeps its own call", async () => {
+test("independent calls overlap up to 8 and each result keeps its own call", async () => {
   const calls = Array.from({ length: 9 }, (_, i) => call("r" + i, "read", { path: `f${i}` }));
   let active = 0,
     peak = 0;
@@ -25,8 +25,21 @@ test("independent calls overlap up to 4 and each result keeps its own call", asy
     active--;
     return { value: { read: c.id } };
   });
-  assert.equal(peak, 4, "bounded concurrency");
+  assert.equal(peak, 8, "bounded concurrency");
   assert.deepEqual(results.map((r) => r.value.read), calls.map((c) => c.id));
+});
+
+test("a delayed dependency cannot overbook a slot handed to an existing waiter", async () => {
+  const calls = Array.from({ length: 24 }, (_, i) => call(String(i), "read", { path: String(i), ...(i >= 16 ? { _after: [i - 15] } : {}) }));
+  let active = 0, peak = 0;
+  const results = await run(calls, async () => {
+    peak = Math.max(peak, ++active);
+    await new Promise(resolve => setTimeout(resolve, 1));
+    active--;
+    return { value: {} };
+  });
+  assert.equal(peak, 8);
+  assert(!results.some(result => result.error));
 });
 
 test("a finished call is reported at once instead of after the whole batch", async () => {
