@@ -26,7 +26,7 @@ import { KeyFiles, gitSshCommand, keyDir } from "./key-files";
 import { relayShellEnvironment } from "./relay-proxy";
 import { AttachmentFiles } from "./attachments";
 import { isDeepStrictEqual } from "node:util";
-import { sceneModels, maskedConfig, mergeSecrets } from "./config";
+import { sceneModels, sceneAllowSpawn, maskedConfig, mergeSecrets } from "./config";
 import { omitPlaceholders } from "./tool-args";
 import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type Internal, type ToolContext } from "./public-tools";
 import type { Session, Call, Message } from "./store";
@@ -196,6 +196,9 @@ export class Tools {
     }
     if (ctx.kind === "normal" && names.has("employee_status")) parts.push(NORMAL_SESSION_EMPLOYEE_RULES);
     if (ctx.kind === "chat") parts.push(ctx.member ? GUEST_RULES : OWNER_RULES);
+    if (names.has("spawn_agent")) parts.push(!this.session.agentChild && sceneAllowSpawn(this.config, this.session.scene || "lightweight", model?.selection || this.session.model)
+      ? "[分身权限] 当前场景的所选模型允许分身；工具定义保持稳定，执行时仍会核对最新配置。"
+      : "[分身权限] 当前场景、模型或分身身份不允许派生；工具仅为缓存前缀稳定而保留，不要调用。切场景后按当时配置重新判断。");
     return parts.length ? "\n" + parts.join("\n") : "";
   }
   async definitions(_model?: Model) {
@@ -402,8 +405,8 @@ export class Tools {
     // 与 Nova 一样按用途拆成窄工具：窄 schema 才不会被模型随手塞进无关字段（旧单个 appuse 就因此整批退回）。
     if (this.session.localAgent && this.session.localPlatform === "windows" && !this.session.readOnly)
       defs.push(...appuseTools());
-    // Tool schemas stay frozen for the session: include 分身 tools only when they were enabled at start.
-    if (this.session.allowSpawnFrozen && !this.session.readOnly) defs.push(...agentTools());
+    // Listing is not authorization: keep the schema stable across scene/model policy changes.
+    if (!this.session.readOnly) defs.push(...agentTools());
     for (const def of defs) {
       def.parameters = structuredClone(def.parameters);
       def.parameters.properties ??= {};
@@ -591,7 +594,8 @@ export class Tools {
     if (isAgentTool(call.name)) {
       if (this.session.agentChild) return { value: { error: `${call.name} 仅在主会话中可用；分身不能再派生分身` }, error: true };
       if (this.session.scene === "computer") return { value: { error: "电脑场景不能开启分身" }, error: true };
-      assert(this.session.allowSpawnFrozen, "当前会话未开放分身");
+      assert(!this.session.readOnly && !(this.session.employeeId && !this.session.taskId)
+        && sceneAllowSpawn(await this.engine.config(this.session), this.session.scene || "lightweight", model.selection || this.session.model), "当前场景的所选模型未开放分身");
       return { value: await this.engine.invokeAgentTool(this.session, call, this) };
     }
     if (call.name === "change_working_directory") {

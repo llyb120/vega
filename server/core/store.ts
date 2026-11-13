@@ -87,7 +87,7 @@ export type Session = {
   /** Frozen stable system prefix for this session (including Epic BOOST if it was on at start). */
   frozenSystem?: string;
   boostFrozen?: boolean;
-  /** Whether spawn_agent tools were in the schema at session start (kept stable mid-session). */
+  /** Legacy schema flag; no longer grants permission (checked against the current scene). */
   allowSpawnFrozen?: boolean;
   /** Persisted before a run; a restart can mark an interrupted turn even without pending tool calls. */
   turnInProgress?: boolean;

@@ -11,7 +11,7 @@ const call = (id: string, name: string, args: Record<string, any> = {}): Call =>
 function run(calls: Call[], execute: (call: Call) => Promise<any>, cwd = process.cwd(), onSettled?: any) {
   const engine = { emit: () => {} } as any;
   const tools = { session: { id: "s", cwd, localAgent: true }, signal: new AbortController().signal, execute } as any;
-  return Engine.prototype.batch.call(engine, tools, calls, {} as any, onSettled) as Promise<any[]>;
+  return Engine.prototype.batch.call(engine, tools, calls, {} as any, new Set(calls.map((c) => c.name)), onSettled) as Promise<any[]>;
 }
 
 test("independent calls overlap up to 4 and each result keeps its own call", async () => {
@@ -88,7 +88,7 @@ test("cancellation and a suspended call run nothing further", async () => {
     signal: aborted.signal,
     execute: async () => (executed++, { value: {} }),
   } as any;
-  const out = await Engine.prototype.batch.call({ emit: () => {} } as any, tools, [call("a", "read", { path: "x" })], {} as any);
+  const out = await Engine.prototype.batch.call({ emit: () => {} } as any, tools, [call("a", "read", { path: "x" })], {} as any, new Set(["read"]));
   assert.equal(executed, 0);
   assert.equal(out[0].error, true);
 

@@ -271,6 +271,7 @@ export async function devinStream(
   version: string,
   signal: AbortSignal,
   emit: (type: string, data: any) => void,
+  deferUndeclared = false,
 ) {
   const url = new URL(
     "/exa.api_server_pb.ApiServerService/GetChatMessage",
@@ -375,7 +376,7 @@ export async function devinStream(
   );
   const validated = calls.map((c) => {
     assert(
-      body.tools?.some((t: Obj) => t.function.name === c.name),
+      c.name && c.name.length <= 256 && (deferUndeclared || body.tools?.some((t: Obj) => t.function.name === c.name)),
       "Devin returned an undeclared tool",
     );
     const arguments_ = nativeArguments(c.args);

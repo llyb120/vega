@@ -5,7 +5,7 @@ import { Groups } from "./groups";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
 import { TaskHandoffs } from "./handoffs";
 import { builtinCommand, expandBuiltin } from "./builtins";
-import { requireSceneModel, sceneModels, sceneModelSelection, sceneAllowSpawn, maskedConfig, mergeSecrets, schedulerLimits, DEFAULT_GLOBAL_SLOTS, DEFAULT_PER_EMPLOYEE_SLOTS } from "./config";
+import { requireSceneModel, sceneModels, sceneModelSelection, maskedConfig, mergeSecrets, schedulerLimits, DEFAULT_GLOBAL_SLOTS, DEFAULT_PER_EMPLOYEE_SLOTS } from "./config";
 import { validateContextRules } from "../../shared/context-rules";
 
 import { employeeConfig, migrateEmployeeCapabilities } from "./employee-capabilities";
@@ -896,12 +896,6 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       session.model = boundSceneModel(config, session);
       if (!session.promptCacheKey)
         session.promptCacheKey = clampPromptCacheKey(session.spawnParent || session.id) || session.id;
-      if (session.allowSpawnFrozen === undefined) {
-        session.allowSpawnFrozen = !session.agentChild
-          && session.scene !== "computer"
-          && !(session.employeeId && !session.taskId)
-          && sceneAllowSpawn(config, session.scene, session.model);
-      }
       if (session.sceneEnumFrozen === undefined) {
         const isolatedComputer = !!session.taskId && session.scene === "computer" && !!session.relayComputer;
         const mainTask = !!session.taskId && !isolatedComputer;
@@ -1024,7 +1018,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         // Group rules come last: they decide who does the work, ahead of the general "dispatch work as tasks" rules above.
         group +
         "\n" + sessionStablePrompt(session, config);
-      if (session.allowSpawnFrozen) stable += SUBAGENT_GUIDE;
+      if (!session.readOnly && !(session.employeeId && !session.taskId)) stable += SUBAGENT_GUIDE;
       if (!session.frozenSystem) {
         const epic = /\/variant\/niu-m$/.test(session.model || "");
         if (epic) stable += "\n\n" + BOOST;
@@ -1069,6 +1063,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           session.model = primary;
         }
         let model = await this.catalog.resolve(config, session.model);
+        tools.config = latest;
         dynamic += await tools.rules(model);
         if (mainTask && frames.length && !session.agentChild) {
           const caller = frames.findLast((f) => f.resume), origin = frames[0];
@@ -1112,7 +1107,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
 
         // Steer that arrived during compact/prep: inject before the next model request.
         if (state.steer.length) continue;
-        let reply: Message | undefined;
+        let reply: Message | undefined, offered = new Set<string>();
         let outputRecovery: Model | undefined,
           outputRecovered = false,
           emptyRecovered = false;
@@ -1123,18 +1118,21 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             attempt,
           });
           try {
+            const definitions = await tools.definitions(model), names = new Set(definitions.map((tool) => tool.name));
             reply = await this.providers.chat(
               outputRecovery || model,
               emptyRecovered ? system + "\n[运行提示：上一段生成未返回正文或工具调用，不能算完成。根据原始授权继续：回复用户，或调用尚未执行且必要的工具；已执行的操作以历史工具结果为准，不得重放。]" : system,
               view,
-              await tools.definitions(model),
+              definitions,
               outputRecovery || emptyRecovered
                 ? AbortSignal.any([control.signal, AbortSignal.timeout(120000)])
                 : control.signal,
               emit,
               key,
               session.promptCacheKey || key,
+              true,
             );
+            offered = names;
             break;
           } catch (e: any) {
             control.signal.throwIfAborted();
@@ -1259,7 +1257,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           return;
         }
         // Delivering from a callee scene would drop the caller's retained work: return first; complete is not executed.
-        if (mainTask && reply.calls.length === 1 && reply.calls[0].name === "task_complete") {
+        if (mainTask && offered.has("task_complete") && reply.calls.length === 1 && reply.calls[0].name === "task_complete") {
           const caller = frames.findLastIndex((f) => f.resume);
           if (caller >= 0) {
             const [f] = frames.splice(caller);
@@ -1269,6 +1267,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
         }
         if (
+          offered.has("switch_scene") &&
           reply.calls.length === 1 &&
           reply.calls[0].name === "switch_scene"
         ) {
@@ -1360,7 +1359,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           continue;
         }
         const settled = new Set<number>(), calls = reply.calls;
-        const outcomes = await this.batch(tools, calls, model, (i, outcome) => {
+        const outcomes = await this.batch(tools, calls, model, offered, (i, outcome) => {
           if (outcome.secret) return;
           settled.add(i);
           const { secret, ...publicResult } = outcome;
@@ -1659,20 +1658,21 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       finishAgent(parentId, child.path, status, last?.text ? `${reason}\n\n[分身最后输出]\n${last.text}` : reason);
     }
   }
-  async batch(tools: Tools, calls: Call[], model: Model, onSettled?: (index: number, outcome: Outcome) => void): Promise<Outcome[]> {
+  async batch(tools: Tools, calls: Call[], model: Model, offered: ReadonlySet<string>, onSettled?: (index: number, outcome: Outcome) => void): Promise<Outcome[]> {
     const output: Outcome[] = new Array(calls.length);
+    const denied = (name: string): Outcome => ({ value: { error: `当前会话未授权工具：${name}；本步未执行` }, error: true });
     const standalone = calls.find(
-      (c) =>
+      (c) => offered.has(c.name) && (
         ["change_working_directory", "switch_scene"].includes(c.name) ||
-        STANDALONE_TOOLS.has(c.name),
+        STANDALONE_TOOLS.has(c.name)),
     );
     if (calls.length > 1 && standalone)
-      return calls.map(() => ({
+      return calls.map((c) => offered.has(c.name) ? {
         value: {
           error: `${standalone.name} must be called alone; this batch was not executed`,
         },
         error: true,
-      }));
+      } : denied(c.name));
     let running = 0;
     const waiters: (() => void)[] = [];
     const acquire = async () => {
@@ -1718,7 +1718,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
                 session: tools.session.id,
                 data: c,
               });
-              output[i] = await tools.execute(c, model);
+              output[i] = offered.has(c.name) ? await tools.execute(c, model) : denied(c.name);
               // 完成的调用立刻上报（与 Nova 一致）；带密钥的结果等调用方登记脱敏后再按序上报。
               if (onSettled && !output[i].secret) onSettled(i, output[i]);
             } finally {

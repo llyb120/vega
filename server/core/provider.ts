@@ -518,6 +518,8 @@ export class Providers {
     emit: Emit = () => {},
     session = "",
     cacheKey?: string,
+    // Only conversation turns can return an error receipt; one-shot model judges stay strict.
+    deferUndeclared = false,
   ): Promise<Message> {
     const promptCacheKey = cacheKey || session;
     const { path, body } = await bodyFor(
@@ -535,6 +537,7 @@ export class Providers {
         model.options.__devinVersion || "3000.11.228",
         signal,
         emit,
+        deferUndeclared,
       ));
     const headers: Obj = {
       "Content-Type": "application/json",
@@ -921,7 +924,7 @@ export class Providers {
           "Tool arguments must be a complete JSON object",
         );
         assert(
-          tools.some((t) => t.name === f.name),
+          deferUndeclared || tools.some((t) => t.name === f.name),
           "Provider returned undeclared tool",
         );
         calls.push({ id: f.id, name: f.name, arguments: args });
@@ -941,9 +944,10 @@ export class Providers {
     const seenCalls = new Set<string>();
     for (const call of result.calls || []) {
       assert(
-        call.id &&
-          call.name &&
-          tools.some((t) => t.name === call.name) &&
+        typeof call.id === "string" && call.id &&
+          typeof call.name === "string" && call.name && call.name.length <= 256 &&
+          call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments) &&
+          (deferUndeclared || tools.some((t) => t.name === call.name)) &&
           !seenCalls.has(call.id),
         "Invalid/duplicate/undeclared tool call",
       );

@@ -91,7 +91,7 @@ test("DeepSeek Flash gets an Epic niu-m variant; other DeepSeek models do not", 
   }
 });
 
-test("spawn_agent is omitted when the session did not freeze allowSpawn, and included when it did; computer stays off", async () => {
+test("spawn schemas remain stable across scene policies; execution uses the latest scene/model permission", async () => {
   const store = await Store.open(":memory:");
   const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   const c = config({
@@ -108,9 +108,29 @@ test("spawn_agent is omitted when the session did not freeze allowSpawn, and inc
     const offTools = await Tools.create(engine, off, c, new AbortController().signal, () => {});
     const onTools = await Tools.create(engine, on, c, new AbortController().signal, () => {});
     const computerTools = await Tools.create(engine, computer, c, new AbortController().signal, () => {});
-    assert.equal((await offTools.definitions(model)).some((t) => t.name === "spawn_agent"), false);
+    assert.equal((await offTools.definitions(model)).some((t) => t.name === "spawn_agent"), true, "the legacy frozen flag is not permission");
     assert.equal((await onTools.definitions(model)).some((t) => t.name === "spawn_agent"), true);
-    assert.equal((await computerTools.definitions(model)).some((t) => t.name === "spawn_agent"), false);
+    assert.equal((await computerTools.definitions(model)).some((t) => t.name === "spawn_agent"), true);
+    const spawnSchema = (defs: any[]) => defs.filter(t => ["spawn_agent", "interrupt_agent"].includes(t.name));
+    assert.deepEqual(spawnSchema(await computerTools.definitions(model)), spawnSchema(await offTools.definitions(model)));
+    let invoked = 0;
+    engine.invokeAgentTool = async () => { invoked++; return { path: "/root/probe", status: "fixture-only", sessionId: "fixture-child" }; };
+    const call = { id: "test", name: "spawn_agent", arguments: { task_name: "probe", message: "inspect" } };
+    off.scene = "lightweight";
+    const latest = structuredClone(c);
+    latest.scenes!.lightweight = ["p/light"];
+    await store.put("config", latest);
+    await assert.rejects(offTools.execute(call, resolveModel(latest, "p/light")), /未开放分身/);
+    off.scene = "coding";
+    await offTools.execute(call, model);
+    assert.equal(invoked, 1, "coding permission applies even when the session started with legacy allowSpawnFrozen=false");
+    latest.scenes!.coding = ["p/flash"];
+    await store.put("config", latest);
+    await assert.rejects(offTools.execute(call, model), /未开放分身/);
+    assert.match((await computerTools.execute(call, model)).value.error, /电脑场景不能/);
+    off.agentChild = true;
+    assert.match((await offTools.execute(call, model)).value.error, /分身不能再派生/);
+    assert.equal(invoked, 1);
     const mid = await store.newSession({ title: "mid", scene: "coding", model: "p/flash", allowSpawnFrozen: true, sceneEnumFrozen: ["lightweight", "coding", "computer"] });
     const midTools = await Tools.create(engine, mid, c, new AbortController().signal, () => {});
     mid.scene = "computer";

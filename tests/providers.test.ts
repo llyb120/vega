@@ -180,6 +180,34 @@ test("all three standard protocols stream tools, thinking and usage", async () =
     assert.deepEqual(result.calls![0].arguments, { path: "a" }, api);
   }
 });
+test("session turns can report undeclared calls while one-shot provider users stay strict", async () => {
+  const sse = (frames: any[]) => frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n";
+  const cases: [string, string, string][] = [
+    ["openai-completions", sse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: "c", function: { name: "unknown", arguments: "{}" } }] }, finish_reason: "tool_calls" }] }]), "text/event-stream"],
+    ["openai-completions", JSON.stringify({ choices: [{ message: { tool_calls: [{ id: "c", function: { name: "unknown", arguments: "{}" } }] }, finish_reason: "tool_calls" }] }), "application/json"],
+    ["openai-responses", sse([{ type: "response.output_item.done", output_index: 0, item: { type: "function_call", call_id: "c", name: "unknown", arguments: "{}" } }, { type: "response.completed", response: { status: "completed" } }]), "text/event-stream"],
+    ["openai-responses", JSON.stringify({ status: "completed", output: [{ type: "function_call", call_id: "c", name: "unknown", arguments: "{}" }] }), "application/json"],
+    ["anthropic-messages", sse([{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "c", name: "unknown", input: {} } }, { type: "message_delta", delta: { stop_reason: "tool_use" } }, { type: "message_stop" }]), "text/event-stream"],
+    ["anthropic-messages", JSON.stringify({ stop_reason: "tool_use", content: [{ type: "tool_use", id: "c", name: "unknown", input: {} }] }), "application/json"],
+  ];
+  for (const [api, body, type] of cases) {
+    const m = model(api, await http(body, type)), signal = new AbortController().signal;
+    await assert.rejects(new Providers().chat(m, "sys", [], [tool], signal), /undeclared tool/, `${api} ${type}`);
+    const reply = await new Providers().chat(m, "sys", [], [tool], signal, undefined, "", undefined, true);
+    assert.deepEqual(reply.calls, [{ id: "c", name: "unknown", arguments: {} }], `${api} ${type}`);
+  }
+  const duplicate = sse([{ choices: [{ delta: { tool_calls: [0, 1].map((index) => ({ index, id: "same", function: { name: "unknown", arguments: "{}" } })) }, finish_reason: "tool_calls" }] }]);
+  await assert.rejects(new Providers().chat(model("openai-completions", await http(duplicate)), "sys", [], [tool], new AbortController().signal, undefined, "", undefined, true), /Duplicate tool call/);
+  for (const call of [
+    { id: 1, function: { name: "unknown", arguments: "{}" } },
+    { id: "c", function: { name: 1, arguments: "{}" } },
+    { id: "c", function: { name: "x".repeat(257), arguments: "{}" } },
+    { id: "c", function: { name: "unknown", arguments: "42" } },
+  ]) {
+    const body = JSON.stringify({ choices: [{ message: { tool_calls: [call] }, finish_reason: "tool_calls" }] });
+    await assert.rejects(new Providers().chat(model("openai-completions", await http(body, "application/json")), "sys", [], [tool], new AbortController().signal, undefined, "", undefined, true), /Invalid/);
+  }
+});
 test("truncated, malformed or incomplete streams never dispatch tools", async () => {
   const bodies = [
     [
@@ -476,7 +504,7 @@ test("Devin protobuf request fields and fragmented gzip Connect trailer validati
     ),
   );
 });
-test("Devin native HTTP validates all declared calls before returning any", async () => {
+test("Devin native HTTP stays strict by default and lets session turns defer undeclared calls", async () => {
   const response = Buffer.concat([
     envelope(
       Buffer.concat([
@@ -533,6 +561,13 @@ test("Devin native HTTP validates all declared calls before returning any", asyn
       new AbortController().signal,
     ),
   );
+  const deferred = await new Providers().chat({ ...m, baseURL: badURL }, "sys", [], [tool], new AbortController().signal, undefined, "", undefined, true);
+  assert.deepEqual(deferred.calls, [{ id: "c", name: "unknown", arguments: {} }]);
+  const longURL = await http(Buffer.concat([
+    envelope(Buffer.concat([fieldNumber(5, 10), fieldBytes(6, Buffer.concat([fieldBytes(1, "c"), fieldBytes(2, "x".repeat(257)), fieldBytes(3, "{}")] ))])),
+    envelope(Buffer.from("{}"), 2),
+  ]), "application/connect+proto");
+  await assert.rejects(new Providers().chat({ ...m, baseURL: longURL }, "sys", [], [tool], new AbortController().signal, undefined, "", undefined, true), /undeclared tool/);
 });
 test("CodeBuddy / WorkBuddy uses isolated Vega logins and ignores CLI state with a valid default fallback", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-buddy-"));
