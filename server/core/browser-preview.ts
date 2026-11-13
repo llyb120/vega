@@ -101,6 +101,7 @@ export async function browserScreenshot(
   );
   return chrome.tabGate(tabTag).run(async () => {
     const tab = await browserTarget(chrome, tabTag);
+    await chrome.protectTab?.(tab.tag);
     const observed = await chrome.feedback(
       owner,
       tabTag,
@@ -164,6 +165,7 @@ export async function browserControl(chrome: Chrome, owner: string, args: Obj) {
     const tab = await browserTarget(chrome, args.tabTag),
       key = owner + ":" + tab.tag,
       o = chrome.observations.get(key);
+    await chrome.protectTab?.(tab.tag);
     assert(
       o &&
         o.id === args.snapshotId &&

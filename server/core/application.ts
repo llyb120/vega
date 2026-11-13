@@ -66,6 +66,7 @@ export async function initialize(pageScript: string) {
     await bridge.start();
   }
   await engine.employee.start();
+  await engine.taskTabs.restore();
   engine.statusPush = (userId, clientId) => void application!.clientSockets.pushStatus(userId, clientId);
   engine.runtimePush = (userId) => void application!.clientSockets.pushRuntime(userId);
   application.clientSockets.runtime = {

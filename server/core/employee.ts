@@ -10,6 +10,7 @@ import { outsideTransaction } from "./db";
 import { resolve, posix, win32 } from "node:path";
 import { realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { taskTabsFinished } from "./task-browser-tabs";
 import type { FileRef } from "./attachments";
 import { assert, id, clone, clip, sleep, type Obj } from "./util";
 import { Vault, VAULT_USAGE } from "./vault";
@@ -409,6 +410,8 @@ export type EmployeeRuntime = {
   run: (session: string, text: string, signal?: AbortSignal, input?: Message["taskInput"], attach?: Pick<Message, "images" | "files">) => Promise<void>;
   cancel: (session: string) => void;
   isRunning: (session: string) => boolean;
+  taskFinished?: (taskId: string) => void;
+  holdTaskCleanup?: (taskId: string) => Promise<() => void>;
   emit: (type: string, data?: any, session?: string) => void;
   config: () => Obj | Promise<Obj>;
   isolated?: boolean;
@@ -597,6 +600,8 @@ export class Employee {
       if (this.employeeId === "default") await this.store.put("employee", base);
       else await this.store.save("employee", this.employeeId, base);
       const moved = await saveRows(this.store, this.employeeId, s, (task) => !ended(task.status));
+      const finished = moved.filter((task) => taskTabsFinished(task.status));
+      if (finished.length) this.store.afterCommit(() => { for (const task of finished) this.runtime.taskFinished?.(task.id); });
       // Task cards in a group show the live status: the group view reloads when one of its tasks changes status.
       const groups = new Set(moved.map((task) => task.group?.groupId).filter(Boolean) as string[]);
       if (groups.size) this.store.afterCommit(() => { for (const id of groups) this.runtime.groups?.changed(id); });
@@ -1591,7 +1596,10 @@ export class Employee {
   }
   async control(a: Obj, owner: Owner = { token: "", name: "" }, echoChatReply = true) {
     let chatReply: { text: string; taskId: string } | undefined;
-    const value = await this.update(async (s) => {
+    const releaseCleanup = a.action === "resume" && typeof a.id === "string" ? await this.runtime.holdTaskCleanup?.(a.id) : undefined;
+    let value: any;
+    try {
+      value = await this.update(async (s) => {
           if (a.action === "settings") {
             assert(!owner.token, "Only host user can change employee settings");
             for (const k of ["public"])
@@ -1795,12 +1803,14 @@ export class Employee {
               assert(ended(t.status), "Only ended task records may be deleted");
               s.tasks = s.tasks.filter((v) => v.id !== t.id);
               await this.store.files.remove(this.store.files.task(this.employeeId, t.id));
+              this.store.afterCommit(() => this.runtime.taskFinished?.(t.id));
               break;
             default:
               throw Error("Unknown task control");
           }
           return { ok: true };
         });
+    } finally { releaseCleanup?.(); }
     if (a.action === "stop") {
       const task = this.task(await this.state(), a.id);
       const sessions = [this.busy.get(task.id)?.session, task.workSession, task.computerSession].filter(Boolean);
@@ -2186,6 +2196,7 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                 }
               });
       const state = await this.state(), task = state.tasks.find((t) => t.id === job.id);
+      if (task && taskTabsFinished(task.status)) this.runtime.taskFinished?.(task.id);
       if (session && task) {
         const conclusion = task.status === "done" ? (task.deliverable ? task.deliverable + "\n\n---\n\n**结论**\n\n" + (task.summary || task.completion || "已完成。") : task.summary || task.result || "已完成，详情见任务。")
           : task.status === "approval" ? "等待你确认：" + task.approval

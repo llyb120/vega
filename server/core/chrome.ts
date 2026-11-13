@@ -14,6 +14,13 @@ import {
   Mutex,
   type Obj,
 } from "./util";
+export type TabHooks = { used: (tag: string) => Promise<void>; opened: (tag: string) => Promise<void> };
+async function recordOpened(hooks: TabHooks | undefined, tag: string) {
+  if (!hooks || !tag) return;
+  try { await hooks.opened(tag); }
+  catch (error) { console.warn("[Vega] could not record task-created tab:", String((error as Error)?.message || error)); }
+}
+
 type Frame = { id: string; parent?: string; session?: string; context: number };
 type Observation = {
   id: string;
@@ -51,6 +58,8 @@ export class Chrome {
   holds = new Map<string, { x: number; y: number }>();
   cancelled = new Map<string, AbortController>();
   experiences: Experiences;
+  /** A person using a task-created page takes it out of automatic cleanup. */
+  protectTab?: (tag: string) => Promise<void>;
   workspaceFile = workspaceFile;
   constructor(
     public store: Store,
@@ -1214,6 +1223,7 @@ export class Chrome {
     args: Obj,
     parent?: AbortSignal,
     credentials: CredentialBinding[] = [],
+    hooks?: TabHooks,
   ): Promise<any> {
     if (args.operation === "stop") {
       this.cancelled.get(owner)?.abort();
@@ -1230,6 +1240,7 @@ export class Chrome {
       target = matches[0][1].tabTag;
     }
     return await (target ? this.tabGate(target) : this.gate).run(async () => {
+      if (target && hooks) await hooks.used(target);
       const control = new AbortController();
       this.cancelled.set(owner, control);
       const signal = AbortSignal.any([
@@ -1237,7 +1248,7 @@ export class Chrome {
         ...(parent ? [parent] : []),
       ]);
       try {
-        const result = await this.inner(owner, cwd, { ...input, ...(target ? { tabTag: target } : {}) }, signal, credentials);
+        const result = await this.inner(owner, cwd, { ...input, ...(target ? { tabTag: target } : {}) }, signal, credentials, hooks);
         return notes === undefined ? result : { ...result, notes };
       } finally {
         if (this.cancelled.get(owner) === control) this.cancelled.delete(owner);
@@ -1250,6 +1261,7 @@ export class Chrome {
     a: Obj,
     signal: AbortSignal,
     credentials: CredentialBinding[] = [],
+    hooks?: TabHooks,
   ): Promise<any> {
     let op =
         a.operation ||
@@ -1295,7 +1307,7 @@ export class Chrome {
             );
     }
     if (op === "run")
-      return this.run(owner, cwd, { ...a, tabTag: tag }, signal, credentials);
+      return this.run(owner, cwd, { ...a, tabTag: tag }, signal, credentials, hooks);
     if (["status", "connect"].includes(op)) {
       await this.bridge.start();
       return this.bridge.status();
@@ -1308,7 +1320,8 @@ export class Chrome {
         (t: Obj) =>
           !query || (t.title + " " + t.url).toLowerCase().includes(query),
       );
-      if (result.tabs.length === 1)
+      if (result.tabs.length === 1) {
+        if (hooks) await hooks.used(result.tabs[0].tag);
         return {
           ...result,
           ...(await this.feedback(
@@ -1319,6 +1332,7 @@ export class Chrome {
             signal,
           )),
         };
+      }
       return result;
     }
     if (
@@ -1339,6 +1353,7 @@ export class Chrome {
         signal,
       );
       tag = result.tabTag || tag;
+      if ((op === "open" || op === "new_tab") && result.tabTag) await recordOpened(hooks, result.tabTag);
       if (["close_tab", "goto", "back", "forward", "reload"].includes(op)) {
         await this.releaseHold(tag);
         for (const [key, observation] of this.observations)
@@ -1430,7 +1445,10 @@ export class Chrome {
     const discover = async () => {
       const { tabs } = await this.bridge.request("tabs", {}, signal);
       const found = tabs.filter((t: Obj) => t.openerTag === tag && !before.some((b: Obj) => b.tag === t.tag));
-      if (found.length) opened = found;
+      if (found.length) {
+        opened = found;
+        for (const tab of found) await recordOpened(hooks, tab.tag);
+      }
     };
     if (script) {
       try {
@@ -1516,7 +1534,7 @@ export class Chrome {
     const { pages, ...head } = result;
     return pages === undefined ? head : { ...head, pages };
   }
-  async run(owner: string, cwd: string, a: Obj, parent: AbortSignal, credentials: CredentialBinding[] = []) {
+  async run(owner: string, cwd: string, a: Obj, parent: AbortSignal, credentials: CredentialBinding[] = [], hooks?: TabHooks) {
     const plan = a.plan;
     validatePlan(plan);
     for (const input of [...plan.steps, ...(plan.inputs || [])]) assertCredentialInput(input.text);
@@ -1561,7 +1579,7 @@ export class Chrome {
       for (const c of batch) used.add(state + c.key);
       baseline = new Set(runCandidates(pages()).map((c) => c.loose));
       result = await this.inner(owner, cwd, { operation: "act", tabTag: tag, snapshotId: observation()!.id,
-        actions: batch.map((c) => c.action), feedback: "inspect", visual: "none", scope: "viewport" }, signal, credentials);
+        actions: batch.map((c) => c.action), feedback: "inspect", visual: "none", scope: "viewport" }, signal, credentials, hooks);
       const done = Math.min(result.completedActions || 0, batch.length);
       executed += done;
       history.push({ step: completed + 1, reveal, actions: batch.map((c) => ({ ...c.action, ...(c.action.text !== undefined ? { text: "[redacted]" } : {}) })),

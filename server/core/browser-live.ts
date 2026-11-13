@@ -59,7 +59,11 @@ export class BrowserLive {
     );
     const tab = await this.chrome
       .tabGate(String(tabTag))
-      .run(() => browserTarget(this.chrome, tabTag));
+      .run(async () => {
+        const tab = await browserTarget(this.chrome, tabTag);
+        await this.chrome.protectTab?.(tab.tag);
+        return tab;
+      });
     for (const [id, t] of this.tickets)
       if (t.until < Date.now()) this.tickets.delete(id);
     assert(this.tickets.size < 64, "实时浏览器连接过多");

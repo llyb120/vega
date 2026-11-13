@@ -28,6 +28,7 @@ export class ChromeBridge {
     }
   >();
   queued = new EventEmitter();
+  onPoll?: () => void;
   version = "0.2.0";
   constructor(public privateInstance = false) {}
   async start() {
@@ -213,6 +214,7 @@ export class ChromeBridge {
               ? "Google Chrome"
               : "unknown",
       });
+      this.onPoll?.();
       const take = () => {
         const queue = this.queues.get(body.clientId) || [];
         while (queue.length) {

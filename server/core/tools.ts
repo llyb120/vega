@@ -784,6 +784,7 @@ export class Tools {
       a,
       this.signal,
       this.credentials,
+      { used: (tag) => this.engine.taskTabs.used(this.session.taskId, tag), opened: (tag) => this.engine.taskTabs.opened(this.session, tag) },
     );
     this.browserTab = result.tabTag || a.tabTag || this.browserTab;
     const images: Outcome["images"] = [];

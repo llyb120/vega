@@ -32,6 +32,7 @@ import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, fo
 import { EmployeeBrowsers } from "./employee-browsers";
 import { NetworkRelay } from "./network-relay";
 import { LocalBrowsers } from "./local-browsers";
+import { TaskBrowserTabs } from "./task-browser-tabs";
 import { Vault, migrateVaultOwnership } from "./vault";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
 
@@ -118,6 +119,7 @@ export class Engine {
   browsers: EmployeeBrowsers;
   relay: NetworkRelay;
   localBrowsers: LocalBrowsers;
+  taskTabs: TaskBrowserTabs;
   vault: Vault;
   /** Group chats: users and their employees working together (groups.ts). */
   groups: Groups;
@@ -128,6 +130,7 @@ export class Engine {
     if ((value as Obj)?.type === "clients_changed") {
       const owner = String((value as Obj).targetUser || "");
       if (owner) this.runtimePush?.(owner);
+      this.taskTabs?.retry();
       void this.handoffs?.clients(value as Obj).catch(() => {});
       // 回连的可能正是某个任务在等的设备：交回调度器，由它核对 waitClient 后继续。
       void this.employee?.all().then((all) => all.forEach((employee) => employee.schedule())).catch(() => {});
@@ -318,6 +321,8 @@ export class Engine {
       run: (s, text, signal, taskInput, attach) => this.run(s, { role: "user", text, taskInput, images: attach?.images?.length ? attach.images : undefined, files: attach?.files?.length ? attach.files : undefined }, undefined, signal),
       cancel: (s) => this.cancel(s),
       isRunning: (s) => this.active.has(s),
+      taskFinished: (id) => this.taskTabs.finish(id),
+      holdTaskCleanup: (id) => this.taskTabs.hold(id),
       emit: (type, data, session?) => this.emit({ type, data, session }),
       config: () => this.config(),
       isolated: true,
@@ -341,8 +346,15 @@ export class Engine {
       const ownerId = await browserOwner(id);
       if (!ownerId) return;
       return this.relay.proxy(ownerId);
-    }, async (id) => cloudEnabled() ? cloudFor({ ownerId: await browserOwner(id) }) : undefined);
+    }, async (id) => cloudEnabled() ? cloudFor({ ownerId: await browserOwner(id) }) : undefined, () => this.taskTabs?.retry());
     this.localBrowsers = new LocalBrowsers(store, this.localAgents, chrome.pageScript);
+    this.taskTabs = new TaskBrowserTabs(store,
+      async (session) => session.localBrowser
+        ? this.localBrowsers.get(session, AbortSignal.timeout(6000))
+        : session.ownerId ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : undefined,
+      async (session) => { if (session.localBrowser) await this.localBrowsers.release(session.id); },
+      (taskId, employeeId) => !!(employeeId === this.employee.employeeId ? this.employee : this.employee.members.get(employeeId))?.busy.has(taskId),
+    );
     this.fire = new Fire(
       store,
       (session, message) => this.run(session, message),
@@ -528,6 +540,7 @@ export class Engine {
   }
   async close() {
     this.closing = true;
+    await this.taskTabs.close();
     this.localAgents.close();
     await this.fire.close();
     this.employee.close();
@@ -669,12 +682,15 @@ export class Engine {
     // 浏览器端与执行端在同一台设备，但普通会话也可用本机浏览器而不必执行权在本机。
     if (session.localBrowser) {
       assert(session.browserClientId || session.clientId, "本机浏览器需要绑定一台在线客户端。");
-      return this.localBrowsers.get(session, signal);
+      const browser = await this.localBrowsers.get(session, signal);
+      browser.protectTab = (tag) => this.taskTabs.used(undefined, tag);
+      return browser;
     }
     const ownerId = await this.browserOwnerId(session);
     // Employee/task work and cloud sessions use the owner's shared private profile.
-    if (session.employeeId || session.taskId || cloudFor(session)) return this.browsers.get(this.browserProfileKey(ownerId));
-    return this.chrome;
+    const browser = session.employeeId || session.taskId || cloudFor(session) ? await this.browsers.get(this.browserProfileKey(ownerId)) : this.chrome;
+    browser.protectTab = (tag) => this.taskTabs.used(undefined, tag);
+    return browser;
   }
   async compact(tools: Tools, model: Model, system: string, force = false, dynamic = "") {
     const ctx = tools.context,
@@ -1446,7 +1462,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         if (session && turnStarted && (error || control.signal.aborted))
           await this.recoverPending(key, control.signal.aborted ? "stopped" : "error");
         try { await tools?.close(); }
-        finally { await this.localBrowsers.release(key); }
+        finally { await this.localBrowsers.release(key); this.taskTabs.retry(); }
         if (control.signal.aborted) {
           cancelSessionBash(key);
           cancelSessionAgents(key);

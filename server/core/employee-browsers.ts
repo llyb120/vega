@@ -17,7 +17,7 @@ export class EmployeeBrowsers {
   static BACKOFF_MS = [5000, 15000, 60000];
   closed = false;
   removed = new Set<string>();
-  constructor(public store: Store, public pageScript: string, private networkProxy?: (id: string) => Promise<string | undefined>, private isolation?: (id: string) => Promise<CloudRuntime | undefined>) {}
+  constructor(public store: Store, public pageScript: string, private networkProxy?: (id: string) => Promise<string | undefined>, private isolation?: (id: string) => Promise<CloudRuntime | undefined>, private onPoll?: () => void) {}
   profile(id: string) {
     assert(/^(default|e[a-zA-Z0-9_-]+|user_[a-zA-Z0-9_-]+)$/.test(id), "Invalid browser profile ID");
     return join(dirname(resolve(process.env.VEGA_DB || "vega.db")), "employee-browsers", id);
@@ -33,7 +33,9 @@ export class EmployeeBrowsers {
     let entry = this.entries.get(id);
     if (!entry) {
       this.profile(id);
-      entry = { chrome: new Chrome(this.store, new ChromeBridge(true), this.pageScript, "experience:" + id), browser: new HeadlessBrowser() };
+      const bridge = new ChromeBridge(true);
+      bridge.onPoll = this.onPoll;
+      entry = { chrome: new Chrome(this.store, bridge, this.pageScript, "experience:" + id), browser: new HeadlessBrowser() };
       this.entries.set(id, entry);
     }
     assert(!entry.stopping, "Employee browser is stopping");
