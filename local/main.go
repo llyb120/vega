@@ -438,11 +438,12 @@ func runCommand(parent context.Context, req execReq) map[string]any {
 }
 
 type fileReq struct {
-	Op      string     `json:"op"`
-	Cwd     string     `json:"cwd"`
-	Path    string     `json:"path"`
-	Content string     `json:"content"`
-	Edits   []fileEdit `json:"edits"`
+	Op           string     `json:"op"`
+	Cwd          string     `json:"cwd"`
+	Path         string     `json:"path"`
+	Content      string     `json:"content"`
+	ExpectedHash string     `json:"expectedHash"`
+	Edits        []fileEdit `json:"edits"`
 }
 type fileEdit struct {
 	OldText string `json:"oldText"`
@@ -538,6 +539,16 @@ func fileOperation(req fileReq) map[string]any {
 			return failure("File exceeds32MiB")
 		}
 		return map[string]any{"path": path, "content": base64.StdEncoding.EncodeToString(data)}
+	case "sync_write":
+		data, err := base64.StdEncoding.DecodeString(req.Content)
+		if err != nil || len(data) > maxSyncFileSize {
+			return failure("Invalid content or exceeds handoff limit")
+		}
+		written, err := writeWorkspace(req.Cwd, req.Path, data, req.ExpectedHash)
+		if err != nil {
+			return failure(err.Error())
+		}
+		return map[string]any{"path": written, "bytes": len(data)}
 	case "write":
 		data, err := base64.StdEncoding.DecodeString(req.Content)
 		if err != nil || len(data) > 32<<20 {

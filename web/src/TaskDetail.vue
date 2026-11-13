@@ -7,11 +7,11 @@ import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
-const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function, employeeId: String });
+const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function, employeeId: String, clients: Array, handoff: Function });
 const emit = defineEmits(["inspect", "back"]);
-const busy = ref(false), answer = ref(""), exportOpen = ref(false), exportError = ref(""), settleSelected = ref([]), settling = ref(false);
+const busy = ref(false), answer = ref(""), exportOpen = ref(false), exportError = ref(""), settleSelected = ref([]), settling = ref(false), clientId = ref("");
 const suggestions = computed(() => props.task.memorySuggestions || []);
-watch(() => props.task.id, () => { answer.value = ""; exportOpen.value = false; exportError.value = ""; });
+watch(() => props.task.id, () => { answer.value = ""; exportOpen.value = false; exportError.value = ""; clientId.value = ""; });
 watch(suggestions, (rows) => { settleSelected.value = rows.map((item) => item.id); }, { immediate: true });
 function toggleSettle(id) {
   settleSelected.value = settleSelected.value.includes(id) ? settleSelected.value.filter((x) => x !== id) : [...settleSelected.value, id];
@@ -46,6 +46,12 @@ async function runExport(format) {
     exportError.value = error?.message || String(error);
   }
 }
+async function moveToClient() {
+  if (busy.value || !clientId.value || !props.handoff) return;
+  busy.value = true;
+  try { await props.handoff(clientId.value); }
+  finally { busy.value = false; }
+}
 async function run(action) {
   if (busy.value) return;
   busy.value = true;
@@ -67,6 +73,11 @@ async function run(action) {
       <MessageText :text="task.text" />
       <p v-if="task.status === 'queued' && task.queueReason" class="detail-note" role="status"><Icon name="clock" :size="14" />{{ task.queueReason }}</p>
       <p v-if="task.handoffState?.note || task.handoffState?.error" class="detail-note" role="status"><Icon :name="task.handoffState?.error ? 'alert' : 'server'" :size="14" />{{ task.handoffState?.error || task.handoffState.note }}</p>
+      <div v-if="!readonly && handoff && !task.execution?.localAgent && !['running', 'done', 'sealed'].includes(task.status) && clients?.length" class="handoff">
+        <label>交到本机 <select v-model="clientId" aria-label="选择执行客户端"><option value="">选择在线客户端</option><option v-for="client in clients" :key="client.id" :value="client.id">{{ (client.name || '客户端') + ' · ' + String(client.id).slice(0, 8) }}</option></select></label>
+        <button type="button" class="sm" :disabled="busy || !clientId" @click="moveToClient">交接</button>
+        <span class="detail-note">已开始的任务会复制云端工作区；同名冲突保留两份。暂停的任务需手动继续。</span>
+      </div>
     </header>
 
     <section v-if="task.status === 'approval'" class="attention-block">
@@ -160,6 +171,9 @@ async function run(action) {
 .detail-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .detail-time { margin-left: auto; color: var(--muted); font-size: 12px; }
 .detail-note { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.handoff { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.handoff label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.handoff select { width: auto; min-width: 160px; }
 .attention-block { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px 16px; border: 1px solid var(--warn-border); border-radius: var(--r-lg); background: var(--warn-soft); }
 .attention-block h3 { display: flex; align-items: center; gap: 6px; color: var(--warn); font-size: 13px; }
 .attention-block textarea { width: 100%; background: var(--surface); }

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -44,6 +46,68 @@ func skipSyncPath(name, rel string) bool {
 }
 
 var errWorkspaceTooLarge = errors.New("workspace exceeds the handoff limit")
+
+// shortcut: another local process can race these checks; use handle-relative writes on hostile shared machines.
+func writeWorkspace(root, relative string, data []byte, expected string) (string, error) {
+	path := filepath.Clean(relative)
+	if root == "" || relative == "" || path == "." || path == ".." || filepath.IsAbs(path) || filepath.VolumeName(path) != "" || strings.HasPrefix(path, ".."+string(filepath.Separator)) || strings.ContainsRune(path, 0) {
+		return "", errors.New("交接文件必须位于工作区内")
+	}
+	for _, part := range strings.Split(filepath.ToSlash(relative), "/") {
+		if part == ".." {
+			return "", errors.New("交接文件必须位于工作区内")
+		}
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		return "", errors.New("本机工作区不存在")
+	}
+	parent := root
+	if dir := filepath.Dir(path); dir != "." {
+		for _, part := range strings.Split(dir, string(filepath.Separator)) {
+			parent = filepath.Join(parent, part)
+			info, err := os.Lstat(parent)
+			if os.IsNotExist(err) {
+				if err = os.Mkdir(parent, 0755); err != nil && !os.IsExist(err) {
+					return "", err
+				}
+				info, err = os.Lstat(parent)
+			}
+			if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return "", errors.New("交接路径含链接或不是目录")
+			}
+		}
+	}
+	target := filepath.Join(parent, filepath.Base(path))
+	info, err := os.Lstat(target)
+	if expected == "" {
+		if err == nil {
+			return "", errors.New("目标文件已存在，交接未覆盖")
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+	} else {
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxSyncFileSize {
+			return "", errors.New("目标文件已变化，交接未覆盖")
+		}
+		current, err := os.ReadFile(target)
+		if err != nil || fmt.Sprintf("%x", sha256.Sum256(current)) != expected {
+			return "", errors.New("目标文件已变化，交接未覆盖")
+		}
+	}
+	if err := writeAtomic(target, data); err != nil {
+		return "", err
+	}
+	return target, nil
+}
 
 // listWorkspace 返回相对 root 的文件清单（路径统一用 /），供服务端比较与增量同步。
 func listWorkspace(root string) map[string]any {

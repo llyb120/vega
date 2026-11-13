@@ -9,6 +9,7 @@
  * - 回传只写文件、不抢执行权；冲突两边都留，不覆盖任何一方。
  * - 登录态：交接时把授权站点的 Cookie 与 storage 从源端搬到目标端（补齐不删）。
  */
+import * as filesystem from "node:fs/promises";
 import { relativePath, allowed, manifest, merge, LIMITS } from "../../shared/workspace-sync.mjs";
 import { browserOrigins, captureBrowser, injectBrowser, restoreBrowser } from "./browser-handoff";
 import type { Chrome } from "./chrome";
@@ -231,7 +232,7 @@ export class TaskHandoffs {
         browserNote,
         browserSites: browserSites.length ? browserSites : record.browserSites,
       };
-      await this.switch(employee, taskId, next, { localAgent: false, clientId: undefined, cwd: cloudCwd, ...this.browserBinding(false) });
+      await this.switch(employee, taskId, next, { localAgent: false, clientId: undefined, cwd: cloudCwd, expectedStatus: task.status, ...this.browserBinding(false) });
       // 恢复在交接之后：执行权已在云端，页面停在授权站点上，下一次观察直接看到真实结果。
       if (next.browser && next.browserSites?.length) {
         try {
@@ -260,26 +261,37 @@ export class TaskHandoffs {
       const employee = await this.deps.employeeFor(employeeId);
       const state = await employee.state({ runs: false });
       const task = employee.task(state, taskId);
-      assert(!ended(task.status), "任务已结束，不需要交接");
-      assert(!this.running(task), "任务这一轮还在执行；等这一步结束或再交接");
+      assert((await this.policy(employeeId)).enabled !== false, "接力未启用");
+      assert(!["done", "sealed"].includes(task.status), "任务已完成或封存，不能交接");
+      assert(!task.execution?.localAgent, "任务已经在本机执行");
+      assert(!this.running(task) && !employee.busy?.has(taskId), "任务这一轮还在执行；等这一步结束或再交接");
       const ownerId = state.ownerId || task.execution?.ownerId || task.owner?.token || "";
       const record = await this.record(taskId);
       const clientId = String(opts.clientId || record?.clientId || task.execution?.clientId || "");
       const agent = clientId ? this.deps.agents.active(ownerId, clientId) : this.deps.agents.active(ownerId);
       assert(agent, "本地客户端未在线，无法把执行权交回本机");
+      const sameClient = !record?.clientId || record.clientId === agent.clientId;
+      const sameCloud = !!record?.cloudCwd && record.cloudCwd === task.cwd;
+      const cwd = (sameClient && sameCloud && record?.localCwd) || agent.cwd;
       const cloud = this.deps.cloud(ownerId);
-      if (!cloud || !record?.cloudCwd) assert(false, "没有可回传的云端副本；直接在本机继续即可");
-      const scanned = await this.scanCloud(cloud, record!.cloudCwd);
-      const cwd = record!.localCwd || task.cwd;
-      const applied = await this.applyLocal(agent, cwd, record!.base, scanned, "cloud");
+      if (record?.cloudCwd) assert(cloud, "云端工作区不可用，未切换执行权");
+      let scanned: { files: HandoffFile[]; contents: Map<string, Buffer> } = { files: [], contents: new Map() };
+      let applied = { conflicts: [] as string[], changed: 0 };
+      if (record?.cloudCwd || task.workSession || task.computerSession) {
+        if (!record?.cloudCwd) assert(["stopped", "failed", "cancelled", "waiting", "approval"].includes(task.status), "云端任务已开始，请先暂停再交到本机");
+        scanned = await this.scanCloud(cloud || { fs: filesystem }, task.cwd);
+        applied = await this.applyLocal(agent, cwd, sameClient && sameCloud ? record?.base || [] : [], scanned, "cloud");
+      }
       const next: HandoffRecord = {
-        ...record!,
+        ...(record || this.fresh(taskId, employeeId, ownerId, "manual")),
         where: "local",
         phase: "ready",
-        epoch: record!.epoch + 1,
+        epoch: (record?.epoch || 0) + 1,
         source: opts.source === "auto" ? "auto" : "manual",
         at: Date.now(),
         clientId: agent.clientId,
+        localCwd: cwd,
+        cloudCwd: sameCloud ? record?.cloudCwd : undefined,
         base: scanned.files,
         conflicts: applied.conflicts,
         note: [
@@ -288,10 +300,9 @@ export class TaskHandoffs {
         ].filter(Boolean).join("；"),
         error: undefined,
       };
-      await this.switch(employee, taskId, next, { localAgent: true, clientId: agent.clientId, cwd, clientName: agent.name, localPlatform: agent.platform, ...this.browserBinding(true, agent.clientId) });
-      // 不把云端 Cookie 灌进本机 Chrome：本机若要借助云端登录态，以视口操作云端 profile。
+      await this.switch(employee, taskId, next, { localAgent: true, clientId: agent.clientId, cwd, clientName: agent.name, localPlatform: agent.platform, expectedStatus: task.status, ...this.browserBinding(true, agent.clientId) });
       if (next.browser && next.browserSites?.length) {
-        next.browserNote = "未把云端登录态写入本机 Chrome；需要云端身份时，请以视口操作云端浏览器 profile";
+        next.browserNote = "授权站点的登录态将在首次使用本机浏览器时按需补齐，不覆盖已有登录";
         next.note = [next.note, next.browserNote].filter(Boolean).join("；");
       }
       await this.deps.store.save(RECORD, taskId, next);
@@ -517,40 +528,50 @@ export class TaskHandoffs {
   }
   /** Switch the execution right on the task and every session it owns, then let the scheduler continue. */
   private async switch(employee: Employee, taskId: string, record: HandoffRecord, target: Obj) {
-    const sessions: Session[] = [];
-    const state = await employee.update((s) => {
-      const task = employee.task(s, taskId);
-      task.execution = {
-        ...(task.execution || {}),
-        localAgent: !!target.localAgent,
-        clientId: target.clientId,
-        clientName: target.clientName,
-        localPlatform: target.localPlatform,
-        ownerId: record.ownerId || task.execution?.ownerId,
-        ...(target.localBrowser === undefined ? {} : { localBrowser: !!target.localBrowser }),
-        ...(target.browserClientId === undefined ? {} : { browserClientId: target.browserClientId || undefined }),
-      };
-      task.cwd = String(target.cwd);
-      task.handoffState = { where: record.where, epoch: record.epoch, at: record.at, note: record.note, error: record.error };
-      // 只重新排期可自动调度的状态；等用户补充（waiting）不得被交接变成重新开工。
-      if (["queued", "deferred", "recovering"].includes(task.status)) {
-        task.queueReason = record.where === "cloud" ? "已交接到云端，继续执行" : "已交回本机，继续执行";
-        task.status = "queued";
-        task.nextCheckAt = 0;
+    await this.deps.store.transaction(async () => {
+      const state = await employee.update((s) => {
+        const task = employee.task(s, taskId);
+        if (target.expectedStatus !== undefined)
+          assert(task.status === target.expectedStatus && !this.running(task) && !employee.busy?.has(taskId), "任务状态已变化，请先暂停后重新交接");
+        if (target.localBrowser !== undefined && (!!task.execution?.localBrowser !== !!target.localBrowser || (task.execution?.browserClientId || "") !== (target.browserClientId || ""))) {
+          delete task.browserSyncedAt;
+          delete task.browserSyncVersion;
+          delete task.browserSyncNote;
+        }
+        task.execution = {
+          ...(task.execution || {}),
+          localAgent: !!target.localAgent,
+          clientId: target.clientId,
+          clientName: target.clientName,
+          localPlatform: target.localPlatform,
+          ownerId: record.ownerId || task.execution?.ownerId,
+          ...(target.localBrowser === undefined ? {} : { localBrowser: !!target.localBrowser }),
+          ...(target.browserClientId === undefined ? {} : { browserClientId: target.browserClientId || undefined }),
+        };
+        task.cwd = String(target.cwd);
+        task.handoffState = { where: record.where, epoch: record.epoch, at: record.at, note: record.note, error: record.error };
+        // 只重新排期可自动调度的状态；等用户补充（waiting）不得被交接变成重新开工。
+        if (["queued", "deferred", "recovering"].includes(task.status)) {
+          task.queueReason = record.where === "cloud" ? "已交接到云端，继续执行" : "已交回本机，继续执行";
+          task.status = "queued";
+          task.nextCheckAt = 0;
+        }
+        return s;
+      });
+      const task = employee.task(state, taskId);
+      for (const id of [task.workSession, task.computerSession]) if (id) {
+        const session = await this.deps.store.session(id);
+        session.localAgent = !!target.localAgent;
+        session.clientId = target.clientId;
+        session.clientName = target.clientName;
+        session.localPlatform = target.localPlatform;
+        if (target.localBrowser !== undefined) session.localBrowser = !!target.localBrowser;
+        if (target.browserClientId !== undefined) session.browserClientId = target.browserClientId || undefined;
+        session.cwd = String(target.cwd);
+        await this.deps.store.saveSession(session);
       }
-      return s;
+      await this.deps.store.save(RECORD, taskId, record);
     });
-    for (const id of [employee.task(state, taskId).workSession, employee.task(state, taskId).computerSession]) if (id) try { sessions.push(await this.deps.store.session(id)); } catch {}
-    for (const session of sessions) {
-      session.localAgent = !!target.localAgent;
-      session.clientId = target.clientId;
-      session.clientName = target.clientName;
-      session.localPlatform = target.localPlatform;
-      if (target.localBrowser !== undefined) session.localBrowser = !!target.localBrowser;
-      if (target.browserClientId !== undefined) session.browserClientId = target.browserClientId || undefined;
-      session.cwd = String(target.cwd);
-      await this.deps.store.saveSession(session);
-    }
   }
 
   /** The browser this task would use on one side, if it can be reached at all. `probeKey` gives the local lease a separate key so a sync doesn't take over the task's own lease. */
@@ -586,21 +607,26 @@ export class TaskHandoffs {
     }
     return { files: manifest([...contents].map(([path, data]) => ({ path, data }))), contents };
   }
-  private async scanCloud(cloud: CloudRuntime, cwd: string) {
+  private async scanCloud(cloud: Pick<CloudRuntime, "fs">, cwd: string) {
     const contents = new Map<string, Buffer>();
+    let bytes = 0;
     const walk = async (dir: string, prefix = "") => {
       const entries = await cloud.fs.readdir(dir, { withFileTypes: true } as any);
       for (const entry of entries as any[]) {
         const path = prefix ? prefix + "/" + entry.name : entry.name;
         const full = join(dir, entry.name);
+        if (!allowed(path) || entry.isSymbolicLink?.()) continue;
         if (entry.isDirectory?.()) {
-          if (relativePath(path)) await walk(full, path);
+          await walk(full, path);
           continue;
         }
-        if (!relativePath(path) || !allowed(path)) continue;
         const stat = await cloud.fs.stat(full);
-        if (!stat.isFile() || Number((stat as any).size || 0) > LIMITS.fileBytes) continue;
-        contents.set(path, Buffer.from(await cloud.fs.readFile(full)));
+        if (!stat.isFile()) continue;
+        assert(Number((stat as any).size || 0) <= LIMITS.fileBytes, `文件过大，无法交接：${path}`);
+        const data = Buffer.from(await cloud.fs.readFile(full));
+        bytes += data.length;
+        assert(data.length <= LIMITS.fileBytes && bytes <= LIMITS.bytes, "云端工作区内容超过交接上限");
+        contents.set(path, data);
         if (contents.size > LIMITS.files) throw Error(`云端工作区文件数超过上限 ${LIMITS.files}`);
       }
     };
@@ -621,9 +647,12 @@ export class TaskHandoffs {
     const local = await this.scanLocal(agent, cwd);
     const plan = merge(base, manifest([...local.contents].map(([path, data]) => ({ path, data }))), remote.files);
     const conflicts: string[] = [];
+    const hashes = new Map(local.files.map((file: HandoffFile) => [file.path, file.hash]));
+    const names = new Set(hashes.keys());
     const write = async (path: string, data: Buffer) => {
-      const result: Obj = await this.deps.agents.request(agent, "file", { op: "write", cwd, path, content: data.toString("base64") }, AbortSignal.timeout(SCAN_TIMEOUT_MS));
+      const result: Obj = await this.deps.agents.request(agent, "file", { op: "sync_write", cwd, path, content: data.toString("base64"), expectedHash: hashes.get(path) || "" }, AbortSignal.timeout(SCAN_TIMEOUT_MS));
       assert(!result.error, String(result.error || "无法写入本地文件：" + path));
+      names.add(path);
     };
     for (const change of plan.changes) {
       if (change.side !== "remote") continue;
@@ -634,7 +663,10 @@ export class TaskHandoffs {
     for (const path of plan.conflicts) {
       const data = remote.contents.get(path);
       if (!data) continue;
-      await write(path + CONFLICT_SUFFIX + source, data);
+      const suffix = path + CONFLICT_SUFFIX + source;
+      let copy = suffix;
+      for (let n = 1; names.has(copy); n++) copy = suffix + "-" + n;
+      await write(copy, data);
       conflicts.push(path);
     }
     return { conflicts, changed: plan.changes.length };

@@ -138,6 +138,20 @@ test("employee task creation never asks users to choose the initial model", () =
   assert(scenes.includes("沟通与任务起步") && scenes.includes("实际进入编码工作时才升级"));
 });
 
+test("task handoff uses the selected client's id and is only offered to managers", async () => {
+  const calls: any[] = [], context: any = {
+    selectedEmployee: ref("ea"), attempt: async (fn: any) => fn(),
+    api: async (...args: any[]) => calls.push(args), loadEmployee: async () => {}, toast() {},
+  };
+  const handoff = vm.runInNewContext(between("async function handoffTask(", "async function openEmployeeTask(") + "\nhandoffTask", context);
+  assert.equal(await handoff({ id: "t1" }, "c1"), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["/employees/ea/tasks/t1/handoff", "POST", { action: "to-local", clientId: "c1" }]]);
+  const detail = readFileSync("web/src/TaskDetail.vue", "utf8");
+  assert(detail.includes('aria-label="选择执行客户端"'));
+  assert(detail.includes("!task.execution?.localAgent") && detail.includes("'running', 'done', 'sealed'"));
+  assert(source.includes(":handoff=\"employee.canManage && canExecute ? handoffTask : undefined\""));
+});
+
 test("work panel attention cards summarize long briefs and leave full detail to the opened task", () => {
   const panel = readFileSync("web/src/WorkPanel.vue", "utf8");
   assert(panel.includes("function brief(") && panel.includes("brief(task.text)"), "titles must be summarized");

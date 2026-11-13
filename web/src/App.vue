@@ -1261,6 +1261,14 @@ async function employeeTaskAction(task, action, text) {
     return true;
   });
 }
+async function handoffTask(task, clientId) {
+  const owner = selectedEmployee.value;
+  return attempt(async () => {
+    await api(`/employees/${encodeURIComponent(owner)}/tasks/${encodeURIComponent(task.id)}/handoff`, "POST", { action: "to-local", clientId });
+    if (selectedEmployee.value === owner) { await loadEmployee(); toast("任务已交到所选客户端；暂停的任务需要手动继续"); }
+    return true;
+  });
+}
 async function openEmployeeTask(id) {
   const owner = selectedEmployee.value;
   let task = employee.value.tasks?.find((entry) => entry.id === id);
@@ -1609,6 +1617,8 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             :focus="employeeTaskFocus"
             :readonly="!canExecute"
             :act="employeeTaskAction"
+            :clients="employee.executionClients || []"
+            :handoff="employee.canManage && canExecute ? handoffTask : undefined"
             :save-memory="saveMemory"
             @filter="employeeTaskFilter = $event"
             @select="employeeTaskFocus = $event"

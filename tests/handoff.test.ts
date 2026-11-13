@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { TaskHandoffs } from "../server/core/handoffs";
+import { Store } from "../server/core/store";
+import { Engine } from "../server/core/engine";
+import { Catalog } from "../server/core/catalog";
+import { Subscriptions } from "../server/core/subscriptions";
+import { Chrome } from "../server/core/chrome";
+import { ChromeBridge } from "../server/core/chrome-bridge";
 
 /** 内存工作区：本地端与云端各一份，测试交接与回传的文件动作。 */
 class Memory {
@@ -41,6 +51,7 @@ function world(options: { clientOnline?: boolean; running?: boolean; cloud?: boo
   const objects = new Map<string, any>();
   const agent = { userId: "u1", clientId: "c1", name: "本机", instance: "i1", cwd: "/local", platform: "windows", prefer: options.prefer };
   const store: any = {
+    async transaction(fn: () => Promise<any>) { return fn(); },
     async object(kind: string, key: string) { return objects.get(kind + ":" + key); },
     async objects(kind: string) { return [...objects].filter(([key]) => key.startsWith(kind + ":")).map(([, value]) => value); },
     async save(kind: string, key: string, value: any) { objects.set(kind + ":" + key, JSON.parse(JSON.stringify(value))); },
@@ -61,7 +72,12 @@ function world(options: { clientOnline?: boolean; running?: boolean; cloud?: boo
       if (args.op === "list") return { root, files: under(local, root).map(([path, text]) => ({ path: path.slice(root.length + 1), size: text.length })) };
       const full = root + "/" + args.path;
       if (args.op === "read") return { path: full, content: local.files.get(full)!.toString("base64") };
-      if (args.op === "write") { local.files.set(full, Buffer.from(args.content, "base64")); return { path: full }; }
+      if (args.op === "sync_write") {
+        const old = local.files.get(full), hash = old ? createHash("sha256").update(old).digest("hex") : "";
+        if (hash !== args.expectedHash) return { error: "目标文件已变化，交接未覆盖" };
+        local.files.set(full, Buffer.from(args.content, "base64"));
+        return { path: full };
+      }
       throw Error("unexpected " + args.op);
     },
   };
@@ -242,6 +258,129 @@ test("旧的服务端优先上报不再自动把任务交到云端，要改这�
   const handoffs = new TaskHandoffs(w.deps);
   await handoffs.clients({ type: "clients_changed", targetUser: "u1" });
   assert.equal(w.state.tasks[0].execution.localAgent, true, "prefer=cloud 不再作为派活或自动交接依据");
+});
+
+test("a never-started cloud task can bind an online client without copying a workspace", async () => {
+  const w = world({ cloud: false });
+  w.task.execution = { localAgent: false, localBrowser: false, ownerId: "u1" };
+  w.task.cwd = "/cloud/work";
+  delete w.task.workSession;
+  const result = await new TaskHandoffs(w.deps).toLocal("e1", "t1", { clientId: "c1" });
+  assert.equal(result.where, "local");
+  assert.equal(w.task.execution.clientId, "c1");
+  assert.equal(w.task.execution.localBrowser, true);
+  assert.equal(w.task.cwd, "/local");
+  assert.equal(w.task.status, "queued");
+});
+
+test("a paused cloud-only task copies its workspace without overwriting local conflicts", async () => {
+  const w = world();
+  w.task.status = "stopped";
+  w.task.execution = { localAgent: false, localBrowser: false, ownerId: "u1" };
+  w.task.cwd = "/cloud/work";
+  w.task.browserSyncedAt = 1;
+  w.remote.put("/cloud/work/src/a.ts", "cloud");
+  w.remote.put("/cloud/work/new.ts", "new");
+  w.remote.put("/cloud/work/node_modules/ignored.js", "dependency");
+  w.local.put("/local/src/a.ts", "local");
+  w.local.put("/local/src/a.ts.vega-conflict-cloud", "previous conflict");
+  const result = await new TaskHandoffs(w.deps).toLocal("e1", "t1", { clientId: "c1" });
+  assert.equal(w.local.text("/local/src/a.ts"), "local");
+  assert.equal(w.local.text("/local/src/a.ts.vega-conflict-cloud"), "previous conflict");
+  assert.equal(w.local.text("/local/src/a.ts.vega-conflict-cloud-1"), "cloud");
+  assert.equal(w.local.text("/local/new.ts"), "new");
+  assert.equal(w.local.text("/local/node_modules/ignored.js"), "");
+  assert.deepEqual(result.conflicts, ["src/a.ts"]);
+  assert.equal(w.task.status, "stopped", "handoff must not resume a paused task");
+  assert.equal(w.task.browserSyncedAt, undefined, "the new browser must sync independently");
+  assert.equal(w.sessions.get("s1").localAgent, true);
+});
+
+test("a paused server task can move to the client without Docker isolation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "vega-handoff-server-"));
+  try {
+    await writeFile(join(directory, "note.txt"), "server file");
+    const w = world({ cloud: false });
+    w.task.status = "stopped";
+    w.task.execution = { localAgent: false, ownerId: "u1" };
+    w.task.cwd = directory;
+    await new TaskHandoffs(w.deps).toLocal("e1", "t1", { clientId: "c1" });
+    assert.equal(w.local.text("/local/note.txt"), "server file");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("handoff uses the cloud task's current directory instead of an obsolete snapshot", async () => {
+  const w = world();
+  w.local.put("/local/work/old.txt", "old workspace");
+  const handoffs = new TaskHandoffs(w.deps);
+  await handoffs.toCloud("e1", "t1");
+  w.task.cwd = "/cloud/new-work";
+  w.task.status = "stopped";
+  w.remote.put("/cloud/new-work/new.txt", "current workspace");
+  await handoffs.toLocal("e1", "t1", { clientId: "c1" });
+  assert.equal(w.local.text("/local/new.txt"), "current workspace");
+  assert.equal(w.local.text("/local/old.txt"), "");
+  assert.equal((await handoffs.record("t1"))!.cloudCwd, undefined, "a later handoff must not overwrite the previous cloud directory");
+});
+
+test("handoff stops if a local file changes after the workspace scan", async () => {
+  const w = world();
+  w.task.status = "stopped";
+  w.task.execution = { localAgent: false, ownerId: "u1" };
+  w.task.cwd = "/cloud/work";
+  w.remote.put("/cloud/work/a.txt", "cloud");
+  const request = w.deps.agents.request;
+  w.deps.agents.request = async (...args: any[]) => {
+    if (args[2].op === "sync_write") w.local.put("/local/a.txt", "new local change");
+    return request(...args);
+  };
+  await assert.rejects(new TaskHandoffs(w.deps).toLocal("e1", "t1", { clientId: "c1" }), /目标文件已变化/);
+  assert.equal(w.local.text("/local/a.txt"), "new local change");
+  assert.equal(w.task.execution.localAgent, false);
+});
+
+test("handoff refuses to switch execution if the task starts during the copy", async () => {
+  const w = world();
+  w.task.status = "stopped";
+  w.task.execution = { localAgent: false, ownerId: "u1" };
+  w.task.cwd = "/cloud/work";
+  w.remote.put("/cloud/work/a.txt", "cloud");
+  const request = w.deps.agents.request;
+  w.deps.agents.request = async (...args: any[]) => {
+    if (args[2].op === "list") w.task.status = "running";
+    return request(...args);
+  };
+  await assert.rejects(new TaskHandoffs(w.deps).toLocal("e1", "t1", { clientId: "c1" }), /任务状态已变化/);
+  assert.equal(w.task.execution.localAgent, false);
+});
+
+test("task, execution sessions and handoff record roll back together on a failed switch", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "vega-handoff-atomic-"));
+  const store = await Store.open(":memory:");
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  engine.employee.closed = true;
+  const originalSave = store.saveSession.bind(store);
+  try {
+    const employee = await engine.employee.for((await engine.employee.create({ name: "Atomic", cwd: directory }, "alice")).id);
+    const clientId = "d".repeat(32);
+    engine.localAgents.connect("alice", { clientId, instance: "a".repeat(32), name: "PC", cwd: "C:\\work", platform: "windows" });
+    const created = await employee.execute("", { action: "add", kind: "todo", text: "work" });
+    const session = await store.newSession({ employeeId: employee.employeeId, taskId: created.value.id, ownerId: "alice", cwd: directory });
+    await employee.update((s) => { const task = employee.task(s, created.value.id); task.status = "stopped"; task.workSession = session.id; return s; });
+    (engine.localAgents as any).request = async () => ({ files: [] });
+    store.saveSession = async () => { throw Error("session save failed"); };
+    await assert.rejects(engine.handoffs.toLocal(employee.employeeId, created.value.id, { clientId }), /session save failed/);
+    const task = employee.task(await employee.state(), created.value.id);
+    assert.equal(task.execution.localAgent, false);
+    assert.equal(task.cwd, directory);
+    assert.equal((await store.session(session.id)).localAgent, undefined);
+    assert.equal(await engine.handoffs.record(task.id), undefined);
+  } finally {
+    store.saveSession = originalSave;
+    await engine.close();
+    await store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("a task taken over automatically comes back to its device once that device returns", async () => {
