@@ -111,6 +111,7 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["task_ask_user", { question: "code?" }, { action: "help", text: "code?" }, task],
     ["task_wait", { checkpoint: "job 1", delayMinutes: 5 }, { action: "defer", text: "job 1", nextCheckInMinutes: 5 }, task],
         ["task_complete", { evidence: "ok", deliverableRefs: [] }, { action: "complete", text: "ok", deliverableRef: [] }, task],
+    ["task_complete", { evidence: "ok", outlineReview: [{ requirement: "test", status: "met", evidence: "receipt" }] }, { action: "complete", text: "ok", outlineReview: [{ requirement: "test", status: "met", evidence: "receipt" }] }, task],
     ["memory_propose", { claim: "c", memoryKind: "convention" }, { action: "memory_propose", claim: "c", memoryKind: "convention" }, chat],
     ["memory_propose", { claim: "c", pinned: true, memoryKind: null }, { action: "memory_propose", claim: "c", pinned: true }, chat],
     ["memory_manage", { request: { command: "feedback", memoryId: "a", signal: "correction", claim: "new" } }, { action: "memory_resolve", resolveAction: "feedback", id: "a", signal: "correction", claim: "new" }, chat],

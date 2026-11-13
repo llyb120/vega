@@ -49,6 +49,49 @@ const withModel = (engine: Engine) => {
 const count = (text: string, part: string) => text.split(part).length - 1;
 const lastTool = (messages: any[], name: string) => messages.findLast(m => m.role === "tool" && m.name === name);
 
+test("replanned task checks the original outline, waits for clarification, then completes", async () => {
+  const { store, engine, employee, add, segment } = await fixture();
+  let phase = 0;
+  const steps = [
+    { content: "阅读需求", status: "completed" },
+    { content: "在需求单 @创建人澄清并等待回复", status: "pending" },
+    { content: "开发并验证", status: "pending" },
+  ];
+  try {
+    await employee.execute("", { action: "add", kind: "duty", text: "需求有疑问先在对应单中联系创建人", manual: true });
+    const job = await add("澄清需求后开发并验证");
+    engine.providers.chat = async (_model, _system, messages) => {
+      phase++;
+      if (phase === 1) return call("plan-1", "task_progress", { message: "阅读需求", plan: steps });
+      if (phase === 2) return call("plan-2", "task_progress", { message: "调整计划", plan: [steps[0], { content: "建议用户澄清", status: "completed" }] });
+      if (phase === 3) return call("complete-1", "task_complete", { evidence: "只读完需求", summary: "尚未开发", deliverableRefs: [] });
+      if (phase === 4) {
+        assert.match(lastTool(messages, "task_complete").text, /outline_review_required/);
+        assert.match(lastTool(messages, "task_complete").text, /@创建人/);
+        return call("complete-2", "task_complete", { evidence: "只读完需求", summary: "尚未开发", deliverableRefs: [], outlineReview: steps.slice(1).map(step => ({ requirement: step.content, status: "unmet", evidence: "尚未执行" })) });
+      }
+      if (phase === 5) {
+        assert.match(lastTool(messages, "task_complete").text, /outline_unmet/);
+        return call("wait", "task_wait", { checkpoint: "需求单已 @创建人，回执 #7；只检查回复，不重复发送", delayMinutes: 5 });
+      }
+      if (phase === 6) {
+        assert(messages.some(message => message.text?.includes("回执 #7")));
+        return call("plan-3", "task_progress", { message: "澄清回复已收到", plan: steps.map(step => ({ ...step, status: "completed" })) });
+      }
+      if (phase === 7) return call("complete-3", "task_complete", { evidence: "回复、提交和测试回执已核对", summary: "澄清、开发和验证已完成", deliverableRefs: [], outlineReview: [...steps.slice(1).map(step => ({ requirement: step.content, status: "met", evidence: "回复、提交和测试回执" })), { requirement: "建议用户澄清", status: "not_applicable", evidence: "已在需求单联系并收到回复" }] });
+      throw Error("unexpected phase " + phase);
+    };
+    withModel(engine);
+    const waiting = await segment(job);
+    assert.equal(waiting.status, "deferred");
+    assert(!waiting.completion);
+    const done = await segment(waiting);
+    assert.equal(done.status, "done");
+    assert.equal(done.completion, "回复、提交和测试回执已核对");
+    assert.equal(phase, 7);
+  } finally { await engine.close(); await store.close(); }
+});
+
 test("export replay: 429 inside computer keeps the caller's resume, the browser phase returns to lightweight, the body is written once and delivered once with every screenshot", async () => {
   const { store, engine, employee, driver, add, segment, deliveries } = await fixture();
   const selected: string[] = [];

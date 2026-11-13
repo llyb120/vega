@@ -301,7 +301,7 @@ test("consecutive interruptions resume with only new supplements and the current
     await employee.control({ action: "resume", id: job.id, text: "preserve login" });
     current = await segment(employee, current);
     assert.match(prompts[1], /preserve login/);
-    assert(!prompts[1].includes(firstText), "recovery is a continuation, not a re-dispatch of the full task");
+    assert(prompts[1].includes(firstText) && prompts[1].includes("续做，不是新派单"), "recovery retains the original task as context without creating a new task");
     assert.match(prompts[1], /external job-123/);
     assert.match(prompts[1], /不重复.*确认|不要.*确认/);
     const reopened = new Employee(store, employee.vault, runtime);
@@ -480,7 +480,7 @@ test("a supplement delivered by a completion guard is not re-injected after anot
     assert(!messages.findLast((message) => message.role === "user" && message.runtime !== "dynamic")!.text!.includes("latest requirement"));
     assert(messages.some((message) => message.role === "tool" && message.taskInput?.answer?.includes("latest requirement")));
     await employee.execute(job.id, { action: "progress", text: "latest goal verified", plan: [{ content: "latest requirement", status: "completed" }] });
-    return { role: "assistant", calls: [{ id: "finish", ...employeeCall({ action: "complete", deliverableRef: [], text: "latest goal verified" }) }] };
+    return { role: "assistant", calls: [{ id: "finish", ...employeeCall({ action: "complete", deliverableRef: [], text: "latest goal verified", outlineReview: [{ requirement: "old goal", status: "met", evidence: "old goal verified" }] }) }] };
   };
   try {
     let current = await segment(employee, job);
@@ -591,7 +591,7 @@ test("new supplements cannot be silently lost by completing an in-flight task", 
       assert.match(result.value.supplement, /preserve existing login/);
       await assert.rejects(employee.execute(job.id, { action: "complete", deliverableRef: [], text: "old result again" }), /latest requirements/);
       await employee.execute(job.id, { action: "progress", text: "verified new goal", plan: [{ content: "goal and existing login", status: "completed" }] });
-      await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "verified new goal and retained login" });
+      await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "verified new goal and retained login", outlineReview: [{ requirement: "goal", status: "met", evidence: "old and new goals verified" }] });
     };
     assert.equal((await segment(employee, job)).status, "done");
   } finally { employee.close(); await store.close(); }
@@ -793,11 +793,16 @@ test("user can settle partial delivery with cancelled steps after recovery budge
   const { store, employee, runtime } = await fixture();
   try {
     const job = await task(employee);
+    await employee.update((state) => { Object.assign(state.tasks[0], {
+      plan: [{ content: "attempted work", status: "completed" }, { content: "remaining", status: "blocked" }],
+      planRevision: 0,
+    }); });
     runtime.run = async () => { throw Error("boom"); };
     let current = await segment(employee, job);
     while (current.status === "recovering") current = await segment(employee, current);
     assert.equal(current.status, "waiting");
     assert.match(current.waiting, /请选择/);
+    assert.match(current.waiting, /remaining/);
     await employee.control({ action: "answer", id: job.id, text: "1" });
     assert.equal((await employee.state()).tasks[0].settlePreferred, true);
     assert.equal((await employee.state()).tasks[0].recovery?.attempts, 4);
@@ -814,6 +819,7 @@ test("user can settle partial delivery with cancelled steps after recovery budge
         action: "complete", deliverableRef: [],
         text: "Partial result with cancelled remainder.",
         summary: "部分交付，剩余已取消。",
+        outlineReview: [{ requirement: "remaining", status: "unmet", evidence: "尚未完成" }],
       });
     };
     current = await segment(employee, employee.task(await employee.state(), job.id));

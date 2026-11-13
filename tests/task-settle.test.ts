@@ -17,32 +17,23 @@ async function fixture() {
   return { store, engine, employee };
 }
 
-test("task_complete auto-settles a lone trailing in_progress plan step", async () => {
+test("task_complete cannot auto-finish a trailing in_progress step", async () => {
   const { store, engine, employee } = await fixture();
   try {
     const created = await employee.execute("", { action: "add", kind: "todo", text: "Open baidu" });
     employee.busy.set(created.value.id, { computer: false, session: "" });
-    await employee.update((state) => {
-      Object.assign(state.tasks[0], {
-        status: "running",
-        revision: 0,
-        planRevision: 0,
-        plan: [
-          { content: "relay browser", status: "completed" },
-          { content: "write delivery and task_complete", status: "in_progress" },
-        ],
-      });
-    });
-    const done = await employee.execute(created.value.id, {
-      action: "complete",
-      deliverableRef: [],
-      text: "Opened https://www.baidu.com, title ok, search box present.",
-      summary: "百度首页已打开。",
-    });
+    const plan = [
+      { content: "relay browser", status: "completed" },
+      { content: "verify result", status: "in_progress" },
+    ];
+    await employee.update((state) => { Object.assign(state.tasks[0], { status: "running", revision: 0, planRevision: 0, plan }); });
+    const delivery = { action: "complete", deliverableRef: [], text: "Opened https://www.baidu.com, title ok, search box present.", summary: "百度首页已打开。" };
+    await assert.rejects(employee.execute(created.value.id, delivery), /未验证步骤=2:in_progress/);
+    assert.equal((await employee.state()).tasks[0].plan[1].status, "in_progress");
+    await employee.execute(created.value.id, { action: "progress", text: "verified", plan: [plan[0], { ...plan[1], status: "completed" }] });
+    const done = await employee.execute(created.value.id, delivery);
     assert.equal(done.stop, true);
-    const task = (await employee.state()).tasks[0];
-    assert.equal(task.plan[1].status, "completed");
-    assert.equal(task.completion.includes("baidu.com"), true);
+    assert.equal((await employee.state()).tasks[0].completion.includes("baidu.com"), true);
   } finally { await engine.close(); await store.close(); }
 });
 

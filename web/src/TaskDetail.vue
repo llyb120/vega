@@ -71,7 +71,7 @@ async function run(action) {
     <section v-if="task.status === 'approval'" class="attention-block">
       <h3><Icon name="alert" :size="16" />需要你确认</h3>
       <MessageText :text="task.approval" />
-      <div v-if="!readonly" class="actions"><button type="button" class="primary" :disabled="busy" @click="run('approve')"><Icon name="check" :size="16" />批准执行</button><button type="button" :disabled="busy" @click="run('reject')">驳回</button></div>
+      <div v-if="!readonly" class="actions"><button type="button" class="primary" :disabled="busy" @click="run('approve')"><Icon name="check" :size="16" />{{ task.partialDelivery ? '接受部分交付' : '批准执行' }}</button><button type="button" :disabled="busy" @click="run('reject')">{{ task.partialDelivery ? '继续原任务' : '驳回' }}</button></div>
     </section>
     <form v-if="task.status === 'waiting'" class="attention-block" @submit.prevent="run('answer')">
       <h3><Icon name="alert" :size="16" />需要补充信息</h3>

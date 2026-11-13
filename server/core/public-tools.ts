@@ -213,7 +213,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       ["dutyId", "request"]));
   if (task) {
     out.push(tool("task_progress",
-      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型，之后状态或要求变化时再提交完整计划；只有真实验证成功的步骤才标 completed，用户放弃的步骤标 cancelled。不新建任务或会话，不结束本轮。",
+      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、适用职责和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。不新建任务或会话，不结束本轮。",
       { message: str("当前进度，1–200 字", { minLength: 1, maxLength: 200 }),
         plan: { type: "array", minItems: 1, maxItems: 50, description: "完整计划，包括未来步骤", items: obj({
           content: str("步骤描述，1–500 字", { minLength: 1, maxLength: 500 }),
@@ -231,14 +231,19 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       "向交代人要只有他能提供的信息，或必须他处理的阻碍（短信/邮箱验证码、访问码、2FA/OTP 等）：question 写清需要什么。滑块/拼图/旋转等视觉验证码先用 chrome_act pointer 自行拖，连续失败后再问，不要一上来就让用户代拖。任务挂起并立即结束本轮，回答后在原会话继续。能自己查到的不要问，低风险细节自行决定；要批准操作用 task_request_approval。必须单独调用。",
       { question: str("要对方补充或处理的内容，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["question"]));
     out.push(tool("task_wait",
-      "已提交的外部作业（构建、发布、导出等）要较久才出结果时挂起当前任务：checkpoint 写作业编号或链接、已做的操作、当前状态、检查方式与超时处理（不含凭据）；resumeAt 和 delayMinutes 二选一。立即结束本轮并释放执行名额，到时在原会话续做，只检查原作业，不要重新提交或循环等待。没有外部作业、只是把本任务改到以后做用 task_reschedule。必须单独调用。",
+      "已提交的外部作业（构建、发布、导出等）或已发出的澄清请求需要等待结果时挂起当前任务：checkpoint 写作业编号或请求链接、已做的操作与回执、当前状态、检查方式和超时处理（不含凭据）；resumeAt 和 delayMinutes 二选一。立即结束本轮并释放执行名额，到时在原会话续做，只检查原作业或回复，同一请求不要重发；有新疑点可发新一轮澄清并保存新回执。没有外部结果、只是把本任务改到以后做用 task_reschedule。必须单独调用。",
       { checkpoint: str("恢复点，1–8000 字", { minLength: 1, maxLength: 8000 }), resumeAt: beijing("续做时间"), delayMinutes: int("多少分钟后续做，1–10080", { minimum: 1, maximum: 10080 }) },
       ["checkpoint"]));
     if (!ctx.computer) {
       // Browser work uses same-session switch_scene(scene=computer); isolated task_relay_computer is retired.
       out.push(tool("task_complete",
-        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求（若只剩末步仍为 in_progress，系统会在交付时自动收尾）。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 可省略（系统选用最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接；仅当确实没有单独正文时传 []（本次交付期内已写出正文却传 [] 会被退回一次，并给出该正文编号）。成功后立即结束本轮。必须单独调用。",
+        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求，in_progress 不能自动收尾。计划重写或存在 cancelled 时必须填 outlineReview，逐项对照原始任务、适用职责与用户最新要求，说明实际证据或不适用依据；不要把旧计划的中间步骤当成必须完成的大纲。仍有未满足的用户要求时先按授权继续、澄清或等待；确需部分交付须经交代人明确接受。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 可省略（系统选用最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接；仅当确实没有单独正文时传 []（本次交付期内已写出正文却传 [] 会被退回一次，并给出该正文编号）。成功后立即结束本轮。必须单独调用。",
         { evidence: str("实际结果与验证证据，1–8000 字", { minLength: 1, maxLength: 8000 }),
+          outlineReview: { type: "array", minItems: 1, maxItems: 100, description: "计划重写或有 cancelled 步骤时必填：逐项对照原始任务、适用职责与用户最新要求；回执 changedSteps 每条在 requirement 原样列出并解释如何完成、替代或为何不适用，这不要求旧计划保持不变。每项写状态和真实依据。", items: obj({
+            requirement: str("用户任务或适用职责中的一项要求", { minLength: 1, maxLength: 500 }),
+            status: str("met 已满足 / not_applicable 条件不适用 / unmet 尚未满足", { enum: ["met", "not_applicable", "unmet"] }),
+            evidence: str("实际回执、验证证据或不适用/未完成的原因", { minLength: 1, maxLength: 2000 }),
+          }, ["requirement", "status", "evidence"]) },
           summary: str("交付摘要，1–400 字；先结论，简单任务一两句即可，勿写小标题清单", { minLength: 1, maxLength: 400 }),
           deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则系统选用本次交付期内最新较长正文；确实无单独正文才传 []" } },
         ["evidence"]));
@@ -422,7 +427,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
       return employee(defined({ action: "defer", text: a.checkpoint, nextAt: a.resumeAt, nextCheckInMinutes: a.delayMinutes }));
     }
     case "task_relay_computer": return employee({ action: "relay", scene: "computer", text: a.handoff });
-    case "task_complete": return employee(defined({ action: "complete", text: a.evidence, summary: a.summary, deliverableRef: a.deliverableRefs }));
+    case "task_complete": return employee(defined({ action: "complete", text: a.evidence, summary: a.summary, deliverableRef: a.deliverableRefs, outlineReview: a.outlineReview }));
     case "memory_search": return employee(defined({ action: "memory_search", query: a.query, status: a.status, memoryScene: a.memoryScene }));
     case "memory_propose": return employee(defined({ action: "memory_propose", claim: a.claim, memoryKind: a.memoryKind, scope: a.scope, tags: a.tags, memoryScene: a.memoryScene, evidence: a.evidence, id: a.memoryId, pinned: a.pinned }));
     case "memory_manage": {

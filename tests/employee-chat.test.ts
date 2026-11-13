@@ -243,27 +243,39 @@ test("complete feedback identifies missing evidence, unverified steps and stale 
   } finally { await engine.close(); await store.close(); }
 });
 
-test("complete accepts cancelled steps as settled partial delivery and progress marks settlePreferred", async () => {
+test("cancelled steps require explicit partial-delivery approval", async () => {
   const { store, engine, employee } = await fixture();
   try {
     const created = await employee.execute("", { action: "add", kind: "todo", text: "Design cases" });
-    employee.busy.set(created.value.id, { computer: false, session: "" });
+    const id = created.value.id;
+    employee.busy.set(id, { computer: false, session: "" });
     await employee.update(state => { Object.assign(state.tasks[0], { status: "running", revision: 0, planRevision: 0 }); });
-    await employee.execute(created.value.id, {
+    await employee.execute(id, {
       action: "progress",
-      text: "partial delivery accepted",
+      text: "partial result",
       plan: [
         { content: "read requirement", status: "completed" },
         { content: "design case list", status: "completed" },
         { content: "execute remaining cases", status: "cancelled" },
       ],
     });
-    assert.equal((await employee.state()).tasks[0].settlePreferred, true);
-    const completed = await employee.execute(created.value.id, {
+    assert.equal((await employee.state()).tasks[0].settlePreferred, undefined);
+    const delivery = {
       action: "complete", deliverableRef: [],
-      text: "Case list delivered; remaining execution cancelled per user.",
-      summary: "已交付用例清单；未执行项已标注取消。",
-    });
+      text: "Case list delivered; remaining execution not performed.",
+      summary: "已交付用例清单；未执行剩余用例。",
+      outlineReview: [{ requirement: "execute remaining cases", status: "unmet", evidence: "尚未执行" }],
+    };
+    const pending = await employee.execute(id, delivery);
+    assert.equal(pending.stop, true);
+    assert.equal(pending.value.status, "approval");
+    assert.match((await employee.state()).tasks[0].approval, /execute remaining cases/);
+    assert.equal((await employee.state()).tasks[0].completion, undefined);
+    employee.busy.delete(id);
+    await employee.control({ action: "approve", id, approved: true });
+    await employee.update(state => { state.tasks[0].status = "running"; });
+    employee.busy.set(id, { computer: false, session: "" });
+    const completed = await employee.execute(id, delivery);
     assert.equal(completed.stop, true);
     assert.equal((await employee.state()).tasks[0].completion.includes("Case list"), true);
   } finally { await engine.close(); await store.close(); }
@@ -408,6 +420,7 @@ test("the concise delivery field cannot bypass credential redaction", async () =
     const tools = await Tools.create(engine, session, await engine.config(), new AbortController().signal, () => {}), model = await engine.catalog.resolve(await engine.config(), sceneModels(await engine.config(), "lightweight")[0]);
     assert.equal((await tools.definitions(model)).find(tool => tool.name === "task_complete")!.parameters.properties.summary.maxLength, 400);
     await assert.rejects(tools.execute({ id: "complete", ...employeeCall({ action: "complete", deliverableRef: [], text: "verified result", summary: "The private-test-token works" }) }, model), /task_complete 的 summary 含有密码本凭据内容/);
+    await assert.rejects(tools.execute({ id: "outline", name: "task_complete", arguments: { evidence: "verified", outlineReview: [{ requirement: "verify", status: "met", evidence: "private-test-token" }] } }, model), /task_complete 的 outlineReview\[0\]\.evidence 含有密码本凭据内容/);
     assert.equal((await employee.state()).tasks[0].completion, undefined);
     employee.busy.delete(created.value.id); engine.redactors.delete(session.id);
     await tools.close();

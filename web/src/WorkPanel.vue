@@ -27,9 +27,9 @@ function brief(text, max = 72) {
         <article v-for="task in attention" :key="task.id" class="attention-card" :aria-busy="busy === task.id">
           <button type="button" class="task-title" :title="task.text" @click="emit('open', task.id)">{{ brief(task.text) }}</button>
           <p class="attention-text" :title="task.status === 'approval' ? task.approval : task.waiting"><strong>{{ task.status === 'approval' ? '需要确认' : '需要补充' }}：</strong>{{ brief(task.status === 'approval' ? task.approval : task.waiting, 96) }}</p>
-          <button type="button" class="link detail" @click="emit('open', task.id)">查看详情</button>
-          <div v-if="!readonly && task.status === 'approval'" class="actions"><button type="button" class="primary sm" :disabled="!!busy" @click="run(task, 'approve')"><Icon name="check" :size="14" />批准执行</button><button type="button" class="sm" :disabled="!!busy" @click="run(task, 'reject')">驳回</button></div>
-          <form v-else-if="!readonly" class="answer" @submit.prevent="run(task, 'answer')"><textarea v-model="answers[task.id]" rows="2" maxlength="8000" required :aria-label="'回复：' + task.text" placeholder="补充信息后，牛马会继续原任务"></textarea><button class="primary sm" :disabled="!!busy || !answers[task.id]?.trim()">回复并继续</button></form>
+          <button type="button" class="link detail" @click="emit('open', task.id)">{{ task.partialDelivery ? '查看详情并决定部分交付' : '查看详情' }}</button>
+          <div v-if="!readonly && task.status === 'approval' && !task.partialDelivery" class="actions"><button type="button" class="primary sm" :disabled="!!busy" @click="run(task, 'approve')"><Icon name="check" :size="14" />批准执行</button><button type="button" class="sm" :disabled="!!busy" @click="run(task, 'reject')">驳回</button></div>
+          <form v-else-if="!readonly && task.status === 'waiting'" class="answer" @submit.prevent="run(task, 'answer')"><textarea v-model="answers[task.id]" rows="2" maxlength="8000" required :aria-label="'回复：' + task.text" placeholder="补充信息后，牛马会继续原任务"></textarea><button class="primary sm" :disabled="!!busy || !answers[task.id]?.trim()">回复并继续</button></form>
         </article>
       </section>
       <section class="panel-section">

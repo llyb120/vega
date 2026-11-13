@@ -672,7 +672,7 @@ export class Tools {
   }
   private async employee(internal: Internal, tool = "", publicArgs: Obj = {}): Promise<Outcome> {
     const a = internal.args;
-    this.refuseSecrets(tool, { text: a.text, condition: a.condition, summary: a.summary, note: a.note, plan: a.plan }, publicArgs);
+    this.refuseSecrets(tool, { text: a.text, condition: a.condition, summary: a.summary, note: a.note, plan: a.plan, outlineReview: a.outlineReview }, publicArgs);
     const employee = await this.engine.employeeFor(this.session);
     const source = this.session.employeeId && !this.session.taskId ? (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user") : undefined;
     const taskLink = async (id: string, replace = false) => {

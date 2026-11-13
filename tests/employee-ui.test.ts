@@ -147,6 +147,15 @@ test("work panel attention cards summarize long briefs and leave full detail to 
   assert(!panel.match(/attention-text[^}]*white-space:\s*pre-wrap/), "pre-wrap would expand the whole brief in the panel");
 });
 
+test("partial delivery approval requires the full task detail and clearly offers continue", () => {
+  const panel = readFileSync("web/src/WorkPanel.vue", "utf8");
+  const detail = readFileSync("web/src/TaskDetail.vue", "utf8");
+  assert(panel.includes("task.status === 'approval' && !task.partialDelivery"), "truncated cards cannot approve partial delivery");
+  assert(panel.includes("task.status === 'waiting'"), "an approval must not show the answer form");
+  assert(detail.includes("task.partialDelivery ? '接受部分交付' : '批准执行'"));
+  assert(detail.includes("task.partialDelivery ? '继续原任务' : '驳回'"));
+});
+
 test("ordinary users have no history/session dispatch navigation and task approvals have explicit reject and approve actions", () => {
   const sidebar = readFileSync("web/src/AppSidebar.vue", "utf8");
   const nav = sidebar.slice(sidebar.indexOf('aria-label="主导航"'), sidebar.indexOf("</nav>"));

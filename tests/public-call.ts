@@ -36,7 +36,7 @@ export function employeeCall(a: Obj, target: "task" | "duty" | "self" = "task"):
     case "help": return call("task_ask_user", { question: a.text });
     case "defer": return call("task_wait", { checkpoint: a.text, resumeAt: a.nextAt, delayMinutes: a.nextCheckInMinutes });
     case "relay": return call("task_relay_computer", { handoff: a.text });
-    case "complete": return call("task_complete", { evidence: a.text, summary: a.summary, deliverableRefs: a.deliverableRef === undefined ? undefined : [].concat(a.deliverableRef) });
+    case "complete": return call("task_complete", { evidence: a.text, summary: a.summary, deliverableRefs: a.deliverableRef === undefined ? undefined : [].concat(a.deliverableRef), outlineReview: a.outlineReview });
     case "vault_list": return call("vault_list");
     case "vault_get": return call("vault_get", { credentialId: a.id, purpose: a.text, url: a.url });
     case "memory_search": return call("memory_search", { query: a.query, status: a.status, memoryScene: a.memoryScene || a.scene });
