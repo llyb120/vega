@@ -1,4 +1,0 @@
-a
-!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="f56d8921-cf5d-40e7-b2bd-3657545219ed",e._sentryDebugIdIdentifier="sentry-dbid-f56d8921-cf5d-40e7-b2bd-3657545219ed"}catch(e){}}(import.meta.url);
-import{M as e,P as t,y as n}from"./chunk-STHDNR4A-YDVIkt7u.js";import{i as r}from"./chunk-BGW36YJW-BggN0oCY.js";function i(e,n,i,a){return t(()=>r(e,!1,n,i,a,1))}function a(t,r,a,o,s,c,l){let u=i(t,r,a,4e3);if(u.height===0)return{width:s,height:c,content:l};let d=u.height+12,f=Math.max(s,Math.ceil(u.width+2*o));return{width:f,height:Math.ceil(c+d),content:n(u,f/2,o+u.height/2,` class="pele-title" font-weight="var(--_tw)"`)+`<g transform="translate(${e((f-s)/2)},${e(d)})">${l}</g>`}}export{a as n,i as t};
-//# debugId=f56d8921-cf5d-40e7-b2bd-3657545219e

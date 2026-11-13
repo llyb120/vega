@@ -1,4 +1,0 @@
-f
-!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="3e11cf99-06aa-46a1-a630-77d634a8ed7c",e._sentryDebugIdIdentifier="sentry-dbid-3e11cf99-06aa-46a1-a630-77d634a8ed7c"}catch(e){}}(import.meta.url);
-import{o as e}from"./chunk-rolldown-runtime-BCiCTKAo.js";import{Kt as t,in as n}from"./index.eager-common-Cu696cDC.js";var r=e(t(),1),i=(0,r.createContext)(null);function a(e){return a.d=2666,(0,r.createElement)(i,{value:e.presentation},e.children)}function o(){let e=(0,r.useContext)(i);return n(e!=null,`useSettingsPresentation: no SettingsPresentationProvider above this component`),e}export{o as n,a as t};
-//# debugId=3e11cf99-06aa-46a1-a630-77d634a8ed7

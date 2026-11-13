@@ -1,4 +1,0 @@
-f
-!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="2e6cf5ad-ac55-4d36-a875-8985e718875f",e._sentryDebugIdIdentifier="sentry-dbid-2e6cf5ad-ac55-4d36-a875-8985e718875f"}catch(e){}}(import.meta.url);
-var e={request:{id:`A0/u13`},"open-settings":{id:`irWnmp`}},t={id:`OJx3wK`};function n(e){switch(e){case void 0:return{command:void 0,label:{id:`h7peZQ`},note:`waiting`};case`ready`:return{command:void 0,label:{id:`joLIQz`},note:void 0};case`needs_permission`:return{command:`request`,label:{id:`h7peZQ`},note:void 0};case`denied`:return{command:`open-settings`,label:{id:`Yp+Hi/`},note:`settings-hint`};case`unavailable`:return{command:void 0,label:t,note:`unavailable`}}}export{t as n,n as r,e as t};
-//# debugId=2e6cf5ad-ac55-4d36-a875-8985e718875

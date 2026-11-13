@@ -1,4 +1,0 @@
-3
-!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="a5647fe6-2f30-4e2a-8bfb-4eb63ebb50e6",e._sentryDebugIdIdentifier="sentry-dbid-a5647fe6-2f30-4e2a-8bfb-4eb63ebb50e6"}catch(e){}}(import.meta.url);
-function e(e,t,n,r,i,a=0){if(e===``||t<=0)return;let o=i.width(e,n,a);if(o<=t)return{text:e,size:n,width:o};let s=Math.max(r,Math.floor(n*t/o));for(;s>=r;){if(o=i.width(e,s,a),o<=t)return{text:e,size:s,width:o};s--}let c=Array.from(e),l=0,u=c.length-1;for(;l<u;){let e=l+u+1>>1;i.width(c.slice(0,e).join(``).trimEnd()+`\u2026`,r,a)<=t?l=e:u=e-1}if(l===0)return;let d=c.slice(0,l).join(``).trimEnd()+`\u2026`;return o=i.width(d,r,a),o<=t?{text:d,size:r,width:o}:void 0}export{e as t};
-//# debugId=a5647fe6-2f30-4e2a-8bfb-4eb63ebb50e

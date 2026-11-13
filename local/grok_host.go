@@ -1,28 +1,20 @@
 package main
 
 import (
-	"embed"
-	"io/fs"
+	"archive/zip"
+	"bytes"
+	_ "embed"
 	"net/http"
 )
 
-//go:embed all:grok_ui
-var grokUIFS embed.FS
+//go:embed grok_ui.zip
+var grokZipData []byte
 
-// grokFS 返回嵌入的 grok_ui 子文件系统
-func grokFS() fs.FS {
-	sub, err := fs.Sub(grokUIFS, "grok_ui")
-	if err != nil {
-		return nil
-	}
-	return sub
-}
-
-// grokFileServer 提供静态资源服务
+// grokFileServer 提供从嵌入 zip 包读取的静态资源服务
 func grokFileServer() http.Handler {
-	sub := grokFS()
-	if sub == nil {
+	zr, err := zip.NewReader(bytes.NewReader(grokZipData), int64(len(grokZipData)))
+	if err != nil {
 		return http.NotFoundHandler()
 	}
-	return http.FileServer(http.FS(sub))
+	return http.FileServer(http.FS(zr))
 }

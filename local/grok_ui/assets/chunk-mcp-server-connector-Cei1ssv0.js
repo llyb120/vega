@@ -1,4 +1,0 @@
-2
-!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="f2701d3a-674a-4942-b2e5-80495d149128",e._sentryDebugIdIdentifier="sentry-dbid-f2701d3a-674a-4942-b2e5-80495d149128"}catch(e){}}(import.meta.url);
-import{Fx as e,Px as t,lx as n}from"./index.eager-app-6K9VF8rg.js";function r(e){return e.toLowerCase().replace(/[^a-z0-9]/g,``)}function i(i){let a=t(i),o=new Map;for(let e of i)if(e.builtinServerIdentifier==null)for(let t of[r(e.name),r(e.displayName)])t.length>0&&!o.has(t)&&o.set(t,e);return t=>{let i=n(t),s=o.get(r(i));return s==null?{name:i,icon:a(i)}:{name:s.displayName,icon:e(s)}}}export{i as t};
-//# debugId=f2701d3a-674a-4942-b2e5-80495d14912
