@@ -728,7 +728,9 @@ export class Tools {
     if (guest) assert(memberOnly(a.action, a.kind), `这条群聊消息来自${guest.kind === "user" ? "用户" : "牛马"}「${guest.name}」，不是牛马主人：只能派单、查询、补充、续做和停止任务；职责和记忆只有主人能用`);
     if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
       const task = employee.task(await employee.state(), a.id);
-      const value = await employee.control(a, undefined, false);
+      // shortcut: 没有客户端消息ID时用序号与毫秒时间区分清空后的消息；需严格跨清空幂等时改用持久消息ID。
+      const sourceId = source?.seq ? `${this.session.id}:${source.clientMessageId ? `${source.actorId || ""}:${source.clientMessageId}` : `${source.seq}:${source.at || 0}`}` : undefined;
+      const value = await employee.control(a, undefined, false, sourceId);
       return { value, task: await taskLink(a.id, a.action !== "stop" && !value.duplicate) };
     }
     if (a.action === "vault_get") employee.authorize(await employee.state(), this.session.taskId || "", a);

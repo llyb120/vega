@@ -91,15 +91,9 @@ export const taskSummary = (t: Task) =>
     nextAt: ended(t.status) ? undefined : at(t.nextCheckAt),
     finishedAt: at(t.finishedAt),
   }).filter(([, v]) => v !== undefined));
-/**
- * A delivered task accepts a direct follow-up in its own session only within this window after its latest delivery.
- * The window is enforced here; whether the follow-up is related is the communication model's judgement.
- */
-export const FOLLOW_UP_WINDOW_MS = 4 * 60 * 60_000;
-export const followUpOpen = (t: Task, now = Date.now()) =>
-  t.status === "done" && !t.dutyId && !t.fromDuty && t.side !== "computer" && !!t.workSession &&
-  typeof t.finishedAt === "number" && t.finishedAt > 0 && now - t.finishedAt <= FOLLOW_UP_WINDOW_MS;
-export const followUpSummary = (t: Task) => ({ ...taskSummary(t), followUpUntil: at(t.finishedAt + FOLLOW_UP_WINDOW_MS) });
+/** Eligibility is about task ownership/state, not how long ago the task was delivered. */
+export const followUpOpen = (t: Task) =>
+  t.status === "done" && !t.dutyId && !t.fromDuty && t.side !== "computer" && !!t.workSession;
 /** Sealed tasks are archived by the user by hand; nothing (model, scheduler, remote member) may revive them. */
 const SEALED_MESSAGE = "任务已封存，禁止恢复、续做或重新派发";
 
@@ -1057,7 +1051,7 @@ export class Employee {
                 "key exceeds 200",
               );
               const old = a.key ? s.tasks.find((t) => t.key === a.key) : undefined;
-              if (old) return { id: old.id, exists: true, status: old.status };
+              if (old) return { id: old.id, exists: true, status: old.status, next: "这是已有任务，本次创建没有自动续做；先核对原目标和用户意图，需要继续时按状态使用 employee_task_manage 的 resume，不要绕过审批或用户停止。" };
               assert(
                 s.tasks.filter((t) => !ended(t.status)).length < 100,
                 "Active task capacity reached",
@@ -1594,7 +1588,7 @@ export class Employee {
         return { data: im.data, ext: im.mime.split("/")[1] };
     }
   }
-  async control(a: Obj, owner: Owner = { token: "", name: "" }, echoChatReply = true) {
+  async control(a: Obj, owner: Owner = { token: "", name: "" }, echoChatReply = true, supplementSource?: string) {
     let chatReply: { text: string; taskId: string } | undefined;
     const releaseCleanup = a.action === "resume" && typeof a.id === "string" ? await this.runtime.holdTaskCleanup?.(a.id) : undefined;
     let value: any;
@@ -1650,15 +1644,13 @@ export class Employee {
             assert(!["approval", "cancelled"].includes(t.status), "Use explicit approval or a new task");
             const text = a.text.replace(/\r\n?/g, "\n").trim();
             const previous = t.lastSupplement ?? t.answer?.replace(/\r\n?/g, "\n").split("\n用户补充：").at(-1)?.trim();
-            const duplicate = previous === text;
+            const duplicate = previous === text && (!supplementSource || t.lastSupplementSource === supplementSource);
             const reopening = t.status === "done";
             if (reopening) {
-              const now = Date.now();
-              assert(!t.dutyId && !t.fromDuty && t.side !== "computer" && t.workSession, "职责触发或没有原工作会话的已交付任务不能在原任务续做；请用 employee_task_create 新建任务，并在 instructions 写明关联任务 id 与已有结果");
-              assert(followUpOpen(t, now), `该任务已于 ${at(t.finishedAt) || "未知时间"} 交付，超过 ${FOLLOW_UP_WINDOW_MS / 3_600_000} 小时续做时限，未在原任务续做；请用 employee_task_create 新建任务，并在 instructions 写明关联任务 id 与已有结果`);
+              assert(followUpOpen(t), "职责触发或没有原工作会话的已交付任务不能直接续做；请核对原任务和用户意图，不要自动新建替代任务");
               if (duplicate) return { ok: true, duplicate, status: t.status, next: "This supplement was already handled and delivered; do not reopen the task or create a new one for it" };
               t.deliveries = [...(t.deliveries || []), { revision: t.revision || 0, finishedAt: t.finishedAt, summary: t.summary || "", result: clip(t.result || "", 8000), deliverableRefs: t.deliverableRefs || [] }].slice(-5);
-              t.answer = (t.answer || "") + `\n[已交付任务的直接后续] 本任务已于 ${at(t.finishedAt)} 交付；已完成步骤、已验证结果和产物保留，不要重做，不要重复已执行的提交/发送；只做下面这条补充新增的部分，新增动作仅限补充明确要求的范围。用 task_progress 在原计划后追加新步骤，验证后 task_complete 交付本次新增结果。`;
+              t.answer = (t.answer || "") + `\n[已交付任务的直接后续] 本任务已于 ${at(t.finishedAt) || "未知时间"} 交付；已完成步骤、已验证结果和产物保留，不要重做，不要重复已执行的提交/发送。先按用户最新意图判断：若要求继续原目标，核对原要求和回执，恢复仍需完成的步骤（包括之前标为取消的步骤）；若只要求新增部分，或用户明确放弃某些要求，不擅自扩大范围。用 task_progress 更新原计划，验证后 task_complete 交付本次结果。`;
             }
             if (!duplicate) {
               t.answer = (t.answer || "") + "\n用户补充：" + a.text;
@@ -1666,6 +1658,7 @@ export class Employee {
               t.revision = (t.revision || 0) + 1;
               if (wantsSettle(t)) t.settlePreferred = true;
               else t.recovery = undefined;
+              t.lastSupplementSource = supplementSource;
             }
             t.lastSupplement = text;
             if (this.busy.has(t.id) || (duplicate && ["queued", "running", "recovering", "deferred"].includes(t.status)))

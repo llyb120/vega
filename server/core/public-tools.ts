@@ -143,7 +143,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       status: str("任务过滤：all（默认）全部、active 未收尾、ended 已收尾（完成、失败、停止、取消、封存）", { enum: ["all", "active", "ended"] }),
       memoryQuery: str("只影响返回的相关记忆：按这个关键词挑最相关的 30 条；省略为不按关键词", { maxLength: 2000 }) }));
   out.push(tool("employee_task_create",
-    "给当前牛马派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。反复、定时或按条件做的事用 employee_duty_create" +
+    "给当前牛马派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务但不自动续做；需要继续同一目标时核对状态并用 resume，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。反复、定时或按条件做的事用 employee_duty_create" +
       (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : ctx.group ? "。群聊里只给按群公告归你的工作派单；归其他牛马的不要派单，在回复里 @它 交出。" : "。"),
     { instructions: instructions("任务目标、范围、约束和交付标准，保留用户原话；不写工具名或动作名"),
       dedupeKey: str("业务唯一标识，≤200 字；同 key 已有任务（含已收尾）时直接返回原任务。用户明确要求重做已完成的事时用新 key（如原 key 加 :v2）", { minLength: 1, maxLength: 200 }),
@@ -158,7 +158,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         ["set_profile", "改尚未开始的任务的开局场景偏好（职责触发的任务不能改）"],
         ["reschedule", "改执行时间，runAt 或 delayMinutes 二选一（职责触发的任务不能改期）"],
         ["cancel", "取消任务并保留记录，不交付（运行中的先 stop）"],
-        ["resume", "不带 supplement 时继续已停止、失败或取消的任务（复用原会话和计划）；带 supplement 时给未收尾的任务追加要求，或对交付后 4 小时内的任务做直接后续（同一目标上的下一步，在原会话续做并保留已交付结果），相同内容不会重复记录；无关的新目标或超时用 employee_task_create"],
+        ["resume", "不带 supplement 时按用户明确意图继续已停止、失败或取消的任务；带 supplement 时补充未收尾任务，或在原会话继续已交付任务的同一目标，不按交付时间设期限。写清用户真实意图与已知外部回执；继续原目标时保留计划并恢复仍需完成的步骤，不能只做补充中的一步。审批、封存和停止仍受原权限约束；无关的新目标才新建"],
         ["answer", "回答正在等待信息的任务；审批只能用户在界面点击，不能用 answer 批准"],
         ["stop", "真正停止执行：回执 executionStopped=true 才算已停，false 表示停止请求已发出、正在收尾"],
       ]) + "。",
@@ -237,7 +237,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       "向交代人要只有他能提供的信息，或必须他处理的阻碍（短信/邮箱验证码、访问码、2FA/OTP 等）：question 写清需要什么。滑块/拼图/旋转等视觉验证码先用 chrome_act pointer 自行拖，连续失败后再问，不要一上来就让用户代拖。任务挂起并立即结束本轮，回答后在原会话继续。能自己查到的不要问，低风险细节自行决定；要批准操作用 task_request_approval。必须单独调用。",
       { question: str("要对方补充或处理的内容，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["question"]));
     out.push(tool("task_wait",
-      "已提交的外部作业（构建、发布、导出等）或已发出的澄清请求需要等待结果时挂起当前任务：checkpoint 写作业编号或请求链接、已做的操作与回执、当前状态、检查方式和超时处理（不含凭据）；resumeAt 和 delayMinutes 二选一。立即结束本轮并释放执行名额，到时在原会话续做，只检查原作业或回复，同一请求不要重发；有新疑点可发新一轮澄清并保存新回执。没有外部结果、只是把本任务改到以后做用 task_reschedule。必须单独调用。",
+      "已提交的外部作业（构建、发布、导出等）或已发出的澄清请求需要等待结果时挂起当前任务：checkpoint 写作业编号或请求链接、已做的操作与回执、当前状态、检查方式和必要的升级处理（不含凭据）；resumeAt 和 delayMinutes 二选一，结合对方预计回复、工作时间及业务截止时间安排下次，不把等待时长当作任务完成期限。立即结束本轮并释放执行名额，到时在原会话续做，只检查原作业或回复，同一请求不要重发；无回复时按实际情况再次挂起，有部分回复先判断可独立继续的工作。确认真实送达和通知生效，未触达或不确定时如实告知，必要时请用户处理。有新疑点可发新一轮澄清并保存新回执。没有外部结果、只是把本任务改到以后做用 task_reschedule。必须单独调用。",
       { checkpoint: str("恢复点，1–8000 字", { minLength: 1, maxLength: 8000 }), resumeAt: beijing("续做时间"), delayMinutes: int("多少分钟后续做，1–10080", { minimum: 1, maximum: 10080 }) },
       ["checkpoint"]));
     if (!ctx.computer) {

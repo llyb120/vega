@@ -133,6 +133,35 @@ test("an @ starts that member's turn with the group context; members @ each othe
   } finally { await close(); }
 });
 
+test("group task identifier matches are scoped to the same group and the current message", async () => {
+  const { engine, make, close } = await fixture();
+  try {
+    const employeeId = await make("小A", "u1"), employee = await engine.employee.for(employeeId);
+    const group = await engine.groups.create(u1, { name: "关联任务", employees: [employeeId] });
+    const url = "https://example.test/stories/1120427644139799025";
+    const grouped = (await employee.execute("", { action: "add", kind: "todo", text: `群内开发 ${url}` })).value.id;
+    const privateTask = (await employee.execute("", { action: "add", kind: "todo", text: `私聊任务 ${url}` })).value.id;
+    await employee.update(state => {
+      employee.task(state, grouped).group = { groupId: group.id, name: group.name, hop: 0, requester: { kind: "user", id: "u1", name: "alice" }, byOwner: true };
+    });
+    const groupSession = (await engine.groups.get(group.id))!.session;
+    await engine.store.append(groupSession, { role: "user", text: `上次讨论了 ${url}`, author: { kind: "user", id: "u1", name: "alice" } });
+    const seen = script(engine, { [employeeId]: ["收到", "收到"] });
+    await engine.groups.send(u1, group.id, { text: "@小A 你好" });
+    await until(() => seen.length > 0);
+    await settle(engine);
+    assert(!seen[0].messages.findLast((message: any) => message.role === "user").text.includes("[按标识匹配的任务候选]"), "an older group message is not the current task request");
+    await engine.groups.send(u1, group.id, { text: `@小A ${url}?from_iteration_id=1 请继续` });
+    await until(() => seen.length > 1);
+    await settle(engine);
+    const input = seen[1].messages.findLast((message: any) => message.role === "user").text;
+    const candidates = JSON.parse(input.split("[按标识匹配的任务候选] ")[1].split("\n")[0]);
+    assert.equal(candidates.total, 1);
+    assert.equal(candidates.tasks[0].id, grouped);
+    assert(!candidates.tasks.some((task: any) => task.id === privateTask));
+  } finally { await close(); }
+});
+
 test("the relay between employees stops after the hop cap with a notice", async () => {
   const { engine, make, close } = await fixture();
   try {
