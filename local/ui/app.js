@@ -269,7 +269,7 @@ function renderStream(scroll) {
   }
   if (!parts.length) parts.push(`<div class="welcome">还没有消息<small>说一句话就能开工</small></div>`);
   if (firstNew >= 0 && !state.markGone) parts.splice(firstNew, 0, `<div class="new-line" role="separator">新</div>`);
-  if (state.running) parts.push(`<div class="msg"><div class="bubble bot"><span class="typing">正在工作<i></i><i></i><i></i></span></div></div>`);
+  if (state.running) parts.push(`<div class="msg working"><span class="working-face">${faceHTML(state.avatar, state.current.split(":")[1], state.current)}</span><span class="typing">正在工作<i></i><i></i><i></i></span></div>`);
   host.innerHTML = parts.join("");
   if (scroll || state.stick) scrollBottom(); else updateNewPill();
 }
@@ -294,6 +294,7 @@ async function open(thread) {
     state.lastSeq = data.lastSeq || (state.messages.at(-1)?.seq ?? 0);
     state.running = !!data.running;
     if (data.title) state.title = data.title;
+    $("input").placeholder = "给 " + (state.title || "牛马") + " 发消息";
     if (data.avatar !== undefined) state.avatar = data.avatar;
     if (data.authors !== undefined) state.authors = data.authors;
     seenAt(thread, state.lastSeq);
@@ -533,8 +534,14 @@ splitter.addEventListener("mousedown", (event) => {
   document.body.classList.add("resizing");
   const startX = event.clientX, startWidth = $("side").getBoundingClientRect().width;
   const move = (moveEvent) => {
-    const width = Math.min(420, Math.max(200, startWidth + moveEvent.clientX - startX));
-    app.style.setProperty("--side-w", width + "px");
+    const width = startWidth + moveEvent.clientX - startX;
+    // 拖到很窄就收成图标栏，再拖宽就展开（与 Grok Bot 一致）。
+    if (width < 160) {
+      app.classList.add("rails");
+      return;
+    }
+    app.classList.remove("rails");
+    app.style.setProperty("--side-w", Math.min(420, Math.max(200, width)) + "px");
   };
   const up = () => {
     resizing = false;
