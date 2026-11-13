@@ -58,7 +58,7 @@ export async function employeeCapabilities(employee: Employee, user: { id: strin
     const next = structuredClone(mcp);
     mergeSecrets(next, config.mcp || {});
     for (const [name, value] of Object.entries(next)) {
-      check(!!name.trim() && name.length <= 100 && !/[\x00-\x1f]/.test(name) && !["__proto__", "constructor", "prototype"].includes(name), 400, "Invalid MCP name");
+      check(!!name.trim() && name.length <= 100 && !/[\x00-\x1f]/.test(name) && !["__proto__", "constructor", "prototype"].includes(name), 400, "MCP 名称须为 1–100 个字符且不含换行：名称填在「名称」框，配置只写在右侧 JSON 里");
       validateMcpServer(value, name);
     }
     await store.save("employee-capabilities", id, { ...config, mcp: next });

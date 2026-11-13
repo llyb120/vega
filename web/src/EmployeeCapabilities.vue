@@ -80,6 +80,8 @@ function addMcp() {
   if (!canEdit.value) return;
   const key = mcpName.value.trim();
   if (!key) return;
+  // 名称框被粘进整段 JSON 时不要建出一个存不下的名字（服务端同样拒绝，这里先就地拦住）。
+  if (key.length > 100 || /[\x00-\x1f]/.test(key)) return emit("error", "MCP 名称最多 100 个字符、不能换行；JSON 配置写在右侧内容框里");
   if (Object.hasOwn(mcp.value, key)) return emit("error", "MCP名称已存在");
   mcp.value = { ...mcp.value, [key]: '{\n  "url": "https://example.com/mcp"\n}' };
   mcpName.value = "";

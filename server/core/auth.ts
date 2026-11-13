@@ -22,11 +22,15 @@ export type Principal = {
   expiresAt: number;
 };
 export class AuthError extends Error {
+  // Nitro 的响应文案取 statusMessage：缺了它，任何 check() 失败在网页上都只显示 "Server Error"，
+  // 真正的原因（Invalid MCP name、只有创建者可以修改……）留在 body.message 里没人看得到。
+  readonly statusMessage: string;
   constructor(
     public statusCode: number,
     message: string,
   ) {
     super(message);
+    this.statusMessage = message;
   }
 }
 export function check(

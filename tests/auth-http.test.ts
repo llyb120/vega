@@ -543,6 +543,11 @@ test(
       assert.equal((await req(`/employees/${team.id}/avatar`, "POST", { preset: "zodiac:leo" }, v)).r.status, 403);
       assert.equal((await req(`/employees/${workerA.id}/avatar`, "POST", { preset: "https://tracker.example/pixel" }, a)).r.status, 400);
       assert.equal((await ok(`/employees/${workerA.id}`, "GET", undefined, a)).avatar, customAvatar.avatar);
+      // 保存 MCP 失败的原因必须送到前端：名称里被粘进整段 JSON 时，以前网页上只剩 "Server Error"。
+      const longName = '{"url":"https://mcp.example.com/mcp","timeout":20000,"transportType":"streamable-http","headers":{"X-Keep-Links":"true"}}';
+      const badMcp = await req(`/employees/${workerA.id}/mcp`, "PUT", { mcp: { [longName]: { url: "https://mcp.example.com/mcp" } } }, a);
+      assert.equal(badMcp.r.status, 400);
+      assert.match(badMcp.value.statusMessage, /MCP 名称/);
       await ok(`/employees/${team.id}/avatar`, "POST", { mime: "image/png", data: avatarData }, admin);
       for (const login of [a, b, v]) {
         const image = await fetch(base + `/api/employees/${team.id}/avatar`, { headers: { Cookie: login.cookie } });
