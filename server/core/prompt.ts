@@ -147,14 +147,20 @@ export function boostPrompts(system: string, dynamic: string, frozen: boolean, c
   return { system, dynamic };
 }
 
-/** Attach the dynamic segment to the last user message of a request view; do not persist it. */
-export function attachDynamic(messages: Message[], text: string): Message[] {
-  if (!text) return messages;
-  const copy = messages.map((message) => ({ ...message }));
-  const last = copy.findLast((message) => message.role === "user");
-  if (!last) return copy;
-  last.text = last.text ? last.text + "\n\n" + text : text;
-  return copy;
+/** Pin runtime snapshots after their user turn; notices append, and canonical history stays untouched. */
+export function attachDynamic(messages: Message[], text: string, snapshots = new Map<string, Message[]>(), notice = ""): Message[] {
+  const anchors = messages.map((m, i) => m.seq === undefined ? "position:" + i : `${m.seq}:${m.at ?? ""}`);
+  const live = new Set(anchors.length ? anchors : ["empty"]);
+  for (const key of snapshots.keys()) if (!live.has(key)) snapshots.delete(key);
+  const user = messages.findLastIndex(m => m.role === "user" && m.runtime !== "dynamic" && m.runtime !== "turn_aborted");
+  const anchor = anchors[user < 0 ? messages.length - 1 : user] ?? "empty";
+  if (text && !snapshots.has(anchor)) snapshots.set(anchor, [{ role: "user", text, runtime: "dynamic" }]);
+  if (notice) {
+    const last = anchors.at(-1) ?? "empty";
+    snapshots.set(last, [...(snapshots.get(last) || []), { role: "user", text: notice, runtime: "dynamic" }]);
+  }
+  if (!snapshots.size) return messages;
+  return messages.length ? messages.flatMap((m, i) => [m, ...(snapshots.get(anchors[i]) || [])]) : snapshots.get("empty") || messages;
 }
 
 export function ponytailText(config: Config) {

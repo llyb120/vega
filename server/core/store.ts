@@ -14,6 +14,8 @@ export type Message = {
   role: string;
   text?: string;
   displayText?: string;
+  /** Host-owned provenance; API inputs never set it. Dynamic context exists only in request views. */
+  runtime?: "dynamic" | "steer" | "turn_aborted";
   actorId?: string;
   clientMessageId?: string;
   clientMessageHash?: string;

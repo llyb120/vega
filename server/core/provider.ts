@@ -3,7 +3,7 @@ import type { Message, Call } from "./store";
 import { historyImages } from "./history";
 import type { Model } from "./config";
 import { wireOptions } from "./config";
-import { clampPromptCacheKey } from "./prompt";
+import { attachDynamic, clampPromptCacheKey } from "./prompt";
 import {
   assert,
   clip,
@@ -476,6 +476,19 @@ type Checkpoint = {
 };
 export class Providers {
   checkpoints = new Map<string, Checkpoint>();
+  // Retain only runtime insertions, not canonical history or tool results; resets also refresh the current snapshot.
+  private dynamics = new Map<string, { at: number; snapshots: Map<string, Message[]> }>();
+  dynamicPrompt(session: string, messages: Message[], text: string, notice = "") {
+    const now = performance.now();
+    for (const [key, value] of this.dynamics) if (now - value.at > 1800000) this.dynamics.delete(key);
+    let current = this.dynamics.get(session);
+    if (!current) {
+      this.dynamics.set(session, current = { at: now, snapshots: new Map() });
+      if (this.dynamics.size > 64) this.dynamics.delete(this.dynamics.keys().next().value!);
+    }
+    current.at = now;
+    return attachDynamic(messages, text, current.snapshots, notice);
+  }
   // Injected by the engine: resolves {mime,blobId|path} -> {mime,data:base64} lazily,
   // only for images that survived history trimming.
   resolveImage: (image: {
@@ -488,6 +501,7 @@ export class Providers {
     data: im.data || "",
   });
   reset(session: string) {
+    this.dynamics.delete(session);
     for (const key of this.checkpoints.keys())
       if (key.startsWith(session + ":")) this.checkpoints.delete(key);
   }
