@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import ts from "typescript";
+import * as h3 from "h3";
+import * as auth from "../server/core/auth";
 import {
   publicOrigin,
   sameOrigin,
@@ -27,6 +31,22 @@ function event(headers: Record<string, string> = {}, secure = false) {
     values,
   };
 }
+test("native extension requests reach their own device-credential authentication", async () => {
+  const source = readFileSync("server/core/http-auth.ts", "utf8");
+  const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
+  const module = { exports: {} as any };
+  new Function("require", "module", "exports", code)((name: string) => {
+    if (name === "h3") return h3;
+    if (name === "./auth") return auth;
+    if (name === "./application") return { app: () => ({ auth: { authenticate: async () => undefined }, token: "fixture" }), authenticated: () => false };
+    throw Error("Unexpected dependency " + name);
+  }, module, module.exports);
+  const request = event().event;
+  request.method = "POST";
+  await module.exports.gate(request, "/api/local-agent/extension");
+  await assert.rejects(module.exports.gate(request, "/api/local-agent/other"), { statusCode: 401 });
+});
+
 test("login cookies are HttpOnly/SameSite Strict and Secure follows a pinned public HTTPS origin, not spoofed forwarded headers", () => {
   const previous = process.env.VEGA_PUBLIC_URL;
   try {

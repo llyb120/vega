@@ -795,6 +795,17 @@ export class Employee {
       },
     };
   }
+  /** A device-authorized request can bind its new task before the scheduler sees it. */
+  async createLocalTask(text: string, clientId: string, owner: Owner) {
+    const state = await this.state({ runs: false });
+    assert(!this.deleting && !this.resetting && owner.token === state.ownerId, "只能为自己的牛马创建本机任务");
+    const client = clientId && this.runtime.client?.(state.ownerId, clientId);
+    assert(client && client.clientId === clientId, "指定客户端未在线，无法创建本机任务");
+    return this.execute("", { action: "add", kind: "todo", text }, owner, {
+      cwd: client.cwd,
+      execution: { localAgent: true, localBrowser: true, clientId, browserClientId: clientId, clientName: client.clientName, browserClientName: client.clientName, localPlatform: client.localPlatform, ownerId: state.ownerId },
+    });
+  }
   /** Read-modify-write of the whole employee (record, tasks, runs) in one transaction. */
   async update<T>(fn: (s: EmployeeState) => T | Promise<T>): Promise<T> {
     assert(!this.deleting, "Employee is being deleted");
@@ -932,6 +943,7 @@ export class Employee {
     caller: string,
     a: Obj,
     owner: Owner = { token: "", name: "" },
+    boundExecution?: { execution: Execution; cwd: string; note?: string },
   ): Promise<{ value: any; stop?: boolean; secret?: string }> {
     const action = a.action;
     assert(!this.deleting, "Employee is being deleted");
@@ -1033,7 +1045,7 @@ export class Employee {
                 s.tasks.filter((t) => !ended(t.status)).length < 100,
                 "Active task capacity reached",
               );
-              const bound = t ? undefined : this.bindExecution(s);
+              const bound = t ? undefined : boundExecution || this.bindExecution(s);
               const task: Task = {
                 id: id("t"),
                 text: content,

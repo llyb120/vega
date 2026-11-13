@@ -139,6 +139,30 @@ func TestInstallExtensionSurfacesSiteConfigurationHint(t *testing.T) {
 	}
 }
 
+func TestInstallExtensionUncertainResultRequiresChecking(t *testing.T) {
+	allowExtensionInstall(t, true)
+	for _, scenario := range []string{"disconnect", "invalid-response"} {
+		t.Run(scenario, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if scenario == "disconnect" {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err == nil {
+						_ = conn.Close()
+					}
+					return
+				}
+				_, _ = w.Write([]byte("invalid"))
+			}))
+			defer server.Close()
+			a := pairedAgent(t, server.URL, strings.Repeat("s", 43))
+			err := a.installExtension()
+			if err == nil || !strings.Contains(err.Error(), "可能已创建") || !strings.Contains(err.Error(), "核对") {
+				t.Fatalf("an uncertain submission must not be reported as unstarted: %v", err)
+			}
+		})
+	}
+}
+
 func TestInstallExtensionRequiresAPairedSite(t *testing.T) {
 	allowExtensionInstall(t, true)
 	a := &Agent{dataDir: t.TempDir()}

@@ -165,7 +165,7 @@ Codex / Claude Code / Devin 的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DEVIN_CONF
 ### Chrome（兼容入口）
 
 1. Chrome 与 Nitro 桥接必须在同一电脑/回环环境，运行 Nitro。
-2. 用本机客户端并保持默认的**无头浏览器**时不需要这一步：客户端自己解压内置扩展并装进它拉起的隐藏 Chrome。要改走你自己开的 Chrome（「连接授权 → 浏览器」选「用我自己开的 Chrome」）时，才需打开 `chrome://extensions`，开开发者模式，加载项目 `local/extension/vega-chrome`；部署产物在 `.output/public/extension/vega-chrome`，资源页也下载同一个包。扩展同时内置在本机客户端里，「连接授权 → 授权 → 浏览器扩展」可以把它重新装到本机 Chrome（要求这头牛马的文件系统 Master 与浏览器 Master 都是本机）。
+2. 用本机客户端并保持默认的**无头浏览器**时不需要这一步：客户端自己解压内置扩展并装进它拉起的隐藏 Chrome。要改走你自己开的 Chrome（「连接授权 → 浏览器」选「用我自己开的 Chrome」）时，才需打开 `chrome://extensions`，开开发者模式，加载项目 `local/extension/vega-chrome`；部署产物在 `.output/public/extension/vega-chrome`，资源页也下载同一个包。扩展同时内置在本机客户端里，「连接授权 → 授权 → 浏览器扩展」会为在线的 Windows 客户端创建本机安装任务。
 3. Vega 的扩展有自己的 ID（manifest `key`）和端口 47753–47762，只与 Vega 客户端配对；Nova 的扩展用 47653–47662，两边同时安装也不会互相连接。`VEGA_CHROME_PORT` 可指定单一回环端口。
 4. 无痕操作须在扩展详情开启无痕权限；多浏览器同时连接时优先 Chrome。控制目标始终是已观察到的稳定 tag，不猜当前激活页。
 
