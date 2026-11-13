@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { browserOrigins, captureBrowser, restoreBrowser } from "../server/core/browser-handoff";
+import { browserOrigins, captureBrowser, injectBrowser, restoreBrowser } from "../server/core/browser-handoff";
 
 /** Minimal Chrome double: tabs + the CDP methods the migration uses. */
 function fakeChrome(tabs: any[], options: { cookies?: any[]; storage?: { local: any; session: any }; page?: any } = {}) {
@@ -72,6 +72,35 @@ test("restore writes cookies and storage, then reports what the page actually sh
   assert(chrome.calls.some((call: any) => call.method === "Network.setCookie" && call.params.name === "sid"));
   assert(chrome.calls.some((call: any) => call.method === "Page.navigate" && call.params.url === "https://a.test/home"));
   assert(chrome.calls.some((call: any) => call.method === "Page.reload"));
+});
+
+test("inject merges cookies and storage into open pages without navigating or reloading", async () => {
+  const chrome = fakeChrome([
+    { tag: "t1", url: "https://a.test/home", title: "首页" },
+    { tag: "t2", url: "https://b.test/other", title: "别的站点" },
+  ]);
+  const state = {
+    version: 1 as const, origins: ["https://a.test"], capturedAt: Date.now(), warnings: [],
+    cookies: [{ name: "sid", value: "1", domain: "a.test", path: "/", secure: true, httpOnly: true }],
+    pages: [{ url: "https://a.test/home", title: "首页", localStorage: { token: "t" }, sessionStorage: { step: "2" } }],
+  };
+  const result = await injectBrowser(chrome, state, AbortSignal.timeout(5000));
+  assert.equal(result.ok, true);
+  assert(chrome.calls.some((call: any) => call.method === "Network.setCookie" && call.params.name === "sid"));
+  assert(chrome.calls.some((call: any) => call.method === "Runtime.evaluate" && String(call.params.expression).includes("setItem")));
+  // 按需同步不动用户页签：不导航也不重载。
+  assert(!chrome.calls.some((call: any) => call.method === "Page.navigate" || call.method === "Page.reload"));
+});
+
+test("inject still writes cookies when the authorised origin has no open tab", async () => {
+  const chrome = fakeChrome([{ tag: "t1", url: "https://b.test/other", title: "别的站点" }]);
+  const result = await injectBrowser(chrome, {
+    version: 1, origins: ["https://a.test"], capturedAt: Date.now(), warnings: [],
+    cookies: [{ name: "sid", value: "1", domain: "a.test", path: "/", secure: true, httpOnly: true }],
+    pages: [{ url: "https://a.test/home", title: "", localStorage: { token: "t" }, sessionStorage: {} }],
+  }, AbortSignal.timeout(5000));
+  assert.equal(result.cookies, 1);
+  assert.match(result.warnings.join(), /页签/);
 });
 
 test("a page that still looks like a login form is reported, not called a success", async () => {

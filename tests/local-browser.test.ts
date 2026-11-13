@@ -112,11 +112,10 @@ test("a computer task keeps its task-bound local Chrome for new and legacy sessi
     const config = { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, model: "fixture/model", provider: { fixture: { baseURL: "https://unused.test", models: { model: { supportsImages: true, modalities: { input: ["text", "image"] } } } } } };
     await store.put("config", config);
     engine.catalog.resolve = async (_c, selection) => resolveModel(config, selection || config.scenes.lightweight[0]);
-    // task_relay_computer 已停用：执行位置由这头牛马的文件系统 / 浏览器 Master 决定。
-    await engine.runtimes.setMaster(employee.employeeId, "fs", client.clientId);
-    await engine.runtimes.setMaster(employee.employeeId, "browser", client.clientId);
     const added = await employee.execute("", { action: "add", kind: "todo", text: "Use the existing local Chrome tab" });
     const id = added.value.id;
+    // 任务已绑定到这台客户端（交接后的状态）：电脑侧任务与浏览器都落在本机。
+    await employee.update((state) => { employee.task(state, id).execution = { localAgent: true, localBrowser: true, clientId: client.clientId, browserClientId: client.clientId, clientName: client.name, browserClientName: client.name, localPlatform: client.platform, ownerId: "alice" }; employee.task(state, id).cwd = client.cwd; });
     let turns = 0;
     engine.providers.chat = async () => {
       if (++turns === 1) return { role: "assistant", calls: [{ id: "local-tabs", ...chromeCall({ operation: "tabs" }) }] };
@@ -205,7 +204,7 @@ test("competing sessions pause without input; releasing a turn admits the next s
 
 test("offline, unbound and old clients never fall back to any server browser", async (t) => {
   const { engine, session } = await fixture(t);
-  await assert.rejects(engine.chromeFor({ ...session, clientId: undefined }), /绑定浏览器 Master/);
+  await assert.rejects(engine.chromeFor({ ...session, clientId: undefined }), /本机浏览器需要绑定/);
   engine.localAgents.request = async () => ({ error: "Unknown operation" });
   await assert.rejects(engine.chromeFor(session), /升级客户端/);
   assert.equal(engine.localAgents.active("alice", client.clientId)!.browserLeases.size, 0);

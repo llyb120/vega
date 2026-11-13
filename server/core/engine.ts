@@ -4,7 +4,6 @@ import { Fire } from "./fire";
 import { Groups } from "./groups";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
 import { TaskHandoffs } from "./handoffs";
-import { MasterRuntimes, CLOUD_MASTER } from "./master-runtime";
 import { builtinCommand, expandBuiltin } from "./builtins";
 import { requireSceneModel, sceneModels, sceneModelSelection, sceneAllowSpawn, maskedConfig, mergeSecrets, schedulerLimits, DEFAULT_GLOBAL_SLOTS, DEFAULT_PER_EMPLOYEE_SLOTS } from "./config";
 import { validateContextRules } from "../../shared/context-rules";
@@ -116,8 +115,6 @@ export class Engine {
   employee: Employee;
   /** 任务执行权调度：本地客户端与云端之间的交接、检查点与回传。 */
   handoffs!: TaskHandoffs;
-  /** 账户级文件系统 / 浏览器 Master。 */
-  runtimes!: MasterRuntimes;
   browsers: EmployeeBrowsers;
   relay: NetworkRelay;
   localBrowsers: LocalBrowsers;
@@ -130,10 +127,7 @@ export class Engine {
     // 客户端离线/回连由调度器统一处理：自动接管与增量回传不依赖界面点击。
     if ((value as Obj)?.type === "clients_changed") {
       const owner = String((value as Obj).targetUser || "");
-      if (owner) {
-        this.runtimePush?.(owner);
-        void this.runtimes?.releaseUnavailable(owner).catch(() => {});
-      }
+      if (owner) this.runtimePush?.(owner);
       void this.handoffs?.clients(value as Obj).catch(() => {});
       // 回连的可能正是某个任务在等的设备：交回调度器，由它核对 waitClient 后继续。
       void this.employee?.all().then((all) => all.forEach((employee) => employee.schedule())).catch(() => {});
@@ -283,7 +277,7 @@ export class Engine {
       session.executionCwds = { ...session.executionCwds, [previous]: session.cwd, [target]: cwd };
       session.cwd = cwd;
       session.localAgent = localAgent;
-      // 普通会话不是牛马任务：浏览器仍按这台客户端自己的选择；牛马任务由该牛马的浏览器 Master 绑定。
+      // 普通会话不是牛马任务：浏览器仍按这台客户端自己的选择。
       session.localBrowser = !!agent && agent.browser !== "cloud";
       session.browserClientId = session.localBrowser ? agent?.clientId : undefined;
       session.localPlatform = agent?.platform;
@@ -309,7 +303,6 @@ export class Engine {
     await rm(keyDir(store.files.root), { recursive: true, force: true });
     await engine.vault.key();
     await migrateVaultOwnership(store);
-    await engine.runtimes.loadAll();
     await engine.fire.recover();
     return engine;
   }
@@ -328,12 +321,11 @@ export class Engine {
       emit: (type, data, session?) => this.emit({ type, data, session }),
       config: () => this.config(),
       isolated: true,
-      // 指定 clientId 时返回那台已连接的客户端（含 Follower）；不传则返回当前文件系统 Master（若在线）。
+      // 指定 clientId 时返回那台已连接的客户端；不传则返回任一在线客户端（若在线）。
       client: (ownerId, clientId) => {
         const agent = clientId ? this.localAgents.active(ownerId, clientId) : this.localAgents.active(ownerId);
         return agent ? { clientId: agent.clientId, clientName: agent.name, localPlatform: agent.platform, cwd: agent.cwd, browser: agent.browser, prefer: agent.prefer } : undefined;
       },
-      masters: (employeeId) => this.runtimes.peek(employeeId),
       groups: {
         post: (group, employeeId, message, wake) => this.groups.post(group, employeeId, message, wake),
         taskContext: (groupId, employeeId) => this.groups.taskContext(groupId, employeeId),
@@ -343,30 +335,11 @@ export class Engine {
     };
     this.groups = new Groups(this);
     this.employee = new Employee(store, this.vault, runtime);
-    this.runtimes = new MasterRuntimes(store, this.localAgents, (value) => this.emit(value as any));
-    this.runtimes.listEmployees = async (ownerId) => {
-      const out: { id: string; name: string }[] = [];
-      for (const employee of await this.employee.all()) {
-        const state = await employee.state({ runs: false });
-        if (state.ownerId === ownerId) out.push({ id: employee.employeeId, name: state.name || employee.employeeId });
-      }
-      return out;
-    };
-    this.runtimes.employeeInfo = async (employeeId) => {
-      try {
-        const employee = await this.employee.for(employeeId);
-        const state = await employee.state({ runs: false });
-        return { ownerId: state.ownerId, name: state.name || employee.employeeId };
-      } catch { return undefined; }
-    };
-    this.localAgents.runtimes = this.runtimes;
-    this.relay = new NetworkRelay(store, this.localAgents, (userId, employeeId) => employeeId ? this.runtimes.cloudMayBorrow(employeeId, userId) : this.runtimes.ownerMayBorrow(userId));
+    this.relay = new NetworkRelay(store, this.localAgents);
     const browserOwner = async (id: string) => id.startsWith("user_") ? id.slice(5) : (await (await this.employee.for(id)).state()).ownerId;
     this.browsers = new EmployeeBrowsers(store, chrome.pageScript, async (id) => {
       const ownerId = await browserOwner(id);
       if (!ownerId) return;
-      const employeeId = id.startsWith("user_") ? undefined : id;
-      if (!(employeeId ? this.runtimes.cloudMayBorrow(employeeId, ownerId) : await this.runtimes.ownerMayBorrow(ownerId))) return;
       return this.relay.proxy(ownerId);
     }, async (id) => cloudEnabled() ? cloudFor({ ownerId: await browserOwner(id) }) : undefined);
     this.localBrowsers = new LocalBrowsers(store, this.localAgents, chrome.pageScript);
@@ -388,16 +361,26 @@ export class Engine {
         local: (session) => this.localBrowsers.get(session),
         cloud: (session: Session) => this.browsers.get(this.browserProfileKey(session.ownerId || "")),
       },
+      onlineClients: (ownerId) => this.localAgents.list(ownerId).map((item) => ({ id: item.id })),
+      releaseLocal: (key) => this.localBrowsers.release(key, true),
       seal: (value, aad) => this.vault.sealObject(value, aad),
       open: (blob, aad) => this.vault.openObject(blob, aad),
-      masters: (employeeId) => this.runtimes.peek(employeeId),
     });
-    this.runtimes.beforeSwitch = async (employeeId, kind) => {
-      if (kind === "fs") await this.handoffs.assertIdle(employeeId);
-    };
-    this.runtimes.afterSwitch = async (employeeId, kind, from, to) => {
-      await this.handoffs.onMasterChange(employeeId, kind, from, to);
-    };
+  }
+  /** 账户下浏览器节点视图：云端 + 各客户端（含离线的），供客户端 runtime/ready 视图和前端节点列表使用。 */
+  async clientsView(userId: string): Promise<Obj> {
+    const online = this.localAgents.list(userId);
+    const seen = new Set(online.map((item) => item.id));
+    const nodes: Obj[] = [{ id: "cloud", name: "云端", kind: "cloud", online: true }];
+    for (const item of online) {
+      nodes.push({ id: item.id, name: item.name, kind: "client", online: true, platform: item.platform, cwd: item.cwd });
+    }
+    for (const grant of await this.store.objects<{ userId: string; clientId: string }>("client-token")) {
+      if (grant.userId !== userId || seen.has(grant.clientId)) continue;
+      seen.add(grant.clientId);
+      nodes.push({ id: grant.clientId, name: "客户端 " + grant.clientId.slice(0, 8), kind: "client", online: false });
+    }
+    return { nodes };
   }
   async config(session?: Session): Promise<Config> {
     await migrateEmployeeCapabilities(this.store);
@@ -678,9 +661,9 @@ export class Engine {
         if (agent) session.browserClientId = agent.clientId;
       }
     }
-    // 浏览器 Master 与文件系统 Master 互相独立：本机浏览器不必要求执行权也在本机。
+    // 浏览器端与执行端在同一台设备，但普通会话也可用本机浏览器而不必执行权在本机。
     if (session.localBrowser) {
-      assert(session.browserClientId || session.clientId, "本机浏览器需要绑定浏览器 Master 客户端。");
+      assert(session.browserClientId || session.clientId, "本机浏览器需要绑定一台在线客户端。");
       return this.localBrowsers.get(session, signal);
     }
     const ownerId = await this.browserOwnerId(session);

@@ -212,10 +212,9 @@ type job struct {
 	Op   string          `json:"op"`
 	Args json.RawMessage `json:"args"`
 	// task_status 推送：服务端算好的任务栏五档（对齐 Nova taskbar_status）。
-	Status    *jobStatus           `json:"status"`
-	Runtime   *RuntimeView         `json:"runtime,omitempty"`
-	Nodes     []RuntimeNode        `json:"nodes,omitempty"`
-	Employees []EmployeeMasterView `json:"employees,omitempty"`
+	Status  *jobStatus    `json:"status"`
+	Runtime *RuntimeView  `json:"runtime,omitempty"`
+	Nodes   []RuntimeNode `json:"nodes,omitempty"`
 }
 
 func runtimeFromJob(j job) (RuntimeView, bool) {
@@ -223,7 +222,7 @@ func runtimeFromJob(j job) (RuntimeView, bool) {
 		return *j.Runtime, true
 	}
 	if j.Type == "runtime" {
-		return RuntimeView{Nodes: j.Nodes, Employees: j.Employees}, true
+		return RuntimeView{Nodes: j.Nodes}, true
 	}
 	return RuntimeView{}, false
 }

@@ -194,7 +194,7 @@ export async function sessionDynamicPrompt(s: Session, c: Config, store: Store, 
   const location = s.localAgent
     ? "文件与命令在所选客户端执行；项目 AGENTS.md 必须用 read 在该客户端检查；Chrome 位置由那台客户端自己的配置决定（本机浏览器或云端浏览器），不由会话选择；用本机浏览器时同一客户端同一时间只允许一个会话独占，忙碌时等待原会话结束再继续；sqlite: 与 /api/files、/api/blobs 存档仍在服务端，用 read 直接读这些路径或 URL，禁止 bash 在客户端磁盘上查找。"
     : "文件与命令在服务端执行，不使用已连接客户端的路径或命令环境。";
-  return `${supplement}${shell}\n当前工作目录：${s.cwd.replaceAll("\\", "/")}\n${s.readOnly ? "当前是只读计划模式，不能修改文件或执行非只读MCP工具。\n" : ""}当前执行位置：${s.localAgent ? "客户端 " + (s.clientName || s.clientId || "尚未选择") : "服务端"}。由该牛马在「连接授权」里配置的 Master 决定，不随客户端连接自动改变。${location} 切换执行位置不迁移文件；历史中的路径、工具结果和进程状态可能来自另一端，先在当前端重新检查目录和项目约定，再继续未完成工作。不要重放已完成或结果不确定的命令、写入、提交。\n技能索引（描述匹配时先 read 指定文件；技能和项目约定不扩大用户授权）：\n${JSON.stringify(skills)}\n项目约定：\n${clip(JSON.stringify(instructions), 96000)}`;
+  return `${supplement}${shell}\n当前工作目录：${s.cwd.replaceAll("\\", "/")}\n${s.readOnly ? "当前是只读计划模式，不能修改文件或执行非只读MCP工具。\n" : ""}当前执行位置：${s.localAgent ? "客户端 " + (s.clientName || s.clientId || "尚未选择") : "服务端"}。由当前任务的工作区所在端决定，不随客户端连接自动改变。${location} 切换执行位置不迁移文件；历史中的路径、工具结果和进程状态可能来自另一端，先在当前端重新检查目录和项目约定，再继续未完成工作。不要重放已完成或结果不确定的命令、写入、提交。\n技能索引（描述匹配时先 read 指定文件；技能和项目约定不扩大用户授权）：\n${JSON.stringify(skills)}\n项目约定：\n${clip(JSON.stringify(instructions), 96000)}`;
 }
 
 export async function sessionPrompt(s: Session, c: Config, store: Store, clientSupplement = "") {

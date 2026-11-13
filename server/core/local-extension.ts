@@ -22,14 +22,13 @@ export function browserExtensionPrompt(path: string, client?: { name?: string })
     "4. 完成后用 chrome_connection 确认扩展已连接（本机回环端口 47753–47762）。",
     "",
     "约束：只能用 appuse 操作桌面和原生对话框；不要用 bash、PowerShell、UIAutomation 或任何脚本安装扩展，不要从商店或网络下载插件，不要改 Chrome 的 Profile、偏好设置或登录态。遇到拿不准的原生对话框或权限提示就停下来问用户，不要猜。",
-    "如果发现本机不是这头牛马的文件系统 / 浏览器 Master，不要换成别的机器或云端装：停下来告诉用户去客户端的「本机 → 文件系统 Master」和「授权 → 浏览器 Master」把本机选上。",
+    "如果这台电脑当前不在线，不要换成别的机器或云端装：停下来让用户先让这台电脑的客户端上线。",
   ].join("\n");
 }
 
 /**
- * 设备凭据 → 这台电脑 → 第一头「文件系统与浏览器 Master 都在本机」的可用牛马 → 让它用 appuse 装扩展。
- * 安装要用本机桌面（appuse 按文件系统 Master 在本机执行），装进的是本机 Chrome（浏览器 Master）；
- * 两项对不上时不偷偷换机器，直接把要改的那一处告诉用户。
+ * 设备凭据 → 这台电脑 → 一头可用牛马 → 让它用 appuse 在这台电脑的 Chrome 装扩展。
+ * 装扩展要用这台电脑的桌面（appuse）和这台电脑的 Chrome；这台电脑不在线时不偷偷换机器。
  */
 export async function installBrowserExtension(
   deps: ExtensionDeps,
@@ -47,25 +46,11 @@ export async function installBrowserExtension(
     mine.length,
     "没有可用的牛马：请先在「数字牛马」里新建一个（或等正在删除的牛马处理完），再点一次「更新浏览器扩展」。",
   );
-  let employee = mine[0];
-  let runtime = await deps.engine.runtimes.get(employee.employeeId, owner.id);
-  for (const candidate of mine) {
-    const value = await deps.engine.runtimes.get(candidate.employeeId, owner.id);
-    if (value.fsMaster === grant.clientId && value.browserMaster === grant.clientId) {
-      employee = candidate;
-      runtime = value;
-      break;
-    }
-  }
+  const employee = mine[0];
   const name = async () => (await employee.state()).name;
-  // 所选客户端不在线时 MasterRuntimes 已经回落成云端，所以这里看到的即生效值。
   assert(
-    runtime.fsMaster === grant.clientId,
-    `这头牛马「${await name()}」的文件系统 Master 现在是${masterLabel(runtime.fsMaster)}：appuse 要在这台电脑上执行。请在客户端「本机 → 文件系统 Master」把本机选上，再点一次「更新浏览器扩展」。`,
-  );
-  assert(
-    runtime.browserMaster === grant.clientId,
-    `这头牛马「${await name()}」的浏览器 Master 现在是${masterLabel(runtime.browserMaster)}：要装的是这台电脑的 Chrome。请在客户端「授权 → 浏览器 Master」把本机选上，再点一次「更新浏览器扩展」。`,
+    deps.engine.localAgents.active(owner.id, grant.clientId),
+    `这台电脑当前不在线：appuse 要在它的桌面上执行、扩展要装进它的 Chrome。请先让这台电脑的客户端上线，再点一次「更新浏览器扩展」。`,
   );
   const session = await employee.chat(owner.id);
   assert(!deps.engine.active.has(session.id), "这个牛马正在执行别的请求，等它结束再点一次「更新浏览器扩展」。");
@@ -77,8 +62,6 @@ export async function installBrowserExtension(
   });
   return { employee: await name(), employeeId: employee.employeeId, session: session.id };
 }
-
-const masterLabel = (master: string) => (master === "cloud" ? "云端" : "另一台设备");
 
 /** 只接受客户端报上来的本机绝对路径（Windows 盘符或 POSIX）。 */
 function extensionPath(value: unknown) {

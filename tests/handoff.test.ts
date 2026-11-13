@@ -192,13 +192,13 @@ test("a task on the local client with a cloud browser takes the local login stat
   const w = world();
   const handoffs = new TaskHandoffs(w.deps);
   const session: any = { id: "s1", taskId: "t1", employeeId: "e1", localAgent: true, localBrowser: false, ownerId: "u1" };
-  assert.equal(await handoffs.ensureBrowserState(session), undefined, "未配置授权站点时不动本机登录态");
+  assert.equal(await handoffs.ensureBrowserState(session), undefined, "未配置授权站点时不动登录态");
   await handoffs.configure("e1", { sites: ["https://a.test"] });
-  // 登录态开关已取消，客户端默认允许被借用。
-  await assert.rejects(handoffs.ensureBrowserState(session), /浏览器不可用/);
-  // 用本机浏览器、或在服务端执行时，不需要搬运登录态。
-  assert.equal(await handoffs.ensureBrowserState({ ...session, localBrowser: true }), undefined);
-  assert.equal(await handoffs.ensureBrowserState({ ...session, localAgent: false }), undefined);
+  // 目标端云端浏览器不可达就报错；本机做源端也要浏览器可达。
+  await assert.rejects(handoffs.ensureBrowserState(session), /云端浏览器不可用/);
+  // 浏览器端在本机时，目标就是本机浏览器；它不可达同样报错（云端此时是源端）。
+  await assert.rejects(handoffs.ensureBrowserState({ ...session, localBrowser: true }), /本机浏览器不可用/);
+  await assert.rejects(handoffs.ensureBrowserState({ ...session, localAgent: false }), /云端浏览器不可用/);
   // 已经搬过的任务不重复搬。
   w.state.tasks[0].browserSyncedAt = Date.now();
   assert.equal(await handoffs.ensureBrowserState(session), undefined);

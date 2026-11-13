@@ -82,71 +82,31 @@ test("employees are immediately available even with legacy disabled hours; duty 
   } finally { await engine.close(); await store.close(); }
 });
 
-test("configured Masters decide new tasks, and changing them never moves old, resumed or child tasks", async () => {
+test("new tasks run on the cloud; resumed and child tasks keep their bound execution", async () => {
   const { store, engine } = await fixture();
   const client = { instance: "a".repeat(32), clientId: "d".repeat(32), name: "Office PC", cwd: "C:\\client-only", platform: "windows" };
   try {
     const employee = await engine.employee.for((await engine.employee.create({ name: "Developer" }, "alice")).id);
     engine.localAgents.connect("alice", client);
-    engine.localAgents.request = async (_agent, op, args) => { assert.equal(op, "file"); assert.equal(args.op, "stat"); return { isDir: true, path: args.path }; };
-    // 云端当 Master：新任务落服务端。
+    // 新任务默认云端执行，不再要求配置 Master。
     const original = await add(employee, "server work");
     assert.equal(original.execution?.localAgent, false);
-    // 这头牛马的文件系统与浏览器 Master 都改成这台客户端：新任务在本机，浏览器也在本机。
-    await engine.runtimes.setMaster(employee.employeeId, "fs", client.clientId);
-    await engine.runtimes.setMaster(employee.employeeId, "browser", client.clientId);
+    assert.equal(original.execution?.clientId, undefined);
+    // 已绑定到客户端的任务（例如交接后）不跟着连接状态变；子任务继承父任务执行位置。
     const local = await add(employee, "client work");
-    assert.equal(local.execution?.localAgent, true);
-    assert.equal(local.execution?.clientId, client.clientId);
-    assert.equal(local.execution?.localBrowser, true);
-    assert.equal(local.execution?.browserClientId, client.clientId);
-    assert.equal(local.cwd, client.cwd);
-    // 调用方会话（例如云端普通会话）会把自己的 cwd 带进来；客户端 Master 时仍必须落在客户端目录。
-    const injected = await employee.execute("", { action: "add", kind: "todo", text: "client work from a cloud chat", cwd: "/workspace/.vega-users/alice/workspace" });
-    assert.equal(employee.task(await employee.state(), injected.value.id).cwd, client.cwd, "客户端 Master 忽略调用方会话的云端目录");
-    // 浏览器 Master 单独切到云端：新任务仍在本机执行，浏览器在云端。
-    await engine.runtimes.setMaster(employee.employeeId, "browser", "cloud");
-    const cloudBrowserTask = await add(employee, "client work with cloud browser");
-    assert.equal(cloudBrowserTask.execution?.localAgent, true);
-    assert.equal(cloudBrowserTask.execution?.localBrowser, false);
-    // 子任务继承父任务的执行位置，不跟着当前 Master 变（add 子任务要求父任务在运行）。
-    await employee.update((state) => { state.tasks.find((task) => task.id === original.id)!.status = "running"; });
-    employee.busy.set(original.id, { computer: false, session: "" });
-    const child = await employee.execute(original.id, { action: "add", kind: "todo", text: "child inherits server" });
-    assert.equal(employee.task(await employee.state(), child.value.id).execution?.localAgent, false);
-    // 切换 Master 前先让任务停下并释放占用（产品禁止在有任务运行时切换）。
-    employee.busy.clear();
     await employee.update((state) => {
-      for (const task of state.tasks) if (!["done", "failed", "stopped", "cancelled", "sealed"].includes(task.status)) task.status = "stopped";
+      const task = employee.task(state, local.id);
+      task.execution = { localAgent: true, localBrowser: true, clientId: client.clientId, browserClientId: client.clientId, clientName: client.name, browserClientName: client.name, localPlatform: client.platform, ownerId: "alice" };
+      task.cwd = client.cwd;
+      task.status = "running";
     });
-    await engine.runtimes.setMaster(employee.employeeId, "fs", "cloud");
-    const cloudTask = await add(employee, "Master is the cloud again");
-    assert.equal(cloudTask.execution?.localAgent, false);
-    // 已绑定的任务不跟着 Master 变。
-    assert.equal(employee.task(await employee.state(), local.id).execution?.clientId, client.clientId);
-    assert.equal(employee.task(await employee.state(), local.id).cwd, client.cwd);
-    employee.busy.clear();
-    await employee.control({ action: "resume", id: local.id });
-    assert.equal(employee.task(await employee.state(), local.id).execution?.clientId, client.clientId);
-    const localTask = employee.task(await employee.state(), local.id);
-    await employee.update((state) => { state.tasks.find((task) => task.id === local.id)!.status = 'running'; });
-    employee.busy.set(local.id, { session: '', computer: false });
-    const originalRun = employee.runtime.run;
-    employee.runtime.run = async (sessionId) => {
-      const actual = await store.session(sessionId);
-      assert.equal(actual.localAgent, true);
-      assert.equal(actual.clientId, client.clientId);
-      assert.equal(actual.cwd, client.cwd);
-      await employee.execute(local.id, { action: 'progress', text: 'verified on original client', plan: [{ content: 'check target', status: 'completed' }] });
-      await employee.execute(local.id, { action: 'complete', text: 'verified on original client' });
-    };
-    await employee.run(localTask);
-    employee.runtime.run = originalRun;
+    employee.busy.set(local.id, { computer: false, session: "" });
+    const child = await employee.execute(local.id, { action: "add", kind: "todo", text: "child inherits client" });
+    assert.equal(employee.task(await employee.state(), child.value.id).execution?.localAgent, true);
+    assert.equal(employee.task(await employee.state(), child.value.id).execution?.clientId, client.clientId);
+    // 断开后绑定的客户端不改绑到云端，回连后仍在原设备续做。
     engine.localAgents.disconnect("alice");
-    // 客户端不在线：Master 解析回云端，新任务落服务端并说明原因。
-    const offlineTask = await add(employee, "Master set while the client is offline");
-    assert.equal(offlineTask.execution?.localAgent, false);
-    assert.match(offlineTask.checkpoint || "", /文件系统 Master 为云端/);
+    assert.equal(employee.task(await employee.state(), local.id).execution?.clientId, client.clientId);
   } finally { engine.active.clear(); (await engine.employee.all()).forEach((employee) => employee.busy.clear()); await engine.close(); await store.close(); }
 });
 
@@ -266,9 +226,10 @@ test("a task whose client drops recovers on that same device instead of asking t
   try {
     engine.localAgents.connect("alice", client);
     const employee = await engine.employee.for((await engine.employee.create({ name: "Recover" }, "alice")).id);
-    await engine.runtimes.setMaster(employee.employeeId, "fs", client.clientId);
     const job = await add(employee, "client work");
-    assert.equal(job.execution?.clientId, client.clientId);
+    // 任务已绑定到这台客户端（交接后的状态）：掉线就在原设备恢复，不换端。
+    await employee.update((state) => { employee.task(state, job.id).execution = { localAgent: true, clientId: client.clientId, clientName: client.name, localPlatform: client.platform, ownerId: "alice" }; });
+    assert.equal(employee.task(await employee.state(), job.id).execution?.clientId, client.clientId);
     const session = await store.newSession({ taskId: job.id, employeeId: employee.employeeId, ownerId: "alice", cwd: job.cwd, localAgent: true, clientId: client.clientId, scene: "lightweight", model: "fixture/model" });
     await employee.update((state) => { const task = employee.task(state, job.id); task.workSession = session.id; task.status = "running"; });
     engine.localAgents.disconnect("alice");

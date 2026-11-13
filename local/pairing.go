@@ -20,24 +20,19 @@ import (
 )
 
 type Config struct {
-	ClientID         string               `json:"clientId"`
-	Supplement       string               `json:"supplement,omitempty"`
-	Browser          string               `json:"browser,omitempty"`       // 旧字段，仅作尚未按牛马配置时的缺省
-	BrowserMaster    string               `json:"browserMaster,omitempty"` // 旧的账户级记忆，已改按牛马存
-	LoginState       *bool                `json:"loginState,omitempty"`    // 已废弃：始终允许借用登录态
-	SSHKeys          *bool                `json:"sshKeys,omitempty"`       // 已废弃：始终允许借用 ~/.ssh
-	Prefer           string               `json:"prefer,omitempty"`        // 旧字段，仅作尚未按牛马配置时的缺省
-	FsMaster         string               `json:"fsMaster,omitempty"`
-	EmployeeMasters  []EmployeeMasterPref `json:"employeeMasters,omitempty"`
-	SelectedEmployee string               `json:"selectedEmployee,omitempty"`
-	Offline          bool                 `json:"offline,omitempty"`        // 已废弃：进程开着即上线，忽略此字段
-	Butterfly        bool                 `json:"butterfly,omitempty"`      // 显示任务栏蝴蝶与提示气泡；默认关
-	ConfirmSeconds   int                  `json:"confirmSeconds,omitempty"` // 动鼠标键盘前等几秒（0 = 用默认 15）
+	ClientID       string `json:"clientId"`
+	Supplement     string `json:"supplement,omitempty"`
+	Browser        string `json:"browser,omitempty"`        // 浏览器位置：cloud / local
+	LoginState     *bool  `json:"loginState,omitempty"`     // 已废弃：始终允许借用登录态
+	SSHKeys        *bool  `json:"sshKeys,omitempty"`        // 已废弃：始终允许借用 ~/.ssh
+	Offline        bool   `json:"offline,omitempty"`        // 已废弃：进程开着即上线，忽略此字段
+	Butterfly      bool   `json:"butterfly,omitempty"`      // 显示任务栏蝴蝶与提示气泡；默认关
+	ConfirmSeconds int    `json:"confirmSeconds,omitempty"` // 动鼠标键盘前等几秒（0 = 用默认 15）
 	// BrowserMode 是 chrome_* 用哪个浏览器：空/headless = 客户端自己拉起的无头 Chrome（默认），
 	// real = 用户自己打开、装了 Vega Chrome 扩展的浏览器。
-	BrowserMode      string               `json:"browserMode,omitempty"`
-	TrustedOrigins   []string             `json:"trustedOrigins"`
-	Servers          []ServerCredential   `json:"servers,omitempty"`
+	BrowserMode    string             `json:"browserMode,omitempty"`
+	TrustedOrigins []string           `json:"trustedOrigins"`
+	Servers        []ServerCredential `json:"servers,omitempty"`
 }
 
 // pinnedOrigin 是安装包自带的站点（只允许连它）；dataDir 是它自己的数据目录。
@@ -336,23 +331,6 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   <section class="panel" id="panel-access">
 
   <section class="card">
-    <h2>浏览器 Master</h2>
-    <small>按牛马配置。选定只把这头牛马的其余节点降为 Follower，不影响其它牛马。本机当浏览器 Master 时，不会把云端 Cookie 灌进本机 Chrome，也不会让本机流量改走云端。登录态默认允许被云端 Master 借用，不再单独开关。</small>
-    {{if .Employees}}
-    {{range $emp := .Employees}}
-    <form method="post">
-      <p><strong>{{$emp.Name}}</strong></p>
-      <input type="hidden" name="employeeId" value="{{$emp.ID}}">
-      {{range $.Nodes}}
-      <label class="switch"><input type="radio" name="browserMaster" value="{{.ID}}"{{if eq .ID $emp.BrowserMaster}} checked{{end}}>{{.Name}}{{if eq .ID "cloud"}}（云端）{{else if .Online}} · 在线{{else}} · 离线{{end}}</label>
-      {{end}}
-      <div class="row"><button name="saveBrowserMaster" value="1">保存这头牛马的浏览器 Master</button></div>
-    </form>
-    {{end}}
-    {{else}}<p class="empty">连上站点后，可按牛马分别配置浏览器 Master。尚未列出牛马时无法保存。</p>{{end}}
-  </section>
-
-  <section class="card">
     <h2>浏览器</h2>
     <form method="post">
       <small>chrome_* 工具用哪个浏览器。无头：客户端自己拉起一个隐藏的 Chrome，启动时先尝试复制本机 Chrome 的登录态；Chrome 开着时它的 Cookie 库是独占的、复制不到，改由装在本机 Chrome 里的 Vega 扩展双向同步（要有后台页签，每 10 分钟或每轮操作结束后同步一次，只补对方缺少或已过期的 Cookie），也不影响你自己开着的页面；有头：用你自己打开、装了扩展的 Chrome。</small>
@@ -366,30 +344,13 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   <section class="card">
     <h2>浏览器扩展</h2>
     <form method="post">
-      <small>把客户端内置的 Vega Chrome 扩展解压到本机（<code>{{.ExtensionDir}}</code>），再交给一头牛马在电脑会话里用 appuse 打开 chrome://extensions 加载它。要求该牛马的文件系统 Master 与浏览器 Master 都是本机；不满足会提示该去改哪一项。</small>
+      <small>把客户端内置的 Vega Chrome 扩展解压到本机（<code>{{.ExtensionDir}}</code>），再交给一头牛马在电脑会话里用 appuse 打开 chrome://extensions 加载它。要求本机客户端在线；不满足会提示该怎么做。</small>
       <div class="row"><button name="updateExtension" value="1">更新浏览器扩展</button></div>
     </form>
   </section>
 
   </section>
   <section class="panel" id="panel-client">
-
-  <section class="card">
-    <h2>文件系统 Master</h2>
-    <small>按牛马配置，这是 read / write / edit / bash 实际执行的机器。选定只把这头牛马的其余节点降为 Follower，不影响其它牛马。要停接活，把这台设成 Follower，并把 Master 交给别的节点（没有别的可用节点时用云端）。进程开着就是上线，退出按还原点恢复。</small>
-    {{if .Employees}}
-    {{range $emp := .Employees}}
-    <form method="post">
-      <p><strong>{{$emp.Name}}</strong></p>
-      <input type="hidden" name="employeeId" value="{{$emp.ID}}">
-      {{range $.Nodes}}
-      <label class="switch"><input type="radio" name="fsMaster" value="{{.ID}}"{{if eq .ID $emp.FsMaster}} checked{{end}}>{{.Name}}{{if eq .ID "cloud"}}（云端）{{else if .Online}} · 在线{{else}} · 离线{{end}}</label>
-      {{end}}
-      <div class="row"><button name="saveFsMaster" value="1">保存这头牛马的文件系统 Master</button></div>
-    </form>
-    {{end}}
-    {{else}}<p class="empty">连上站点后，可按牛马分别配置文件系统 Master。尚未列出牛马时无法保存。</p>{{end}}
-  </section>
 
   <section class="card">
     <h2>补充内容</h2>
@@ -428,7 +389,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
 
   <section class="card">
     <h2>账户配对</h2>
-    <p>这里只管理本机与站点账户的配对。云端当 Master 时，访不到的网络会自动单向借用本机网桥，不再单独配置流量中继。</p>
+    <p>这里只管理本机与站点账户的配对。云端访不到的网络会单向借用本机网桥（按账户隔离，只借自己的客户端），不再单独配置流量中继。</p>
     {{range .Accounts}}
     <form method="post" class="account">
       <p>所属服务器地址：<strong><code>{{.Origin}}</code></strong><br>账户 ID：<code>{{.UserID}}</code><br>
@@ -468,15 +429,10 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid form", 400)
 			return
 		}
-		if r.FormValue("saveSupplement") == "1" || r.FormValue("saveFsMaster") == "1" || r.FormValue("saveBrowserMaster") == "1" || r.FormValue("updateExtension") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" || r.FormValue("saveBrowserMode") == "1" {
+		if r.FormValue("saveSupplement") == "1" || r.FormValue("updateExtension") == "1" || r.FormValue("saveButterfly") == "1" || r.FormValue("saveConfirm") == "1" || r.FormValue("saveBrowserMode") == "1" {
 			var err error
 			tab := "client"
-			if r.FormValue("saveBrowserMaster") == "1" {
-				tab = "access"
-				err = a.saveBrowserMaster(strings.TrimSpace(r.FormValue("employeeId")), strings.TrimSpace(r.FormValue("browserMaster")))
-			} else if r.FormValue("saveFsMaster") == "1" {
-				err = a.saveFsMaster(strings.TrimSpace(r.FormValue("employeeId")), strings.TrimSpace(r.FormValue("fsMaster")))
-			} else if r.FormValue("updateExtension") == "1" {
+			if r.FormValue("updateExtension") == "1" {
 				tab = "access"
 				err = a.installExtension()
 			} else if r.FormValue("saveButterfly") == "1" {
@@ -611,7 +567,6 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		accounts = append(accounts, account{saved.Origin, saved.UserID, status, true})
 	}
 	supplement := a.config.Supplement
-	employees, nodes := a.pairingMasters()
 	extension := a.lastExtension
 	butterfly := a.config.Butterfly
 	headlessBrowserMode := a.config.BrowserMode != "real"
@@ -635,8 +590,6 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		Supplement                         string
 		Pin                                string
 		LastSite                           string
-		Employees                          []EmployeeMasterView
-		Nodes                              []RuntimeNode
 		Butterfly                          bool
 		ConfirmSeconds                     int
 		ConfirmMin, ConfirmMax             int
@@ -647,7 +600,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		HeadlessBrowser                    bool
 		HeadlessNotice                     string
 		AssistantURL                       string
-	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, employees, nodes, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts, extension, extensionDir, headlessBrowserMode, headlessNotice, assistantURL})
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts, extension, extensionDir, headlessBrowserMode, headlessNotice, assistantURL})
 }
 
 type loginProof struct {

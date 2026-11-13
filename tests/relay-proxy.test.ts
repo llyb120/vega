@@ -14,13 +14,12 @@ import { relayProxyFile, relayShellEnvironment } from "../server/core/relay-prox
 const grant = { userId: "alice", clientId: "c".repeat(32), hash: "device-hash" };
 async function fixture(t: TestContext) {
   const store = await Store.open(":memory:"), hub = new LocalAgents();
-  // 中继开关已取消：借用条件只由「云端是否 Master」决定，用这个可变标志模拟本机当 Master。
-  let borrow = true;
-  const relay = new NetworkRelay(store, hub, () => borrow);
+  const relay = new NetworkRelay(store, hub);
   const root = await mkdtemp(join(tmpdir(), "vega-relay-test-"));
-  hub.connect(grant.userId, { clientId: grant.clientId, instance: "a".repeat(32), platform: "windows", cwd: "C:\\work" }, { send() {}, close() {} });
+  const details = { clientId: grant.clientId, instance: "a".repeat(32), platform: "windows", cwd: "C:\\work" };
+  hub.connect(grant.userId, details, { send() {}, close() {} });
   t.after(async () => { hub.close(); await relay.close(); await store.close(); });
-  return { store, hub, relay, root, setBorrow: (value: boolean) => { borrow = value; } };
+  return { store, hub, relay, root, offline: () => hub.disconnect(grant.userId, details.instance) };
 }
 function read(stream: NodeJS.ReadableStream, size: number): Promise<Buffer> {
   return new Promise((yes, no) => {
@@ -54,8 +53,8 @@ test("server shells get the proxy whenever a borrowable client is online, with o
   await f.relay.configure(grant, []);
   assert.equal(await f.relay.enabled("alice"), true, "没有规则也能兜底借用（开关字段已取消）");
   assert.equal(await f.relay.enabled("bob"), false, "没有在线客户端就没有代理");
-  f.setBorrow(false);
-  assert.equal(await f.relay.enabled("alice"), false, "本机是 Master 时不借云端出口");
+  f.offline();
+  assert.equal(await f.relay.enabled("alice"), false, "客户端离线时不借云端出口");
 });
 
 test("the ProxyCommand relays a TCP stream through the gateway", async (t) => {

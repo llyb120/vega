@@ -8,7 +8,7 @@ import { assert } from "./util";
 const FRAME = 32 << 10;
 type Grant = { userId: string; clientId: string; hash: string };
 type Record = Grant & { rules: string[]; on?: boolean };
-/** 中继开关已取消：只要云端是 Master，就允许借用在线 Follower，忽略旧的 on 关闭记录。 */
+/** 中继开关已取消：服务端可单向借用在线客户端出网（按账号隔离），忽略旧的 on 关闭记录。 */
 const allowed = (_record: Record) => true;
 type TunnelPeer = Wire;
 type Flow = { grant: Grant; transport: Agent["transport"]; socket: Socket; peer?: TunnelPeer; ready: boolean; sending: boolean; incoming: boolean; timer: ReturnType<typeof setTimeout>; finish: (reason?: string) => void };
@@ -72,8 +72,8 @@ export class NetworkRelay {
   // 同一个地址最近从客户端走通过就不用再探：否则每个连接都要先直连失败或超时一次。
   private routes = new Map<string, number>();
   static ROUTE_TTL_MS = 10 * 60_000;
-  /** 仅当云端是文件系统或浏览器 Master 时才允许经 Follower 出网；本机当 Master 时绝不借云端当出口。 */
-  constructor(private store: Store, private hub: LocalAgents, private mayBorrow?: (userId: string, employeeId?: string) => boolean | Promise<boolean>) {}
+  /** 服务端可借客户端网络中继出网，按账号隔离；客户端永不借服务端。 */
+  constructor(private store: Store, private hub: LocalAgents) {}
   private routeKey(userId: string, host: string, port: number) { return `${userId}:${host}:${port}`; }
   private viaClient(userId: string, host: string, port: number) {
     const at = this.routes.get(this.routeKey(userId, host, port));
@@ -101,7 +101,6 @@ export class NetworkRelay {
     const record = records[0];
     assert(allowed(record), "客户端已关闭该账户的流量中继，不会回退直连");
     assert(record.rules.includes(`${host}:${port}`), "客户端未授权该域名端口");
-    assert(await this.borrowAllowed(userId), "本机是 Master 时不能借云端当出口，流量中继仅在云端为文件系统或浏览器 Master 时单向借用 Follower");
     const agent = this.hub.active(userId, record.clientId);
     assert(agent?.transport && !agent.reconnecting, "中继客户端离线，不会回退直连");
     return { record, agent };
@@ -111,7 +110,6 @@ export class NetworkRelay {
    * 只要该账号的中继开关没关。
    */
   async fallback(userId: string) {
-    if (!(await this.borrowAllowed(userId))) return;
     const records = (await this.store.objects<Record>("client-relay")).filter((item) => item.userId === userId && allowed(item));
     const candidates = records.map((record) => {
       const agent = this.hub.active(userId, record.clientId);
@@ -120,12 +118,8 @@ export class NetworkRelay {
     if (candidates.length !== 1) return;
     return candidates[0];
   }
-  private async borrowAllowed(userId: string, employeeId?: string) {
-    return this.mayBorrow ? !!(await this.mayBorrow(userId, employeeId)) : true;
-  }
-  /** 服务端命令要不要带上中继代理：该牛马的云端是 Master，且有在线且开启中继的客户端。 */
-  async enabled(userId: string, employeeId?: string) {
-    if (!(await this.borrowAllowed(userId, employeeId))) return false;
+  /** 服务端命令要不要带上中继代理：该账号有在线且开启中继的客户端。 */
+  async enabled(userId: string) {
     return !!(await this.fallback(userId));
   }
   inUse(clientId: string) { return [...this.flows.values()].some((flow) => flow.grant.clientId === clientId); }

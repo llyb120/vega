@@ -35,10 +35,9 @@ export class ClientSockets {
   private timer: ReturnType<typeof setInterval>;
   /** 正在做下线交接的连接：同一条连接只交接一次。 */
   private goingOffline = new Set<string>();
-  /** 按牛马的 Master：由 application 注入，供 ready/pong 下发和 set_master 写入。 */
+  /** 账户下在线客户端节点视图：由 application 注入，供 ready/pong 下发。 */
   runtime?: {
     view: (userId: string) => Promise<Obj>;
-    setMaster: (userId: string, employeeId: string, kind: "fs" | "browser", master: string) => Promise<Obj>;
   };
   private onRevoke = async (userId: string) => await this.revoke(userId);
   constructor(private store: Store, private auth: Auth, private hub: LocalAgents, private clientInUse: (clientId: string) => boolean | Promise<boolean>, private relay?: NetworkRelay, private userStop?: (session: string, reason: string) => boolean, private statusFor?: (userId: string, clientId: string) => Promise<Obj>, private offlineHandoff?: (userId: string, clientId: string) => Promise<Obj>) {
@@ -154,16 +153,6 @@ export class ClientSockets {
         accepted = true;
         void this.offline(socketId, connection);
         return;
-      } else if (value.type === "set_master") {
-        assert(this.runtime, "此节点尚不支持主从配置");
-        assert(typeof value.employeeId === "string" && value.employeeId, "请指定要配置的牛马");
-        assert(value.kind === "fs" || value.kind === "browser", "只能设置文件系统或浏览器 Master");
-        assert(value.master === "cloud" || (typeof value.master === "string" && /^[a-f0-9-]{32,36}$/.test(value.master)), "无效的 Master");
-        const view = await this.runtime.setMaster(grant.userId, value.employeeId, value.kind, value.master);
-        accepted = true;
-        connection.socket.send({ type: "runtime", ...view });
-        void this.pushStatus(grant.userId, grant.clientId);
-        void this.pushRuntime(grant.userId);
       } else if (value.type === "ping") {
         if (value.relay !== undefined) await this.relay?.configure(grant, value.relay, value.relayOn);
         if ("supplement" in value) {
@@ -197,7 +186,7 @@ export class ClientSockets {
         accepted = true;
         connection.socket.send({ type: "user_stop", session: value.session, stopped });
       } else {
-        assert(value.type === "result", "Client may only send heartbeats, job results, master updates and user stops");
+        assert(value.type === "result", "Client may only send heartbeats, job results and user stops");
         this.hub.result(grant.userId, { id: value.id, result: value.result, instance: connection.details.instance });
         // Results also prove the control channel is alive; refresh the agent heartbeat so a burst of
         // results without an interleaved ping cannot expire the LocalAgents timer and suspend the client.
