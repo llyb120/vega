@@ -7,7 +7,7 @@
   --white: #ffffff;
   --brand: #994af3;
   --mine: #7f36cc;
-  --bot: #f0f0f0;
+  --bot: #f2f2f2;
   --ink: #1c1c1c;
   --ink-2: #6f6f74;
   --faint: #a3a4a3;
@@ -53,6 +53,8 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .search-row input::placeholder { color: var(--faint); }
 .hero { display: grid; justify-items: center; flex: none; gap: 9px; padding: 22px 8px 0; color: inherit; }
 .hero-face { display: grid; place-items: center; width: 54px; height: 54px; }
+/* Bot 图形只占 viewBox 的 ~78%，放 SVG 盒把它撑满容器（Grok Bot 的头像就是填满的）。 */
+.hero-face .bot-avatar { width: 69px; height: 69px; }
 .hero-name { max-width: 100%; overflow: hidden; color: var(--faint); font-size: 12px; line-height: 16px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .rail { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 23px 16px 8px 16px; scrollbar-width: none; }
 .rail-list { display: flex; flex-direction: column; }
@@ -62,6 +64,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .row:hover { background: var(--hover); }
 .row.on { background: var(--sel); }
 .row-face { position: relative; display: grid; place-items: center; flex: none; width: 36px; height: 36px; border-radius: 10px; overflow: visible; }
+.row-face .bot-avatar { width: 46px; height: 46px; }
 .row-letter { border-radius: 10px; background: #fff; color: var(--ink-2); font-size: 13px; font-weight: 600; }
 .row-text { display: grid; flex: 1; min-width: 0; gap: 0; }
 .row-text strong { overflow: hidden; color: var(--ink); font-size: 13px; font-weight: 600; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
@@ -92,6 +95,13 @@ body.resizing { cursor: col-resize; }
 .app.rails .rail { padding: 88px 0 8px; }
 .app.rails .row { justify-content: center; height: 54px; padding: 0; }
 .app.rails .acc-pill { display: none; }
+/* 收起态底部：参考图里是「＋」「⊞」两个细线图标，然后才是账号头像。 */
+.rail-actions { display: none; flex-direction: column; gap: 4px; }
+.app.rails .rail-actions { display: flex; order: -1; }
+.rail-actions button { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; color: #6f716f; }
+.rail-actions button:hover { background: #eaeaea; color: var(--ink); }
+.rail-actions .icon { width: 18px; height: 18px; stroke-width: 1.8; }
+.app.rails .gear { display: none; }
 .app.rails .foot { flex-direction: column; gap: 8px; padding: 0 0 14px; }
 
 /* ── 聊天 ───────────────────────────────────────────── */
@@ -100,6 +110,7 @@ body.resizing { cursor: col-resize; }
 .title-drag { flex: 1; align-self: stretch; }
 .pill { position: absolute; left: 50%; top: 10px; display: flex; align-items: center; gap: 12px; height: 39px; max-width: 60%; padding: 0 14px 0 7px; border-radius: 20px; background: var(--white); box-shadow: 0 1px 3px rgb(16 18 22 / 8%); transform: translateX(-50%); }
 .pill-face { display: grid; place-items: center; flex: none; width: 24px; height: 24px; }
+.pill-face .bot-avatar { width: 31px; height: 31px; }
 .pill-name { overflow: hidden; color: var(--ink); font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .title-tools { display: flex; align-items: center; gap: 16px; margin-left: auto; margin-right: -3px; align-self: stretch; }
 .share { display: grid; place-items: center; width: 34px; height: 32px; border-radius: 10px; background: var(--white); color: #6f716f; box-shadow: 0 1px 2px rgb(16 18 22 / 5%); }
@@ -123,7 +134,7 @@ body.resizing { cursor: col-resize; }
 .msg-actions button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; color: var(--faint); }
 .msg-actions button:hover { background: #efefef; color: var(--ink); }
 .msg-actions .icon { width: 13px; height: 13px; stroke-width: 1.8; }
-.bubble { max-width: 560px; min-width: 0; padding: 6.5px 14px; border-radius: 16px; overflow-wrap: anywhere; font-size: 15px; line-height: 22px; }
+.bubble { max-width: 540px; min-width: 0; padding: 6.5px 14px; border-radius: 18px; overflow-wrap: anywhere; font-size: 15px; line-height: 22px; }
 .bubble.bot { background: var(--bot); color: var(--ink); }
 .bubble.user { background: var(--mine); color: #fff; }
 .bubble.user { padding: 6.5px 14px; }

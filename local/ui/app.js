@@ -52,16 +52,14 @@ function botFace(avatar, seed) {
       <stop offset="0" stop-color="${avatarAPI.shade(bot.hex, 0.32)}"/><stop offset="0.42" stop-color="${bot.hex}"/><stop offset="0.8" stop-color="${avatarAPI.shade(bot.hex, -0.22)}"/><stop offset="1" stop-color="${avatarAPI.shade(bot.hex, -0.42)}"/>
     </radialGradient>
     <radialGradient id="${uid}h"><stop offset="0" stop-color="#fff" stop-opacity=".55"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
-    <radialGradient id="${uid}s"><stop offset="0" stop-color="#000" stop-opacity=".32"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
     <clipPath id="${uid}c"><path d="${geometry.d}"/></clipPath>
   </defs>
-  <ellipse cx="${face.shadow.x}" cy="93.5" rx="${face.shadow.rx}" ry="4.5" fill="url(#${uid}s)" opacity="${face.shadow.opacity}"/>
-  <g class="bot-body"><g transform="translate(50 50) scale(.9) translate(-50 -50)"><g transform="${face.body}">
+  <g class="bot-body"><g transform="${face.body}" data-face="1">
     <path d="${geometry.d}" fill="url(#${uid}b)"/>
     <g clip-path="url(#${uid}c)"><ellipse cx="${face.highlight.x}" cy="${face.highlight.y}" rx="17" ry="12" fill="url(#${uid}h)"/></g>
-    <ellipse class="bot-eye" cx="${face.left.cx}" cy="${face.left.cy}" rx="${face.left.rx}" ry="${face.left.ry}" opacity="${face.left.opacity}"/>
-    <ellipse class="bot-eye" cx="${face.right.cx}" cy="${face.right.cy}" rx="${face.right.rx}" ry="${face.right.ry}" opacity="${face.right.opacity}"/>
-  </g></g></g>
+    <ellipse class="bot-eye" data-eye="l" cx="${face.left.cx}" cy="${face.left.cy}" rx="${face.left.rx}" ry="${face.left.ry}" opacity="${face.left.opacity}"/>
+    <ellipse class="bot-eye" data-eye="r" cx="${face.right.cx}" cy="${face.right.cy}" rx="${face.right.rx}" ry="${face.right.ry}" opacity="${face.right.opacity}"/>
+  </g></g>
 </svg>`;
 }
 /** 一个头像：bot 预设画 SVG，上传的图片走本机代理，其它（旧星座预设）退回默认 bot。 */
@@ -505,6 +503,8 @@ $("accFace").addEventListener("click", openAccount);
 $("accBtn").addEventListener("click", openAccount);
 $("gearBtn").addEventListener("click", () => openURL({ config: true }));
 $("micBtn").addEventListener("click", () => toast("客户端暂不支持语音输入，请在网页里使用语音"));
+$("railAdd").addEventListener("click", () => openURL({ url: ((state.client && state.client.origin) || "") + "/groups/new" }));
+$("railApps").addEventListener("click", () => openURL({ config: true }));
 $("shareBtn").addEventListener("click", () => {
   const id = state.current.split(":")[1];
   const origin = (state.client && state.client.origin) || "";
@@ -553,6 +553,46 @@ window.addEventListener("resize", () => { if ($("side").getBoundingClientRect().
 /* 外部点击收起 hover 卡 */
 window.addEventListener("scroll", hideHover, true);
 window.addEventListener("blur", hideHover);
+
+/* ── 头像看向鼠标：hover 头像区域时，图形和双眼跟着指针转（Grok Bot 的效果） ── */
+const FACE_HOSTS = ".hero-face, .row-face, .pill-face";
+let faceFrame = 0;
+function paintFace(svg, yaw, pitch) {
+  const geometry = avatarAPI.BOT_SHAPE_GEOMETRY[svg.dataset.shape] || avatarAPI.BOT_SHAPE_GEOMETRY.round;
+  const face = avatarAPI.projectFace(geometry, yaw, pitch, 1);
+  const body = svg.querySelector("[data-face]");
+  if (body) body.setAttribute("transform", face.body);
+  for (const [side, eye] of [["l", face.left], ["r", face.right]]) {
+    const node = svg.querySelector(`[data-eye="${side}"]`);
+    if (!node) continue;
+    node.setAttribute("cx", eye.cx);
+    node.setAttribute("cy", eye.cy);
+    node.setAttribute("rx", eye.rx);
+    node.setAttribute("ry", eye.ry);
+    node.setAttribute("opacity", eye.opacity);
+  }
+}
+function faceFor(event) {
+  const host = event.target.closest && event.target.closest(FACE_HOSTS);
+  return host ? host.querySelector("svg.bot-avatar") : null;
+}
+document.addEventListener("mousemove", (event) => {
+  const svg = faceFor(event);
+  if (!svg) return;
+  const rect = svg.getBoundingClientRect();
+  const nx = (event.clientX - (rect.left + rect.width / 2)) / (rect.width / 2 || 1);
+  const ny = (event.clientY - (rect.top + rect.height / 2)) / (rect.height / 2 || 1);
+  const yaw = Math.max(-36, Math.min(36, nx * 34));
+  const pitch = Math.max(-26, Math.min(26, -ny * 26));
+  cancelAnimationFrame(faceFrame);
+  faceFrame = requestAnimationFrame(() => paintFace(svg, yaw, pitch));
+});
+document.addEventListener("mouseout", (event) => {
+  const host = event.target.closest && event.target.closest(FACE_HOSTS);
+  if (!host || (event.relatedTarget && host.contains(event.relatedTarget))) return;
+  const svg = host.querySelector("svg.bot-avatar");
+  if (svg) paintFace(svg, 0, 0);
+});
 
 /* ── 启动 ───────────────────────────────────────────── */
 function restoreSidebar() {
