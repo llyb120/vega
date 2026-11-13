@@ -1,0 +1,4 @@
+4
+!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="014ada5b-810f-4712-abf5-5f1309e548d8",e._sentryDebugIdIdentifier="sentry-dbid-014ada5b-810f-4712-abf5-5f1309e548d8"}catch(e){}}(import.meta.url);
+import{hn as e}from"./index.eager-platform-RJXLWBaV.js";import{ZI as t,dR as n,iL as r}from"./index.eager-app-6K9VF8rg.js";import{C as i}from"./index.eager-vendor-Mv0_sSxx.js";var a=i(),o=`grok_bot_team_review_queue`;function s(i){let s=(0,a.c)(5),l;s[0]===i?l=s[1]:(l=i.teamId!=null&&n(i).canReviewLearnings,s[0]=i,s[1]=l);let u=l,d=t(),f;s[2]!==d||s[3]!==u?(f=()=>(u&&d(o),c),s[2]=d,s[3]=u,s[4]=f):f=s[4],e(f);let p=r(o);return u&&p}function c(){}export{s as n,o as t};
+//# debugId=014ada5b-810f-4712-abf5-5f1309e548d

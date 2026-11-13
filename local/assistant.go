@@ -25,6 +25,8 @@ var assistantMarked []byte
 // assistantMount 把面板页面和它的几个接口挂到本地服务器上。
 func (a *Agent) assistantMount(mux *http.ServeMux) {
 	base := a.assistantPath()
+	grokSrv := http.StripPrefix(base, grokFileServer())
+
 	mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/api/threads"):
@@ -45,16 +47,17 @@ func (a *Agent) assistantMount(mux *http.ServeMux) {
 			butterflyPanelPark()
 			assistantReply(w, http.StatusOK, map[string]any{"ok": true})
 		case strings.HasSuffix(r.URL.Path, "/marked.js"):
-			// markdown 渲染用 marked（MIT），面板里不带构建步骤，直接内嵌发出去。
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(assistantMarked)
-		case r.Method == http.MethodGet:
+		case r.URL.Query().Get("legacy") == "1":
+			// 备用轻量面板
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(assistantPage)
 		default:
-			http.NotFound(w, r)
+			// 默认托管 Grok Bot 完整大窗口静态页面与资源
+			grokSrv.ServeHTTP(w, r)
 		}
 	})
 }

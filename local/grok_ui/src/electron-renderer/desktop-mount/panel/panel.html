@@ -1,0 +1,113 @@
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <script src="../../../../assets/dune-render-trace-hook-265eb7be.js"></script>
+
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src data: blob:; media-src blob:; script-src 'self'; connect-src 'self' ws:;"
+    />
+    <title>Sand</title>
+    <script type="module" crossorigin src="../../../../assets/desktop-mount-panel-B7UqiJP2.js"></script>
+    <link rel="modulepreload" crossorigin href="../../../../assets/chunk-rolldown-runtime-BCiCTKAo.js">
+    <link rel="modulepreload" crossorigin href="../../../../assets/index.eager-common-Cu696cDC.js">
+    <link rel="stylesheet" crossorigin href="../../../../assets/desktop-mount-panel-B8IFCkGk.css">
+    <link rel="modulepreload" crossorigin href="../../../../assets/chunk-prompt-editor-B2hXPxJW.js">
+  </head>
+  <body>
+    <main id="panel" hidden>
+      <button
+        id="mount-trigger"
+        type="button"
+        aria-expanded="false"
+        aria-controls="composer"
+        aria-label="Open composer"
+        aria-describedby="hover-preview-text"
+      >
+        <img id="mark" alt="" draggable="false" />
+        <span id="mark-motion" aria-hidden="true"><span id="mark-motion-canvas"></span></span>
+      </button>
+      <div id="hover-preview" role="tooltip" hidden>
+        <p id="hover-preview-text" dir="auto"></p>
+        <p id="hover-preview-note" dir="auto" hidden></p>
+      </div>
+      <div id="history" hidden><div id="history-list"></div></div>
+      <div id="bot-menu" role="menu" aria-label="Switch bot" hidden>
+        <div id="bot-menu-pinned" role="none">
+          <button id="unmount-item" class="bot-menu-action" type="button" role="menuitem" tabindex="-1">
+            <svg class="bot-menu-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+              <path
+                d="M2.5 3.5h11v7h-11zM6 13.5h4M8 10.5v3"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.25"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span class="bot-menu-name">Unmount from Desktop</span>
+          </button>
+        </div>
+      </div>
+      <template id="bot-menu-item">
+        <button
+          class="bot-menu-item"
+          type="button"
+          role="menuitemradio"
+          aria-checked="false"
+          tabindex="-1"
+        >
+          <img class="bot-menu-mark" alt="" draggable="false" />
+          <span class="bot-menu-name"></span>
+          <svg class="bot-menu-check" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <path
+              d="M3.5 8.5 6.5 11.5 12.5 4.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.75"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+      </template>
+      <form id="composer" inert>
+        <div id="attachments" role="list" aria-label="Attachments" hidden></div>
+        <p id="attachment-notice" role="status" hidden></p>
+        <textarea id="prompt" rows="1" dir="auto" autocomplete="off" spellcheck="true"></textarea>
+        <button id="send" type="submit" aria-label="Send">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path
+              d="M8 13V3M3.5 7.5 8 3l4.5 4.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.75"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <button
+          id="capture"
+          type="button"
+          aria-label="Capture a window or region"
+          aria-keyshortcuts="Alt+Shift+Space"
+          hidden
+        >
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <path
+              d="M14.5 4V3A1.5 1.5 0 0 0 13 1.5H3A1.5 1.5 0 0 0 1.5 3v10A1.5 1.5 0 0 0 3 14.5h3M6.471 7.39h7.963a.151.151 0 0 1 .075.282l-3.754 2.167a.302.302 0 0 0-.151.262v4.336a.151.151 0 0 1-.282.075L6.341 7.616a.151.151 0 0 1 .13-.226z"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+      </form>
+    </main>
+  </body>
+</html>

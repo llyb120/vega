@@ -1,0 +1,4 @@
+a
+!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="a1cfa770-eba6-4593-9a49-c4b8935b88ae",e._sentryDebugIdIdentifier="sentry-dbid-a1cfa770-eba6-4593-9a49-c4b8935b88ae"}catch(e){}}(import.meta.url);
+import{t as e}from"./chunk-personal-bot-target-cVCzOJYF.js";function t(t,n,r){return e({agents:t,mainAgentId:n,selectedAgentId:r,fallback:`none`})}export{t as usageReviewTarget};
+//# debugId=a1cfa770-eba6-4593-9a49-c4b8935b88a

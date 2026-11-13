@@ -1,0 +1,4 @@
+8
+!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="a4b46aae-ff10-48d8-bc30-3f5256684b5d",e._sentryDebugIdIdentifier="sentry-dbid-a4b46aae-ff10-48d8-bc30-3f5256684b5d"}catch(e){}}(import.meta.url);
+import{_R as e,iL as t,iv as n}from"./index.eager-app-6K9VF8rg.js";import{C as r}from"./index.eager-vendor-Mv0_sSxx.js";var i=r();function a(r){let a=(0,i.c)(3),o=n()?.openPane,s=t(`sand_simplified_right_pane`),c=t(`grok_bot_multiplayer`);if(o==null||!s||!e(r,c))return null;let l;return a[0]!==r.id||a[1]!==o?(l=()=>o({agentId:r.id,overviewTab:`overview`}),a[0]=r.id,a[1]=o,a[2]=l):l=a[2],l}export{a as t};
+//# debugId=a4b46aae-ff10-48d8-bc30-3f5256684b5

@@ -1,0 +1,4 @@
+3
+!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="4fd0c374-e03d-40f1-80c1-04609008e583",e._sentryDebugIdIdentifier="sentry-dbid-4fd0c374-e03d-40f1-80c1-04609008e583"}catch(e){}}(import.meta.url);
+var e=`will-change`;function t(t){t.style.getPropertyValue(e)===``&&t.style.setProperty(e,`transform`)}function n(t){t.style.getPropertyValue(e)!==``&&t.style.removeProperty(e)}function r(e){let n=e.closest(`.sand-settings-dialog`);n!==null&&t(n)}export{t as n,n as r,r as t};
+//# debugId=4fd0c374-e03d-40f1-80c1-04609008e58

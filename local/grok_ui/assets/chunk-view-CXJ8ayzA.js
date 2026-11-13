@@ -1,0 +1,4 @@
+1
+!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="a2495735-1adc-4dd7-84af-49081d2fa8a6",e._sentryDebugIdIdentifier="sentry-dbid-a2495735-1adc-4dd7-84af-49081d2fa8a6"}catch(e){}}(import.meta.url);
+import{Gt as e}from"./index.eager-common-Cu696cDC.js";import{C as t}from"./index.eager-vendor-Mv0_sSxx.js";import{a as n}from"./chunk-heading-link-BYtooEXP.js";import{t as r}from"./chunk-general-pane-Cke0bTa0.js";var i=t(),a=e();function o(e){o.d=2662;let t=(0,i.c)(3),{params:s}=e,c=s.focusSetting??null,l;t[0]===Symbol.for(`react.memo_cache_sentinel`)?(l=(0,a.jsx)(r,{}),t[0]=l):l=t[0];let u;return t[1]===c?u=t[2]:(u=(0,a.jsx)(n,{focus:c,children:l}),t[1]=c,t[2]=u),u}export{o as default};
+//# debugId=a2495735-1adc-4dd7-84af-49081d2fa8a

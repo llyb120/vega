@@ -1,0 +1,4 @@
+c
+!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="afa866fb-f8bf-478e-be67-f35d12c063f9",e._sentryDebugIdIdentifier="sentry-dbid-afa866fb-f8bf-478e-be67-f35d12c063f9"}catch(e){}}(import.meta.url);
+import{s as e}from"./chunk-EXE5EH6O-bvyP6mCs.js";var t=/[\t ]*accDescr(?:[\t ]*:(?:[^\n\r]*?(?=%%)|[^\n\r]*)|\s*({))/y;function n(){let e=!1;return(n,r)=>{t.lastIndex=r;let i=t.exec(n);if(i===null)return-1;let a=t.lastIndex;if(i[1]===void 0)return a;if(e)return-1;let o=n.indexOf(`}`,a);return e=o===-1,o+1||-1}}function r(t=`ACC_DESCR`){return{...e,name:t,scanner:n}}export{r as t};
+//# debugId=afa866fb-f8bf-478e-be67-f35d12c063f

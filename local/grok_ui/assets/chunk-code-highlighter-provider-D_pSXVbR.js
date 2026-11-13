@@ -1,0 +1,4 @@
+f
+!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="15f31c3c-516c-4d56-914e-d72091a6c355",e._sentryDebugIdIdentifier="sentry-dbid-15f31c3c-516c-4d56-914e-d72091a6c355"}catch(e){}}(import.meta.url);
+import{Gt as e}from"./index.eager-common-Cu696cDC.js";import{$s as t}from"./index.eager-app-6K9VF8rg.js";import{C as n}from"./index.eager-vendor-Mv0_sSxx.js";import{t as r}from"./chunk-plain-code-tokenizer-BQaPwtuI.js";import{t as i}from"./chunk-CodeTokenizerProvider-D_CCI5yY.js";var a=n(),o=e();function s(e){s.d=769;let n=(0,a.c)(3),{children:c}=e,l=t.useModule()?.highlightsCodeTokenizer??r,u;return n[0]!==c||n[1]!==l?(u=(0,o.jsx)(i,{tokenizer:l,children:c}),n[0]=c,n[1]=l,n[2]=u):u=n[2],u}export{s as t};
+//# debugId=15f31c3c-516c-4d56-914e-d72091a6c35

@@ -1,0 +1,4 @@
+5
+!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="d5035ed5-144a-425a-b573-c3ee061e552e",e._sentryDebugIdIdentifier="sentry-dbid-d5035ed5-144a-425a-b573-c3ee061e552e"}catch(e){}}(import.meta.url);
+function e(e){if(!e)return{};let t={};e&1&&(t.fontStyle=`italic`),e&2&&(t.fontWeight=`bold`);let n=[];return e&4&&n.push(`underline`),e&8&&n.push(`line-through`),n.length>0&&(t.textDecoration=n.join(` `)),t}function t(e){return e.split(/\r\n|\r|\n/).map(e=>[{content:e,col:0}])}export{t as n,e as t};
+//# debugId=d5035ed5-144a-425a-b573-c3ee061e552

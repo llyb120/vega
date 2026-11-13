@@ -27,8 +27,8 @@ import (
 const (
 	butterflyPanelTitle = "Vega 蝴蝶助理"
 	// 现在是普通窗口，不是气泡：默认给够面积放得下对话和设置，用户拖过就按上次的大小打开。
-	butterflyPanelWidth        = 900
-	butterflyPanelHeight       = 720
+	butterflyPanelWidth        = 1080
+	butterflyPanelHeight       = 780
 	butterflyPanelMinWidth     = 560
 	butterflyPanelMinHeight    = 420
 	butterflyPanelMargin       = 8
