@@ -1177,15 +1177,6 @@ async function loadEmployee() {
   else { employee.value.tasks = data.tasks; employee.value.busy = data.busy; employee.value.chatRunning = data.chatRunning; employee.value.executionClients = data.executionClients; employee.value.execution = data.execution; employee.value.avatar = data.avatar; employee.value.runtime = data.runtime; }
 }
 
-async function setEmployeeMaster(payload) {
-  if (!selectedEmployee.value) return;
-  try {
-    const data = await api("/runtime", "POST", { employeeId: selectedEmployee.value, ...payload });
-    if (employee.value && data) employee.value.runtime = data;
-  } catch (e) {
-    if (!e.network) employeeError.value = e.message;
-  }
-}
 function employeeApi(path, method = "GET", data) {
   if (!selectedEmployee.value) throw Error("请先创建牛马");
   return api(path.replace(/^\/employee(?=\/|$)/, `/employees/${selectedEmployee.value}`), method, data);
@@ -1594,7 +1585,6 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             @tab="employeeTabChanged"
             @delete="deleteEmployee"
             @menu="openNavigation"
-            @set-master="setEmployeeMaster"
           />
           <p v-if="employeeError" class="banner error" role="alert"><span>{{ employeeError }}</span><button class="icon" aria-label="关闭牛马错误" @click="employeeError = ''"><Icon name="close" :size="14" /></button></p>
           <div v-if="employeeTab === 'chat' && selectedEmployee && employee.id === selectedEmployee" class="employee-chat-layout" :class="{ 'panel-inline': wide && workPanelVisible }">

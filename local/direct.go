@@ -28,7 +28,7 @@ type ServerCredential struct {
 	RelayOn *bool    `json:"relayOn,omitempty"` // nil = never configured: this computer may relay
 }
 
-// relayAllowed 始终允许在云端为 Master 时单向借用本机网桥，不再读取已废弃的中继开关。
+// relayAllowed 始终允许云端单向借用本机网桥（按账户隔离），不再读取已废弃的中继开关。
 func (s ServerCredential) relayAllowed() bool { return true }
 
 type connectionStatus struct {
@@ -189,7 +189,6 @@ func (a *Agent) startConnection(saved ServerCredential, token string) *directCon
 	connection.jobs.loginState = &allowed
 	keys := true
 	connection.jobs.sshKeys = &keys
-	connection.jobs.prefer = executionPlace(a.config.Prefer)
 	connection.jobs.onRuntime = a.applyRuntime
 	a.configureRelay(connection, saved, ctx)
 	a.direct[key] = connection
@@ -276,7 +275,7 @@ func (a *Agent) connectBackend(ctx context.Context, saved ServerCredential, conn
 	rules := append([]string{}, connection.jobs.relayRules...)
 	connection.jobs.mu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "loginState": true, "sshKeys": true, "prefer": executionPlace(connection.jobs.prefer), "relay": rules, "relayOn": true, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true, "backgroundBash": true}) != nil {
+	if conn.WriteJSON(map[string]any{"type": "hello", "instance": connection.instance, "clientId": clientID, "supplement": supplement, "browser": browser, "loginState": true, "sshKeys": true, "relay": rules, "relayOn": true, "name": name, "cwd": cwd, "platform": runtime.GOOS, "arch": runtime.GOARCH, "version": clientVersion, "autoUpdate": true, "resume": true, "backgroundBash": true}) != nil {
 		a.connectionStatus(connection, connectionStatus{Code: "backend_network"})
 		return true, false
 	}
@@ -361,7 +360,6 @@ type jobRunner struct {
 	browser      string
 	loginState   *bool
 	sshKeys      *bool
-	prefer       string
 	lastActivity time.Time
 	updateReady  chan bool
 	recovery     *time.Timer
@@ -521,7 +519,7 @@ func (runner *jobRunner) run(conn *Conn, pending, leases []string) {
 			case <-ticker.C:
 				runner.mu.Lock()
 				if runner.conn == conn {
-					message := map[string]any{"type": "ping", "supplement": runner.supplement, "prefer": executionPlace(runner.prefer), "loginState": true, "sshKeys": true, "relayOn": true}
+					message := map[string]any{"type": "ping", "supplement": runner.supplement, "loginState": true, "sshKeys": true, "relayOn": true}
 					if runner.browser != "" {
 						message["browser"] = runner.browser
 					}

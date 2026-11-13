@@ -20,6 +20,7 @@ export type BrowserState = {
   warnings: string[];
 };
 export type BrowserRestore = { ok: boolean; pages: { url: string; title: string; needLogin: boolean; storage: number }[]; warnings: string[] };
+export type BrowserSync = { ok: boolean; cookies: number; storage: number; warnings: string[] };
 
 /** Authorised sites, normalised to origins; anything else never leaves the browser. */
 export function browserOrigins(value: unknown): string[] {
@@ -134,4 +135,50 @@ async function waitReady(chrome: Chrome, tag: string, signal: AbortSignal) {
     const ready = unwrap(await chrome.cdp(tag, "Runtime.evaluate", { expression: "document.readyState === 'complete'", returnByValue: true }, undefined, signal));
     if (ready.value === true) return;
   }
+}
+
+/**
+ * 按需补齐登录态（多退少补）：把 Cookie 写进目标浏览器，并向已打开的授权站点页补 localStorage/sessionStorage。
+ * 只增不删、不导航也不重载：与 restoreBrowser 的整页迁移不同，这里不动用户页签。
+ * storage 是 per-origin 的，目标端没打开该源页签时跳过这部分（Cookie 已写入，下次打开自动带）。
+ */
+export async function injectBrowser(chrome: Chrome, state: BrowserState, signal: AbortSignal): Promise<BrowserSync> {
+  assert(state?.version === 1 && Array.isArray(state.pages) && Array.isArray(state.cookies), "登录态数据无效");
+  const warnings: string[] = [...(state.warnings || [])];
+  const { tabs } = (await chrome.bridge.request("tabs", {}, signal)) as Obj;
+  const allowed = new Set(state.origins);
+  const open = httpTab(tabs || []).filter((tab) => allowed.has(originOf(tab.url)));
+  if (!open.length) {
+    // 目标端一个授权站点页都没打开：Cookie 仍要写，借任意一个页签设进 jar（setCookie 按 domain 生效，不看当前页）。
+    const any = httpTab(tabs || [])[0];
+    if (!any) { warnings.push("目标浏览器没有可用页签"); return { ok: false, cookies: 0, storage: 0, warnings }; }
+    open.push(any);
+  }
+
+  let cookies = 0;
+  for (const cookie of state.cookies.slice(0, MAX_COOKIES)) {
+    const params: Obj = { name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path || "/", secure: !!cookie.secure, httpOnly: !!cookie.httpOnly };
+    if (cookie.sameSite) params.sameSite = cookie.sameSite;
+    if (typeof cookie.expires === "number" && cookie.expires > 0) params.expires = cookie.expires;
+    try { await chrome.cdp(open[0].tag, "Network.setCookie", params, undefined, signal); cookies++; }
+    catch (error: any) { warnings.push(`Cookie ${cookie.name} 写入失败：${String(error?.message || error).slice(0, 120)}`); }
+  }
+
+  // 页面存储按源页 origin 写进目标端同源的已开页签；setItem 只补不删。
+  let storage = 0;
+  for (const page of state.pages.slice(0, MAX_PAGES)) {
+    const origin = originOf(page.url);
+    const tab = open.find((item) => originOf(item.url) === origin);
+    if (!tab) { warnings.push(`${origin} 的目标浏览器没有打开的页签，页面存储未同步（Cookie 已写入）`); continue; }
+    try {
+      const result = unwrap(await chrome.cdp(tab.tag, "Runtime.evaluate", {
+        expression: `(() => { let n = 0; const put = (store, data) => { for (const [k, v] of Object.entries(data || {})) { try { store.setItem(k, v); n++; } catch {} } }; put(localStorage, ${JSON.stringify(page.localStorage)}); put(sessionStorage, ${JSON.stringify(page.sessionStorage)}); return n; })()`,
+        returnByValue: true,
+      }, undefined, signal));
+      storage += Number(result.value || 0);
+    } catch (error: any) { warnings.push(`${origin} 页面存储写入失败：${String(error?.message || error).slice(0, 120)}`); }
+  }
+  const ok = cookies > 0 || storage > 0;
+  if (!ok) warnings.push("没有写入任何 Cookie 或页面存储");
+  return { ok, cookies, storage, warnings };
 }

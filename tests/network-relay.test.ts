@@ -21,15 +21,14 @@ function tunnel(id: string, sink?: (frame: Buffer) => void) {
 const upstream = (bytes: Uint8Array | readonly number[]) => encodeFrame(Buffer.from(bytes));
 async function fixture(t: TestContext) {
   const store = await Store.open(":memory:"), hub = new LocalAgents();
-  // 中继开关已取消：借用条件只由「云端是否 Master」决定，用这个可变标志模拟本机当 Master。
-  let borrow = true;
-  const relay = new NetworkRelay(store, hub, () => borrow);
+  const relay = new NetworkRelay(store, hub);
   let command: (job: any) => void = () => {};
   const transport = { send: (job: any) => command(job), close() {} };
   const details = { clientId: grant.clientId, instance: "a".repeat(32), platform: "windows", cwd: "C:\\work" };
   hub.connect(grant.userId, details, transport);
   t.after(async () => { hub.close(); await relay.close(); await store.close(); });
-  return { store, hub, relay, transport, details, setBorrow: (value: boolean) => { borrow = value; }, onCommand: (handler: (job: any) => void) => { command = handler; } };
+  const offline = () => hub.disconnect(grant.userId, details.instance), online = () => hub.connect(grant.userId, details, transport);
+  return { store, hub, relay, transport, details, offline, online, onCommand: (handler: (job: any) => void) => { command = handler; } };
 }
 function read(socket: Socket, size: number): Promise<Buffer> {
   return new Promise((yes, no) => {
@@ -286,8 +285,8 @@ test("one unreachable address is probed once, then reused until borrowing is una
   }
   assert.equal(jobs, 2, "两个连接都由客户端承载");
   assert.equal(probes(), 1, "第二个连接直接复用记住的客户端路由，不再探测直连");
-  // 本机当 Master（不可借云端出口）：记住的客户端路由作废，直连失败就报错，不再找客户端。
-  f.setBorrow(false);
+  // 客户端离线（不可借云端出口）：记住的客户端路由作废，直连失败就报错，不再找客户端。
+  f.offline();
   const socket = await socks(proxy, "only-client.internal", 22, t);
   assert.equal((await read(socket, 10))[1], 4, "不可借后不再记着客户端路由");
   assert.equal(jobs, 2);
@@ -300,8 +299,8 @@ test("without a borrowable client a failed direct dial reports the SOCKS error i
   f.onCommand(() => { jobs++; });
   await f.relay.configure(grant, [], false);
   assert.equal(await f.relay.enabled("alice"), true, "开关字段已取消：上报过配置且客户端在线就允许兜底借用");
-  f.setBorrow(false);
-  assert.equal(await f.relay.enabled("alice"), false, "本机是 Master 时不借云端出口");
+  f.offline();
+  assert.equal(await f.relay.enabled("alice"), false, "客户端离线时不借云端出口");
   const socket = await socks(await f.relay.proxy("alice"), "only-client.internal", 22, t);
   assert.equal((await read(socket, 10))[1], 4);
   assert.equal(jobs, 0);

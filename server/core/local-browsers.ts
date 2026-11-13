@@ -31,7 +31,7 @@ export class LocalBrowsers {
   constructor(private store: Store, private hub: LocalAgents, private pageScript: string) {}
   async get(session: Session, signal?: AbortSignal) {
     const clientId = session.browserClientId || session.clientId;
-    if (!clientId) throw new LocalAgentUnavailable("此会话尚未绑定浏览器 Master 客户端；不会自动选择设备或使用服务端浏览器。");
+    if (!clientId) throw new LocalAgentUnavailable("此会话尚未绑定本机浏览器客户端；不会自动选择设备或使用服务端浏览器。");
     const agent = this.hub.active(session.ownerId, clientId);
     if (!agent) throw new LocalAgentUnavailable();
     let entry = this.sessions.get(session.id);

@@ -3,14 +3,14 @@
  * 交接是唯一改变它的方式；每次交接递增 epoch，旧端的结果不再推进任务。
  *
  * 规则（与产品约定一致）：
- * - 文件系统 Master 与浏览器 Master 互相独立。切换 Master 时自动同步工作区，这就是交接。
+ * - 文件系统与浏览器绑定到同一执行端，交接时同步工作区与浏览器登录态。
  * - 本地在线时必须现读工作区；客户端硬退出（连接已不在）不要把云端旧副本当成当前活工作区，一律按还原点续做，并说明「以还原点为准，离线期间的新文件不在其中」。
  * - 只有目标端真的拿到工作区，才切换执行权；否则保持原样并记失败原因。回合进行中（isRunning）拒绝切换。
  * - 回传只写文件、不抢执行权；冲突两边都留，不覆盖任何一方。
- * - 登录态：云端是浏览器 Master 时可从 Follower 捕获授权站点状态；本机是浏览器 Master 时禁止把云端 Cookie 灌进本机 Chrome。
+ * - 登录态：交接时把授权站点的 Cookie 与 storage 从源端搬到目标端（补齐不删）。
  */
 import { relativePath, allowed, manifest, merge, LIMITS } from "../../shared/workspace-sync.mjs";
-import { browserOrigins, captureBrowser, restoreBrowser } from "./browser-handoff";
+import { browserOrigins, captureBrowser, injectBrowser, restoreBrowser } from "./browser-handoff";
 import type { Chrome } from "./chrome";
 import { shell } from "./tools";
 import type { CloudRuntime } from "./cloud";
@@ -73,9 +73,12 @@ export type HandoffDeps = {
   isRunning: (session?: string) => boolean;
   cloud: (ownerId: string) => CloudRuntime | undefined;
   browsers: { local: (session: Session) => Promise<Chrome>; cloud: (session: Session) => Promise<Chrome> };
+  /** List online clientIds for this owner (same account only). */
+  onlineClients?: (ownerId: string) => { id: string }[];
+  /** Release a local browser lease taken for an on-demand login-state sync (keyed by session id). */
+  releaseLocal?: (key: string) => Promise<void>;
   seal: (value: any, aad: string) => Promise<string>;
   open: (blob: string, aad: string) => Promise<any>;
-  masters?: (employeeId: string) => { fsMaster: string; browserMaster: string };
 };
 
 const join = (cwd: string, path: string) => (cwd.endsWith("/") || cwd.endsWith("\\") ? cwd + path : cwd + "/" + path);
@@ -187,9 +190,9 @@ export class TaskHandoffs {
       } else {
         notes.push("未配置环境准备命令：依赖本地服务的步骤需在云端重新启动后再继续");
       }
-      // 登录态：只在浏览器也交到云端时，从本机 Follower 采集授权站点；复制不等于登录成功，恢复后必须打开页面核对。
+      // 登录态：执行权交到云端时，浏览器也回到云端——从刚离线/交接的本机浏览器采集授权站点。复制不等于登录成功，恢复后必须打开页面核对。
       const sites = policy.sites || [];
-      const browserTarget = this.browserBinding(employeeId);
+      const browserTarget = this.browserBinding(false);
       let sealed = "";
       let browserNote = "";
       let browserSites: string[] = [];
@@ -228,7 +231,7 @@ export class TaskHandoffs {
         browserNote,
         browserSites: browserSites.length ? browserSites : record.browserSites,
       };
-      await this.switch(employee, taskId, next, { localAgent: false, clientId: undefined, cwd: cloudCwd, ...this.browserBinding(employeeId) });
+      await this.switch(employee, taskId, next, { localAgent: false, clientId: undefined, cwd: cloudCwd, ...this.browserBinding(false) });
       // 恢复在交接之后：执行权已在云端，页面停在授权站点上，下一次观察直接看到真实结果。
       if (next.browser && next.browserSites?.length) {
         try {
@@ -285,8 +288,8 @@ export class TaskHandoffs {
         ].filter(Boolean).join("；"),
         error: undefined,
       };
-      await this.switch(employee, taskId, next, { localAgent: true, clientId: agent.clientId, cwd, clientName: agent.name, localPlatform: agent.platform, ...this.browserBinding(employeeId) });
-      // 禁止把云端 Cookie 灌进本机 Chrome：本机若要借助云端登录态，以视口操作云端 profile。
+      await this.switch(employee, taskId, next, { localAgent: true, clientId: agent.clientId, cwd, clientName: agent.name, localPlatform: agent.platform, ...this.browserBinding(true, agent.clientId) });
+      // 不把云端 Cookie 灌进本机 Chrome：本机若要借助云端登录态，以视口操作云端 profile。
       if (next.browser && next.browserSites?.length) {
         next.browserNote = "未把云端登录态写入本机 Chrome；需要云端身份时，请以视口操作云端浏览器 profile";
         next.note = [next.note, next.browserNote].filter(Boolean).join("；");
@@ -296,7 +299,7 @@ export class TaskHandoffs {
     });
   }
 
-  /** 设备回连：自动接到云端执行的任务搬回本机继续（手动交接的仍由用户决定，运行中的等这一轮结束）。 */
+  /** 设备回连：自动接到云端执行的任务，若它的工作区在这台回连的设备上，就搬回本机继续（手动交接的仍由用户决定，运行中的等这一轮结束）。 */
   async backHome(ownerId?: string) {
     for (const employee of await this.deps.employees()) {
       const state = await employee.state({ runs: false });
@@ -307,10 +310,8 @@ export class TaskHandoffs {
         if (!record || record.where !== "cloud" || record.phase !== "ready" || record.source !== "auto" || !record.clientId) continue;
         if (this.running(task)) continue;
         const agent = this.deps.agents.active(record.ownerId, record.clientId);
-        // 设备不在线、或它已不再是文件系统 Master：继续留在云端。未注入账户运行时时，沿用旧的 prefer 判断。
+        // 设备不在线就继续留在云端：工作区本来就在这台设备上，回连后接回去。
         if (!agent) continue;
-        const fsMaster = this.deps.masters?.(employee.employeeId)?.fsMaster;
-        if (fsMaster ? fsMaster !== agent.clientId : agent.prefer === "cloud") continue;
         try { await this.toLocal(employee.employeeId, task.id, { source: "auto", clientId: agent.clientId }); }
         catch { /* 没接住就留在云端，下次回连或手动接回 */ }
       }
@@ -354,34 +355,56 @@ export class TaskHandoffs {
   }
 
   /**
-   * 客户端执行 + 云端浏览器：本机的站点登录态对云端浏览器不可见，开演前先搬过去（每个任务一次）。
-   * 只搬 policy.sites 授权的站点；密码本凭据本来就在服务端，不走这里。
+   * 按需共享登录态：同一账号的云端与各客户端浏览器互通有无（多退少补）。
+   * 任务选定浏览器端后、首次用浏览器前，把其余在线端在授权站点上的 Cookie 与 storage 补进目标端——
+   * 补齐不删、不落盘、源端须在线；源端离线或没有授权站点就跳过，失败不阻断任务。
    */
   async ensureBrowserState(session: Session) {
     const employeeId = session.employeeId, taskId = session.taskId;
-    if (!employeeId || !taskId || session.localBrowser || !session.localAgent) return;
-    // 客户端关掉「登录态」开关就不动它的 Cookie 和页面存储。
+    if (!employeeId || !taskId) return;
     const employee = await this.deps.employeeFor(employeeId);
     const task = employee.task(await employee.state({ runs: false }), taskId);
     if (task.browserSyncedAt) return;
     const sites = (await this.policy(employeeId)).sites || [];
     if (!sites.length) return; // 没授权站点就不擅自搬登录态
+    const ownerId = task.execution?.ownerId || task.owner?.token || "";
+    const targetLocal = !!session.localBrowser;
+    const targetClient = session.browserClientId || session.clientId || "";
     return this.exclusive("browser:" + taskId, async () => {
-      const local = await this.browserChrome(task, "local");
-      const remote = await this.browserChrome(task, "cloud");
-      assert(local, "本机浏览器不可用，登录态未同步到云端浏览器");
-      assert(remote, "云端浏览器不可用，登录态未同步");
-      const captured = await captureBrowser(local, sites, AbortSignal.timeout(60_000));
-      const restored = await restoreBrowser(remote, captured, AbortSignal.timeout(150_000));
+      const target = await this.browserChrome(task, targetLocal ? "local" : "cloud");
+      assert(target, targetLocal ? "本机浏览器不可用，登录态未同步" : "云端浏览器不可用，登录态未同步");
+      // 对端源：目标在本机 => 云端 + 其余在线客户端；目标在云端 => 全部在线客户端。同一账号，只借自己的。
+      const sources: { side: "local" | "cloud"; clientId?: string }[] = [];
+      if (targetLocal) sources.push({ side: "cloud" });
+      for (const client of this.deps.onlineClients?.(ownerId) || [])
+        if (!targetLocal || client.id !== targetClient) sources.push({ side: "local", clientId: client.id });
+      const merged: string[] = [];
+      const warnings: string[] = [];
+      for (const source of sources) {
+        // 源端浏览器用独立的 sync 键租约，抓完即释放，不占/不断目标端（任务端）的浏览器租约。
+        const probeKey = session.id + ":sync";
+        try {
+          const origin = await this.browserChrome(task, source.side, source.clientId, probeKey);
+          if (!origin) { warnings.push(source.clientId ? `客户端 ${source.clientId.slice(0, 8)} 浏览器不可达` : "云端浏览器不可达"); continue; }
+          const captured = await captureBrowser(origin, sites, AbortSignal.timeout(60_000));
+          const applied = await injectBrowser(target, captured, AbortSignal.timeout(90_000));
+          if (applied.cookies || applied.storage) merged.push(...captured.origins);
+          warnings.push(...applied.warnings);
+        } catch (error: any) {
+          warnings.push((source.clientId ? `客户端 ${source.clientId.slice(0, 8)}` : "云端") + "登录态未同步：" + String(error?.message || error).slice(0, 120));
+        } finally {
+          if (source.side === "local") await this.deps.releaseLocal?.(probeKey).catch(() => {});
+        }
+      }
       await employee.update((state) => {
         const current = employee.task(state, taskId);
         current.browserSyncedAt = Date.now();
-        current.browserSyncNote = restored.ok
-          ? `已把 ${captured.origins.join("、")} 的登录态同步到云端浏览器`
-          : "登录态同步后仍需处理：" + restored.warnings.slice(0, 3).join("；");
+        current.browserSyncNote = merged.length
+          ? `已把 ${[...new Set(merged)].join("、")} 的登录态同步到${targetLocal ? "本机" : "云端"}浏览器`
+          : "登录态同步后仍需处理：" + warnings.slice(0, 3).join("；");
         return state;
       });
-      return { ok: restored.ok, origins: captured.origins, warnings: restored.warnings };
+      return { ok: merged.length > 0, origins: [...new Set(merged)], warnings };
     });
   }
 
@@ -458,127 +481,16 @@ export class TaskHandoffs {
       if (agent) await this.syncBack(clientId, userId).catch(() => {});
       else await this.clientsGone(clientId, userId).catch(() => {});
     }
-    // 回来的设备若仍是文件系统 Master：云端自动接管的那一轮结束后搬回本机继续。
+    // 回来的设备若仍有绑定它的任务：云端自动接管的那一轮结束后搬回本机继续。
     await this.backHome(userId).catch(() => {});
   }
 
-  /** 这头牛马还有任务在执行时拒绝切换 Master；不影响其它牛马。 */
-  async assertIdle(employeeId: string) {
-    const employee = await this.deps.employeeFor(employeeId);
-    const state = await employee.state({ runs: false });
-    for (const task of state.tasks) {
-      if (ended(task.status)) continue;
-      assert(!this.running(task), "这头牛马还有任务在执行；等这一步结束或先暂停再切换 Master");
-    }
-  }
 
-  /** 切换某头牛马的 Master 后自动交接，只动这头牛马的任务。 */
-  async onMasterChange(employeeId: string, kind: "fs" | "browser", from: string, to: string) {
-    if (kind === "browser") return this.applyBrowserMaster(employeeId, to);
-    const employee = await this.deps.employeeFor(employeeId);
-    const state = await employee.state({ runs: false });
-    const ownerId = state.ownerId || "";
-    if (to === "cloud") {
-      for (const task of state.tasks) {
-        if (ended(task.status) || task.execution?.localAgent !== true) continue;
-        if (from !== "cloud" && task.execution?.clientId && task.execution.clientId !== from) continue;
-        try { await this.toCloud(employeeId, task.id, { source: "auto" }); }
-        catch { /* 失败记在交接记录里 */ }
-      }
-      return;
-    }
-    if (from === "cloud") {
-      for (const task of state.tasks) {
-        if (ended(task.status) || task.execution?.localAgent) continue;
-        try { await this.toLocal(employeeId, task.id, { source: "auto", clientId: to }); }
-        catch { /* 没有可回传的云端副本时保持原样 */ }
-      }
-      return;
-    }
-    await this.toOtherClient(employeeId, ownerId, from, to);
-  }
-
-  /** 把仍绑在旧客户端上的任务工作区同步到新的文件系统 Master。 */
-  private async toOtherClient(employeeId: string, ownerId: string, from: string, to: string) {
-    const dest = this.deps.agents.active(ownerId, to);
-    if (!dest) return;
-    const employee = await this.deps.employeeFor(employeeId);
-    const state = await employee.state({ runs: false });
-    for (const task of state.tasks) {
-        if (ended(task.status) || task.execution?.localAgent !== true || task.execution?.clientId !== from) continue;
-        const source = this.deps.agents.active(ownerId, from);
-        try {
-          await this.exclusive(task.id, async () => {
-            assert(!this.running(task), "任务这一轮还在执行；等这一步结束或先暂停再切换 Master");
-            const cwd = dest.cwd;
-            const notes: string[] = [];
-            if (source) {
-              const scanned = await this.scanLocal(source, task.cwd);
-              const record = (await this.record(task.id)) || this.fresh(task.id, employee.employeeId, ownerId, "auto");
-              const applied = await this.applyLocal(dest, cwd, record.base, scanned, "local");
-              const next = {
-                ...record,
-                where: "local" as const,
-                phase: "ready" as const,
-                epoch: record.epoch + 1,
-                source: "auto" as const,
-                at: Date.now(),
-                clientId: dest.clientId,
-                localCwd: cwd,
-                base: scanned.files,
-                conflicts: applied.conflicts,
-                note: ["工作区已从原 Master 同步到新的文件系统 Master", applied.conflicts.length ? `有 ${applied.conflicts.length} 个文件两边都改过，保留为冲突副本` : ""].filter(Boolean).join("；"),
-                error: undefined,
-              };
-              await this.switch(employee, task.id, next, { localAgent: true, clientId: dest.clientId, cwd, clientName: dest.name, localPlatform: dest.platform, ...this.browserBinding(employeeId) });
-              await this.deps.store.save(RECORD, task.id, next);
-            } else {
-              const record = (await this.record(task.id)) || this.fresh(task.id, employee.employeeId, ownerId, "auto");
-              const next = {
-                ...record,
-                where: "local" as const,
-                phase: "ready" as const,
-                epoch: record.epoch + 1,
-                source: "auto" as const,
-                at: Date.now(),
-                clientId: dest.clientId,
-                localCwd: cwd,
-                base: [],
-                note: "原文件系统 Master 已离线，以还原点为准，离线期间的新文件不在其中；未把旧云端副本当成当前活工作区",
-                error: undefined,
-              };
-              await this.switch(employee, task.id, next, { localAgent: true, clientId: dest.clientId, cwd, clientName: dest.name, localPlatform: dest.platform, ...this.browserBinding(employeeId) });
-              await this.deps.store.save(RECORD, task.id, next);
-            }
-            notes.push("ok");
-          });
-        } catch { /* 单任务失败不阻断其余任务 */ }
-      }
-  }
-
-  private async applyBrowserMaster(employeeId: string, to: string) {
-    const employee = await this.deps.employeeFor(employeeId);
-    const state = await employee.state({ runs: false });
-    const binding = this.browserBinding(employeeId, to);
-    for (const task of state.tasks) {
-      if (ended(task.status)) continue;
-      const record = (await this.record(task.id)) || this.fresh(task.id, employeeId, state.ownerId || "", "auto");
-      await this.switch(employee, task.id, { ...record, at: Date.now(), note: to === "cloud" ? "浏览器 Master 已切到云端" : "浏览器 Master 已切到本机；不会把云端 Cookie 灌进本机 Chrome" }, {
-        localAgent: !!task.execution?.localAgent,
-        clientId: task.execution?.clientId,
-        clientName: task.execution?.clientName,
-        localPlatform: task.execution?.localPlatform,
-        cwd: task.cwd,
-        ...binding,
-      });
-    }
-  }
-
-  private browserBinding(employeeId: string, master?: string) {
-    const browserMaster = master || this.deps.masters?.(employeeId)?.browserMaster || "cloud";
+  /** 浏览器端跟随任务工作区所在端：本机执行就用本机浏览器，云端执行就用云端浏览器。 */
+  private browserBinding(local: boolean, clientId?: string) {
     return {
-      localBrowser: browserMaster !== "cloud",
-      browserClientId: browserMaster !== "cloud" ? browserMaster : "",
+      localBrowser: local,
+      browserClientId: local ? clientId || "" : "",
     };
   }
 
@@ -641,14 +553,20 @@ export class TaskHandoffs {
     }
   }
 
-  /** The browser this task would use on one side, if it can be reached at all. */
-  private async browserChrome(task: Task, side: "local" | "cloud") {
+  /** The browser this task would use on one side, if it can be reached at all. `probeKey` gives the local lease a separate key so a sync doesn't take over the task's own lease. */
+  private async browserChrome(task: Task, side: "local" | "cloud", clientId?: string, probeKey?: string) {
     const sessionId = task.computerSession || task.workSession;
     if (!sessionId) return undefined;
     try {
       const session = await this.deps.store.session(sessionId);
       if (!session.ownerId) return undefined;
-      return side === "local" ? await this.deps.browsers.local(session) : await this.deps.browsers.cloud(session);
+      if (side === "local") {
+        const probe = { ...session, localBrowser: true };
+        if (clientId) { probe.browserClientId = clientId; probe.clientId = clientId; }
+        if (probeKey) probe.id = probeKey;
+        return await this.deps.browsers.local(probe);
+      }
+      return await this.deps.browsers.cloud(session);
     } catch {
       return undefined;
     }

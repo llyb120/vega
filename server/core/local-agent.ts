@@ -69,8 +69,6 @@ export class LocalAgents {
   private agents = new Map<string, Agent>();
   private tickets = new Map<string, { hash: string; instance: string; until: number }>();
   private seq = 0;
-  /** 按牛马的主从：连接时用旧 prefer/browser 只给尚未配置的牛马做缺省。由 Engine 注入。 */
-  runtimes?: { applyClientReport: (userId: string, clientId: string, reported: { prefer?: "client" | "cloud"; browser?: "local" | "cloud" }) => Promise<unknown> };
   constructor(private emit: (value: Obj) => void = () => {}) {}
   ticket(principal: Principal, instance: unknown) {
     assert(typeof instance === "string" && /^[a-f0-9-]{32,36}$/.test(instance), "Invalid agent instance");
@@ -99,9 +97,9 @@ export class LocalAgents {
     return online;
   }
   /**
-   * 已连接的客户端（含 Follower）。Follower 保持连接，可做视口、中继和登录借用，
-   * 文件/命令/浏览器的派活由账户级 Master 决定，不再按「最新登录」拦截。
-   * 不传 clientId 时返回当前文件系统 Master（若它在线）。
+   * 已连接的客户端。客户端保持连接，可做视口、中继和登录借用，
+   * 文件/命令/浏览器的派活由会话的执行位置绑定（session.clientId），不再按「最新登录」拦截。
+   * 不传 clientId 时仅在恰好一台在线时返回它。
    */
   active(userId?: string, clientId?: string) {
     if (!userId) return;
@@ -144,7 +142,6 @@ export class LocalAgents {
     agent.sshKeys = true;
     const prefer = a.prefer === "cloud" ? "cloud" : "client";
     agent.prefer = prefer;
-    void this.runtimes?.applyClientReport(userId, clientId, { prefer, browser: agent.browser });
     const recovering = agent.reconnecting, previous = agent.transport;
     if (transport) agent.transport = transport;
     // Ping/result refresh calls connect() without a transport. That must not clear a suspended

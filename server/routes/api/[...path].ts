@@ -173,7 +173,7 @@ export default defineEventHandler(async (event) => {
         cwd,
         ...(cloudError ? { cloudError } : {}),
         clients: engine.localAgents.list(user.id),
-        runtime: await engine.runtimes.view(user.id),
+        runtime: await engine.clientsView(user.id),
         stack: {
           frontend: "Vue 3.6 Vapor",
           backend: "Nitro",
@@ -333,7 +333,7 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "transcript" && method === "POST") return await employee.transcript(a.threadId);
       if (path.length === 2 && method === "GET") {
         const { enabled, workStart, workEnd, ...visible } = state;
-        return { ...visible, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], runtime: await engine.runtimes.viewEmployee(employee.employeeId, state.ownerId || user.id), busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
+        return { ...visible, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
       }
       if (path.length === 2 && method === "POST") {
         if (!await employee.manageable(user)) check(a.action === "list" || a.action === "memory_search" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
@@ -373,19 +373,8 @@ export default defineEventHandler(async (event) => {
     }
     if (path[0] === "groups") return await groupRoute(path, method, a, user, getRequestURL(event).searchParams);
     if (path[0] === "runtime") {
-      if (method === "GET" && path.length === 1) return await engine.runtimes.view(user.id);
-      if (method === "POST" && path.length === 1) {
-        assert(typeof a.employeeId === "string" && a.employeeId, "请指定要配置的牛马");
-        assert(a.fsMaster === undefined || a.fsMaster === "cloud" || (typeof a.fsMaster === "string" && /^[a-f0-9-]{32,36}$/.test(a.fsMaster)), "无效的文件系统 Master");
-        assert(a.browserMaster === undefined || a.browserMaster === "cloud" || (typeof a.browserMaster === "string" && /^[a-f0-9-]{32,36}$/.test(a.browserMaster)), "无效的浏览器 Master");
-        assert(a.fsMaster !== undefined || a.browserMaster !== undefined, "请指定要更新的 Master");
-        const employee = await engine.employee.for(a.employeeId);
-        check(await employee.manageable(user), 403, "没有权限配置这头牛马的 Master");
-        if (a.fsMaster !== undefined) await engine.runtimes.setMaster(a.employeeId, "fs", a.fsMaster);
-        if (a.browserMaster !== undefined) await engine.runtimes.setMaster(a.employeeId, "browser", a.browserMaster);
-        return await engine.runtimes.viewEmployee(a.employeeId, (await employee.state({ runs: false })).ownerId || user.id);
-      }
-      check(false, 405, "GET or POST required");
+      check(method === "GET" && path.length === 1, 405, "GET required");
+      return await engine.clientsView(user.id);
     }
     if (path[0] === "sessions") {
       if (path.length === 1 && method === "POST") {

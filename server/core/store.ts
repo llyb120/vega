@@ -61,9 +61,9 @@ export type Session = {
   taskId?: string;
   employeeId?: string;
   localAgent?: boolean;
-  /** 浏览器位置与执行位置解耦：由该牛马的浏览器 Master 决定，只有用本机浏览器时才为 true。 */
+  /** 浏览器位置与执行位置解耦：只有用本机浏览器时才为 true。 */
   localBrowser?: boolean;
-  /** 托管真正 Chromium 的客户端（浏览器 Master）；可以与文件系统 Master 不是同一台。 */
+  /** 托管真正 Chromium 的客户端；可以与文件系统执行端不是同一台。 */
   browserClientId?: string;
   localPlatform?: string;
   clientId?: string;

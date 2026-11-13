@@ -397,10 +397,8 @@ export type EmployeeRuntime = {
   config: () => Obj | Promise<Obj>;
   isolated?: boolean;
   presence?: () => Promise<Presence>;
-  /** 已连接的客户端（含 Follower）。 */
+  /** 已连接的客户端。 */
   client?: (ownerId: string, clientId?: string) => { clientId: string; clientName?: string; localPlatform?: string; cwd: string; browser?: "local" | "cloud"; prefer?: "client" | "cloud" } | undefined;
-  /** 这头牛马自己的文件系统 / 浏览器 Master。 */
-  masters?: (employeeId: string) => { fsMaster: string; browserMaster: string };
   /** Group chats (groups.ts): task notices of tasks started in a group go back there; false when the group is gone. */
   groups?: {
     post: (group: NonNullable<Task["group"]>, employeeId: string, message: Message, wake: boolean) => Promise<boolean>;
@@ -784,37 +782,16 @@ export class Employee {
     if (migrated.changed || pruned.changed) await this.save(state);
     return state;
   }
-  /** 绑定新任务的执行位置：按这头牛马当前的文件系统 Master 和浏览器 Master（二者可以不同）。 */
+  /** 绑定新任务的执行位置：默认在云端执行，浏览器端与执行端一致；发生任务交接时才切到客户端。 */
   private bindExecution(state: EmployeeState): { execution: Execution; cwd?: string; note?: string } {
-    const masters = this.runtime.masters?.(this.employeeId) || { fsMaster: "cloud", browserMaster: "cloud" };
-    const fsMaster = masters.fsMaster || "cloud";
-    const browserMaster = masters.browserMaster || "cloud";
-    const fsAgent = fsMaster !== "cloud" ? this.runtime.client?.(state.ownerId, fsMaster) : undefined;
-    const browserAgent = browserMaster !== "cloud" ? this.runtime.client?.(state.ownerId, browserMaster) : undefined;
-    const localBrowser = browserMaster !== "cloud";
-    const browserClientId = localBrowser ? browserMaster : undefined;
-    if (fsMaster === "cloud") {
-      return {
-        execution: { localAgent: false, localBrowser, browserClientId, clientId: browserClientId, clientName: browserAgent?.clientName, browserClientName: browserAgent?.clientName, localPlatform: browserAgent?.localPlatform, ownerId: state.ownerId },
-        note: "文件系统 Master 为云端，任务在云端执行。" + (localBrowser ? "浏览器 Master 在本机，网页操作走那台客户端。" : ""),
-      };
-    }
-    const note = fsAgent
-      ? (localBrowser && browserMaster !== fsMaster ? "文件系统与浏览器 Master 不在同一台设备。" : undefined)
-      : "文件系统 Master 当前离线，任务已绑定该客户端，上线后继续；不会改绑到其它设备或云端。";
     return {
       execution: {
-        localAgent: true,
-        localBrowser,
-        browserClientId,
-        clientId: fsMaster,
-        clientName: fsAgent?.clientName,
-        browserClientName: browserAgent?.clientName,
-        localPlatform: fsAgent?.localPlatform,
+        localAgent: false,
+        localBrowser: false,
+        browserClientId: undefined,
+        clientId: undefined,
         ownerId: state.ownerId,
       },
-      cwd: fsAgent?.cwd,
-      note,
     };
   }
   /** Read-modify-write of the whole employee (record, tasks, runs) in one transaction. */

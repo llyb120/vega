@@ -123,7 +123,7 @@ export class Tools {
   /** Proxy env for server shells when this account has an online relay client (intranet git, curl and ssh). */
   private async relayEnvironment() {
     const owner = this.session.ownerId;
-    if (!owner || this.session.localAgent || !(await this.engine.relay.enabled(owner, this.session.employeeId))) return undefined;
+    if (!owner || this.session.localAgent || !(await this.engine.relay.enabled(owner))) return undefined;
     return await relayShellEnvironment(await this.engine.relay.proxy(owner), this.engine.store.files.root, this.cloud);
   }
   /**
@@ -431,12 +431,12 @@ export class Tools {
     if (!agent) {
       const online = !!this.session.ownerId && this.engine.localAgents.list(this.session.ownerId).length > 0;
       throw new LocalAgentUnavailable(online
-        ? "本会话绑定的文件系统 Master 当前不在线；本次未执行任何操作，也不会改绑到其它设备或云端。请在该客户端上线后回复「继续」。"
+        ? "本会话绑定的执行客户端当前不在线；本次未执行任何操作，也不会改绑到其它设备或云端。请在该客户端上线后回复「继续」。"
         : undefined);
     }
     return agent;
   }
-  /** 云端执行时借用一台已授权 SSH 的 Follower 密钥；多台时取第一台，不把本机 Master 的流量改走云端。 */
+  /** 云端执行时借用一台已授权 SSH 的客户端密钥；多台时取第一台。 */
   private sshBorrowAgent(ownerId: string) {
     return this.engine.localAgents.list(ownerId).map((item) => this.engine.localAgents.active(ownerId, item.id)).find((agent) => agent && agent.sshKeys !== false);
   }
@@ -722,8 +722,8 @@ export class Tools {
   }
   private async chrome(a: Obj): Promise<Outcome> {
     this.assertBrowserScene();
-    // 任务在本机执行、浏览器在云端时，先把本机在授权站点上的登录态同步过去（失败不阻断，留给任务自己处理）。
-    if (this.session.taskId && !this.session.localBrowser && this.session.localAgent) {
+    // 任务会话首次用浏览器前，把同账号其它在线端在授权站点上的登录态补到本端（补齐不删，失败不阻断）。
+    if (this.session.taskId) {
       try { await this.engine.handoffs.ensureBrowserState(this.session); }
       catch (error: any) { console.warn("[Vega] browser login state sync skipped", { session: this.session.id, reason: String(error?.message || error).slice(0, 200) }); }
     }
