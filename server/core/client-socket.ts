@@ -11,7 +11,8 @@ export const CLIENT_BODY_LIMIT = 48 << 20, CLIENT_SOCKET_LIMIT = 1 << 20;
 /** Node-level compatibility gate: this deployment refuses older clients instead of failing mid-job. */
 // 与 local/VERSION 同步：发布新客户端时一并抬高。环境变量覆盖；设成空串表示不限制。
 // 0.5.0：下线改为软交接，服务端需先交接再断开连接，旧客户端会立即拆连接所以必须拒绝。
-export const MIN_CLIENT_VERSION = "0.5.0";
+// 0.5.6：增加只读控件树与受保护的屏幕坐标输入，旧客户端不能执行新协议。
+export const MIN_CLIENT_VERSION = "0.5.6";
 export const minClientVersion = () => process.env.VEGA_MIN_CLIENT_VERSION ?? MIN_CLIENT_VERSION;
 const triple = (value?: string) => (/^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(value || "") ? value!.split(".").map(Number) : undefined);
 /** Clients that never reported a version predate the gate, so they count as outdated. */

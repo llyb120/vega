@@ -61,21 +61,27 @@ type appuseAction struct {
 }
 
 type appuseRequest struct {
-	Operation   string         `json:"operation"`
-	Owner       string         `json:"owner"`
-	WindowID    *uint32        `json:"windowId"`
-	MonitorID   *uint32        `json:"monitorId"`
-	Region      *appuseRegion  `json:"region"`
-	RegionSpace string         `json:"regionSpace"`
-	SnapshotID  string         `json:"snapshotId"`
-	ImageID     string         `json:"imageId"`
-	Feedback    string         `json:"feedback"`
-	Actions     []appuseAction `json:"actions"`
-	MaxEdge     uint32         `json:"maxEdge"`
-	ImagePath   string         `json:"imagePath"`
-	Notes       string         `json:"notes"`
-	Query       string         `json:"query"`
-	Observe     *bool          `json:"observe"`
+	Operation       string         `json:"operation"`
+	Owner           string         `json:"owner"`
+	WindowID        *uint32        `json:"windowId"`
+	MonitorID       *uint32        `json:"monitorId"`
+	Region          *appuseRegion  `json:"region"`
+	RegionSpace     string         `json:"regionSpace"`
+	SnapshotID      string         `json:"snapshotId"`
+	ImageID         string         `json:"imageId"`
+	Feedback        string         `json:"feedback"`
+	Actions         []appuseAction `json:"actions"`
+	MaxEdge         uint32         `json:"maxEdge"`
+	ImagePath       string         `json:"imagePath"`
+	Notes           string         `json:"notes"`
+	Query           string         `json:"query"`
+	Observe         *bool          `json:"observe"`
+	CoordinateSpace string         `json:"coordinateSpace"`
+	X               *int           `json:"x"`
+	Y               *int           `json:"y"`
+	Depth           int            `json:"depth"`
+	MaxItems        int            `json:"maxItems"`
+	Filter          string         `json:"filter"`
 }
 
 type appusePoint struct{ X, Y int32 }
@@ -114,6 +120,7 @@ type appuseShot struct {
 	Cursor   *appusePoint
 	WindowID *uint32
 	Monitor  uint32
+	Screen   bool
 }
 
 type appuseSnapshot struct {
@@ -124,6 +131,7 @@ type appuseSnapshot struct {
 	Foreground  *appusePoint
 	MaxEdge     uint32
 	Invalidated string
+	GuardFrames map[uint32]*image.RGBA
 }
 
 var (
@@ -169,6 +177,19 @@ func appuseExecute(raw json.RawMessage) map[string]any {
 	}
 	if request.MonitorID != nil && request.Operation != "screenshot" {
 		return failure("monitorId 仅用于 screenshot；act 由 imageId 选择屏幕")
+	}
+	if request.CoordinateSpace != "" && request.CoordinateSpace != "image" && request.CoordinateSpace != "screen" {
+		return failure("coordinateSpace 必须是 image 或 screen")
+	}
+	if request.CoordinateSpace == "screen" {
+		if request.Operation != "act" || request.SnapshotID != "" || request.ImageID != "" {
+			return failure("screen 只用于 act，不能携带图片 ID；本批未执行")
+		}
+		for _, action := range request.Actions {
+			if action.Action == "type" || action.Action == "press" {
+				return failure("screen 不允许键盘输入；本批未执行")
+			}
+		}
 	}
 	appuseDisplayOnly(&request)
 	appuseInit()
@@ -239,6 +260,8 @@ func appuseRunLocked(request *appuseRequest, maxEdge uint32) map[string]any {
 	switch request.Operation {
 	case "windows":
 		return appuseWindowsOperation(request, maxEdge)
+	case "elements":
+		return appuseElementsOperation(request)
 	case "screenshot":
 		return appuseScreenshotOperation(request, maxEdge)
 	case "activate":
@@ -248,7 +271,7 @@ func appuseRunLocked(request *appuseRequest, maxEdge uint32) map[string]any {
 	case "recall":
 		return appuseRecallOperation(request)
 	default:
-		return failure("未知 appuse 操作；可用：windows/screenshot/act/activate/recall")
+		return failure("未知 appuse 操作；可用：windows/elements/screenshot/act/activate/recall")
 	}
 }
 
@@ -375,6 +398,9 @@ func appuseActivateOperation(request *appuseRequest, maxEdge uint32) map[string]
 	if err := appuseActivate(id); err != nil {
 		return failure(err.Error())
 	}
+	if appuseElementsLast != nil {
+		appuseElementsLast.Snapshot.Invalidated = "激活窗口后需要重新读取控件"
+	}
 	time.Sleep(150 * time.Millisecond)
 	result := appuseCapture(request.Owner, &id, nil, nil, maxEdge)
 	if result == nil {
@@ -414,39 +440,50 @@ func appuseActOperation(request *appuseRequest, maxEdge uint32) map[string]any {
 		}
 		return result
 	}
-	bindInputSnapshot(request)
-	if request.SnapshotID == "" {
-		result := map[string]any{"status": "not_executed", "completedActions": 0, "inputAttempted": false,
-			"required": []string{"observation"}, "errorCode": "observation_required",
-			"error": "没有本会话可用的观察；本批次未执行。先 windows(observe:true) 或 screenshot 看目标画面再决策，不需要补填 snapshotId。"}
-		return result
-	}
-	snapshot := appuseSnapshots[request.Owner]
-	if snapshot == nil || snapshot.ID != request.SnapshotID {
-		result := map[string]any{"status": "not_executed", "completedActions": 0, "inputAttempted": false,
-			"required": []string{"snapshotId"}, "errorCode": "stale_snapshot_id",
-			"error": "旧 snapshotId 不可用于输入；最新快照仍可用，未执行、未重新截图。请核对最新图及 completedActions，不要重放已执行动作。"}
-		if snapshot != nil {
-			result["snapshotId"] = snapshot.ID
-			result["snapshotPreserved"] = true
-			result["imageIds"] = appuseImageIDs(snapshot)
-			next := map[string]any{"operation": "act", "snapshotId": snapshot.ID}
-			if len(snapshot.Shots) == 1 {
-				next["imageId"] = snapshot.Shots[0].ImageID
-			}
-			result["nextArguments"] = next
+	var snapshot *appuseSnapshot
+	var shot *appuseShot
+	if request.CoordinateSpace == "screen" {
+		var err error
+		snapshot, err = appuseScreenSnapshot(request)
+		if err != nil {
+			return map[string]any{"status": "not_executed", "completedActions": 0, "inputAttempted": false, "error": err.Error()}
 		}
-		return result
-	}
-	if snapshot.Invalidated != "" {
-		result := map[string]any{"status": "not_executed", "completedActions": 0, "inputAttempted": false,
-			"error": fmt.Sprintf("快照在截图后被其它操作改动的画面作废：%s；附当前观察，请基于新图重新决策", snapshot.Invalidated)}
-		appuseObserve(request.Owner, nil, nil, maxEdge, result)
-		return result
-	}
-	shot := appuseFindShot(snapshot, request.ImageID)
-	if shot == nil {
-		return failure(appuseImageListError(snapshot))
+		shot = &snapshot.Shots[0]
+	} else {
+		bindInputSnapshot(request)
+		if request.SnapshotID == "" {
+			result := map[string]any{"status": "not_executed", "completedActions": 0, "inputAttempted": false,
+				"required": []string{"observation"}, "errorCode": "observation_required",
+				"error": "没有本会话可用的观察；本批次未执行。先 windows(observe:true) 或 screenshot 看目标画面再决策，不需要补填 snapshotId。"}
+			return result
+		}
+		snapshot = appuseSnapshots[request.Owner]
+		if snapshot == nil || snapshot.ID != request.SnapshotID {
+			result := map[string]any{"status": "not_executed", "completedActions": 0, "inputAttempted": false,
+				"required": []string{"snapshotId"}, "errorCode": "stale_snapshot_id",
+				"error": "旧 snapshotId 不可用于输入；最新快照仍可用，未执行、未重新截图。请核对最新图及 completedActions，不要重放已执行动作。"}
+			if snapshot != nil {
+				result["snapshotId"] = snapshot.ID
+				result["snapshotPreserved"] = true
+				result["imageIds"] = appuseImageIDs(snapshot)
+				next := map[string]any{"operation": "act", "snapshotId": snapshot.ID}
+				if len(snapshot.Shots) == 1 {
+					next["imageId"] = snapshot.Shots[0].ImageID
+				}
+				result["nextArguments"] = next
+			}
+			return result
+		}
+		if snapshot.Invalidated != "" {
+			result := map[string]any{"status": "not_executed", "completedActions": 0, "inputAttempted": false,
+				"error": fmt.Sprintf("快照在截图后被其它操作改动的画面作废：%s；附当前观察，请基于新图重新决策", snapshot.Invalidated)}
+			appuseObserve(request.Owner, nil, nil, maxEdge, result)
+			return result
+		}
+		shot = appuseFindShot(snapshot, request.ImageID)
+		if shot == nil {
+			return failure(appuseImageListError(snapshot))
+		}
 	}
 	for index := range request.Actions {
 		if err := request.Actions[index].validate(shot); err != nil {
@@ -470,6 +507,10 @@ func appuseActOperation(request *appuseRequest, maxEdge uint32) map[string]any {
 	for index := range request.Actions {
 		action := request.Actions[index]
 		if action.Action != "wait" {
+			if request.CoordinateSpace == "screen" {
+				shot = appuseScreenShot(snapshot, action.X, action.Y)
+				monitor, windowID = shot.Monitor, shot.WindowID
+			}
 			if err := appuseCheckTarget(snapshot, shot, action); err != nil {
 				failureText = err.Error()
 				break
@@ -490,6 +531,14 @@ func appuseActOperation(request *appuseRequest, maxEdge uint32) map[string]any {
 		time.Sleep(appuseActionDelay(request.Actions, index))
 	}
 	snapshot.Invalidated = "动作已执行，请先观察新画面，不重放输入"
+	if appuseElementsLast != nil {
+		appuseElementsLast.Snapshot.Invalidated = snapshot.Invalidated
+	}
+	if request.CoordinateSpace == "screen" && attempted {
+		if previous := appuseSnapshots[request.Owner]; previous != nil {
+			previous.Invalidated = snapshot.Invalidated
+		}
+	}
 	status := "executed"
 	if failureText != "" {
 		if attempted {
@@ -823,6 +872,13 @@ func appusePointOf(shot *appuseShot, x, y *int) (appusePoint, error) {
 	if x == nil || y == nil {
 		return appusePoint{}, fmt.Errorf("缺少 x/y 坐标")
 	}
+	if shot.Screen {
+		point := appusePoint{X: int32(*x), Y: int32(*y)}
+		if int(point.X) != *x || int(point.Y) != *y {
+			return appusePoint{}, fmt.Errorf("坐标超出物理像素范围")
+		}
+		return point, nil
+	}
 	if *x < 0 || *y < 0 || uint32(*x) >= shot.PixelsW || uint32(*y) >= shot.PixelsH || shot.SourceW == 0 || shot.SourceH == 0 {
 		return appusePoint{}, fmt.Errorf("坐标超出原始截图范围")
 	}
@@ -866,6 +922,23 @@ func appuseCheckTarget(snapshot *appuseSnapshot, shot *appuseShot, action appuse
 	if err != nil {
 		return err
 	}
+	if shot.Screen {
+		if err := appuseScreenCheckTarget(action); err != nil {
+			return err
+		}
+		for _, expected := range snapshot.Shots {
+			matched := false
+			for _, monitor := range current {
+				if monitor == expected.Surface {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return fmt.Errorf("显示器布局已改变，请重新观察")
+			}
+		}
+	}
 	for _, monitor := range current {
 		if monitor.ID == shot.Monitor {
 			if monitor.X != shot.Surface.X || monitor.Y != shot.Surface.Y || monitor.W != shot.Surface.W || monitor.H != shot.Surface.H {
@@ -889,9 +962,16 @@ func appuseGuardPixels(snapshot *appuseSnapshot, shot *appuseShot, action appuse
 	if action.X == nil || action.Y == nil {
 		return nil
 	}
-	frame := appusePreviousFrame(snapshot.Owner)[shot.Monitor]
-	if !appuseFrameFresh(frame, appuseSnapshotTTL) || frame.Image == nil {
-		return nil
+	baseline := snapshot.GuardFrames[shot.Monitor]
+	if baseline == nil {
+		if shot.Screen {
+			return fmt.Errorf("控件观察缺少视觉守卫基线；未输入，请重新观察")
+		}
+		frame := appusePreviousFrame(snapshot.Owner)[shot.Monitor]
+		if !appuseFrameFresh(frame, appuseSnapshotTTL) || frame.Image == nil {
+			return nil
+		}
+		baseline = frame.Image
 	}
 	point, err := appusePointOf(shot, action.X, action.Y)
 	if err != nil {
@@ -910,7 +990,7 @@ func appuseGuardPixels(snapshot *appuseSnapshot, shot *appuseShot, action appuse
 	if uint32(left) != region.X || uint32(top) != region.Y {
 		return nil // 贴着屏幕边缘就不做像素比对，避免误报
 	}
-	if !appuseRegionUnchanged(frame.Image, grab, region, 0.06) {
+	if !appuseRegionUnchanged(baseline, grab, region, 0.06) {
 		return fmt.Errorf("目标周围画面在截图后已经变化（可能弹窗/翻页/被遮挡）；本批未执行，请基于新图重新定位，不要重放")
 	}
 	return nil
@@ -1070,7 +1150,7 @@ func (a appuseAction) validate(shot *appuseShot) error {
 	if a.Glide != nil && a.Action != "click" && a.Action != "double_click" && a.Action != "move" && a.Action != "drag" {
 		return fmt.Errorf("glide 仅用于 click/double_click/move/drag")
 	}
-	if a.MS != nil && *a.MS > 2000 {
+	if a.MS != nil && (*a.MS < 0 || *a.MS > 2000) {
 		return fmt.Errorf("ms=%d，允许范围为 0–2000", *a.MS)
 	}
 	switch a.Action {

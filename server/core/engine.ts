@@ -15,7 +15,7 @@ import { MCP } from "./mcp";
 import { units, refName, archivedResult } from "./history";
 import { CHROME_TOOLS, STANDALONE_TOOLS } from "./public-tools";
 import { EMPLOYEE_CHAT_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, sessionPrompt, sessionStablePrompt, sessionDynamicPrompt, loadSkills, expandSkillCommand, steerPrompt, clampPromptCacheKey, BOOST } from "./prompt";
-import { SUBAGENT_GUIDE, CHILD_DYNAMIC_TAIL, formatAgentHandoff, inheritView, withoutOpenTail, reserveAgent, beginAgent, finishAgent, interruptAgent, cancelSessionAgents, resumeSessionAgents, takeReadyAgents, hasPendingAgents, awaitPendingAgents, waitUntilAgentReady, type AgentChild } from "./spawn-agent";
+import { SUBAGENT_GUIDE, CHILD_DYNAMIC_TAIL, isAgentTool, formatAgentHandoff, inheritView, withoutOpenTail, reserveAgent, beginAgent, finishAgent, interruptAgent, cancelSessionAgents, resumeSessionAgents, takeReadyAgents, hasPendingAgents, awaitPendingAgents, waitUntilAgentReady, type AgentChild } from "./spawn-agent";
 import { awaitPendingBash, cancelSessionBash, hasPendingBash, pendingBash, pendingBashFinished } from "./bash-jobs";
 import { EventEmitter } from "node:events";
 import { rm, stat } from "node:fs/promises";
@@ -28,6 +28,7 @@ import { Catalog } from "./catalog";
 import { Providers, ProviderError, type Emit } from "./provider";
 import { Tools, type Outcome } from "./tools";
 import { Context, estimate, ACP_GUIDE, sinceNewSession } from "./context";
+import { APPUSE_TOOLS } from "./appuse-tools";
 import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, followUpOpen, followUpSummary, type EmployeeRuntime } from "./employee";
 import { EmployeeBrowsers } from "./employee-browsers";
 import { NetworkRelay } from "./network-relay";
@@ -1719,8 +1720,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             const deps = dependencies(c.arguments._after, i);
             for (const d of deps) {
               assert(
-                !CHROME_TOOLS.has(calls[d].name) && !["mcp", "switch_scene"].includes(calls[d].name),
-                "UI/MCP results require model review; not an automatic prerequisite",
+                !CHROME_TOOLS.has(calls[d].name) && !APPUSE_TOOLS.has(calls[d].name) && !isAgentTool(calls[d].name) && !["mcp", "switch_scene"].includes(calls[d].name),
+                "UI/MCP/agent results require model review; not an automatic prerequisite",
               );
               await done[d];
               assert(

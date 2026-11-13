@@ -1,10 +1,10 @@
 import type { Tool } from "./provider";
-import type { Obj } from "./util";
+import { assert, type Obj } from "./util";
 
 /**
  * 剑来桌面工具：与 Nova 的 scripts/jianlai-tools.json 同构的窄 schema。
  *
- * Nova 的 8 个工具共享同一个执行器：窄工具只负责参数形状，映射后交给 appuse 执行器。
+ * Nova 的 9 个工具共享同一个执行器：窄工具只负责参数形状，映射后交给 appuse 执行器。
  * 这里保持同样的分工——参数校验在服务端可见 schema 上完成，执行与安全校验仍在客户端。
  * 服务端不重造执行逻辑，只把 capture.kind / routeId 这类 Nova 的形状翻译成执行器参数。
  */
@@ -38,10 +38,10 @@ const action = {
   type: "object",
   properties: {
     action: { type: "string", enum: ["click", "double_click", "move", "drag", "type", "press", "scroll", "wait"] },
-    x: { type: "integer", minimum: 0 },
-    y: { type: "integer", minimum: 0 },
-    toX: { type: "integer", minimum: 0 },
-    toY: { type: "integer", minimum: 0 },
+    x: { type: "integer", minimum: -2147483648, maximum: 2147483647 },
+    y: { type: "integer", minimum: -2147483648, maximum: 2147483647 },
+    toX: { type: "integer", minimum: -2147483648, maximum: 2147483647 },
+    toY: { type: "integer", minimum: -2147483648, maximum: 2147483647 },
     button: { type: "string", enum: ["left", "right", "middle"] },
     text: { type: "string", maxLength: 10000 },
     key: { type: "string" },
@@ -63,6 +63,12 @@ export function appuseTools(): Tool[] {
       "appuse_windows",
       "列出桌面窗口和显示器。query 按应用名/标题过滤；observe=true 同次附目标所在显示器整屏，windowId 优先、否则 query 唯一命中。不激活窗口；未指定目标观察所有显示器。输入前核对 focused/observedWindowFocused，需切窗用 appuse_activate。",
       { query: { type: "string" }, windowId: { type: "integer", minimum: 0 }, observe: { type: "boolean" }, maxEdge, background },
+      [],
+    ),
+    def(
+      "appuse_elements",
+      "只读查询 Windows 控件树，不激活窗口、不发送输入、不返回新截图。windowId 指定窗口；x/y 查询当前图片像素点下的窗口（无可用图片时为屏幕物理像素），都省略则查询前台。优先用于原生控件定位；自绘界面无控件时再截图。返回名称、角色、自动化 ID、具名可见控件矩形和 screen 物理像素；有匹配的整屏/裁剪截图时同时返回图内矩形和 imageId，图外控件只给 screen；窗口自身截图只给 screen，避免误用屏幕原点。truncated=true 表示受深度、数量或时间预算限制，不能声称列表完整。",
+      { windowId, x: { type: "integer", minimum: -2147483648, maximum: 2147483647 }, y: { type: "integer", minimum: -2147483648, maximum: 2147483647 }, snapshotId: { type: "string" }, imageId: { type: "string" }, depth: { type: "integer", minimum: 1, maximum: 20 }, maxItems: { type: "integer", minimum: 1, maximum: 200 }, filter: { type: "string", maxLength: 200 } },
       [],
     ),
     def(
@@ -112,8 +118,8 @@ export function appuseTools(): Tool[] {
     ),
     def(
       "appuse_act",
-      "在最新观察上执行 1–16 个已确认鼠标键盘动作并自动附图。snapshotId 可省略：直接使用本会话最新同模式可用观察；没有可用观察时才要求重新观察。ID 不代表屏幕没变，执行前仍校验现场焦点、显示器布局和落点像素。type/press 前必须先确认焦点；纯 wait 不输入、可省略快照。失败核对 completedActions/inputAttempted，不重放；actions 必须基于最新图重新决策。",
-      { snapshotId: { type: "string" }, imageId: { type: "string" }, windowId, background, feedback: { type: "string", enum: ["screenshot", "desktop", "none"] }, notes: { type: "string", maxLength: 12000 }, maxEdge, actions: { type: "array", minItems: 1, maxItems: 16, items: action } },
+      "在最新观察上执行 1–16 个已确认鼠标键盘动作并自动附图。默认 image 使用图片像素并保留视觉守卫；snapshotId 可省略以绑定最新截图。coordinateSpace=screen 使用刚读取的 elements[].screen 物理像素（可负），无需截图 ID，只允许指针动作及 wait；客户端会重查控件、窗口和画面，不能用于键盘输入或后台模式。确认卡、输入租约和 Esc 停止仍生效。失败核对 completedActions/inputAttempted，禁止重放已执行动作。",
+      { coordinateSpace: { type: "string", enum: ["image", "screen"] }, snapshotId: { type: "string" }, imageId: { type: "string" }, windowId, background, feedback: { type: "string", enum: ["screenshot", "desktop", "none"] }, notes: { type: "string", maxLength: 12000 }, maxEdge, actions: { type: "array", minItems: 1, maxItems: 16, items: action } },
       ["actions"],
     ),
     def(
@@ -196,7 +202,12 @@ export function normalizeDesktopAction(raw: any): any {
 /** 窄工具参数 → 执行器参数。只有形状翻译，不改变任何安全校验与快照规则。 */
 export function appuseArguments(name: string, a: Obj, owner: string): Obj {
   const defined = (o: Obj) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+  assert(!a.background, "Windows 不支持后台桌面操作，不会回退到前台");
   const common = defined({ snapshotId: a.snapshotId, imageId: a.imageId, windowId: a.windowId, maxEdge: a.maxEdge, notes: a.notes, feedback: a.feedback, owner });
+  if (name === "appuse_elements") {
+    assert((a.x === undefined) === (a.y === undefined) && !(a.windowId !== undefined && a.x !== undefined), "elements 的 x/y 必须成对，且与 windowId 二选一");
+    return defined({ ...common, operation: "elements", x: a.x, y: a.y, depth: a.depth, maxItems: a.maxItems, filter: a.filter });
+  }
   if (name === "appuse_windows") return defined({ operation: "windows", query: a.query, windowId: a.windowId, observe: a.observe, maxEdge: a.maxEdge, owner });
   if (name === "appuse_screenshot") {
     const capture = (a.capture || {}) as Obj;
@@ -214,7 +225,15 @@ export function appuseArguments(name: string, a: Obj, owner: string): Obj {
     return defined(mapped);
   }
   if (name === "appuse_activate") return defined({ operation: "activate", windowId: a.windowId, maxEdge: a.maxEdge, owner });
-  if (name === "appuse_act") return defined({ ...common, operation: "act", actions: (a.actions || []).map(normalizeDesktopAction) });
+  if (name === "appuse_act") {
+    const actions = (a.actions || []).map(normalizeDesktopAction);
+    if (a.coordinateSpace === "screen") {
+      assert(!a.snapshotId && !a.imageId && !a.background, "screen 坐标不能携带图片 ID 或启用后台模式");
+      assert(actions.every((action: Obj) => ["click", "double_click", "move", "drag", "scroll", "wait"].includes(action.action)), "screen 坐标只允许指针动作和 wait，不允许键盘输入");
+    } else for (const action of actions) for (const key of ["x", "y", "toX", "toY"])
+      assert(action[key] === undefined || action[key] >= 0, "image 坐标不能为负");
+    return defined({ ...common, operation: "act", coordinateSpace: a.coordinateSpace, actions });
+  }
   if (name === "appuse_recall") return defined({ operation: "recall", imagePath: a.imagePath, owner });
   // 经验图谱：桌面路径与浏览器路径共用同一套存储，按 origin 分域；这里用应用名作 scope。
   const experience = defined({

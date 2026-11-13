@@ -18,11 +18,11 @@ async function setup(t: any) {
   return { store, hub, session, tools };
 }
 
-test("desktop tools are the eight narrow ones, listed only in a Windows client session", async (t) => {
+test("desktop tools are the nine narrow ones, listed only in a Windows client session", async (t) => {
   const { store, tools } = await setup(t);
   const names = (await tools.definitions()).map((tool) => tool.name);
   assert.deepEqual([...APPUSE_TOOLS].sort(), names.filter((name) => name.startsWith("appuse_")).sort());
-  assert.equal(APPUSE_TOOLS.size, 8);
+  assert.equal(APPUSE_TOOLS.size, 9);
   assert.match(await tools.rules(), /\[桌面操作\]/);
   // 单个 appuse 已不再列出：模型乱塞字段的根因就是那个扁平 schema。
   assert(!names.includes("appuse"));
@@ -31,6 +31,31 @@ test("desktop tools are the eight narrow ones, listed only in a Windows client s
   assert.doesNotMatch(await server.rules(), /\[桌面操作\]/);
   const linux = await Tools.create({ store, localAgents: new LocalAgents(), mcpFor: () => ({}) } as any, await store.newSession({ ownerId: "alice", localAgent: true, localPlatform: "linux", clientId: client.clientId, cwd: "/home/alice" }), { model: "", provider: {} }, new AbortController().signal, () => {});
   assert(!(await linux.definitions()).some((tool) => tool.name.startsWith("appuse_")));
+});
+
+test("elements are read-only queries and physical screen input is validated before dispatch", async (t) => {
+  const { hub, tools } = await setup(t);
+  let seen: any, calls = 0;
+  (hub as any).request = async (_agent: unknown, _op: string, args: any) => { calls++; seen = args; return { elements: [], truncated: true }; };
+  const result = await tools.execute({ id: "tree", name: "appuse_elements", arguments: { windowId: 42, depth: 4, maxItems: 60, filter: "Save" } }, {} as any);
+  assert.equal(seen.operation, "elements");
+  assert.equal(seen.windowId, 42);
+  assert.equal(result.value.truncated, true);
+  const actions = [{ action: "click", x: -120, y: 20 }];
+  await tools.execute({ id: "screen", name: "appuse_act", arguments: { coordinateSpace: "screen", actions } }, {} as any);
+  assert.equal(seen.coordinateSpace, "screen");
+  assert.equal(seen.actions[0].x, -120);
+  const before = calls;
+  for (const arguments_ of [
+    { coordinateSpace: "screen", snapshotId: "old", actions },
+    { coordinateSpace: "screen", imageId: "old", actions },
+    { coordinateSpace: "screen", background: true, actions },
+    { coordinateSpace: "screen", actions: [{ action: "press", key: "Enter" }] },
+    { actions },
+  ]) await assert.rejects(tools.execute({ id: "bad", name: "appuse_act", arguments: arguments_ }, {} as any));
+  for (const arguments_ of [{ x: 1 }, { x: 1, y: 2, windowId: 42 }, { depth: 21 }, { maxItems: 201 }])
+    await assert.rejects(tools.execute({ id: "bad-tree", name: "appuse_elements", arguments: arguments_ }, {} as any));
+  assert.equal(calls, before, "invalid requests never reach the client");
 });
 
 test("screenshot capture kinds map onto the executor without changing region spaces", () => {

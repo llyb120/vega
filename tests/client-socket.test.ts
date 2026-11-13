@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Auth } from "../server/core/auth";
 import { Store } from "../server/core/store";
 import { CLIENT_HEARTBEAT_TIMEOUT, CLIENT_RECONNECT_GRACE, LocalAgents, LocalAgentUnavailable } from "../server/core/local-agent";
-import { ClientSockets } from "../server/core/client-socket";
+import { ClientSockets, MIN_CLIENT_VERSION } from "../server/core/client-socket";
 import { NetworkRelay } from "../server/core/network-relay";
 import type { SendOptions, Wire } from "../server/core/sse";
 
@@ -507,19 +507,19 @@ test("a node minimum client version refuses older clients with a visible reason"
   // 不配置也应该按发布版本拦截（MIN_CLIENT_VERSION 与 local/VERSION 同步）。
   delete process.env.VEGA_MIN_CLIENT_VERSION;
   t.after(() => { process.env.VEGA_MIN_CLIENT_VERSION = previous ?? ""; });
-  for (const [id, version] of [["old", "0.3.9"], ["legacy", undefined]] as const) {
+  for (const [id, version] of [["old", "0.3.9"], ["previous", "0.5.4"], ["legacy", undefined]] as const) {
     const socket = f.peer(paired.deviceToken, id);
     await f.sockets.open(socket);
     await f.sockets.message(socket.id, { type: "hello", ...details, version });
     assert.equal(socket.messages[0]?.type, "error", "older and version-less clients are refused before any job");
     assert.equal(socket.messages[0]?.code, "client_outdated");
-    assert.match(socket.messages[0]?.message, /0\.5\.0/);
+    assert(socket.messages[0]?.message.includes(MIN_CLIENT_VERSION));
     assert.equal(f.hub.active(owner, details.clientId), undefined);
     assert.equal(socket.closed.length, 1);
   }
   const current = f.peer(paired.deviceToken, "current");
   await f.sockets.open(current);
-  await f.sockets.message(current.id, { type: "hello", ...details, version: "0.5.0" });
+  await f.sockets.message(current.id, { type: "hello", ...details, version: MIN_CLIENT_VERSION });
   assert.equal(current.messages[0]?.type, "ready");
   assert(f.hub.active(owner, details.clientId));
 });

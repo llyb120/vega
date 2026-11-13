@@ -42,6 +42,22 @@ test("a delayed dependency cannot overbook a slot handed to an existing waiter",
   assert(!results.some(result => result.error));
 });
 
+test("screen resources stay ordered and UI/MCP/agent outcomes cannot authorize automatic dependents", async () => {
+  const order: string[] = [];
+  await run([call("web", "chrome_act"), call("desktop", "appuse_act")], async c => {
+    order.push(c.id + ":start");
+    await new Promise(resolve => setTimeout(resolve, 1));
+    order.push(c.id + ":end"); return { value: {} };
+  });
+  assert.deepEqual(order, ["web:start", "web:end", "desktop:start", "desktop:end"]);
+  for (const name of ["chrome_inspect", "appuse_elements", "spawn_agent", "mcp"]) {
+    let inputs = 0;
+    const outcomes = await run([call("observe", name), call("write", "write", { path: "x", _after: [1] })], async () => { inputs++; return { value: {} }; });
+    assert.equal(inputs, 1);
+    assert.match(outcomes[1].value.error, /require model review/);
+  }
+});
+
 test("a finished call is reported at once instead of after the whole batch", async () => {
   const settled: string[] = [];
   await run(
