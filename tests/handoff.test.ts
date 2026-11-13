@@ -217,6 +217,7 @@ test("a task on the local client with a cloud browser takes the local login stat
   await assert.rejects(handoffs.ensureBrowserState({ ...session, localAgent: false }), /云端浏览器不可用/);
   // 已经搬过的任务不重复搬。
   w.state.tasks[0].browserSyncedAt = Date.now();
+  w.state.tasks[0].browserSyncVersion = 2;
   assert.equal(await handoffs.ensureBrowserState(session), undefined);
 });
 
@@ -381,6 +382,72 @@ test("task, execution sessions and handoff record roll back together on a failed
     await store.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("browser sync retries partial results when the target opens an authorised page", async () => {
+  const w = world();
+  w.task.execution = { localAgent: false, localBrowser: false, ownerId: "u1" };
+  const tab = { tag: "target", url: "about:blank" }, cookies: any[] = [];
+  const target: any = {
+    bridge: { request: async () => ({ tabs: [tab] }) },
+    cdp: async (_tag: string, method: string, params: any) => {
+      if (method === "Network.getAllCookies") return { cookies };
+      if (method === "Network.setCookie") { cookies.push(params); return { success: true }; }
+      if (method === "Runtime.evaluate") return { result: { value: { written: 1, failed: 0 } } };
+      throw Error("unexpected " + method);
+    },
+  };
+  const source: any = {
+    bridge: { request: async () => ({ tabs: [{ tag: "source", url: "https://a.test/" }] }) },
+    cdp: async (_tag: string, method: string) => method === "Network.getAllCookies"
+      ? { cookies: [{ name: "sid", value: "x", domain: "a.test", path: "/" }] }
+      : { result: { value: JSON.stringify({ local: { token: "x" }, session: {} }) } },
+  };
+  w.deps.browsers = { cloud: async () => target, local: async () => source };
+  w.deps.onlineClients = () => [{ id: "c1" }];
+  w.deps.releaseLocal = async () => {};
+  const handoffs = new TaskHandoffs(w.deps);
+  await handoffs.configure("e1", { sites: ["https://a.test"] });
+  const session: any = { id: "s1", taskId: "t1", employeeId: "e1", ownerId: "u1", localBrowser: false };
+  w.task.browserSyncedAt = 1; // Old versions could mark an unsuccessful sync as complete.
+  assert.equal((await handoffs.ensureBrowserState(session))!.ok, false);
+  assert.equal(w.task.browserSyncedAt, undefined);
+  assert.equal(cookies.length, 1);
+  tab.url = "https://a.test/";
+  assert.equal((await handoffs.ensureBrowserState(session))!.ok, true);
+  assert(w.task.browserSyncedAt);
+  assert.equal(w.task.browserSyncVersion, 2);
+  assert.equal(cookies.length, 1, "retry does not overwrite a copied cookie");
+  assert.equal(await handoffs.ensureBrowserState(session), undefined);
+});
+
+test("browser sync does not mark cookie-only source pages as fully synchronized", async () => {
+  const w = world();
+  w.task.execution = { localAgent: false, localBrowser: false, ownerId: "u1" };
+  const sourceTab = { tag: "source", url: "about:blank" }, cookies: any[] = [];
+  const target: any = {
+    bridge: { request: async () => ({ tabs: [{ tag: "target", url: "https://a.test/" }] }) },
+    cdp: async (_tag: string, method: string, params: any) => method === "Network.getAllCookies" ? { cookies } : method === "Network.setCookie" ? (cookies.push(params), { success: true }) : { result: { value: { written: 1, failed: 0 } } },
+  };
+  let storageAvailable = false;
+  const source: any = {
+    bridge: { request: async () => ({ tabs: [sourceTab] }) },
+    cdp: async (_tag: string, method: string) => method === "Network.getAllCookies" ? { cookies: [{ name: "sid", value: "x", domain: "a.test", path: "/" }] } : storageAvailable ? { result: { value: JSON.stringify({ local: { token: "x" }, session: {} }) } } : { result: {}, exceptionDetails: { text: "denied" } },
+  };
+  w.deps.browsers = { cloud: async () => target, local: async () => source };
+  w.deps.onlineClients = () => [{ id: "c1" }];
+  const handoffs = new TaskHandoffs(w.deps);
+  await handoffs.configure("e1", { sites: ["https://a.test"] });
+  const session: any = { id: "s1", taskId: "t1", employeeId: "e1", ownerId: "u1" };
+  assert.equal((await handoffs.ensureBrowserState(session))!.ok, false);
+  assert.equal(cookies.length, 1);
+  assert.equal(w.task.browserSyncedAt, undefined);
+  sourceTab.url = "https://a.test/";
+  assert.equal((await handoffs.ensureBrowserState(session))!.ok, false, "an unreadable source storage must also be retried");
+  assert.equal(w.task.browserSyncedAt, undefined);
+  storageAvailable = true;
+  assert.equal((await handoffs.ensureBrowserState(session))!.ok, true);
+  assert(w.task.browserSyncedAt);
 });
 
 test("a task taken over automatically comes back to its device once that device returns", async () => {

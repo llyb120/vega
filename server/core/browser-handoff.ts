@@ -17,6 +17,7 @@ export type BrowserState = {
   cookies: Obj[];
   pages: { url: string; title: string; localStorage: Record<string, string>; sessionStorage: Record<string, string> }[];
   capturedAt: number;
+  incomplete?: boolean;
   warnings: string[];
 };
 export type BrowserRestore = { ok: boolean; pages: { url: string; title: string; needLogin: boolean; storage: number }[]; warnings: string[] };
@@ -51,7 +52,11 @@ export async function captureBrowser(chrome: Chrome, origins: string[], signal: 
     warnings.push("未配置迁移站点，只迁移当前活动站点：" + origin);
   }
   const open = httpTab(tabs || []).filter((tab) => allowed.has(originOf(tab.url))).slice(0, MAX_PAGES);
-  if (!open.length) throw Error("授权站点上没有打开的页面，无法读取登录态；请先在这些站点登录并保持页签打开");
+  const control = open[0] || httpTab(tabs || [])[0] || (tabs || []).find((tab: Obj) => tab.url === "about:blank");
+  if (!control) throw Error("浏览器没有可读取 Cookie 的页签");
+  let incomplete = [...allowed].some((site) => !open.some((tab) => originOf(tab.url) === site));
+  if (!open.length) warnings.push("授权站点没有打开的页面，只能采集 Cookie");
+  else if (incomplete) warnings.push("部分授权站点没有打开页面，其页面存储未采集");
 
   const pages: BrowserState["pages"] = [];
   for (const tab of open) {
@@ -60,15 +65,25 @@ export async function captureBrowser(chrome: Chrome, origins: string[], signal: 
       returnByValue: true,
     }, undefined, signal);
     let parsed: Obj = {};
-    try { parsed = JSON.parse(unwrap(storage).value || "{}"); } catch { warnings.push("页面存储无法读取：" + tab.url); }
+    try {
+      assert(!storage.exceptionDetails && typeof unwrap(storage).value === "string", "页面存储无法读取");
+      parsed = JSON.parse(unwrap(storage).value);
+      assert(parsed && typeof parsed === "object", "页面存储无效");
+    } catch { incomplete = true; warnings.push("页面存储无法读取：" + tab.url); }
     pages.push({ url: String(tab.url), title: String(tab.title || ""), localStorage: parsed.local || {}, sessionStorage: parsed.session || {} });
   }
 
   const cookies: Obj[] = [];
   const seen = new Set<string>();
-  for (const tab of open) {
+  for (const tab of open.length ? open : [control]) {
     const raw = unwrap(await chrome.cdp(tab.tag, "Network.getAllCookies", {}, undefined, signal));
-    for (const cookie of raw.cookies || []) {
+    assert(Array.isArray(raw.cookies), "源浏览器 Cookie 无法读取");
+    for (const cookie of raw.cookies) {
+      // Partitioned cookies cannot be copied without changing their isolation boundary.
+      if (cookie.partitionKey !== undefined) {
+        if (!warnings.includes("分区 Cookie 未同步")) warnings.push("分区 Cookie 未同步");
+        continue;
+      }
       const domain = String(cookie.domain || "").replace(/^\./, "");
       if (!domain || ![...allowed].some((origin) => { const host = new URL(origin).hostname; return host === domain || host.endsWith("." + domain); })) continue;
       const key = [cookie.name, cookie.domain, cookie.path].join("\u0000");
@@ -79,7 +94,34 @@ export async function captureBrowser(chrome: Chrome, origins: string[], signal: 
     }
   }
   if (!cookies.length && !pages.some((page) => Object.keys(page.localStorage).length)) warnings.push("没有读到可迁移的 Cookie 或页面存储");
-  return { version: 1, origins: [...allowed], cookies, pages, capturedAt: Date.now(), warnings };
+  return { version: 1, origins: [...allowed], cookies, pages, capturedAt: Date.now(), ...(incomplete ? { incomplete } : {}), warnings };
+}
+
+// shortcut: Chrome has no conditional Cookie write, so concurrent changes can race this snapshot; serialize access for hostile shared browsers.
+async function mergeCookies(chrome: Chrome, tag: string, input: Obj[], warnings: string[], signal: AbortSignal) {
+  if (!input.length) return { count: 0, available: 0, pending: false };
+  const existing = unwrap(await chrome.cdp(tag, "Network.getAllCookies", {}, undefined, signal));
+  assert(Array.isArray(existing.cookies), "目标浏览器 Cookie 无法读取，未写入登录态");
+  const now = Date.now() / 1000;
+  const live = (cookie: Obj) => typeof cookie.expires !== "number" || cookie.expires <= 0 || cookie.expires > now;
+  const key = (cookie: Obj) => [cookie.name, cookie.domain, cookie.path || "/"].join("\0");
+  const known = new Set(existing.cookies.filter((cookie: Obj) => cookie.partitionKey === undefined && live(cookie)).map(key));
+  let count = 0, available = 0, pending = false;
+  for (const cookie of input.slice(0, MAX_COOKIES)) {
+    if (cookie.partitionKey !== undefined || !live(cookie)) continue;
+    if (known.has(key(cookie))) { available++; continue; }
+    const params: Obj = { name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path || "/", secure: !!cookie.secure, httpOnly: !!cookie.httpOnly };
+    if (cookie.sameSite) params.sameSite = cookie.sameSite;
+    if (typeof cookie.expires === "number" && cookie.expires > 0) params.expires = cookie.expires;
+    try {
+      const result = unwrap(await chrome.cdp(tag, "Network.setCookie", params, undefined, signal));
+      assert(result.success !== false, "浏览器未接受 Cookie");
+      known.add(key(cookie));
+      count++;
+      available++;
+    } catch (error: any) { pending = true; warnings.push(`Cookie ${cookie.name} 写入失败：${String(error?.message || error).slice(0, 120)}`); }
+  }
+  return { count, available, pending };
 }
 
 /** Put the state into this browser, then verify what the pages actually show. */
@@ -87,17 +129,10 @@ export async function restoreBrowser(chrome: Chrome, state: BrowserState, signal
   assert(state?.version === 1 && Array.isArray(state.pages) && Array.isArray(state.cookies), "登录态数据无效");
   const warnings: string[] = [...(state.warnings || [])];
   const { tabs } = (await chrome.bridge.request("tabs", {}, signal)) as Obj;
-  const target = httpTab(tabs || []).find((tab) => state.origins.includes(originOf(tab.url))) || httpTab(tabs || [])[0];
+  const target = httpTab(tabs || []).find((tab) => state.origins.includes(originOf(tab.url))) || httpTab(tabs || [])[0] || (tabs || []).find((tab: Obj) => tab.url === "about:blank");
   if (!target) throw Error("目标浏览器没有可用页签，无法写入登录态；请先在云端打开一个页面");
 
-  let applied = 0;
-  for (const cookie of state.cookies.slice(0, MAX_COOKIES)) {
-    const params: Obj = { name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path || "/", secure: !!cookie.secure, httpOnly: !!cookie.httpOnly };
-    if (cookie.sameSite) params.sameSite = cookie.sameSite;
-    if (typeof cookie.expires === "number" && cookie.expires > 0) params.expires = cookie.expires;
-    try { await chrome.cdp(target.tag, "Network.setCookie", params, undefined, signal); applied++; }
-    catch (error: any) { warnings.push(`Cookie ${cookie.name} 写入失败：${String(error?.message || error).slice(0, 120)}`); }
-  }
+  const merged = await mergeCookies(chrome, target.tag, state.cookies, warnings, signal);
 
   const pages: BrowserRestore["pages"] = [];
   for (const page of state.pages.slice(0, MAX_PAGES)) {
@@ -105,7 +140,7 @@ export async function restoreBrowser(chrome: Chrome, state: BrowserState, signal
       await chrome.cdp(target.tag, "Page.navigate", { url: page.url }, undefined, signal);
       await waitReady(chrome, target.tag, signal);
       await chrome.cdp(target.tag, "Runtime.evaluate", {
-        expression: `(() => { const put = (store, data) => { for (const [k, v] of Object.entries(data || {})) { try { store.setItem(k, v); } catch {} } }; put(localStorage, ${JSON.stringify(page.localStorage)}); put(sessionStorage, ${JSON.stringify(page.sessionStorage)}); return true; })()`,
+        expression: `(() => { const put = (store, data) => { for (const [k, v] of Object.entries(data || {})) { try { if (store.getItem(k) === null) store.setItem(k, v); } catch {} } }; put(localStorage, ${JSON.stringify(page.localStorage)}); put(sessionStorage, ${JSON.stringify(page.sessionStorage)}); return true; })()`,
         returnByValue: true,
       }, undefined, signal);
       await chrome.cdp(target.tag, "Page.reload", {}, undefined, signal);
@@ -122,8 +157,8 @@ export async function restoreBrowser(chrome: Chrome, state: BrowserState, signal
       pages.push({ url: page.url, title: page.title, needLogin: true, storage: 0 });
     }
   }
-  const ok = applied > 0 || pages.some((page) => page.storage > 0);
-  if (!ok) warnings.push("没有写入任何 Cookie 或页面存储");
+  const ok = merged.available > 0 || pages.some((page) => page.storage > 0);
+  if (!ok) warnings.push("没有可用的 Cookie 或页面存储");
   // 恢复后的页面停留在授权站点上，让下一次观察直接看到真实结果。
   return { ok, pages, warnings };
 }
@@ -148,37 +183,30 @@ export async function injectBrowser(chrome: Chrome, state: BrowserState, signal:
   const { tabs } = (await chrome.bridge.request("tabs", {}, signal)) as Obj;
   const allowed = new Set(state.origins);
   const open = httpTab(tabs || []).filter((tab) => allowed.has(originOf(tab.url)));
-  if (!open.length) {
-    // 目标端一个授权站点页都没打开：Cookie 仍要写，借任意一个页签设进 jar（setCookie 按 domain 生效，不看当前页）。
-    const any = httpTab(tabs || [])[0];
-    if (!any) { warnings.push("目标浏览器没有可用页签"); return { ok: false, cookies: 0, storage: 0, warnings }; }
-    open.push(any);
-  }
+  const control = open[0] || httpTab(tabs || [])[0] || (tabs || []).find((tab: Obj) => tab.url === "about:blank");
+  if (!control) { warnings.push("目标浏览器没有可用页签"); return { ok: false, cookies: 0, storage: 0, warnings }; }
 
-  let cookies = 0;
-  for (const cookie of state.cookies.slice(0, MAX_COOKIES)) {
-    const params: Obj = { name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path || "/", secure: !!cookie.secure, httpOnly: !!cookie.httpOnly };
-    if (cookie.sameSite) params.sameSite = cookie.sameSite;
-    if (typeof cookie.expires === "number" && cookie.expires > 0) params.expires = cookie.expires;
-    try { await chrome.cdp(open[0].tag, "Network.setCookie", params, undefined, signal); cookies++; }
-    catch (error: any) { warnings.push(`Cookie ${cookie.name} 写入失败：${String(error?.message || error).slice(0, 120)}`); }
-  }
+  const merged = await mergeCookies(chrome, control.tag, state.cookies, warnings, signal);
+  const cookies = merged.count;
+  let pending = merged.pending;
 
-  // 页面存储按源页 origin 写进目标端同源的已开页签；setItem 只补不删。
   let storage = 0;
   for (const page of state.pages.slice(0, MAX_PAGES)) {
+    if (!Object.keys(page.localStorage || {}).length && !Object.keys(page.sessionStorage || {}).length) continue;
     const origin = originOf(page.url);
     const tab = open.find((item) => originOf(item.url) === origin);
-    if (!tab) { warnings.push(`${origin} 的目标浏览器没有打开的页签，页面存储未同步（Cookie 已写入）`); continue; }
+    if (!tab) { pending = true; warnings.push(`${origin} 的目标浏览器没有打开的页签，页面存储未同步`); continue; }
     try {
-      const result = unwrap(await chrome.cdp(tab.tag, "Runtime.evaluate", {
-        expression: `(() => { let n = 0; const put = (store, data) => { for (const [k, v] of Object.entries(data || {})) { try { store.setItem(k, v); n++; } catch {} } }; put(localStorage, ${JSON.stringify(page.localStorage)}); put(sessionStorage, ${JSON.stringify(page.sessionStorage)}); return n; })()`,
+      const raw = await chrome.cdp(tab.tag, "Runtime.evaluate", {
+        expression: `(() => { let written = 0, failed = 0; const put = (store, data) => { for (const [k, v] of Object.entries(data || {})) { try { if (store.getItem(k) === null) { store.setItem(k, v); written++; } } catch { failed++; } } }; put(localStorage, ${JSON.stringify(page.localStorage)}); put(sessionStorage, ${JSON.stringify(page.sessionStorage)}); return { written, failed }; })()`,
         returnByValue: true,
-      }, undefined, signal));
-      storage += Number(result.value || 0);
-    } catch (error: any) { warnings.push(`${origin} 页面存储写入失败：${String(error?.message || error).slice(0, 120)}`); }
+      }, undefined, signal);
+      assert(!raw.exceptionDetails, "无法访问页面存储");
+      const result = unwrap(raw).value;
+      assert(result && typeof result.written === "number" && typeof result.failed === "number", "页面存储结果无效");
+      storage += result.written;
+      if (result.failed) { pending = true; warnings.push(`${origin} 有页面存储未写入`); }
+    } catch (error: any) { pending = true; warnings.push(`${origin} 页面存储写入失败：${String(error?.message || error).slice(0, 120)}`); }
   }
-  const ok = cookies > 0 || storage > 0;
-  if (!ok) warnings.push("没有写入任何 Cookie 或页面存储");
-  return { ok, cookies, storage, warnings };
+  return { ok: !pending, cookies, storage, warnings };
 }

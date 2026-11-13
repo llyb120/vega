@@ -374,34 +374,42 @@ export class TaskHandoffs {
     const employeeId = session.employeeId, taskId = session.taskId;
     if (!employeeId || !taskId) return;
     const employee = await this.deps.employeeFor(employeeId);
-    const task = employee.task(await employee.state({ runs: false }), taskId);
-    if (task.browserSyncedAt) return;
     const sites = (await this.policy(employeeId)).sites || [];
     if (!sites.length) return; // 没授权站点就不擅自搬登录态
-    const ownerId = task.execution?.ownerId || task.owner?.token || "";
     const targetLocal = !!session.localBrowser;
     const targetClient = session.browserClientId || session.clientId || "";
     return this.exclusive("browser:" + taskId, async () => {
+      const task = employee.task(await employee.state({ runs: false }), taskId);
+      if (task.browserSyncedAt && task.browserSyncVersion === 2) return;
+      const ownerId = task.execution?.ownerId || task.owner?.token || "";
       const target = await this.browserChrome(task, targetLocal ? "local" : "cloud");
       assert(target, targetLocal ? "本机浏览器不可用，登录态未同步" : "云端浏览器不可用，登录态未同步");
-      // 对端源：目标在本机 => 云端 + 其余在线客户端；目标在云端 => 全部在线客户端。同一账号，只借自己的。
       const sources: { side: "local" | "cloud"; clientId?: string }[] = [];
       if (targetLocal) sources.push({ side: "cloud" });
       for (const client of this.deps.onlineClients?.(ownerId) || [])
         if (!targetLocal || client.id !== targetClient) sources.push({ side: "local", clientId: client.id });
       const merged: string[] = [];
       const warnings: string[] = [];
+      let complete = sources.length > 0, hasState = false;
       for (const source of sources) {
-        // 源端浏览器用独立的 sync 键租约，抓完即释放，不占/不断目标端（任务端）的浏览器租约。
         const probeKey = session.id + ":sync";
         try {
           const origin = await this.browserChrome(task, source.side, source.clientId, probeKey);
-          if (!origin) { warnings.push(source.clientId ? `客户端 ${source.clientId.slice(0, 8)} 浏览器不可达` : "云端浏览器不可达"); continue; }
+          if (!origin) { complete = false; warnings.push(source.clientId ? `客户端 ${source.clientId.slice(0, 8)} 浏览器不可达` : "云端浏览器不可达"); continue; }
           const captured = await captureBrowser(origin, sites, AbortSignal.timeout(60_000));
+          if (captured.incomplete) complete = false;
+          if (!captured.cookies.length && !captured.pages.some((page) => Object.keys(page.localStorage).length || Object.keys(page.sessionStorage).length)) {
+            complete = false;
+            warnings.push(...captured.warnings);
+            continue;
+          }
+          hasState = true;
           const applied = await injectBrowser(target, captured, AbortSignal.timeout(90_000));
-          if (applied.cookies || applied.storage) merged.push(...captured.origins);
+          if (applied.ok || applied.cookies || applied.storage) merged.push(...captured.origins);
+          if (!applied.ok) complete = false;
           warnings.push(...applied.warnings);
         } catch (error: any) {
+          complete = false;
           warnings.push((source.clientId ? `客户端 ${source.clientId.slice(0, 8)}` : "云端") + "登录态未同步：" + String(error?.message || error).slice(0, 120));
         } finally {
           if (source.side === "local") await this.deps.releaseLocal?.(probeKey).catch(() => {});
@@ -409,13 +417,19 @@ export class TaskHandoffs {
       }
       await employee.update((state) => {
         const current = employee.task(state, taskId);
-        current.browserSyncedAt = Date.now();
-        current.browserSyncNote = merged.length
+        if (complete && hasState) {
+          current.browserSyncedAt = Date.now();
+          current.browserSyncVersion = 2;
+        } else {
+          delete current.browserSyncedAt;
+          delete current.browserSyncVersion;
+        }
+        current.browserSyncNote = complete && hasState
           ? `已把 ${[...new Set(merged)].join("、")} 的登录态同步到${targetLocal ? "本机" : "云端"}浏览器`
-          : "登录态同步后仍需处理：" + warnings.slice(0, 3).join("；");
+          : "登录态同步未完成：" + (warnings.slice(0, 3).join("；") || "没有可用的登录态来源");
         return state;
       });
-      return { ok: merged.length > 0, origins: [...new Set(merged)], warnings };
+      return { ok: complete && hasState, origins: [...new Set(merged)], warnings };
     });
   }
 
