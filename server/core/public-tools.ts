@@ -354,7 +354,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
     case "chrome_screenshot": {
       const c = a.capture;
       return chrome(defined({
-        operation: "screenshot", tabTag: a.tabTag, maxEdge: c.maxEdge, ...budget,
+        operation: "screenshot", tabTag: a.tabTag, maxEdge: c.maxEdge, visual: a.visual, ...budget,
         ...(c.kind === "page" ? { fullPage: true, tileOffset: c.tileOffset } : {}),
         ...(c.kind === "element" ? { ref: c.ref, frame: c.frame } : {}),
         ...(c.kind === "region" ? { region: c.region } : {}),

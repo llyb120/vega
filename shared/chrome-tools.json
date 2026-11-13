@@ -430,6 +430,14 @@
             }
           ]
         },
+        "visual": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "none"
+          ],
+          "description": "兼容其他浏览器工具；显式截图始终返回图片，即使 visual=none。只需要 DOM 时请用 chrome_inspect 的 visual=none。"
+        },
         "maxItems": {
           "type": "integer",
           "minimum": 1,

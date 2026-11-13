@@ -397,6 +397,21 @@ async function screenshotFixture(t: TestContext, width = 800, height = 3000) {
   return { ...f, captures, layouts };
 }
 
+test("explicit screenshots return images even with the compatible visual=none flag", async (t) => {
+  const f = await screenshotFixture(t), schema = CHROME_TOOL_DEFINITIONS.find(tool => tool.name === "chrome_screenshot")!.parameters;
+  for (const visual of [undefined, "auto", "none"]) {
+    const args = { tabTag: "tab", capture: { kind: "viewport" }, maxItems: 3, maxTextChars: 60, ...(visual ? { visual } : {}) };
+    const mapped = toInternal("chrome_screenshot", checkArgs(schema, args), { kind: "normal" }).args;
+    const result = await f.chrome.execute("owner", ".", mapped);
+    assert.equal(result.images.length, 1, String(visual));
+    assert(result.images[0].path && result.snapshotId);
+    assert.equal(f.chrome.observations.get("owner:tab")!.screenshot, true);
+  }
+  const inspect = await f.chrome.execute("owner", ".", { operation: "inspect", tabTag: "tab", visual: "none" });
+  assert.deepEqual(inspect.images, [], "visual=none still skips optional screenshots on inspect");
+  assert.equal(f.captures.filter((call) => call.method === "Page.captureScreenshot").length, 3);
+});
+
 test("unchanged screenshots detect small pixel changes and keep frame streams separate", async (t) => {
   const f = await screenshotFixture(t, 640, 480);
   Object.assign(f.page.viewport, { width: 640, height: 480 });

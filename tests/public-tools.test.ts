@@ -46,6 +46,9 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["chrome_tabs", { query: "jira", maxItems: 4 }, { operation: "tabs", query: "jira", maxItems: 4 }],
     ["chrome_inspect", { tabTag: "C1", scope: "viewport", visual: "none" }, { operation: "inspect", tabTag: "C1", scope: "viewport", visual: "none" }],
     ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" } }, { operation: "screenshot", tabTag: "C1" }],
+    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, visual: "none", maxItems: 3, maxTextChars: 60 }, { operation: "screenshot", tabTag: "C1", visual: "none", maxItems: 3, maxTextChars: 60 }],
+    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, visual: "auto" }, { operation: "screenshot", tabTag: "C1", visual: "auto" }],
+    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, visual: null }, { operation: "screenshot", tabTag: "C1" }],
     ["chrome_screenshot", { tabTag: "C1", capture: { kind: "page", tileOffset: 2 } }, { operation: "screenshot", tabTag: "C1", fullPage: true, tileOffset: 2 }],
     ["chrome_screenshot", { tabTag: "C1", capture: { kind: "element", ref: "e3", frame: 1 } }, { operation: "screenshot", tabTag: "C1", ref: "e3", frame: 1 }],
     ["chrome_screenshot", { tabTag: "C1", capture: { kind: "region", region: { x: 0, y: 0, width: 10, height: 20 } } }, { operation: "screenshot", tabTag: "C1", region: { x: 0, y: 0, width: 10, height: 20 } }],
@@ -139,6 +142,8 @@ test("branch errors name the field and the chosen branch's structure", () => {
   assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "elsewhere" } }), /target\.kind 只能是 "new_tab" \/ "existing_tab"/);
   assert.throws(() => map("chrome_act", { tabTag: "C1", actions: [{ action: "click", ref: "e1", x: 1 }] }), /不接受字段 x.*必填 action、ref/s);
   assert.throws(() => map("chrome_screenshot", { tabTag: "C1", capture: { kind: "region", region: { x: 0, y: 0, width: 0, height: 0 } } }), /width 必须大于 0/);
+  assert.throws(() => map("chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, visual: "invalid" }), /参数\.visual 只能是/);
+  assert.throws(() => map("chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, unknown: true }), /不接受字段 unknown/);
   assert.throws(() => map("task_wait", { checkpoint: "x" }, task), /resumeAt 和 参数\.delayMinutes 必须恰好填一个/);
   assert.throws(() => map("task_wait", { checkpoint: "x", delayMinutes: 5, resumeAt: "2030-01-01 09:00" }, task), /恰好填一个/);
   assert.throws(() => map("employee_task_create", { instructions: "x", runAt: "tomorrow 9am" }), /runAt 至少 16 个字符|runAt 格式不对/);
@@ -251,6 +256,24 @@ test("chrome invocations outside the computer scene are rejected before any brow
   const result = await inside.execute({ id: "c", name: "chrome_connection", arguments: { command: "status" } } as any, {} as any);
   assert.deepEqual(result.value, { connected: true });
   assert.equal(driver, 1, "computer scene reaches the driver");
+});
+
+test("screenshot visual=none passes the actual tool boundary and returns the image", async (t) => {
+  const store = await Store.open(":memory:");
+  t.after(async () => await store.close());
+  let received: any;
+  const engine = {
+    store, vault: new Vault(store), mcpFor: () => ({}), taskTabs: { used() {}, opened() {} },
+    chromeFor: async () => ({ execute: async (_owner: string, _cwd: string, args: any) => {
+      received = args;
+      return { tabTag: args.tabTag, snapshotId: "snap", images: [{ path: "fixture.webp", url: "/fixture" }] };
+    } }),
+  } as any;
+  const session = await store.newSession({ scene: "computer" });
+  const tools = await Tools.create(engine, session, { provider: {}, scenes: { computer: ["p/x"] } } as any, new AbortController().signal, () => {});
+  const result = await tools.execute({ id: "shot", name: "chrome_screenshot", arguments: { tabTag: "C1", capture: { kind: "viewport" }, visual: "none", maxItems: 3, maxTextChars: 60 } }, {} as any);
+  assert.deepEqual(received, { operation: "screenshot", tabTag: "C1", visual: "none", maxItems: 3, maxTextChars: 60 });
+  assert.equal(result.images?.length, 1);
 });
 
 test("dispatch and status descriptions steer away from copied tool names and redundant dedupe checks", () => {

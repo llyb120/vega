@@ -77,7 +77,7 @@ export function chromeCall(a: Obj): { name: string; arguments: Obj } {
     case "inspect": return call("chrome_inspect", { tabTag: a.tabTag, query: a.query, scope: a.scope, visual: a.visual, maxItems: a.maxItems, maxTextChars: a.maxTextChars });
     case "screenshot": {
       const capture = a.region ? { kind: "region", region: a.region } : a.expandScroll ? defined({ kind: "scroll_area", ref: a.ref }) : a.ref ? defined({ kind: "element", ref: a.ref, frame: a.frame }) : a.fullPage ? defined({ kind: "page", tileOffset: a.tileOffset }) : { kind: "viewport" };
-      return call("chrome_screenshot", { tabTag: a.tabTag, capture: defined({ ...capture, maxEdge: a.maxEdge }) });
+      return call("chrome_screenshot", { tabTag: a.tabTag, capture: defined({ ...capture, maxEdge: a.maxEdge }), visual: a.visual });
     }
     case "act": return call("chrome_act", { tabTag: a.tabTag, actions: (a.actions || [a.action]).map(action), imageId: a.imageId, visual: a.visual, settleMs: a.settleMs });
     case "evaluate": return call("chrome_evaluate", { tabTag: a.tabTag, expression: a.expression, frame: a.frame, visual: a.visual, observe: a.feedback === "none" ? false : undefined });
