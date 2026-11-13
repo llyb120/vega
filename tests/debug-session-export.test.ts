@@ -10,7 +10,7 @@ function mount(api: (path: string) => Promise<any>, debug = true, failure = "") 
   const blobs: Blob[] = [], links: any[] = [], revoked: string[] = [], timers: (() => void)[] = [];
   const state = vm.runInNewContext(
     source.slice(source.indexOf("const props ="), source.indexOf("</script>")) +
-      "\n({ refresh, exportSession, record, messages, raw, busy, error })",
+      "\n({ refresh, loadOlder, exportSession, record, messages, hasMore, raw, busy, error })",
     {
       ref, computed, Blob,
       CHAT_PAGE_SIZE: 60,
@@ -57,13 +57,20 @@ const fixture = () => ({
   fire: null, running: true, canWrite: false,
 });
 
-test("debug export saves the entire loaded session as readable JSON, regardless of the displayed view", async () => {
+test("debug export fetches the entire session, including unloaded and newly added messages", async () => {
   const payload = fixture(), paths: string[] = [];
-  const state = mount(async (path) => { paths.push(path); return payload; });
+  const state = mount(async (path) => {
+    paths.push(path);
+    return path.includes("?limit=") ? { ...payload, messages: payload.messages.slice(-60), hasMore: true } : payload;
+  });
   await state.refresh();
+  assert.equal(state.messages.value.length, 60);
+  assert.equal(state.messages.value[0].seq, 63);
+  payload.messages.push({ seq: 123, role: "assistant", text: "导出前新增的消息" } as any);
   state.raw.value = false;
   await state.exportSession();
   assert.deepEqual(paths, ["/sessions/session-fixture?limit=60", "/sessions/session-fixture"]);
+  assert.equal(state.messages.value.length, 60, "export does not alter the displayed page");
   assert.equal(state.blobs.length, 1);
   assert.equal(state.blobs[0].type, "application/json;charset=utf-8");
   const json = await state.blobs[0].text(), exported = JSON.parse(json);
@@ -80,7 +87,33 @@ test("debug export saves the entire loaded session as readable JSON, regardless 
   assert.deepEqual(state.revoked, ["blob:debug-export"]);
 });
 
-test("export is debug-only and disabled until a complete record is loaded", async () => {
+test("exporting the same session before and after loading older pages returns the same messages", async () => {
+  const payload = fixture();
+  const state = mount(async (path) => {
+    if (path.includes("?limit=")) return { ...payload, messages: payload.messages.slice(-60), hasMore: true };
+    if (path.includes("?before=")) {
+      const before = Number(new URL("http://fixture" + path).searchParams.get("before"));
+      const older = payload.messages.filter((message) => message.seq < before);
+      return { ...payload, messages: older.slice(-60), hasMore: older.length > 60 };
+    }
+    return payload;
+  });
+  await state.refresh();
+  await state.exportSession();
+  await state.loadOlder();
+  await state.loadOlder();
+  assert.equal(state.hasMore.value, false);
+  assert.equal(state.messages.value.length, payload.messages.length);
+  await state.exportSession();
+  const before = JSON.parse(await state.blobs[0].text()), after = JSON.parse(await state.blobs[1].text());
+  delete before.exportedAt;
+  delete after.exportedAt;
+  assert.deepEqual(before, after);
+  assert.deepEqual(after.messages, payload.messages);
+  state.cleanup();
+});
+
+test("export is debug-only and disabled until the session is loaded", async () => {
   const state = mount(async () => fixture());
   await state.exportSession();
   assert.equal(state.blobs.length, 0);
@@ -106,6 +139,22 @@ test("switching to a session that fails to load cannot export the previous sessi
   assert.equal(state.record.value, null);
   assert.equal(state.blobs.length, 0);
   assert.equal(state.error.value, "not found");
+});
+
+test("export refuses an incomplete or mismatched response rather than saving a partial session", async () => {
+  for (const response of [
+    { ...fixture(), messages: fixture().messages.slice(-60), hasMore: true },
+    { ...fixture(), session: { ...fixture().session, id: "another-session" } },
+    { ...fixture(), messages: undefined },
+  ]) {
+    const state = mount(async (path) => path.includes("?limit=") ? fixture() : response);
+    await state.refresh();
+    await state.exportSession();
+    assert.equal(state.blobs.length, 0);
+    assert.match(state.error.value, /未能获取完整会话记录/);
+    assert.equal(state.busy.value, false);
+    state.cleanup();
+  }
 });
 
 test("empty conversations can still export their metadata", async () => {

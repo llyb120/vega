@@ -132,7 +132,9 @@ async function exportSession() {
   let url;
   try {
     // Export always pulls the full transcript once (display stays paginated).
-    const full = await props.api("/sessions/" + encodeURIComponent(props.sessionId));
+    const sessionId = props.sessionId;
+    const full = await props.api("/sessions/" + encodeURIComponent(sessionId));
+    if (full.session?.id !== sessionId || !Array.isArray(full.messages) || full.hasMore) throw Error("未能获取完整会话记录");
     const json = JSON.stringify({
       exportedAt: new Date().toISOString(),
       session: full.session,
@@ -185,7 +187,7 @@ onBeforeUnmount(() => { version++; });
   <PageHeader :title="session?.title || '牛马会话记录'" :subtitle="debug ? '调试会话' : (session?.agentChild ? '分身只读记录' : '只读执行记录')" :back="debug ? '调试会话' : '返回牛马'" @back="emit('back')">
     <template #title-extra><span :class="['badge', running ? 'info' : '']"><span v-if="running" class="dot info pulse"></span>{{ running ? "执行中" : "执行记录" }}</span></template>
     <button v-if="debug" type="button" class="sm" :aria-pressed="raw" @click="raw = !raw"><Icon name="code" :size="14" /><span class="hide-mobile">{{ raw ? '整理视图' : '原始消息' }}</span></button>
-    <button v-if="debug" type="button" class="sm" :disabled="busy || !record" title="导出当前会话记录（JSON）" aria-label="导出会话（JSON）" @click="exportSession"><Icon name="download" :size="14" /><span class="hide-mobile">导出会话</span></button>
+    <button v-if="debug" type="button" class="sm" :disabled="busy || !record" title="导出该会话的全部记录（JSON）" aria-label="导出会话（JSON）" @click="exportSession"><Icon name="download" :size="14" /><span class="hide-mobile">导出会话</span></button>
     <button type="button" class="sm" :disabled="busy" title="刷新记录" @click="refresh"><Icon name="refresh" :size="14" /><span class="hide-mobile">刷新记录</span></button>
   </PageHeader>
   <section
@@ -207,7 +209,7 @@ onBeforeUnmount(() => { version++; });
         @click="emit('open', item.id)"
       >{{ item.kind === 'main' ? item.title : item.title }}<span v-if="item.status === 'running' || item.status === 'working'" class="dot info pulse"></span></button>
     </nav>
-    <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；补充、审批或续做请返回对应牛马，不能在这里输入或重放操作。<template v-if="debug">导出包含原始消息、工具参数与本地路径，分享前请脱敏；图片仅保留引用。</template></span></p>
+    <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；补充、审批或续做请返回对应牛马，不能在这里输入或重放操作。<template v-if="debug">导出该会话截至导出时的全部原始消息、工具参数与本地路径，分享前请脱敏；图片仅保留引用。</template></span></p>
     <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>牛马 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>模型 / 场景</dt><dd>{{ session.model || '未配置' }} / {{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-if="busy && !messages.length" class="context-note" role="status"><span class="spinner"></span>正在加载记录…</p>
