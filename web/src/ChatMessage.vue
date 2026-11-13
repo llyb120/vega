@@ -140,11 +140,17 @@ async function runExport(format) {
 .author-name { height: auto; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--text-2); font-size: 12px; font-weight: 600; }
 .author-name:hover:not(:disabled) { background: transparent; color: var(--accent-text); text-decoration: underline; }
 .chat-bubble img { display: block; max-width: 100%; max-height: 360px; margin-top: 6px; border-radius: var(--r-md); }
-.chat-quote { display: grid; justify-content: stretch; justify-items: start; gap: 1px; width: 100%; height: auto; min-height: 0; margin: 0 0 6px; padding: 4px 8px; border: 0; border-left: 2px solid var(--accent); border-radius: 2px 6px 6px 2px; background: rgb(255 255 255 / 60%); color: var(--text-2); font-weight: 400; text-align: left; white-space: normal; }
-.chat-quote strong { font-size: 11px; }
-.chat-quote span { display: -webkit-box; overflow: hidden; font-size: 12px; line-height: 1.5; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-/* 引用块跟着气泡的字色走：用户气泡是深色白字，里面再套浅底深字会读不清。 */
-.chat-bubble.tinted .chat-quote { border-left-color: color-mix(in srgb, currentColor 45%, transparent); background: color-mix(in srgb, currentColor 14%, transparent); color: color-mix(in srgb, currentColor 86%, transparent); }
+.chat-quote { display: grid; justify-content: stretch; justify-items: start; gap: 1px; width: 100%; max-width: 100%; height: auto; min-height: 0; margin: 0 0 6px; padding: 4px 8px; border: 0; border-left: 2px solid var(--accent); border-radius: 2px 6px 6px 2px; background: rgb(255 255 255 / 60%); color: var(--text-2); font-weight: 400; text-align: left; white-space: normal; }
+/* 不让引用原文撑宽气泡，同时给短回复保留可读的预览宽度。 */
+@supports (contain: inline-size) and (contain-intrinsic-inline-size: 14rem) {
+  .chat-quote { contain: inline-size; contain-intrinsic-inline-size: 14rem; }
+}
+.chat-quote:hover:not(:disabled) { background: rgb(255 255 255 / 75%); }
+.chat-quote strong { max-width: 100%; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.chat-quote span { min-width: 0; max-width: 100%; display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* 深色气泡上的引用加深背景，保留白字对比度。 */
+.chat-bubble.tinted .chat-quote { border-left-color: rgb(255 255 255 / 50%); background: rgb(0 0 0 / 12%); color: inherit; }
+.chat-bubble.tinted .chat-quote:hover:not(:disabled) { background: rgb(0 0 0 / 20%); }
 .chat-tasks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; width: 100%; min-width: 0; }
 .chat-task-link { justify-content: flex-start; gap: 8px; width: 100%; min-width: 0; max-width: min(100%, 440px); height: auto; min-height: 36px; padding: 6px 8px 6px 10px; border-color: var(--border); background: var(--surface); font-weight: 500; text-align: left; }
 .chat-task-link > .icon-svg:first-child { color: var(--accent); }
