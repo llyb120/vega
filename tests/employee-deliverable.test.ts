@@ -66,6 +66,18 @@ test("a longer reply written after the cited one auto-upgrades to that newer bod
   assert.deepEqual(resolveDeliverable(later, [5]).refs, [8]);
 });
 
+test("文本步骤产物可显式引用为最终正文，但不自动混入最终交付", () => {
+  const messages: any[] = [
+    { seq: 1, role: "assistant", model: "m", text: "简短进度" },
+    { seq: 2, role: "tool", text: JSON.stringify({ textRef: 1 }) },
+  ];
+  const opts = { excludeAuto: [1], stepOutputs: [{ ref: 1, text: "独立步骤产物" }] };
+  assert.deepEqual(resolveDeliverable(messages, undefined, opts).refs, []);
+  assert.deepEqual(resolveDeliverable(messages, [1], opts).texts, ["独立步骤产物"]);
+  assert.deepEqual(resolveDeliverable(messages, [2], opts).texts, ["独立步骤产物"], "工具回执仍能映射到原产物");
+  assert(resolveDeliverable(messages, [1], { excludeAuto: [1], stepOutputs: [{ ref: 1, text: "" }] }).error, "纯文件产物不能冒充文本正文");
+});
+
 test("explicit empty deliverableRefs never auto-pick a body: refused once naming it, then honored when confirmed", () => {
   const refused = resolveDeliverable(session, []);
   assert.deepEqual(refused.refs, []);
@@ -75,6 +87,14 @@ test("explicit empty deliverableRefs never auto-pick a body: refused once naming
   const confirmed = resolveDeliverable(session, [], { confirmEmpty: 4 });
   assert.equal(confirmed.error, undefined);
   assert.deepEqual(confirmed.texts, []);
+});
+
+test("step outputs are excluded from automatic final selection but remain explicitly citable", () => {
+  assert.deepEqual(resolveDeliverable(session, undefined, { excludeAuto: [4] }).refs, []);
+  assert.equal(resolveDeliverable(session, [], { excludeAuto: [4] }).error, undefined);
+  assert.deepEqual(resolveDeliverable(session, [4], { excludeAuto: [4] }).texts, [body.trim()]);
+  const newer = [...session, { seq: 8, role: "assistant", model: "m", text: body + "下一步骤" }];
+  assert.deepEqual(resolveDeliverable(newer, [4], { excludeAuto: [8] }).refs, [4], "a newer step output must not replace an explicitly cited final body");
 });
 
 test("memory claim limit fits path-heavy environment facts", () => {

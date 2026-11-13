@@ -218,6 +218,13 @@
     color: var(--fg-2); font-size: 11px;
   }
   .ta-message.user .ta-chip { border-color: rgb(255 255 255 / 0.3); background: rgb(255 255 255 / 0.16); color: #fff; }
+  .ta-step-output { display: grid; gap: 6px; margin-top: 6px; padding: 10px 12px; border: 1px solid rgb(var(--ink) / 0.1); border-radius: 12px; background: var(--surface); overflow-wrap: anywhere; }
+  .ta-step-output strong { font-size: 12px; }
+  .ta-step-output summary { color: var(--brand); cursor: pointer; font-size: 11px; }
+  .ta-step-output .ta-md { margin-top: 8px; user-select: text; }
+  .ta-step-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ta-step-actions button { padding: 4px 8px; border: 1px solid rgb(var(--ink) / 0.1); border-radius: 8px; color: var(--fg); background: rgb(var(--ink) / 0.04); font: inherit; font-size: 11px; cursor: pointer; }
+  .ta-step-actions button:disabled { opacity: .5; cursor: default; }
 
   /* markdown（与 Nova 的 .ta-md 同一套规则） */
   .ta-md > :first-child { margin-top: 0; }
@@ -796,10 +803,28 @@ const seen = {
 };
 const newLine = () => `<div class="ta-new${state.markGone ? " gone" : ""}" role="separator"><span>新</span></div>`;
 
+function stepOutputOf(message) {
+  if (message.stepOutput && typeof message.stepOutput === "object") return message.stepOutput;
+  const prefix = "**步骤产物（任务未完成）**\n\n", text = String(message.text || "");
+  if (message.stepOutput !== true || !text.startsWith(prefix)) return null;
+  const rest = text.slice(prefix.length), split = rest.indexOf("\n\n");
+  return { label: split < 0 ? "历史步骤产物" : rest.slice(0, split), text: split < 0 ? rest : rest.slice(split + 2) };
+}
+
+function stepOutputHTML(message) {
+  const output = stepOutputOf(message);
+  if (!output) return "";
+  const files = (output.files || []).filter((file) => /^blob-[a-f\d]{32}$/.test(file.blobId || ""));
+  const content = output.text ? `<details><summary>查看内容</summary><div class="ta-md">${sanitize(marked.parse(output.text))}</div></details>` : "";
+  const actions = files.map((file) => `<button type="button" data-step-file="${esc(file.blobId)}" data-step-name="${esc(file.name)}">下载 ${esc(file.name)}</button>`).join("") +
+    (output.text ? `<button type="button" data-step-export="${Number(message.seq) || 0}">导出 Markdown</button>` : "");
+  return `<section class="ta-step-output"><strong>步骤产物${output.step ? ` · 第 ${Number(output.step)} 步` : ""}</strong><span>${esc(output.label || "")}</span>${content}${actions ? `<div class="ta-step-actions">${actions}</div>` : ""}</section>`;
+}
+
 function messageHTML(message) {
   if (message.notice) return `<div class="ta-notice"><span>${esc(message.text || "")}</span></div>`;
   if (message.role !== "user" && message.role !== "assistant") return "";
-  const text = message.displayText || message.text || "";
+  const text = message.stepOutput === true && stepOutputOf(message) ? "步骤产物已保存。" : message.displayText || message.text || "";
   const mine = message.role === "user" && !message.author;
   const other = message.author && message.author.kind === "user" && !mine;
   const ask = message.role === "assistant" && askOpen(message);
@@ -829,7 +854,7 @@ function messageHTML(message) {
   if (message.error) classes.push("error");
   if (message.progress) classes.push("progress");
   return `<div class="ta-message ${message.role === "user" ? "user" : "bot"}">${avatars}
-    <div class="ta-message-content">${author}<div class="${classes.join(" ")}">${body}${chipHTML}</div></div>
+    <div class="ta-message-content">${author}<div class="${classes.join(" ")}">${body}${chipHTML}</div>${stepOutputHTML(message)}</div>
   </div>`;
 }
 
@@ -873,7 +898,35 @@ async function controlTask(taskId, action, extra) {
   }
 }
 
+function saveStepFile(data, name, type) {
+  const url = URL.createObjectURL(new Blob([data], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = String(name || "步骤产物").replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").slice(0, 120);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 el.stream.addEventListener("click", (event) => {
+  const file = event.target.closest?.("[data-step-file]");
+  if (file && !file.disabled) {
+    file.disabled = true;
+    void api("file", { blobId: file.dataset.stepFile }).then((result) => {
+      const raw = atob(result.data), bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      saveStepFile(bytes, file.dataset.stepName, "application/octet-stream");
+    }).catch((error) => toast(error.message)).finally(() => { file.disabled = false; });
+    return;
+  }
+  const exportButton = event.target.closest?.("[data-step-export]");
+  if (exportButton) {
+    const message = state.messages.find((item) => item.seq === Number(exportButton.dataset.stepExport));
+    const output = message && stepOutputOf(message);
+    if (output?.text) saveStepFile(output.text, (output.label || "步骤产物").slice(0, 110) + ".md", "text/markdown;charset=utf-8");
+    return;
+  }
   const button = event.target.closest?.(".tb-btn");
   if (!button || button.disabled) return;
   const { task, act, ok } = button.dataset;

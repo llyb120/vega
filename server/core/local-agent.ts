@@ -313,9 +313,9 @@ export async function localShellPoll(hub: LocalAgents, agent: Agent, jobId: stri
 export async function localShellKill(hub: LocalAgents, agent: Agent, jobId: string, signal: AbortSignal) {
   try { await hub.request(agent, "exec_kill", { jobId }, signal); } catch { /* best effort */ }
 }
-export async function localRead(hub: LocalAgents, agent: Agent, cwd: string, path: string, signal: AbortSignal) {
-  const r = await hub.request(agent, "file", { op: "read", cwd, path }, signal);
-  assert(!r.error, r.error);
+export async function localRead(hub: LocalAgents, agent: Agent, cwd: string, path: string, signal: AbortSignal, workspaceOnly = false) {
+  const r = await hub.request(agent, "file", { op: workspaceOnly ? "read_workspace" : "read", cwd, path }, signal);
+  assert(!r.error, workspaceOnly && r.error === "Unknown file operation" ? "客户端尚不支持安全读取工作区产物，请先升级客户端" : r.error);
   assert(typeof r.path === "string" && typeof r.content === "string" && r.content.length <= Math.ceil((32 << 20) / 3) * 4, "Invalid local file result");
   return { path: r.path as string, data: Buffer.from(r.content, "base64") };
 }

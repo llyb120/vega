@@ -23,7 +23,7 @@ import {
   send,
 } from "h3";
 import { app, employeeLive } from "../../core/application";
-import { safeFileName, storeAttachments } from "../../core/attachments";
+import { ATTACHMENT_BYTES, safeFileName, storeAttachments } from "../../core/attachments";
 import { cloudFor, cloudEnabled, cloudHealthy } from "../../core/cloud";
 import { newCommand } from "../../core/new-session";
 import { clientBaseName, clientPackage } from "../../core/client-package";
@@ -738,6 +738,12 @@ export default defineEventHandler(async (event) => {
 async function clientChat(op: string, a: Obj, userId: string) {
   const { engine, store } = app(), user = await app().auth.user(userId);
   assert(user, "User not found");
+  if (op === "file") {
+    assert(typeof a.blobId === "string" && /^blob-[a-f\d]{32}$/.test(a.blobId) && await app().auth.canBlob(user, a.blobId), "File not found");
+    const blob = await store.blobData(a.blobId);
+    assert(blob && blob.data.length <= ATTACHMENT_BYTES, "File unavailable");
+    return { data: Buffer.from(blob.data).toString("base64") };
+  }
   if (op === "threads") {
     const employees = await Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
       const s = await employee.state(), last = s.chatSession ? await store.lastMessage(s.chatSession) : undefined;

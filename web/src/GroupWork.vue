@@ -1,5 +1,5 @@
 <script setup vapor>
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import Icon from "./Icon.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import TaskDetail from "./TaskDetail.vue";
@@ -8,18 +8,19 @@ import { taskLabel, taskTone, planProgress, shortTime } from "./task-status";
 // The owner opens a task in the employee view; other members read it here.
 const props = defineProps({ members: Array, loading: Boolean });
 const emit = defineEmits(["open", "close"]);
-const selected = ref(null);
+const selectedKey = ref(null);
+const selected = computed(() => props.members?.find((member) => member.id === selectedKey.value?.member)?.tasks.find((task) => task.id === selectedKey.value?.task));
 const requester = (task) => task.requester ? `${task.requester.kind === "employee" ? "牛马" : ""}${task.requester.name}` : "";
 const note = (task) => task.status === "waiting" ? task.waiting : task.status === "approval" ? task.approval : task.progress?.at(-1)?.text || task.queueReason || "";
 function open(member, task) {
   if (member.mine) emit("open", { employeeId: member.id, taskId: task.id });
-  else selected.value = task;
+  else selectedKey.value = { member: member.id, task: task.id };
 }
 </script>
 <template>
   <aside class="group-work" aria-label="工作面板">
     <header class="panel-head">
-      <button v-if="selected" type="button" class="icon sm" aria-label="返回任务列表" @click="selected = null"><Icon name="back" :size="16" /></button>
+      <button v-if="selected" type="button" class="icon sm" aria-label="返回任务列表" @click="selectedKey = null"><Icon name="back" :size="16" /></button>
       <h3>工作面板</h3>
       <button type="button" class="icon sm" aria-label="收起工作面板" @click="emit('close')"><Icon name="close" :size="16" /></button>
     </header>

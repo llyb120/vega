@@ -38,6 +38,8 @@ func (a *Agent) assistantMount(mux *http.ServeMux) {
 		case strings.HasSuffix(r.URL.Path, "/api/control"):
 			// 待确认气泡上的「允许 / 拒绝 / 回答」：透传给牛马的 employee.control。
 			a.assistantProxy(w, r, "control")
+		case strings.HasSuffix(r.URL.Path, "/api/file"):
+			a.assistantProxy(w, r, "file")
 		case strings.HasSuffix(r.URL.Path, "/api/close"):
 			// 页面上的 × 只是把面板收回屏幕外（WebView2 留在内存里，下次点蝴蝶秒开）。
 			butterflyPanelPark()
@@ -104,7 +106,15 @@ func (a *Agent) assistantProxy(w http.ResponseWriter, r *http.Request, op string
 		return
 	}
 	defer response.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	limit := int64(8 << 20)
+	if op == "file" || op == "messages" {
+		limit = 48 << 20 // 25MiB binary plus base64, or a page of full step outputs
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil || int64(len(data)) > limit {
+		assistantReply(w, http.StatusBadGateway, map[string]any{"error": "站点返回的内容无法完整读取"})
+		return
+	}
 	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusUnauthorized {
 		// 老版本服务端没有这几个接口（还得要网站 cookie）：给页面一句能看懂的话。
 		assistantReply(w, http.StatusConflict, map[string]any{"error": "服务端还没有更新到支持蝴蝶面板的版本（缺少 /api/local-agent/chat）"})

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -27,5 +30,36 @@ func TestAssistantCredentialFollowsTheNewestPairing(t *testing.T) {
 	agent.config.Servers[1].Token = "broken"
 	if _, token, ok := agent.assistantCredential(); !ok || token != strings.Repeat("o", 43) {
 		t.Fatalf("picked %q (ok=%v), want the older pairing as fallback", token, ok)
+	}
+}
+
+func TestAssistantFileProxyPreservesLargeDownloadAndChecksOrigin(t *testing.T) {
+	const token = "fixture-device-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/local-agent/chat/file" || r.Header.Get("Authorization") != "Bearer "+token {
+			t.Errorf("unexpected request: %s %s", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		fmt.Fprint(w, `{"data":"`+strings.Repeat("Y", 9<<20)+`"}`)
+	}))
+	defer server.Close()
+	protected, err := protectToken(token)
+	if err != nil {
+		t.Skipf("token protection unavailable: %v", err)
+	}
+	agent := &Agent{pinnedOrigin: server.URL, configToken: "test", config: Config{Servers: []ServerCredential{{Origin: server.URL, UserID: "u1", Token: protected}}}}
+	mux := http.NewServeMux()
+	agent.assistantMount(mux)
+	post := func(origin string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, agent.assistantPath()+"api/file", strings.NewReader(`{"blobId":"blob-1"}`))
+		request.Header.Set("Origin", origin)
+		mux.ServeHTTP(recorder, request)
+		return recorder
+	}
+	if denied := post("https://untrusted.test"); denied.Code != http.StatusForbidden {
+		t.Fatalf("foreign origin answered %d", denied.Code)
+	}
+	if response := post("http://" + localAddress); response.Code != http.StatusOK || response.Body.Len() <= 9<<20 {
+		t.Fatalf("download proxy truncated or failed: status %d, bytes %d", response.Code, response.Body.Len())
 	}
 }

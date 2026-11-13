@@ -37,6 +37,8 @@ export type Message = {
   newSession?: boolean;
   /** A task milestone the executing session chose to tell the user (task_progress tellUser). */
   progress?: boolean;
+  /** Step output is a separate card, not a group instruction to dispatch mentions. */
+  stepOutput?: boolean | { step: number; label: string; text?: string; files?: FileRef[] };
   thinking?: string;
   signature?: string;
   opaque?: any[];

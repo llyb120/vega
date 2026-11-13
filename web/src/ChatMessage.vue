@@ -5,6 +5,7 @@ import EmployeeAvatar from "./EmployeeAvatar.vue";
 import UserAvatar from "./UserAvatar.vue";
 import Icon from "./Icon.vue";
 import FileCard from "./FileCard.vue";
+import StepOutput from "./StepOutput.vue";
 import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
 import { MESSAGE_POSE } from "./bot-avatar.js";
@@ -20,6 +21,15 @@ const exportOpen = ref(false), exportError = ref("");
 // In a group every message carries its author (a user or an employee, avatar filled in by the group view); only the
 // viewer's own messages sit on the right. A private chat has no authors: user messages are mine, the rest the employee's.
 const mine = computed(() => props.message.role === "user" && (!props.message.author || props.message.author.id === props.viewerId));
+// Earlier step outputs were saved inside the chat body; present them as cards without rewriting history.
+const legacyOutput = computed(() => {
+  const prefix = "**步骤产物（任务未完成）**\n\n", text = String(props.message.text || "");
+  if (props.message.stepOutput !== true || !text.startsWith(prefix)) return;
+  const rest = text.slice(prefix.length), split = rest.indexOf("\n\n");
+  return { label: split < 0 ? "历史步骤产物" : rest.slice(0, split), text: split < 0 ? rest : rest.slice(split + 2) };
+});
+const stepOutput = computed(() => typeof props.message.stepOutput === "object" ? props.message.stepOutput : legacyOutput.value);
+const bodyText = computed(() => legacyOutput.value ? "步骤产物已保存。" : props.message.displayText || props.message.text);
 const sender = computed(() => props.message.author ? { kind: props.message.author.kind, id: props.message.author.id, name: props.message.author.name, avatar: props.message.author.avatar || "" } : { kind: "employee", id: props.employeeId, name: props.name, avatar: props.avatar });
 // My own bubbles take the color of the 牛马 I am talking to (the chat view passes it); the 牛马's replies stay neutral.
 const tint = computed(() => (mine.value && !props.message.error ? props.selfTint : undefined));
@@ -65,10 +75,11 @@ async function runExport(format) {
       <div class="chat-bubble" :class="{ failed: message.error, tinted: !!tint }" :style="tint" :role="message.error ? 'alert' : undefined">
         <button v-if="message.quote" type="button" class="chat-quote" :aria-label="'跳转到引用的消息：' + message.quote.text" @click="emit('jump', message.quote.seq)"><strong>{{ message.quote.role === 'user' ? '我' : name }}</strong><span>{{ message.quote.text }}</span></button>
         <UserMessage v-if="message.role === 'user' && message.text" :text="message.displayText || message.text" />
-        <MessageText v-else-if="message.text" :text="message.displayText || message.text" :streaming="message.streaming" :archive-base="archiveBase" />
+        <MessageText v-else-if="message.text" :text="bodyText" :streaming="message.streaming" :archive-base="archiveBase" />
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
         <FileCard v-for="(file, index) in message.files || []" :key="'f' + index" :file="file" />
       </div>
+      <StepOutput v-if="stepOutput" :output="stepOutput" :archive-base="archiveBase" />
       <div v-if="message.sendStatus" class="chat-send-status" role="status">
         <span v-if="message.sendStatus === 'sending'"><span class="spinner" aria-hidden="true"></span>发送中…</span>
         <button v-else-if="message.sendStatus === 'failed'" type="button" :disabled="!quotable" :title="message.sendError" aria-label="重发这条消息" @click="emit('retry', message)">发送未确认 · 点击重发</button>

@@ -471,7 +471,15 @@ func fileOperation(req fileReq) map[string]any {
 		return map[string]any{"path": path, "isDir": err == nil && st.IsDir()}
 	case "list":
 		return listWorkspace(path)
-	case "upload":
+	case "upload", "read_workspace":
+		var workspace *os.Root
+		if req.Op == "read_workspace" {
+			workspace, err = os.OpenRoot(req.Cwd)
+			if err != nil {
+				return failure(err.Error())
+			}
+			defer workspace.Close()
+		}
 		root, err := filepath.EvalSymlinks(req.Cwd)
 		if err != nil {
 			return failure(err.Error())
@@ -489,7 +497,26 @@ func fileOperation(req fileReq) map[string]any {
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) || statErr != nil || !st.Mode().IsRegular() {
 			return failure("Only regular files within the working directory may be uploaded")
 		}
-		return map[string]any{"path": file}
+		if req.Op == "upload" {
+			return map[string]any{"path": file}
+		}
+		f, err := workspace.Open(rel)
+		if err != nil {
+			return failure(err.Error())
+		}
+		defer f.Close()
+		st, err = f.Stat()
+		if err != nil || !st.Mode().IsRegular() || st.Size() > 25<<20 {
+			return failure("Regular workspace file required, max25MiB")
+		}
+		data, err := io.ReadAll(io.LimitReader(f, (25<<20)+1))
+		if err != nil {
+			return failure(err.Error())
+		}
+		if len(data) > 25<<20 {
+			return failure("Workspace file exceeds25MiB")
+		}
+		return map[string]any{"path": file, "content": base64.StdEncoding.EncodeToString(data)}
 	case "read":
 		f, err := os.Open(path)
 		if err != nil {

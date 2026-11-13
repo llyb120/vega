@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -284,9 +285,14 @@ func TestLocalBrowserUploadOnlyAllowsRegularWorkspaceFiles(t *testing.T) {
 	if r := fileOperation(fileReq{Op: "upload", Cwd: root, Path: "upload.txt"}); r["path"] != file {
 		t.Fatal(r)
 	}
+	if r := fileOperation(fileReq{Op: "read_workspace", Cwd: root, Path: "upload.txt"}); r["path"] != file || r["content"] != base64.StdEncoding.EncodeToString([]byte("local")) {
+		t.Fatal("workspace read did not return the checked file", r)
+	}
 	for _, path := range []string{root, filepath.Join(t.TempDir(), "outside"), "missing"} {
-		if r := fileOperation(fileReq{Op: "upload", Cwd: root, Path: path}); r["error"] == nil {
-			t.Fatal("unsafe upload allowed", r)
+		for _, op := range []string{"upload", "read_workspace"} {
+			if r := fileOperation(fileReq{Op: op, Cwd: root, Path: path}); r["error"] == nil {
+				t.Fatal("unsafe workspace path allowed", r)
+			}
 		}
 	}
 	outside := filepath.Join(t.TempDir(), "secret")
@@ -298,8 +304,21 @@ func TestLocalBrowserUploadOnlyAllowsRegularWorkspaceFiles(t *testing.T) {
 	}
 	link := filepath.Join(root, "link")
 	if err := os.Symlink(outside, link); err == nil {
-		if r := fileOperation(fileReq{Op: "upload", Cwd: root, Path: link}); r["error"] == nil {
-			t.Fatal("escaping symlink allowed", r)
+		for _, op := range []string{"upload", "read_workspace"} {
+			if r := fileOperation(fileReq{Op: op, Cwd: root, Path: link}); r["error"] == nil {
+				t.Fatal("escaping symlink allowed", r)
+			}
 		}
+	}
+	large, err := os.Create(filepath.Join(root, "large.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = large.Truncate((25 << 20) + 1); err != nil {
+		t.Fatal(err)
+	}
+	_ = large.Close()
+	if r := fileOperation(fileReq{Op: "read_workspace", Cwd: root, Path: "large.bin"}); r["error"] == nil {
+		t.Fatal("oversized workspace file allowed", r)
 	}
 }

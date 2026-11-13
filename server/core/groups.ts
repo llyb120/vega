@@ -2,7 +2,7 @@ import type { Engine } from "./engine";
 import { ended, type Employee, type GroupAuthor, type TaskGroup } from "./employee";
 import type { Message, Session } from "./store";
 import { nameKey, parseMentions } from "./names";
-import { assert, id } from "./util";
+import { assert, id, type Obj } from "./util";
 import { ATTACHMENTS_MAX } from "./attachments";
 import { narrate, narratorSetup, NARRATOR } from "./narrator";
 import { createHash } from "node:crypto";
@@ -360,10 +360,14 @@ export class Groups {
   async post(task: TaskGroup, employeeId: string, message: Message, wake: boolean) {
     const group = await this.get(task.groupId);
     if (!group || !group.employees.some((e) => e.id === employeeId)) return false;
-    const saved = await this.append(group, { ...message, quote: undefined, author: await this.author(employeeId), hop: task.hop });
+    const saved = await this.store.transaction(async () => {
+      if (typeof message.stepOutput === "object")
+        for (const file of message.stepOutput.files || []) await this.store.grantBlob(file.blobId, group.session);
+      return this.append(group, { ...message, quote: undefined, author: await this.author(employeeId), hop: task.hop });
+    });
     // Any notice that @mentions members hands them the turn (a task passing on sub-work); within the hop cap.
     const extra = wake && task.requester.kind === "employee" && task.requester.id !== employeeId ? [task.requester.id] : [];
-    this.store.afterCommit(() => void this.dispatch(group.id, saved, extra).catch((error) => this.report(group.id, error)));
+    if (!message.stepOutput) this.store.afterCommit(() => void this.dispatch(group.id, saved, extra).catch((error) => this.report(group.id, error)));
     return true;
   }
   /**
@@ -384,6 +388,7 @@ export class Groups {
       const open = all.filter((t) => !ended(t.status)), done = all.filter((t) => ended(t.status));
       const tasks = [...open, ...done.slice(0, GROUP_TASKS_ENDED)].map((t) => ({
         ...(mine ? t : Object.fromEntries(SHARED.filter((k) => k in t).map((k) => [k, t[k]]))),
+        ...(!mine && t.stepOutputs ? { stepOutputs: t.stepOutputs.map(({ step, label, text, files, at }: Obj) => ({ step, label, text, files, at })) } : {}),
         requester: t.group!.requester,
       }));
       members.push({ id: person.id, name: person.name, avatar: person.avatar, mine, tasks, endedHidden: Math.max(0, done.length - GROUP_TASKS_ENDED) });

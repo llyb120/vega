@@ -213,13 +213,19 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       ["dutyId", "request"]));
   if (task) {
     out.push(tool("task_progress",
-      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、适用职责和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。不新建任务或会话，不结束本轮。",
+      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、适用职责和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。步骤需要交付成果时用 stepOutput 保存为独立产物，正文和文件不混入对话消息；不新建任务或会话、不结束本轮，最终仍需 task_complete。",
       { message: str("当前进度，1–200 字", { minLength: 1, maxLength: 200 }),
         plan: { type: "array", minItems: 1, maxItems: 50, description: "完整计划，包括未来步骤", items: obj({
           content: str("步骤描述，1–500 字", { minLength: 1, maxLength: 500 }),
           status: str("", { enum: ["pending", "in_progress", "completed", "failed", "blocked", "cancelled"] }),
         }, ["content", "status"]) },
-        tellUser: { type: "boolean", description: "true 时把 message 发到沟通会话（纯文字、不挂任务卡）。写成跟人同步进度的自然短句，例如「百度搜「你好」的结果页出来了」，不要「已派单/阶段完成」这类公文腔，也不要流水账或每步工具结果。task_ask_user / task_request_approval 与最终交付另走通知并挂任务卡。每个任务最多 12 次，超出不发送（toldUser=false，进度仍保存）。省略为 false" } },
+        tellUser: { type: "boolean", description: "true 时把 message 发到沟通会话（纯文字、不挂任务卡）。写成跟人同步进度的自然短句，例如「百度搜「你好」的结果页出来了」，不要「已派单/阶段完成」这类公文腔，也不要流水账或每步工具结果。task_ask_user / task_request_approval 与最终交付另走通知并挂任务卡。每个任务最多 12 次，超出不发送（toldUser=false，进度仍保存）。省略为 false；同时给 stepOutput 时只发送产物，不重复发送进度。" },
+        stepOutput: obj({
+          step: int("完整计划中的步骤序号，从 1 开始", { minimum: 1, maximum: 50 }),
+          text: str("可选：产物的完整 Markdown 内容，不写进对话正文", { minLength: 1, maxLength: 64000 }),
+          ref: int("可选：已写出的产物正文消息编号，或包含 textRef 的工具回执编号；与 text 二选一", { minimum: 1 }),
+          paths: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区内的产物文件路径", { minLength: 1, maxLength: 4096 }), description: "可选：本步骤生成的文件，系统读取并保存快照供用户下载；只接受当前执行端工作区内的普通文件，单个不超过 25MiB、合计不超过 64MiB。不要包含凭据。" },
+        }, ["step"], "步骤的独立产物：文本填 text，构建/导出文件填 paths，也可同时填写；已有正文可用 ref 引用。系统单独展示并允许导出，不放进对话正文；每任务最多 50 条。草稿、未执行或未验证项须如实说明。") },
       ["message"]));
     out.push(tool("task_reschedule",
       "把当前任务整体改到以后再继续（例如用户要求晚点或明天再处理、要等的时间点还没到）：runAt 或 delayMinutes 二选一。任务转为延后并立即结束本轮，到时在原会话续做。只改本任务自己；在等已提交的外部作业结果、需要记下恢复点时用 task_wait；给所属动态职责安排下次用 employee_duty_manage。",
@@ -237,7 +243,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
     if (!ctx.computer) {
       // Browser work uses same-session switch_scene(scene=computer); isolated task_relay_computer is retired.
       out.push(tool("task_complete",
-        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求，in_progress 不能自动收尾。计划重写或存在 cancelled 时必须填 outlineReview，逐项对照原始任务、适用职责与用户最新要求，说明实际证据或不适用依据；不要把旧计划的中间步骤当成必须完成的大纲。仍有未满足的用户要求时先按授权继续、澄清或等待；确需部分交付须经交代人明确接受。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 可省略（系统选用最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接；仅当确实没有单独正文时传 []（本次交付期内已写出正文却传 [] 会被退回一次，并给出该正文编号）。成功后立即结束本轮。必须单独调用。",
+        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求，in_progress 不能自动收尾。计划重写或存在 cancelled 时必须填 outlineReview，逐项对照原始任务、适用职责与用户最新要求，说明实际证据或不适用依据；不要把旧计划的中间步骤当成必须完成的大纲。仍有未满足的用户要求时先按授权继续、澄清或等待；确需部分交付须经交代人明确接受。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 可省略（系统选用尚未作为步骤产物交出的最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。已交出的步骤产物不会自动算作最终正文，也不要重复放进正文；仅当用户明确要求时可显式引用其文本。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接；仅当确实没有单独的最终正文时传 []（本次交付期内已写出未交出的正文却传 [] 会被退回一次，并给出该正文编号）。成功后立即结束本轮。必须单独调用。",
         { evidence: str("实际结果与验证证据，1–8000 字", { minLength: 1, maxLength: 8000 }),
           outlineReview: { type: "array", minItems: 1, maxItems: 100, description: "计划重写或有 cancelled 步骤时必填：逐项对照原始任务、适用职责与用户最新要求；回执 changedSteps 每条在 requirement 原样列出并解释如何完成、替代或为何不适用，这不要求旧计划保持不变。每项写状态和真实依据。", items: obj({
             requirement: str("用户任务或适用职责中的一项要求", { minLength: 1, maxLength: 500 }),
@@ -245,7 +251,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
             evidence: str("实际回执、验证证据或不适用/未完成的原因", { minLength: 1, maxLength: 2000 }),
           }, ["requirement", "status", "evidence"]) },
           summary: str("交付摘要，1–400 字；先结论，简单任务一两句即可，勿写小标题清单", { minLength: 1, maxLength: 400 }),
-          deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则系统选用本次交付期内最新较长正文；确实无单独正文才传 []" } },
+          deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则选用尚未作为步骤产物交出的最新较长正文；仅无单独最终正文时传 []" } },
         ["evidence"]));
     }
   }
@@ -416,7 +422,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
         : { enabled: r.command === "enable" };
       return employee({ action: "update", id, ...fields }, "duty");
     }
-    case "task_progress": return employee(defined({ action: "progress", text: a.message, plan: a.plan, tellUser: a.tellUser }));
+    case "task_progress": return employee(defined({ action: "progress", text: a.message, plan: a.plan, tellUser: a.tellUser, stepOutput: a.stepOutput }));
     case "task_reschedule":
       if (!ctx.taskId) throw new ArgumentError("task_reschedule 只能在任务会话中使用");
       return employee({ action: "update", id: ctx.taskId, ...when(a, "") });

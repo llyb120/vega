@@ -24,7 +24,7 @@ import { verifyVaultUse } from "./vault-use";
 import { VAULT_USAGE } from "./vault";
 import { KeyFiles, gitSshCommand, keyDir } from "./key-files";
 import { relayShellEnvironment } from "./relay-proxy";
-import { AttachmentFiles } from "./attachments";
+import { AttachmentFiles, ATTACHMENT_BYTES, ATTACHMENTS_BYTES, ATTACHMENTS_MAX, safeFileName } from "./attachments";
 import { isDeepStrictEqual } from "node:util";
 import { sceneModels, sceneAllowSpawn, maskedConfig, mergeSecrets } from "./config";
 import { omitPlaceholders } from "./tool-args";
@@ -49,7 +49,7 @@ import {
   localShellPoll,
   localShellKill,
 } from "./local-agent";
-import { assert, clip, id, type Obj } from "./util";
+import { assert, clip, id, workspaceFile, type Obj } from "./util";
 import type { Config, Model } from "./config";
 import type { Tool } from "./provider";
 import {
@@ -670,9 +670,38 @@ export class Tools {
       throw new Error(`${tool || "该工具"} 的 ${fields.length ? fields.join("、") : "文本字段"} 含有密码本凭据内容（如账号、密码或令牌），不能写入任务进度、提问、备注或恢复点。请删去该值后重试；需要指代时写“密码本中的某条目”。`);
     }
   }
+  // shortcut: server/cloud path validation and the later read can race on a hostile shared machine; use handle-relative reads there.
+  private async stepFiles(paths: string[]) {
+    assert(Array.isArray(paths) && paths.length > 0 && paths.length <= ATTACHMENTS_MAX, `步骤产物最多 ${ATTACHMENTS_MAX} 个文件`);
+    const forbidden = /(^|[\\/])(?:\.env(?:\.[^\\/]*)?|\.ssh|\.aws|\.npmrc|\.netrc|id_rsa[^\\/]*)(?:[\\/]|$)|\.(?:pem|key|pfx|p12|keystore)$/i;
+    const agent = this.agent(), fs = this.cloud?.fs || filesystem, files: { name: string; data: Buffer }[] = [];
+    let total = 0;
+    for (const input of paths) {
+      assert(typeof input === "string" && input.trim() && input.length <= 4096 && !forbidden.test(input), "产物路径无效或指向凭据文件");
+      let path: string, data: Buffer;
+      if (agent) {
+        const local = await localRead(this.engine.localAgents, agent, this.session.cwd, input, this.signal, true);
+        path = local.path;
+        assert(!forbidden.test(path), "产物路径指向凭据文件");
+        data = local.data;
+      } else {
+        path = await workspaceFile(this.session.cwd, input, fs);
+        assert(!forbidden.test(path), "产物路径指向凭据文件");
+        const info = await fs.stat(path);
+        assert(info.size <= ATTACHMENT_BYTES, "单个步骤产物文件不能超过 25MiB");
+        data = await fs.readFile(path);
+      }
+      total += data.length;
+      assert(data.length <= ATTACHMENT_BYTES && total <= ATTACHMENTS_BYTES, "步骤产物文件超出限制：单个不超过 25MiB，合计不超过 64MiB");
+      for (const secret of this.engine.redactors.get(this.session.id)?.values || [])
+        assert(!secret || !data.includes(Buffer.from(secret)), "步骤产物文件含有本轮凭据，不能交付");
+      files.push({ name: safeFileName(path), data });
+    }
+    return files;
+  }
   private async employee(internal: Internal, tool = "", publicArgs: Obj = {}): Promise<Outcome> {
     const a = internal.args;
-    this.refuseSecrets(tool, { text: a.text, condition: a.condition, summary: a.summary, note: a.note, plan: a.plan, outlineReview: a.outlineReview }, publicArgs);
+    this.refuseSecrets(tool, { text: a.text, condition: a.condition, summary: a.summary, note: a.note, plan: a.plan, stepOutput: a.stepOutput, outlineReview: a.outlineReview }, publicArgs);
     const employee = await this.engine.employeeFor(this.session);
     const source = this.session.employeeId && !this.session.taskId ? (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user") : undefined;
     const taskLink = async (id: string, replace = false) => {
@@ -704,9 +733,17 @@ export class Tools {
     }
     if (a.action === "vault_get") employee.authorize(await employee.state(), this.session.taskId || "", a);
     const scope = a.action === "vault_get" ? await this.credentialScope(a) : "";
+    let stepFiles: { name: string; data: Buffer }[] | undefined;
+    if (a.action === "progress" && a.stepOutput?.paths) {
+      const task = employee.authorize(await employee.state(), this.session.taskId || "", a);
+      assert(task && (task.workSession === this.session.id || task.computerSession === this.session.id), "只能交付当前任务会话的产物");
+      stepFiles = await this.stepFiles(a.stepOutput.paths);
+      this.signal.throwIfAborted();
+    }
     const result = await employee.execute(
       this.session.taskId || "",
       await prepareDutyInput(this.engine, employee, { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) }, this.session.taskId || "", this.signal),
+      undefined, undefined, stepFiles,
     );
     if (a.action === "vault_get" && result.secret) {
       const credential = JSON.parse(result.secret);

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import MessageText from "./MessageText.vue";
+import StepOutput from "./StepOutput.vue";
 import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
 import { exportResult, exportTitleOf } from "./export-result.js";
@@ -91,6 +92,11 @@ async function run(action) {
       <ol class="plan">
         <li v-for="(step, index) in task.plan" :key="index" :class="step.status"><span class="step-mark" :title="taskLabel(step.status)"><Icon v-if="stepIcon[step.status]" :name="stepIcon[step.status]" :size="12" /></span><span>{{ step.content }}</span></li>
       </ol>
+    </section>
+
+    <section v-if="task.stepOutputs?.length" class="detail-section">
+      <h3>步骤产物</h3>
+      <StepOutput v-for="(output, index) in task.stepOutputs" :key="index" :output="output" :archive-base="archiveBase" />
     </section>
 
     <section v-if="task.result" class="detail-section">

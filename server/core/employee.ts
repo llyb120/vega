@@ -9,6 +9,8 @@ import type { Store, Session, Message } from "./store";
 import { outsideTransaction } from "./db";
 import { resolve, posix, win32 } from "node:path";
 import { realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import type { FileRef } from "./attachments";
 import { assert, id, clone, clip, sleep, type Obj } from "./util";
 import { Vault, VAULT_USAGE } from "./vault";
 import { requireSceneModel, schedulerLimits, type Config } from "./config";
@@ -147,12 +149,14 @@ const latestBody = (candidates: Message[], minChars = 80) =>
  *  Tool-result seqs with textRef are remapped to that assistant body (models often confuse receipt # with textRef).
  *  [] while a body was written in the current delivery window is refused once (emptyGuard = that body's seq);
  *  repeating [] after that refusal (confirmEmpty = the same seq) is a deliberate no-body delivery. */
-export const resolveDeliverable = (messages: readonly Message[], ref: unknown, opts: { since?: number; confirmEmpty?: number } = {}): { declared: boolean; refs: number[]; texts: string[]; error?: string; later: Message[]; remapped?: string[]; auto?: boolean; upgraded?: boolean; emptyGuard?: number } => {
+export const resolveDeliverable = (messages: readonly Message[], ref: unknown, opts: { since?: number; confirmEmpty?: number; excludeAuto?: number[]; stepOutputs?: { ref: number; text?: string }[] } = {}): { declared: boolean; refs: number[]; texts: string[]; error?: string; later: Message[]; remapped?: string[]; auto?: boolean; upgraded?: boolean; emptyGuard?: number } => {
   const { candidates, list } = candidateList(messages, opts.since);
+  // Published step outputs stay explicitly citable, but do not become an implicit final body.
+  const finalCandidates = candidates.filter((message) => !opts.excludeAuto?.includes(message.seq!));
   const retry = `请用合法正文编号立即再调 task_complete（例如 deliverableRefs:[${candidates.at(-1)?.seq ?? "…"}]）；不要改用 task_progress 重贴同一交付。本任务可引用：${list}`;
   // Omitted refs: auto-pick the latest substantial body, or [] when there is none (pure evidence delivery).
   if (ref === undefined || ref === null || ref === "") {
-    const latest = latestBody(candidates);
+    const latest = latestBody(finalCandidates);
     if (!latest) return { declared: false, refs: [], texts: [], later: [], auto: true };
     return { declared: false, refs: [latest.seq!], texts: [String(latest.text).trim()], later: [], auto: true };
   }
@@ -165,7 +169,7 @@ export const resolveDeliverable = (messages: readonly Message[], ref: unknown, o
   }
   // Explicit [] means no separate body — never auto-picked or upgraded, but a body written in this window must not vanish silently.
   if (!requested.length) {
-    const body = latestBody(candidates, BODY_CHARS);
+    const body = latestBody(finalCandidates, BODY_CHARS);
     if (!body || opts.confirmEmpty === body.seq) return { declared: true, refs: [], texts: [], later: [] };
     return {
       declared: true, refs: [], texts: [], later: [], emptyGuard: body.seq,
@@ -173,16 +177,23 @@ export const resolveDeliverable = (messages: readonly Message[], ref: unknown, o
     };
   }
   const bySeq = new Map(messages.map((m) => [m.seq, m]));
+  const published = new Set<number>(), stepTexts = new Map<number, string[]>();
+  for (const output of opts.stepOutputs || []) {
+    published.add(output.ref);
+    const text = String(output.text || "").trim();
+    if (text) stepTexts.set(output.ref, [...new Set([...(stepTexts.get(output.ref) || []), text])]);
+  }
+  const textFor = (n: number) => stepTexts.get(n)?.join("\n\n") || (!published.has(n) && authored(bySeq.get(n)) ? String(bySeq.get(n)!.text).trim() : "");
   const refs: number[] = [];
   const remapped: string[] = [];
   const bad: number[] = [];
   for (const n of requested) {
-    if (authored(bySeq.get(n))) {
+    if (textFor(n)) {
       if (!refs.includes(n)) refs.push(n);
       continue;
     }
     const via = toolTextRef(bySeq.get(n));
-    if (via && authored(bySeq.get(via))) {
+    if (via && textFor(via)) {
       if (!refs.includes(via)) refs.push(via);
       remapped.push(`#${n}→#${via}`);
       continue;
@@ -197,13 +208,13 @@ export const resolveDeliverable = (messages: readonly Message[], ref: unknown, o
     return { declared: true, refs: requested, texts: [], later: [], remapped, error: `deliverableRefs ${hints.join("；")}。${retry}` };
   }
   const last = Math.max(0, ...refs);
-  const later = candidates.filter((m) => m.seq! > last && bodyLength(m) >= BODY_CHARS);
+  const later = finalCandidates.filter((m) => m.seq! > last && bodyLength(m) >= BODY_CHARS);
   // Citing an older body while a longer newer one exists usually means the model just rewrote it; use the newest.
   if (later.length) {
     const newest = later[later.length - 1]!;
     return { declared: true, refs: [newest.seq!], texts: [String(newest.text).trim()], later: [], upgraded: true, remapped: remapped.length ? remapped : undefined };
   }
-  return { declared: true, refs, texts: refs.map((n) => String(bySeq.get(n)!.text).trim()), later: [], remapped: remapped.length ? remapped : undefined };
+  return { declared: true, refs, texts: refs.map(textFor), later: [], remapped: remapped.length ? remapped : undefined };
 };
 const wantsSettle = (t: Task) =>
   !!(t.settlePreferred || (typeof t.recovery?.reason === "string" && t.recovery.reason.includes("未验证交付")));
@@ -600,9 +611,9 @@ export class Employee {
       if (!chatSession) return;
       await this.store.append(chatSession, message);
       // Session-scoped signal so other open chats refresh without waiting for employee_changed.
-      this.runtime.emit(message.role === "user" ? "user" : "message_end", undefined, chatSession);
+      this.store.afterCommit(() => this.runtime.emit(message.role === "user" ? "user" : "message_end", undefined, chatSession));
     }
-    this.runtime.emit("employee_changed", { employeeId: this.employeeId });
+    this.store.afterCommit(() => this.runtime.emit("employee_changed", { employeeId: this.employeeId }));
   }
   /** The employee owning a task, if any. */
   async forTask(id: string): Promise<Employee | undefined> {
@@ -944,6 +955,7 @@ export class Employee {
     a: Obj,
     owner: Owner = { token: "", name: "" },
     boundExecution?: { execution: Execution; cwd: string; note?: string },
+    stepFiles: { name: string; data: Buffer }[] = [],
   ): Promise<{ value: any; stop?: boolean; secret?: string }> {
     const action = a.action;
     assert(!this.deleting, "Employee is being deleted");
@@ -1176,7 +1188,9 @@ export class Employee {
                 : "";
               const sessionRows = t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [];
               const since = t.deliveries?.at(-1)?.finishedAt || 0;
-              const cited = resolveDeliverable(sessionRows, a.deliverableRef, { since, confirmEmpty: t.deliverableNeeded?.emptyGuard });
+              const stepOutputs = (t.stepOutputs || []).filter((output: Obj) => output.session === t.workSession);
+              const excludeAuto = stepOutputs.map((output: Obj) => output.ref);
+              const cited = resolveDeliverable(sessionRows, a.deliverableRef, { since, confirmEmpty: t.deliverableNeeded?.emptyGuard, excludeAuto, stepOutputs });
               if (cited.error) {
                 // The refusal rolls this transaction back; only this record is kept (see the catch around update).
                 refused = {
@@ -1336,7 +1350,7 @@ export class Employee {
                 t.progress.push({ at: now, text: content });
                 t.progress = t.progress.slice(-50);
                 // After a failed task_complete (bad deliverableRefs), block no-progress progress loops.
-                if (t.deliverableNeeded && !planUnresolved(t.plan).length && t.plan?.length) {
+                if (t.deliverableNeeded && !a.stepOutput && !planUnresolved(t.plan).length && t.plan?.length) {
                   const rows = t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [];
                   const { list } = candidateList(rows);
                   const refs = (Array.isArray(t.deliverableNeeded.suggested) ? t.deliverableNeeded.suggested : [])
@@ -1345,6 +1359,55 @@ export class Employee {
                     ok: false,
                     error: `请用 task_complete 收口，deliverableRefs:[${refs.join(",") || "…"}]（正文消息编号，不要填工具回执序号；回执 textRef 才是正文）。禁止无新进展地重复 task_progress。可引用：${list}`,
                   };
+                }
+                if (a.stepOutput !== undefined) {
+                  const output = a.stepOutput;
+                  assert(output && typeof output === "object" && !Array.isArray(output) && Number.isSafeInteger(output.step) && output.step > 0 && output.step <= (t.plan?.length || 0), "stepOutput.step 必须是当前计划的有效步骤序号");
+                  assert(output.ref === undefined || (Number.isSafeInteger(output.ref) && output.ref > 0), "stepOutput.ref 必须是正文消息编号");
+                  assert(output.text === undefined || (typeof output.text === "string" && output.text.trim() && [...output.text].length <= 64000), "步骤产物文本需要 1–64000 字");
+                  assert(output.ref === undefined || output.text === undefined, "stepOutput.text 和 ref 只能选一个");
+                  assert((output.paths === undefined && !stepFiles.length) || (Array.isArray(output.paths) && output.paths.length === stepFiles.length && stepFiles.length > 0), "步骤产物文件未准备好");
+                  const session = this.busy.get(t.id)?.session || (t.side === "computer" ? t.computerSession : t.workSession);
+                  assert(session && (session === t.workSession || session === t.computerSession), "当前任务会话不可用，未保存步骤产物");
+                  const source = await this.store.lastMessage(session, "assistant");
+                  let body = output.ref ? await this.store.message(session, output.ref) : undefined;
+                  if (output.ref && body?.role === "tool") {
+                    const ref = toolTextRef(body);
+                    body = ref ? await this.store.message(session, ref) : undefined;
+                  }
+                  if (output.ref) assert(authored(body), "步骤产物需要本任务会话中模型写出的非空正文；请引用正文的 textRef");
+                  else {
+                    assert(source?.calls?.some((call) => call.name === "task_progress" && call.arguments?.stepOutput?.step === output.step), "未指定 ref 时，步骤产物必须与本次 task_progress 在同一条回复");
+                    if (output.text === undefined && !stepFiles.length) {
+                      body = source;
+                      assert(authored(body), "步骤产物需要非空文本或文件");
+                    }
+                  }
+                  const text = output.text ?? body?.text ?? "";
+                  assert([...text].length <= 64000, "步骤产物正文最多 64000 字，请分开提交");
+                  assert(text.trim() || stepFiles.length, "步骤产物需要非空文本或文件");
+                  const ref = output.ref ? body!.seq! : source!.seq!;
+                  const fingerprint = createHash("sha256").update(JSON.stringify([text, ...stepFiles.map((file) => [file.name, createHash("sha256").update(file.data).digest("hex")])])).digest("hex");
+                  const outputs: Obj[] = t.stepOutputs ||= [];
+                  const duplicate = outputs.some((item) => item.session === session && item.ref === ref && item.step === output.step && (item.fingerprint === fingerprint || (!item.fingerprint && !stepFiles.length && item.text === text)));
+                  if (!duplicate) {
+                    assert(outputs.length < 50, "一个任务最多保存 50 条步骤产物");
+                    const label = t.plan[output.step - 1].content, files: FileRef[] = [];
+                    for (const file of stepFiles) {
+                      const blobId = await this.store.blob("application/octet-stream", file.data);
+                      await this.store.grantBlob(blobId, session);
+                      if (s.chatSession) await this.store.grantBlob(blobId, s.chatSession);
+                      files.push({ name: file.name, mime: "application/octet-stream", size: file.data.length, blobId });
+                    }
+                    const artifact = { step: output.step, label, text, ...(files.length ? { files } : {}) };
+                    outputs.push({ ...artifact, session, ref, fingerprint, at: now });
+                    if (s.chatSession || t.group) {
+                      const quote = !t.group && t.chatSource?.session === s.chatSession && await this.store.message(s.chatSession!, t.chatSource.seq) ? await this.store.quote(s.chatSession!, t.chatSource.seq) : undefined;
+                      // The artifact and its source-chat card must commit together.
+                      await this.toChat(s.chatSession, t.group, { role: "assistant", text: content, quote, progress: true, stepOutput: artifact, tasks: [{ id: t.id, title: t.text.slice(0, 80), status: t.status }] }, false);
+                    }
+                  }
+                  return { ok: true, stepOutput: { step: output.step, ref, duplicate }, next: "Step output saved; continue the remaining work, then complete the task separately." };
                 }
                 if (a.tellUser !== true) return { ok: true, toldUser: false, next: "Continue the current step" };
                 // Key milestones only; progress is saved either way. Ordinary progress has no task card;
@@ -2002,7 +2065,7 @@ export class Employee {
       // Delivery is acknowledged by the persisted input/result, never before the runtime actually appends it.
       const supplement = previous.answer !== undefined && input.answer.startsWith(previous.answer) ? input.answer.slice(previous.answer.length).trim() : input.answer;
 
-      const snapshot = JSON.stringify({ plan: task.plan, planRevision: task.planRevision || 0, revision: task.revision || 0, progress: task.progress?.at(-1), checkpoint: task.checkpoint });
+      const snapshot = JSON.stringify({ plan: task.plan, planRevision: task.planRevision || 0, revision: task.revision || 0, progress: task.progress?.at(-1), checkpoint: task.checkpoint, stepOutputs: task.stepOutputs?.map(({ step, label, session, ref, files }: Obj) => ({ step, label: clip(label, 100), session, ref, files: files?.map((file: FileRef) => file.name) })) });
       const memoryScene: MemoryScene = computer ? "computer" : scene === "coding" ? "coding" : "any";
       const memoryQuery = [task.text, task.progress?.at(-1)?.text, task.checkpoint, supplement, continuing ? "续做" : ""].filter(Boolean).join("\n");
       const memories = recallMemories(state.memories as MemoryRecord[], memoryQuery, {
@@ -2021,7 +2084,7 @@ export class Employee {
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。每完成一步用task_progress记下做了什么与回执（这就是下一轮用的还原点，换了执行位置靠它接着做）；新现场缺必要文件或无法核验时同样 task_ask_user，不凭空补写。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。计划可按实际情况拆分、合并、改写或删去不再需要的中间步骤，但必须覆盖原始任务、适用职责与用户最新明确要求；不得把仍需完成的用户要求改成建议或悄悄移除。真实验证成功才标completed，受阻标blocked。计划重写或存在cancelled步骤时，交付前按task_complete的outlineReview逐项列出大纲要求、状态及真实依据；旧计划只是线索，不是大纲，替代的中间步骤无需用户批准。未满足的用户要求先按授权继续、澄清或等待；仅确需部分交付才标cancelled并由交代人确认。不要把task_complete本身列成计划步骤。任务明确要求并授权向指定对象澄清时，直接在指定渠道联系，不得只建议交代人代办；发出后用task_wait保存定位和回执并等待回复，按需多轮澄清，无法联系或确需用户处理时才task_ask_user。提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统会选用本次交付期内最新较长正文；已写出正文时不要传[]，确实没有单独正文才传deliverableRefs=[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；常规开发分支提交、普通推送及明确授权的非生产分支合并按用户要求执行，先核对差异；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
+      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。计划可按实际情况拆分、合并、改写或删去不再需要的中间步骤，但必须覆盖原始任务、适用职责与用户最新明确要求；不得把仍需完成的用户要求改成建议或悄悄移除。真实验证成功才标completed，受阻标blocked。计划重写或存在cancelled步骤时，交付前按task_complete的outlineReview逐项列出大纲要求、状态及真实依据；旧计划只是线索，不是大纲，替代的中间步骤无需用户批准。未满足的用户要求先按授权继续、澄清或等待；仅确需部分交付才标cancelled并由交代人确认。不要把task_complete本身列成计划步骤。任务明确要求并授权向指定对象澄清时，直接在指定渠道联系，不得只建议交代人代办；发出后用task_wait保存定位和回执并等待回复，按需多轮澄清，无法联系或确需用户处理时才task_ask_user。用户要求步骤产物时，在该步骤完成后用task_progress的stepOutput交出独立产物并继续，不把产物塞进对话正文，也不等最终收口；已保存的步骤产物不要重复发送。提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统只会选用本次交付期内尚未作为步骤产物交出的最新较长正文；已交出的步骤产物留在独立产物卡中，不重复写进最终正文；仅当用户明确要求时可显式引用其文本；没有单独最终正文时可传deliverableRefs=[]，已写出未交出的正文时不要传[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；常规开发分支提交、普通推送及明确授权的非生产分支合并按用户要求执行，先核对差异；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       // Attachments the work session has not been given yet.
       const given = new Set(rowsBefore.flatMap((m) => [...(m.images || []), ...(m.files || [])].map((x: { blobId?: string }) => x.blobId)));

@@ -327,6 +327,7 @@ export function downloadDocx({ title, request, markdown, filename } = {}) {
 /** HTML and PDF fetch archived images first, so this returns a promise for every format. */
 export async function exportResult(format, { title, request, markdown, archiveBase } = {}) {
   const filename = exportBasename(title);
+  if (format === "md") return downloadBlob(new Blob([String(markdown || "")], { type: "text/markdown;charset=utf-8" }), filename + ".md");
   if (format === "html") return downloadHtml({ title, request, markdown, filename, archiveBase });
   if (format === "pdf") return printPdf({ title, request, markdown, archiveBase });
   if (format === "docx") return downloadDocx({ title, request, markdown, filename });
