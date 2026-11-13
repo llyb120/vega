@@ -75,6 +75,9 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .acc-pill:hover { background: #fafafa; }
 .acc-name { overflow: hidden; color: var(--ink); font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .acc-state { flex: none; margin-left: auto; color: var(--ink-2); font-size: 11.5px; }
+.gear { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border-radius: 50%; background: var(--blue); color: #fff; }
+.gear:hover { background: #2c6ad1; }
+.gear .icon { width: 17px; height: 17px; stroke-width: 1.6; }
 .splitter { position: absolute; top: 0; right: -3px; bottom: 0; width: 6px; z-index: 6; cursor: col-resize; }
 .splitter::after { content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px; border-radius: 2px; background: transparent; }
 .splitter:hover::after { background: #d8d8da; }
@@ -113,6 +116,13 @@ body.resizing { cursor: col-resize; }
 .welcome small { font-size: 12px; font-weight: 400; color: var(--faint); }
 .msg { display: flex; align-items: flex-start; margin: 0 0 8px; min-width: 0; }
 .msg.user { justify-content: flex-end; }
+/* 消息 hover 时右侧（自己的消息是左侧）冒出操作图标，与 Grok Bot 一致：只有 hover 才出现。 */
+.msg-actions { display: flex; flex: none; align-self: flex-start; gap: 2px; margin: 6px 0 0 8px; opacity: 0; transition: opacity .12s; }
+.msg.user .msg-actions { order: -1; margin: 6px 8px 0 0; }
+.msg:hover .msg-actions, .msg-actions:focus-within { opacity: 1; }
+.msg-actions button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; color: var(--faint); }
+.msg-actions button:hover { background: #efefef; color: var(--ink); }
+.msg-actions .icon { width: 13px; height: 13px; stroke-width: 1.8; }
 .bubble { max-width: 560px; min-width: 0; padding: 6.5px 14px; border-radius: 16px; overflow-wrap: anywhere; font-size: 15px; line-height: 22px; }
 .bubble.bot { background: var(--bot); color: var(--ink); }
 .bubble.user { background: var(--mine); color: #fff; }
@@ -174,13 +184,16 @@ body.resizing { cursor: col-resize; }
 .composer { display: flex; flex: none; align-items: center; height: 42px; margin: 0 18px 17px 18px; padding: 0 8px 0 7px; border: 1px solid #c9c9c9; border-radius: 21px; background: var(--white); box-shadow: 0 1px 4px rgb(16 18 22 / 5%); }
 .composer:focus-within { border-color: #bdbdc1; }
 .cbtn { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 50%; background: #f2f2f2; color: #6f716f; }
-.cbtn:hover { background: #e9e9e9; color: var(--ink); }
+.cbtn:hover { background: #f9f9f9; color: #4a4a4a; }
 .cbtn .icon { width: 14px; height: 14px; stroke-width: 2.2; }
 .input { flex: 1; min-width: 0; height: 24px; max-height: 110px; margin: 0 11px 0 16px; padding: 1px 0; border: 0; outline: none; background: transparent; color: var(--ink); font: inherit; font-size: 15px; line-height: 22px; resize: none; field-sizing: content; user-select: text; }
 .input::placeholder { color: #a9a9ab; }
 .send { display: grid; place-items: center; flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--send); color: #fff; }
-.send:hover { background: #7a37c9; }
-.send:disabled { background: #eeeeee; color: #c8c8c8; }
+.send:hover { background: #7b3bc3; }
+.send:disabled { background: var(--send); color: #fff; cursor: default; }
+.mic { display: grid; place-items: center; flex: none; width: 30px; height: 30px; margin-right: 2px; border-radius: 50%; color: #6f716f; }
+.mic:hover { background: #f2f2f2; color: var(--ink); }
+.mic .icon { width: 18px; height: 18px; stroke-width: 1.6; }
 .send .icon { width: 13px; height: 13px; stroke-width: 2.2; }
 
 /* 通知、确认卡、横幅 */

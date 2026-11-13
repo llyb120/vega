@@ -161,8 +161,10 @@ function messageHTML(message) {
   else inner = quote + (text ? `<div class="text">${esc(message.displayText || message.text)}</div>` : "");
   if (!inner && !(message.images || []).length && !(message.files || []).length && !(message.tasks || []).length) return "";
   if (message.error) inner = `<div class="md">${esc(plain(text))}</div>`;
+  const actions = message.error ? "" : `<div class="msg-actions"><button type="button" data-copy="${message.seq}" aria-label="复制" title="复制"><svg class="icon"><use href="#i-copy"/></svg></button><button type="button" data-more="${message.seq}" aria-label="更多" title="更多"><svg class="icon"><use href="#i-more"/></svg></button></div>`;
   return `<div class="msg ${mine ? "user" : "bot"}" data-seq="${message.seq || ""}">
     <div class="bubble ${mine ? "user" : "bot"}${message.role === "assistant" && text && !message.error ? " md" : ""}${message.error ? " error" : ""}">${inner}${imagesHTML(message)}${filesHTML(message)}${tasksHTML(message)}</div>
+    ${actions}
   </div>`;
 }
 function archiveBase() {
@@ -429,6 +431,14 @@ hero.addEventListener("click", () => hero.dataset.thread && open(hero.dataset.th
 document.addEventListener("click", (event) => {
   const row = event.target.closest(".row");
   if (row) { void open(row.dataset.thread); return; }
+  const copy = event.target.closest("[data-copy]");
+  if (copy) {
+    const message = state.messages.find((item) => String(item.seq) === copy.dataset.copy);
+    const text = String((message && (message.displayText || message.text)) || "").trim();
+    if (text) void navigator.clipboard.writeText(text).then(() => toast("已复制"), () => toast("复制失败，请手动选中文字复制"));
+    return;
+  }
+  if (event.target.closest("[data-more]")) { toast("更多操作请在网页里使用"); return; }
   const jump = event.target.closest(".quote");
   if (jump) {
     $("stream").querySelector(`[data-seq="${jump.dataset.jump}"]`)?.scrollIntoView({ block: "center" });
@@ -493,6 +503,8 @@ $("createBtn").addEventListener("click", () => openURL({ url: ((state.client && 
 const openAccount = () => openURL({ url: (state.client && state.client.origin) || "" });
 $("accFace").addEventListener("click", openAccount);
 $("accBtn").addEventListener("click", openAccount);
+$("gearBtn").addEventListener("click", () => openURL({ config: true }));
+$("micBtn").addEventListener("click", () => toast("客户端暂不支持语音输入，请在网页里使用语音"));
 $("shareBtn").addEventListener("click", () => {
   const id = state.current.split(":")[1];
   const origin = (state.client && state.client.origin) || "";
