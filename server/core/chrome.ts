@@ -801,7 +801,7 @@ export class Chrome {
   /**
    * After open/goto/back/forward/reload/select: wait while the tab is loading or its document is not
    * complete, bounded by settleMs (0 or omitted = 4000 ms). Long-polling or streaming pages simply hit the bound.
-   * Returns the last tab list.
+   * Returns the last tab list with document readiness included in loading.
    */
   async settleNavigation(tag: string, settleMs: number | undefined, signal: AbortSignal) {
     const deadline = Date.now() + Math.min(settleMs || NAVIGATION_SETTLE_MS, 5000);
@@ -816,6 +816,7 @@ export class Chrome {
           .then((r: Obj) => r?.result?.value, () => "complete");
         loading = typeof state === "string" && state !== "complete";
       }
+      if (tab) tab.loading = loading;
       if (!loading || Date.now() >= deadline) return tabs;
       await sleep(Math.min(100, Math.max(0, deadline - Date.now())), signal);
     }
@@ -1218,6 +1219,8 @@ export class Chrome {
       this.cancelled.get(owner)?.abort();
       return { stopped: true };
     }
+    const { notes, ...input } = args;
+    if (notes !== undefined) assert(args.operation === "act" && typeof notes === "string" && [...notes].length <= 12000, "notes 仅用于 act，须为最多 12000 字符的意图备注");
     let target = args.tabTag;
     if (!target && args.snapshotId)
       target = [...this.observations].find(([key, observation]) => key.startsWith(owner + ":") && observation.id === args.snapshotId)?.[1].tabTag;
@@ -1234,7 +1237,8 @@ export class Chrome {
         ...(parent ? [parent] : []),
       ]);
       try {
-        return await this.inner(owner, cwd, { ...args, ...(target ? { tabTag: target } : {}) }, signal, credentials);
+        const result = await this.inner(owner, cwd, { ...input, ...(target ? { tabTag: target } : {}) }, signal, credentials);
+        return notes === undefined ? result : { ...result, notes };
       } finally {
         if (this.cancelled.get(owner) === control) this.cancelled.delete(owner);
       }
@@ -1368,13 +1372,15 @@ export class Chrome {
       );
     if (op === "inspect" || op === "screenshot")
       return this.feedback(owner, tag, a, op, signal);
-    const o = latest();
-    assert(
-      o,
-      "Inspect this tab first; no observation is bound to this session",
-    );
     const script = op === "evaluate";
     assert(script || op === "act", "Unknown Chrome operation");
+    let o = latest();
+    const automatic = !o;
+    if (!o) {
+      const tabs = await this.settleNavigation(tag, undefined, signal);
+      assert(!tabs?.some((tab: Obj) => tab.tag === tag && tab.loading), "页面仍在加载，本次操作未执行；请在加载完成后重试");
+      o = await this.observe(tag, "all", signal);
+    }
     if (script) {
       assert(typeof a.expression === "string" && a.expression.trim() && a.expression.length <= 65536, "expression required, at most 64K characters");
       assert(Number.isInteger(a.frame ?? 0) && o.frames[a.frame ?? 0], "Unknown frame");
@@ -1399,6 +1405,8 @@ export class Chrome {
         ),
       );
       for (const action of actions) if (["fill", "type"].includes(action.action)) assertCredentialInput(action.text);
+      if (automatic && a.imageId && actions.some((action) => ["click_at", "move", "drag", "scroll_at"].includes(action.action) || (action.action === "pointer" && action.x !== undefined)))
+        throw Error("当前页面没有可用的原截图，旧图片坐标未执行；请按当前页面截图重新定位");
       await this.preflight(o, actions, a, cwd);
       }
     } catch (e: any) {
@@ -1408,7 +1416,7 @@ export class Chrome {
         completedActions: 0,
         reason: e.message,
         tabTag: tag,
-        snapshotId: o.id,
+        ...(automatic ? {} : { snapshotId: o.id }),
       };
     }
 

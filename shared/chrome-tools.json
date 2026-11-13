@@ -40,7 +40,7 @@
   },
   {
     "name": "chrome_navigate",
-    "description": "打开一个 http(s) 网址：target.kind=new_tab 新建标签（incognito=true 开无痕窗口），existing_tab 在 tabTag 标签里跳转（该标签旧的 ref 作废）。等待加载完成（标签不再 loading 且文档 readyState=complete，默认最多 4 秒，settleMs 可调）后附新观察；页面仍在加载时调大 settleMs，不要用 chrome_act 的 wait 补；长轮询、流式页面到上限即返回。observe=none 只执行不观察。网址只用用户给的或观察里已有的 href，不猜。页面可能已打开时先用 chrome_tabs 找；不带网址的切换、关闭、后退、前进、刷新用 chrome_tab_control。",
+    "description": "打开一个 http(s) 网址：target.kind=new_tab 新建标签（incognito=true 开无痕窗口）；跳转已有标签用 target.kind=existing_tab 并将标签写在 target.tabTag，不要另传顶层 tabTag（该标签旧的 ref 作废）。等待加载完成（标签不再 loading 且文档 readyState=complete，默认最多 4 秒，settleMs 可调）后附新观察；页面仍在加载时调大 settleMs，不要用 chrome_act 的 wait 补；长轮询、流式页面到上限即返回。observe=none 只执行、不等待加载也不返回新观察；后续操作需要页面信息时自动读取当前页面，不复用旧页面的 ref 或截图。网址只用用户给的或观察里已有的 href，不猜。页面可能已打开时先用 chrome_tabs 找；不带网址的切换、关闭、后退、前进、刷新用 chrome_tab_control。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -141,7 +141,7 @@
   },
   {
     "name": "chrome_tab_control",
-    "description": "对一个已有标签执行不带网址的控制：select 切到前台，close 关闭，back/forward/reload 后退、前进、刷新。除 close 外都会等待加载并附新观察（observe=none 时只执行）；close 不返回观察，之后该 tabTag 失效。去新网址用 chrome_navigate；要中止正在执行的浏览器调用用 chrome_connection 的 cancel_operation，不是关标签。",
+    "description": "对一个已有标签执行不带网址的控制：select 切到前台，close 关闭，back/forward/reload 后退、前进、刷新。除 close 外默认等待加载并附新观察；observe=none 只执行，不等待加载也不返回新观察。back/forward/reload 会使该标签旧观察失效；后续操作需要页面信息时自动读取当前页面，不复用旧页面的 ref 或截图。close 不返回观察，之后该 tabTag 失效。去新网址用 chrome_navigate；要中止正在执行的浏览器调用用 chrome_connection 的 cancel_operation，不是关标签。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -205,7 +205,7 @@
   },
   {
     "name": "chrome_inspect",
-    "description": "读取标签页当前的 DOM 摘要和 snapshotId（elements 每行以 ref 开头，@ 行为所在区域，offscreen 为屏外），visual 默认同时附当前视口图；它是 chrome_act 里 ref 的来源。chrome_navigate、chrome_tab_control、chrome_act、chrome_evaluate 和 chrome_tabs 单个命中已自动附观察，不必紧接着再调用。要整页、长图或局部特写用 chrome_screenshot；要批量读取链接或表格用 chrome_evaluate。",
+    "description": "读取标签页当前的 DOM 摘要和 snapshotId（elements 每行以 ref 开头，@ 行为所在区域，offscreen 为屏外），visual 默认同时附当前视口图；它是 chrome_act 里 ref 的来源。chrome_navigate、chrome_tab_control、chrome_act、chrome_evaluate 和 chrome_tabs 单个命中默认会附观察，结果有 snapshotId 时不必紧接着再调用；导航或刷新使用 observe=none、evaluate 使用 observe=false 时不会附新观察。要整页、长图或局部特写用 chrome_screenshot；要批量读取链接或表格用 chrome_evaluate。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -452,7 +452,7 @@
   },
   {
     "name": "chrome_act",
-    "description": "在已观察的标签上按顺序执行 1–16 个已确定的动作，然后附新观察（含 click、click_at、press、hover 时先等待加载和页面稳定，最长 settleMs）。click/hover/fill/scroll 用最新观察的 ref，upload 用 selector，type/press/wait 作用于当前焦点；hover 只把鼠标停在元素上，悬停才出现的 tooltip、菜单看随后的观察。click_at/move/drag/pointer/scroll_at 的 x/y 是 imageId 那张图的像素坐标，按该图的尺寸、缩放和裁剪区域换算成视口 CSS 像素后直接执行（imageId 只能是当前观察里的图，省略或未匹配时用当前观察的第一张图，当前观察无图时 x/y 按视口 CSS 像素）；不校验该图截取后页面是否滚动或变化，坐标请取自最新的视口图，页面可能已变时先 chrome_screenshot（capture.kind=viewport）再用它的 imageId。同一屏已知的动作合成一批，提交放最后；动作打开新标签时余下动作不执行，结果见 openedTabs。后续目标尚未出现、只能靠描述的多步流程用 chrome_run；只读数据用 chrome_evaluate。Canvas 表格可先定位再 press Ctrl+C，返回的 clipboard 是 TSV。 滑块/拼图/旋转等视觉验证码用 pointer 自行边看边拖，短信/邮箱验证码才问用户。",
+    "description": "在标签页按顺序执行 1–16 个已确定的动作，然后附新观察（含 click、click_at、press、hover 时先等待加载和页面稳定，最长 settleMs）。没有当前页面快照时自动读取，无需事先绑定观察；页面等待 4 秒后仍在加载则不执行，刷新或跳转后不能复用旧页面的 ref 或截图坐标。click/hover/fill/scroll 用最新观察的 ref，upload 用 selector，type/press/wait 作用于当前焦点；hover 只把鼠标停在元素上，悬停才出现的 tooltip、菜单看随后的观察。click_at/move/drag/pointer/scroll_at 的 x/y 是 imageId 那张图的像素坐标，按该图的尺寸、缩放和裁剪区域换算成视口 CSS 像素后直接执行（imageId 只能是当前观察里的图，省略或未匹配时用当前观察的第一张图，当前观察无图时 x/y 按视口 CSS 像素；自动读取新页面时不能沿用旧 imageId）。不校验该图截取后页面是否滚动或变化，坐标请取自最新的视口图，页面可能已变时先 chrome_screenshot（capture.kind=viewport）再用它的 imageId。同一屏已知的动作合成一批，提交放最后；动作打开新标签时余下动作不执行，结果见 openedTabs。后续目标尚未出现、只能靠描述的多步流程用 chrome_run；只读数据用 chrome_evaluate。Canvas 表格可先定位再 press Ctrl+C，返回的 clipboard 是 TSV。 滑块/拼图/旋转等视觉验证码用 pointer 自行边看边拖，短信/邮箱验证码才问用户。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -460,6 +460,11 @@
           "type": "string",
           "minLength": 1,
           "description": "目标标签的 tag，原样复制 chrome_tabs 的 tabs[].tag 或其它 chrome 工具返回的 tabTag；不是数字 tabId"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 12000,
+          "description": "可选：本批动作的对象和意图，尤其发送、提交、上传。仅作为元数据随结果原样返回，不输入网页，不代表业务成功或额外授权。"
         },
         "actions": {
           "type": "array",
@@ -962,7 +967,7 @@
   },
   {
     "name": "chrome_evaluate",
-    "description": "在页面隔离环境执行 JavaScript 并返回 value：共享 DOM，但读不到网页自己的 JS 全局变量；支持 Promise，执行上限 5 秒。用于一次性批量读取链接、表格、属性，或确认 file input 的 selector。默认执行后附新观察，observe=false 只返回 value。点击、填写、提交用 chrome_act，不用脚本代替；超时或异常时可能已部分执行，先观察再决定，不要重放。",
+    "description": "在标签页隔离环境执行 JavaScript 并返回 value：共享 DOM，但读不到网页自己的 JS 全局变量；没有当前页面快照时自动读取，无需事先绑定观察；页面等待 4 秒后仍在加载则不执行。支持 Promise，执行上限 5 秒。用于一次性批量读取链接、表格、属性，或确认 file input 的 selector；页面已发出的慢请求可用 chrome_devtools 查看。默认执行后附新观察，observe=false 只返回 value。点击、填写、提交用 chrome_act，不用脚本代替；超时或异常时可能已部分执行，先观察再决定，不要重放。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -1017,7 +1022,7 @@
   },
   {
     "name": "chrome_run",
-    "description": "在已观察的标签上按语义步骤执行 1–24 步短程计划：每步写动作和目标描述，系统在最新页面上绑定目标，执行前核对 when、执行后核对 expect，不符或有歧义就停下，交回剩余步骤和最新观察（整体最长 3 分钟）。用于能预判、但后续目标还没出现在当前页面的流程（如展开菜单→选择→确认）；所有目标都已有 ref 时用 chrome_act。停下后只重新规划未执行的步骤，不重放已执行的输入。",
+    "description": "在标签页按语义步骤执行 1–24 步短程计划：无需事先绑定观察，系统读取最新页面并绑定目标，执行前核对 when、执行后核对 expect，不符或有歧义就停下，交回剩余步骤和最新观察（整体最长 3 分钟）。用于能预判、但后续目标还没出现在当前页面的流程（如展开菜单→选择→确认）；所有目标都已有 ref 时用 chrome_act。停下后只重新规划未执行的步骤，不重放已执行的输入。",
     "parameters": {
       "type": "object",
       "properties": {

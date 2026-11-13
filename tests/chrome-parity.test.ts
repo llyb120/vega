@@ -6,6 +6,7 @@ import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Store } from "../server/core/store";
 import { bindStep, chains, literalMet, runCandidates, runState, validatePlan } from "../server/core/browser-run";
+import { CHROME_TOOL_DEFINITIONS, checkArgs, toInternal } from "../server/core/public-tools";
 import type { Obj } from "../server/core/util";
 
 async function fixture(t: TestContext) {
@@ -42,6 +43,32 @@ async function fixture(t: TestContext) {
   return { store, chrome, sent, calls, page, tabs, observe, act, run };
 }
 
+test("Chrome intent notes are bounded metadata, never page input or proof of success", async (t) => {
+  const f = await fixture(t), schema = CHROME_TOOL_DEFINITIONS.find(tool => tool.name === "chrome_act")!.parameters;
+  const actions = [{ action: "click", ref: "save" }];
+  const notes = "提交保存；这只是意图，不是成功回执";
+  const mapped = toInternal("chrome_act", checkArgs(schema, { tabTag: "tab", notes, actions }), { kind: "normal" }).args;
+  assert.equal(mapped.notes, notes);
+  await f.observe();
+  const result = await f.act(mapped);
+  assert.equal(result.notes, notes);
+  assert.equal(result.completedActions, 1);
+  assert(!JSON.stringify(f.calls).includes(notes));
+  assert(!JSON.stringify(f.sent).includes(notes));
+  assert.equal((await f.act({ notes: "", actions: [{ action: "wait", ms: 0 }] })).notes, "");
+  const count = f.sent.length;
+  await assert.rejects(f.act({ notes: "字".repeat(12001), actions }), /notes/);
+  await assert.rejects(f.act({ notes: { intent: "no" }, actions }), /notes/);
+  assert.throws(() => checkArgs(schema, { tabTag: "tab", notes: "字".repeat(12001), actions }), /notes/);
+  assert.equal(f.sent.length, count, "invalid notes cannot send any input");
+  await f.observe();
+  f.chrome.mouse = async () => { throw Error("fixture input failure"); };
+  const failed = await f.act({ notes, actions });
+  assert.equal(failed.notes, notes);
+  assert.equal(failed.status, "needs_review");
+  assert.equal(failed.completedActions, 0);
+});
+
 test("navigation invalidates all owners of its tab even without feedback", async (t) => {
   for (const operation of ["goto", "back", "forward", "reload", "close_tab"]) {
     for (const observe of ["none", "inspect"]) {
@@ -53,7 +80,6 @@ test("navigation invalidates all owners of its tab even without feedback", async
       assert(f.chrome.observations.has("owner:unrelated"), operation);
       if (observe === "none" || operation === "close_tab") {
         assert(!f.chrome.observations.has("owner:tab"), operation);
-        await assert.rejects(f.act({ action: { action: "press", key: "Enter" } }), /no observation/);
         assert.equal(f.sent.length, 0);
       } else {
         assert.notEqual(result.snapshotId, old.id);
@@ -62,6 +88,82 @@ test("navigation invalidates all owners of its tab even without feedback", async
       assert.equal(f.calls.filter(call => call.operation === operation).length, 1);
     }
   }
+});
+
+test("after navigation without feedback, evaluate automatically reads the new page without binding it", async (t) => {
+  for (const operation of ["goto", "back", "forward", "reload"]) {
+    const f = await fixture(t), old = await f.observe();
+    await f.chrome.execute("owner", ".", { operation, tabTag: "tab", url: "https://example.test/next", observe: "none" });
+    f.page.document = "new-document"; f.page.url = "https://example.test/next";
+    const result = await f.chrome.execute("owner", ".", { operation: "evaluate", tabTag: "tab", expression: "1", feedback: "none" });
+    assert.equal(result.status, "executed", operation);
+    assert.notEqual(result.basedOnSnapshotId, old.id, operation);
+    assert(f.calls.some((call) => call.expression?.includes('"new-document"') && call.expression?.includes('"https://example.test/next"')), operation);
+    assert(!f.chrome.observations.has("owner:tab"), "automatic reading does not bind an observation");
+  }
+});
+
+test("automatic reading waits for a new page and never borrows another session's snapshot", async (t) => {
+  const f = await fixture(t), old = await f.observe();
+  f.chrome.observations.delete("owner:tab"); f.chrome.observations.set("other:tab", old);
+  f.tabs[0].loading = true;
+  const timer = setTimeout(() => { f.tabs[0].loading = false; f.page.document = "new-document"; }, 150);
+  t.after(() => clearTimeout(timer));
+  const result = await f.chrome.execute("owner", ".", { operation: "evaluate", tabTag: "tab", expression: "1", feedback: "none" });
+  assert.equal(result.status, "executed");
+  assert.notEqual(result.basedOnSnapshotId, old.id);
+  assert(f.calls.some((call) => call.expression?.includes('"new-document"')));
+  assert.equal(f.chrome.observations.get("other:tab"), old);
+  assert(!f.chrome.observations.has("owner:tab"));
+});
+
+test("a still-loading page and stale refs or screenshot coordinates never send input", async (t) => {
+  const f = await fixture(t), old = await f.observe();
+  old.screenshot = true; old.images = [{ imageId: "old-image", pixelWidth: 800, pixelHeight: 600 }];
+  await f.chrome.execute("owner", ".", { operation: "reload", tabTag: "tab", observe: "none" });
+  f.page.items[0].ref = "new-save";
+  const oldRef = await f.act({ action: { action: "click", ref: "save" } });
+  assert.equal(oldRef.status, "not_executed"); assert.match(oldRef.reason, /ref not found/);
+  const oldImage = await f.act({ imageId: "old-image", action: { action: "click_at", x: 20, y: 20 } });
+  assert.equal(oldImage.status, "not_executed"); assert.match(oldImage.reason, /旧图片坐标未执行/);
+  assert(!f.sent.some((item) => item.action === "click" || item.method?.startsWith("Input.")));
+  f.chrome.settleNavigation = async () => [{ tag: "tab", loading: true }];
+  await assert.rejects(f.act({ operation: "evaluate", expression: "1", feedback: "none" }), /仍在加载.*未执行/);
+});
+
+test("automatic reading refuses incomplete documents even when the tab reports loaded", async (t) => {
+  for (const operation of ["act", "evaluate"]) for (const state of ["loading", "interactive"]) {
+    const f = await fixture(t), cdp = f.chrome.cdp.bind(f.chrome), settle = f.chrome.settleNavigation.bind(f.chrome);
+    let readyState = state, probes = 0, observations = 0;
+    f.chrome.cdp = async (tag, method, params: Obj = {}, ...rest) => {
+      if (method === "Runtime.evaluate" && params.expression === "document.readyState") {
+        probes++;
+        return { result: { value: readyState } };
+      }
+      return cdp(tag, method, params, ...rest);
+    };
+    f.chrome.settleNavigation = (tag, _ms, signal) => settle(tag, 20, signal);
+    const observe = f.chrome.observe.bind(f.chrome);
+    f.chrome.observe = async (...args) => { observations++; return observe(...args); };
+    const args = { operation, expression: "1", actions: [{ action: "press", key: "Enter" }], feedback: "none" };
+    await assert.rejects(f.act(args), /仍在加载.*未执行/, operation + ": " + state);
+    assert(probes > 0, "document readiness was checked");
+    assert.equal(observations, 0, "an incomplete document is not used as an automatic observation");
+    assert.equal(f.sent.length, 0, "no input is sent");
+    assert(!f.calls.some((call) => call.expression?.startsWith("__novaWebview.evaluate(")), "the requested script is not evaluated");
+    readyState = "complete";
+    assert.equal((await f.act(args)).status, "executed", "a later ready document can proceed");
+    assert(observations > 0);
+    if (operation === "act") assert.equal(f.sent.filter((item) => item.action === "press").length, 1, "the input is sent once after readiness");
+    else assert.equal(f.calls.filter((call) => call.expression?.startsWith("__novaWebview.evaluate(")).length, 1, "the script is evaluated once after readiness");
+  }
+});
+
+test("actions can start without an existing observation", async (t) => {
+  const f = await fixture(t);
+  const result = await f.act({ action: { action: "press", key: "Enter" } });
+  assert.equal(result.status, "executed");
+  assert(f.sent.some((item) => item.action === "press" && item.key === "Enter"));
 });
 
 test("selecting a tab preserves other owners, and failed navigation does not discard observations", async (t) => {

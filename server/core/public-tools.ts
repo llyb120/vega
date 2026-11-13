@@ -362,7 +362,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
       }));
     }
     case "chrome_act":
-      return chrome(defined({ operation: "act", tabTag: a.tabTag, imageId: a.imageId, visual: a.visual, settleMs: a.settleMs, ...budget, actions: a.actions.map(chromeAction) }));
+      return chrome(defined({ operation: "act", tabTag: a.tabTag, notes: a.notes, imageId: a.imageId, visual: a.visual, settleMs: a.settleMs, ...budget, actions: a.actions.map(chromeAction) }));
     case "chrome_evaluate":
       return chrome(defined({ operation: "evaluate", tabTag: a.tabTag, expression: a.expression, frame: a.frame, visual: a.visual, ...budget, ...(a.observe === false ? { feedback: "none" } : {}) }));
     case "chrome_run":

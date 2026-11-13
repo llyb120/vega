@@ -135,6 +135,7 @@ test("memory source is decided by the server and memory_manage requires an expli
 
 test("branch errors name the field and the chosen branch's structure", () => {
   assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab" } }), /tabTag.*kind="existing_tab" 的结构：必填 kind、tabTag/s);
+  assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab", tabTag: "C1" }, tabTag: "C1" }), /不接受字段 tabTag/);
   assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "elsewhere" } }), /target\.kind 只能是 "new_tab" \/ "existing_tab"/);
   assert.throws(() => map("chrome_act", { tabTag: "C1", actions: [{ action: "click", ref: "e1", x: 1 }] }), /不接受字段 x.*必填 action、ref/s);
   assert.throws(() => map("chrome_screenshot", { tabTag: "C1", capture: { kind: "region", region: { x: 0, y: 0, width: 0, height: 0 } } }), /width 必须大于 0/);

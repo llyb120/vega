@@ -158,6 +158,11 @@ class FixtureBridge extends ChromeBridge {
       await sleep(100);
       return { tabTag: a.tabTag };
     }
+    if (operation === "reload") {
+      await this.send("Page.reload", {}, await this.attached(a.tabTag));
+      await sleep(100);
+      return { tabTag: a.tabTag };
+    }
     throw Error("Unsupported fixture route " + operation);
   }
   override close() {
@@ -837,6 +842,23 @@ test(
       assert.equal(slowImage, 1);
       assert.equal(slow.pages[0].readyState, "complete", "navigation returned only after the slow image finished");
       assert.equal(verified, "");
+
+      // Quiet navigation and reload still use the new document without binding an observation first.
+      const documents: string[] = [], observe = engine.observe.bind(engine);
+      engine.observe = async (tag, scope, signal) => {
+        const o = await observe(tag, scope, signal); documents.push(o.pages[0].document); return o;
+      };
+      await engine.execute("owner", dir, { operation: "goto", tabTag: tag, url, observe: "none" });
+      assert(!engine.observations.has("owner:" + tag));
+      const afterGoto = await run("document.title");
+      assert.equal(afterGoto.value, "Identity");
+      assert(documents[0] && documents[0] !== slow.pages[0].document);
+      assert(!engine.observations.has("owner:" + tag));
+      await engine.execute("owner", dir, { operation: "reload", tabTag: tag, observe: "none" });
+      const afterReload = await run("document.title");
+      assert.equal(afterReload.value, "Identity");
+      assert(documents[1] && documents[1] !== documents[0]);
+      assert(!engine.observations.has("owner:" + tag));
     } finally {
       bridge.close();
       await store.close();

@@ -83,7 +83,21 @@ test("local navigation invalidates other sessions on the same client without sha
   firstBrowser.observations.set(session.id + ":unrelated", { ...observation, tabTag: "unrelated" });
   await engine.localBrowsers.release(session.id);
   const secondBrowser = await engine.chromeFor(second);
-  await assert.rejects(secondBrowser.execute(second.id, second.cwd, { operation: "act", tabTag: "local-a", action: { action: "press", key: "Enter" } }), /no observation/);
+  assert(!secondBrowser.observations.has(second.id + ":local-a"), "another session's observation is never borrowed");
+  let captured = 0;
+  secondBrowser.settleNavigation = async () => [{ tag: "local-a", loading: false }];
+  secondBrowser.observe = async () => {
+    captured++;
+    return { ...observation, id: "fresh", frames: [{ id: "main", context: 1 }], pages: [{ url: "https://example.test/new", document: "fresh-document" }] };
+  };
+  secondBrowser.evaluate = async (_tag, _frame, expression) => {
+    assert.match(expression, /fresh-document/);
+    return { status: "executed", value: "local" };
+  };
+  const result = await secondBrowser.execute(second.id, second.cwd, { operation: "evaluate", tabTag: "local-a", expression: "1", feedback: "none" });
+  assert.equal(result.value, "local"); assert.equal(result.basedOnSnapshotId, "fresh"); assert.equal(captured, 1);
+  assert.equal(firstBrowser.observations.get(session.id + ":local-a"), observation);
+  assert(!secondBrowser.observations.has(second.id + ":local-a"));
   secondBrowser.observations.set(second.id + ":local-a", observation);
   secondBrowser.observations.set(second.id + ":unrelated", { ...observation, tabTag: "unrelated" });
 
