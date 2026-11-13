@@ -40,7 +40,7 @@ const state = {
   current: "", title: "", avatar: "", authors: {},
   messages: [], lastSeq: 0, newFrom: 0, markGone: false,
   running: false, busy: false, stick: true,
-  filter: "", online: true,
+  filter: "", online: false,
 };
 
 const esc = (text) => String(text ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -230,7 +230,6 @@ function toast(message) {
 }
 
 function setOnline(online) {
-  if (state.online === online) return;
   state.online = online;
   el.accName.textContent = online ? "Vega 客户端" : "未连接站点";
   el.accState.textContent = online ? "已连接" : "在托盘里完成配对";
