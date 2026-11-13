@@ -10,7 +10,7 @@
   --ink: #1c1c1c;
   --ink-2: #8a8a8a;
   --ink-3: #adadad;
-  --bot: #f0f0f0;
+  --bot: #f2f2f2;
   --mine: #7f36cc;
   --brand: #994af3;
   --send: #8c43de;
@@ -46,10 +46,10 @@ body {
   overflow: hidden;
   transition: width 160ms ease;
 }
-.app.rail .side { width: var(--rail-w); }
+.app.collapsed .side { width: var(--rail-w); }
 
-.side-top { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 14px; height: 56px; padding-right: 16px; }
-.app.rail .side-top { visibility: hidden; }
+.side-top { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 14px; height: 56px; padding: 4px 16px 0 0; }
+.app.collapsed .side-top { visibility: hidden; }
 
 .round {
   flex: none; display: grid; place-items: center; width: 32px; height: 32px; padding: 0;
@@ -71,11 +71,11 @@ body {
   padding: 22px 16px 0; margin: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer;
 }
 .hero[hidden] { display: none; }
-.app.rail .hero { padding-top: 22px; }
+.app.collapsed .hero { padding-top: 22px; }
 .hero-face { position: relative; flex: none; width: 54px; height: 54px; overflow: visible; }
-.app.rail .hero-face { width: 54px; }
+.app.collapsed .hero-face { width: 54px; }
 .hero-name { font-size: 12px; line-height: 16px; color: var(--ink-2); max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.app.rail .hero-name { display: none; }
+.app.collapsed .hero-name { display: none; }
 
 /* 头像图形占 viewBox 约 70%，按盒子的 1.35 倍画，让可见图形正好等于盒子。 */
 .hero-face .bot-avatar, .row-face .bot-avatar, .pill-face .bot-avatar, .bubble-face .bot-avatar { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: block; }
@@ -85,7 +85,7 @@ body {
 .bubble-face .bot-avatar { width: 39px; height: 39px; }
 
 .rail { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: none; padding: 23px 16px 10px; display: flex; flex-direction: column; gap: 4px; }
-.app.rail .rail { padding: 23px 8px 10px; align-items: center; }
+.app.collapsed .rail { padding: 23px 8px 10px; align-items: center; }
 
 .row {
   flex: none; display: flex; align-items: center; width: 100%; height: 54px;
@@ -94,7 +94,7 @@ body {
   background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
   transition: background 120ms;
 }
-.app.rail .row { width: 54px; padding: 0; justify-content: center; }
+.app.collapsed .row { width: 54px; padding: 0; justify-content: center; }
 .row:hover { background: var(--hover); }
 .row.on { background: var(--sel); }
 
@@ -106,19 +106,19 @@ body {
 .row-face.bot { overflow: visible; background: none; }
 
 .row-text { min-width: 0; flex: 1; display: flex; flex-direction: column; padding-left: 10px; }
-.app.rail .row-text { display: none; }
+.app.collapsed .row-text { display: none; }
 .row-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; line-height: 18px; font-weight: 500; }
 .row-sub { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; line-height: 17px; color: var(--ink-2); }
 .row-count {
   flex: none; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 5px; border-radius: 9px;
   background: var(--brand); color: #fff; font-size: 11px; font-weight: 600; line-height: 18px; text-align: center;
 }
-.app.rail .row-count { position: absolute; top: 6px; right: 6px; margin: 0; }
+.app.collapsed .row-count { position: absolute; top: 6px; right: 6px; margin: 0; }
 
 .empty { padding: 4px 8px; color: var(--ink-3); font-size: 12px; }
 
 .foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 0 16px 16px 17px; }
-.app.rail .foot { flex-direction: column-reverse; padding: 0 0 16px; gap: 10px; }
+.app.collapsed .foot { flex-direction: column-reverse; padding: 0 0 16px; gap: 10px; }
 .acc-face {
   flex: none; display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
   border: 0; border-radius: 50%; background: #fff; color: var(--ink); font-size: 13px; font-weight: 600; cursor: pointer;
@@ -128,7 +128,7 @@ body {
   background: #fff; color: var(--ink); font: inherit; text-align: left; cursor: pointer;
   display: flex; flex-direction: column; justify-content: center;
 }
-.app.rail .acc-pill { display: none; }
+.app.collapsed .acc-pill { display: none; }
 .acc-name { font-size: 12px; line-height: 15px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .acc-state { font-size: 11px; line-height: 14px; color: var(--ink-2); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
@@ -179,7 +179,7 @@ body {
 
 .bubble-wrap { min-width: 0; max-width: 560px; }
 .bubble {
-  padding: 8px 14px; border-radius: 18px; background: var(--bot); color: var(--ink);
+  padding: 6.5px 14px; border-radius: 18px; background: var(--bot); color: var(--ink);
   font-size: 15px; line-height: 22px; white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .msg.user .bubble { background: var(--mine); color: #fff; }

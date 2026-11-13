@@ -584,7 +584,7 @@ for (const button of document.querySelectorAll(".win-btn")) {
 }
 
 // 双击分隔线收起/展开侧栏。
-el.splitter.addEventListener("dblclick", () => el.app.classList.toggle("rail"));
+el.splitter.addEventListener("dblclick", () => el.app.classList.toggle("collapsed"));
 
 async function boot() {
   try {
