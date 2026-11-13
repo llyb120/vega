@@ -20,7 +20,7 @@ var iconConnectedData []byte
 func systrayRun(configure, onQuit func()) {
 	systray.Run(func() {
 		systray.SetTitle("牵牛星")
-		mButterfly := systray.AddMenuItem("蝴蝶助理", "打开蝴蝶窗口（对话和设置都在里面）")
+		mButterfly := systray.AddMenuItem("客户端", "打开客户端窗口（对话和设置都在里面）")
 		mConfigure := systray.AddMenuItem("设置", "管理站点授权、按牛马配置主从和补充内容")
 		mQuit := systray.AddMenuItem("退出", "Stop local agent")
 		trayState.Lock()

@@ -8,16 +8,19 @@ package main
 import (
 	"bytes"
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 )
 
-//go:embed assistant_page.html
-var assistantPage []byte
+// 客户端窗口的界面（local/ui/）：整窗一个 WebView2 页面，数据走下面的同一套接口。
+//
+//go:embed ui
+var desktopUI embed.FS
 
 //go:embed assistant_marked.js
 var assistantMarked []byte
@@ -41,8 +44,7 @@ func (a *Agent) assistantMount(mux *http.ServeMux) {
 		case strings.HasSuffix(r.URL.Path, "/api/file"):
 			a.assistantProxy(w, r, "file")
 		case strings.HasSuffix(r.URL.Path, "/api/close"):
-			// 页面上的 × 只是把面板收回屏幕外（WebView2 留在内存里，下次点蝴蝶秒开）。
-			butterflyPanelPark()
+			// 关窗是窗口自己的事（页面发 chrome.webview.postMessage 收起），这里只回一句交差。
 			assistantReply(w, http.StatusOK, map[string]any{"ok": true})
 		case strings.HasSuffix(r.URL.Path, "/marked.js"):
 			// markdown 渲染用 marked（MIT），面板里不带构建步骤，直接内嵌发出去。
@@ -50,13 +52,45 @@ func (a *Agent) assistantMount(mux *http.ServeMux) {
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(assistantMarked)
 		case r.Method == http.MethodGet:
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write(assistantPage)
+			a.desktopAsset(w, r, base)
 		default:
 			http.NotFound(w, r)
 		}
 	})
+}
+
+// desktopAsset 发客户端窗口的静态文件：index.html、style.css、app.js、bot-avatar.js。
+// 路径全部相对界面目录，不许往上跳。
+func (a *Agent) desktopAsset(w http.ResponseWriter, r *http.Request, base string) {
+	name := strings.TrimPrefix(r.URL.Path, base)
+	if name == "" {
+		name = "index.html"
+	}
+	if strings.Contains(name, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := desktopUI.ReadFile("ui/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", desktopAssetType(name))
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(data)
+}
+
+func desktopAssetType(name string) string {
+	switch path.Ext(name) {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".js":
+		return "text/javascript; charset=utf-8"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 // assistantPath 面板页面与接口在本地服务器上的路径前缀。

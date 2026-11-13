@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vega</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false" style="position:absolute;width:0;height:0;overflow:hidden"><defs>
+  <symbol id="i-search" viewBox="0 0 24 24"><path d="M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM20 20l-4.2-4.2"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-min" viewBox="0 0 10 10"><path d="M1 5h8"/></symbol>
+  <symbol id="i-max" viewBox="0 0 10 10"><path d="M1.2 1.2h7.6v7.6H1.2Z"/></symbol>
+  <symbol id="i-close" viewBox="0 0 10 10"><path d="M1.4 1.4l7.2 7.2M8.6 1.4 1.4 8.6"/></symbol>
+</defs></svg>
+
+<div class="app" id="app">
+  <aside class="side" id="side">
+    <div class="side-top">
+      <button type="button" class="round" id="searchBtn" aria-label="搜索" title="搜索"><svg class="icon"><use href="#i-search"/></svg></button>
+      <button type="button" class="round" id="createBtn" aria-label="新会话" title="新会话"><svg class="icon"><use href="#i-plus"/></svg></button>
+    </div>
+    <div class="search-row" id="searchRow" hidden>
+      <input id="searchInput" type="search" aria-label="搜索" placeholder="搜索牛马或群聊" autocomplete="off">
+    </div>
+    <button type="button" class="hero" id="hero" hidden>
+      <span class="hero-face" id="heroFace"></span>
+      <span class="hero-name" id="heroName"></span>
+    </button>
+    <div class="rail" id="rail"></div>
+    <div class="foot">
+      <button type="button" class="acc-face" id="accFace" aria-label="设置" title="设置">V</button>
+      <button type="button" class="acc-pill" id="accBtn">
+        <span class="acc-name" id="accName">Vega 客户端</span>
+        <span class="acc-state" id="accState">正在连接</span>
+      </button>
+    </div>
+    <div class="splitter" id="splitter" title="双击收起侧栏"></div>
+  </aside>
+
+  <main class="main" id="main">
+    <div class="titlebar">
+      <div class="title-drag" id="titleDrag"></div>
+      <button type="button" class="pill" id="pill" hidden>
+        <span class="pill-face" id="pillFace"></span>
+        <span class="pill-name" id="pillName"></span>
+      </button>
+      <div class="win-btns">
+        <button type="button" class="win-btn" data-win="min" aria-label="最小化" title="最小化"><svg class="icon"><use href="#i-min"/></svg></button>
+        <button type="button" class="win-btn" data-win="max" aria-label="最大化" title="最大化"><svg class="icon"><use href="#i-max"/></svg></button>
+        <button type="button" class="win-btn close" data-win="close" aria-label="关闭" title="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
+      </div>
+    </div>
+
+    <div class="stream" id="stream">
+      <div class="welcome"><strong>选一个牛马开始</strong><small>左栏点一个牛马或群聊，就能在这里交代工作</small></div>
+    </div>
+    <button type="button" class="latest" id="latest" hidden>回到底部</button>
+
+    <form class="composer" id="composer" autocomplete="off">
+      <button type="button" class="cbtn" id="attachBtn" aria-label="更多" title="更多"><svg class="icon"><use href="#i-plus"/></svg></button>
+      <div class="menu" id="menu" hidden>
+        <button type="button" data-act="new">新会话（/new）</button>
+        <button type="button" data-act="settings">客户端设置</button>
+        <button type="button" data-act="reload">重新加载</button>
+      </div>
+      <textarea class="input" id="input" rows="1" placeholder="给牛马发消息…"></textarea>
+      <button type="submit" class="send" id="send" aria-label="发送" title="发送" disabled><svg class="icon"><use href="#i-send"/></svg></button>
+    </form>
+
+    <div class="toast" id="toast" hidden></div>
+  </main>
+</div>
+
+<script src="bot-avatar.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

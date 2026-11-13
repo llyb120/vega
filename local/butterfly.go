@@ -60,12 +60,12 @@ func butterflyPanelTarget(dir, url string) {
 	_ = os.WriteFile(filepath.Join(dir, "panel-target.txt"), []byte(url), 0o600)
 }
 
-// assistantURL 蝴蝶面板打开的地址：本地内置的助理界面（不用登录网站，也不加载站点前端）。
+// assistantURL 客户端窗口打开的地址：本地内置的界面（不用登录网站，也不加载站点前端）。
 func (a *Agent) assistantURL() string {
 	return a.assistantBase()
 }
 
-// threadURL 面板里直达某条会话：界面自己记得上次看的那条，这里仍然回到面板。
+// threadURL 窗口里直达某条会话：界面自己记得上次看的那条，这里仍然回到窗口。
 func (a *Agent) threadURL(session string) string {
 	return a.assistantBase()
 }
@@ -74,7 +74,7 @@ func (a *Agent) threadURL(session string) string {
 func butterflyOpenThread(thread string) {
 	if runningAgent != nil && thread != "" {
 		url := runningAgent.threadURL(thread)
-		if !butterflyPanelOpen(url) {
+		if !desktopShow(url) {
 			openBrowser(url)
 		}
 		return
