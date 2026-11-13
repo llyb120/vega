@@ -94,7 +94,7 @@ export const taskSummary = (t: Task) =>
  * A delivered task accepts a direct follow-up in its own session only within this window after its latest delivery.
  * The window is enforced here; whether the follow-up is related is the communication model's judgement.
  */
-export const FOLLOW_UP_WINDOW_MS = 30 * 60_000;
+export const FOLLOW_UP_WINDOW_MS = 4 * 60 * 60_000;
 export const followUpOpen = (t: Task, now = Date.now()) =>
   t.status === "done" && !t.dutyId && !t.fromDuty && t.side !== "computer" && !!t.workSession &&
   typeof t.finishedAt === "number" && t.finishedAt > 0 && now - t.finishedAt <= FOLLOW_UP_WINDOW_MS;
@@ -1647,7 +1647,7 @@ export class Employee {
             if (reopening) {
               const now = Date.now();
               assert(!t.dutyId && !t.fromDuty && t.side !== "computer" && t.workSession, "职责触发或没有原工作会话的已交付任务不能在原任务续做；请用 employee_task_create 新建任务，并在 instructions 写明关联任务 id 与已有结果");
-              assert(followUpOpen(t, now), `该任务已于 ${at(t.finishedAt) || "未知时间"} 交付，超过 ${FOLLOW_UP_WINDOW_MS / 60_000} 分钟续做时限，未在原任务续做；请用 employee_task_create 新建任务，并在 instructions 写明关联任务 id 与已有结果`);
+              assert(followUpOpen(t, now), `该任务已于 ${at(t.finishedAt) || "未知时间"} 交付，超过 ${FOLLOW_UP_WINDOW_MS / 3_600_000} 小时续做时限，未在原任务续做；请用 employee_task_create 新建任务，并在 instructions 写明关联任务 id 与已有结果`);
               if (duplicate) return { ok: true, duplicate, status: t.status, next: "This supplement was already handled and delivered; do not reopen the task or create a new one for it" };
               t.deliveries = [...(t.deliveries || []), { revision: t.revision || 0, finishedAt: t.finishedAt, summary: t.summary || "", result: clip(t.result || "", 8000), deliverableRefs: t.deliverableRefs || [] }].slice(-5);
               t.answer = (t.answer || "") + `\n[已交付任务的直接后续] 本任务已于 ${at(t.finishedAt)} 交付；已完成步骤、已验证结果和产物保留，不要重做，不要重复已执行的提交/发送；只做下面这条补充新增的部分，新增动作仅限补充明确要求的范围。用 task_progress 在原计划后追加新步骤，验证后 task_complete 交付本次新增结果。`;

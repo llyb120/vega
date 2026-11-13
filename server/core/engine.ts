@@ -1044,9 +1044,17 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const skills = await loadSkills(config, this.store, session.cwd, cloudFor({ ownerId: session.ownerId }));
         const employeeState = await worker?.state();
         const memories = employeeState ? formatMemoriesForPrompt(recallMemory(employeeState, memoryQuery, Date.now(), false) as any) : "";
+        const latestChat = worker && !session.taskId && !session.groupId ? await this.store.lastMessage(key, "user") : undefined;
+        const quoted = latestChat?.quote && await this.store.message(key, latestChat.quote.seq);
+        const quotedTaskId = quoted?.tasks?.length === 1 ? quoted.tasks[0].id : undefined;
+        const quotedTask = quotedTaskId ? await worker!.findTask(quotedTaskId) : undefined;
+        const quotedFollowUp = !!quotedTask && followUpOpen(quotedTask);
         const taskIndex = employeeState ? "\n当前任务索引（内容已节选；完整内容、进度和结果用employee_status传taskId查看）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: [...task.text].slice(0, 120).join(""), status: task.status, ...(task.key ? { dedupeKey: task.key } : {}) }))) : "";
+        const taskContext = quotedTaskId
+          ? `\n[本次引用关联任务] ${JSON.stringify(quotedTask ? { ...taskSummary(quotedTask), ...(quotedTask.status === "done" ? { followUpOpen: quotedFollowUp } : {}) } : { id: quotedTaskId, status: "unavailable" })}\n${quotedFollowUp ? `[近期已交付、可在原任务续做] ${JSON.stringify([followUpSummary(quotedTask!)])}\n` : ""}引用消息已唯一指明该任务：默认以它为本次回复和任务操作的对象，不要先根据上下文搜索或处理其他任务；仅当本次消息明确要求其他任务或多个任务时才处理这些任务。先判断用户是在询问、补充、续做还是停止；问答不自动执行，用户要求同一任务的直接后续且 followUpOpen=true 时用 employee_task_manage 的 resume 带 supplement 在原任务续做。操作仍受任务状态、审批和续做时限约束。关联任务不存在或不可访问时如实说明，不用相似任务替代；需要详情或用户明确要求其他任务时用 employee_status 查询。\n`
+          : taskIndex + (employee && !session.taskId ? taskDigest : "") + (latestChat?.quote ? "\n[引用消息未唯一关联任务] 只能根据本次消息和上下文寻找；多个候选仍无法确定时先向用户澄清。\n" : "");
         const supplement = session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : "";
-        let dynamic = memories + taskIndex + (employee && !session.taskId ? taskDigest : "") + "\n" + (await sessionDynamicPrompt(session, config, this.store, supplement || ""));
+        let dynamic = memories + taskContext + "\n" + (await sessionDynamicPrompt(session, config, this.store, supplement || ""));
         // Scene model edited while this run is in progress: switch on the next provider request.
         const latest = await this.config(session), primary = sceneModels(latest, session.scene!)[0];
         const seen = scenePrimaries.get(session.scene!);

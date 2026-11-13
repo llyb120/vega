@@ -54,6 +54,7 @@ test("a direct follow-up within the window continues the delivered task in its o
   try {
     const first = await delivered(f);
     const work = first.workSession;
+    await f.employee.update(state => { f.employee.task(state, first.id).finishedAt = Date.now() - 3 * 60 * 60_000; });
     assert.equal((await f.deliveries()).length, 1);
 
     const reply = await f.employee.control({ action: "resume", id: first.id, text: "在同一结果页点击第一条自然结果" });
@@ -111,10 +112,10 @@ test("a direct follow-up within the window continues the delivered task in its o
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
-test("follow-up window is a deterministic 30 minutes from the latest delivery, inclusive at the boundary", () => {
+test("follow-up window is a deterministic 4 hours from the latest delivery, inclusive at the boundary", () => {
   const now = 1_800_000_000_000;
   const task = { status: "done", workSession: "w", finishedAt: now - FOLLOW_UP_WINDOW_MS } as unknown as Task;
-  assert.equal(FOLLOW_UP_WINDOW_MS, 30 * 60_000);
+  assert.equal(FOLLOW_UP_WINDOW_MS, 4 * 60 * 60_000);
   assert.equal(followUpOpen(task, now), true, "exactly at the boundary");
   assert.equal(followUpOpen(task, now + 1), false, "one millisecond later");
   assert.equal(followUpOpen({ ...task, finishedAt: 0 } as Task, now), false);
@@ -132,7 +133,7 @@ test("outside the window, without a supplement or in other statuses the delivere
     const status = async () => f.employee.task(await f.employee.state(), job.id).status;
 
     await set({ finishedAt: Date.now() - FOLLOW_UP_WINDOW_MS - 1000 });
-    await assert.rejects(f.employee.control({ action: "resume", id: job.id, text: "点击第一条结果" }), /超过 30 分钟续做时限，未在原任务续做；请用 employee_task_create 新建任务/);
+    await assert.rejects(f.employee.control({ action: "resume", id: job.id, text: "点击第一条结果" }), /超过 4 小时续做时限，未在原任务续做；请用 employee_task_create 新建任务/);
     assert.equal(await status(), "done");
 
     await set({ finishedAt: Date.now() - 1000 });
@@ -203,4 +204,144 @@ test("the communication session lists only recently delivered tasks as follow-up
     assert.match(seen, /目标不同、换了对象或已过 followUpUntil 的用 employee_task_create 新建/);
     assert.match(seen, /拿不准就新建；resume 被拒时改为新建，不要声称已在原任务续做/);
   } finally { await f.engine.close(); await f.store.close(); }
+});
+
+test("a quoted task is the primary reply target rather than other current tasks", async () => {
+  const f = await fixture();
+  try {
+    const target = await delivered(f);
+    const other = await f.add("另一条相似的任务");
+    const newer: Task[] = [];
+    for (let i = 0; i < 5; i++) newer.push(await f.add("另一条最近交付的任务 " + i));
+    await f.employee.update(state => {
+      for (const task of newer) Object.assign(f.employee.task(state, task.id), { status: "done", workSession: "other", finishedAt: Date.now() });
+    });
+    const delivery = (await f.deliveries())[0];
+    const quote = await f.store.quote(f.chat.id, delivery.seq!);
+    let calls = 0;
+    f.engine.providers.chat = async (_model, _system, messages) => {
+      const input = messages.findLast(m => m.role === "user")!.text!;
+      const focus = JSON.parse(input.split("[本次引用关联任务] ")[1].split("\n")[0]);
+      assert.equal(focus.id, target.id);
+      assert.equal(focus.status, "done", "the user-bound task snapshot stays pinned across tool rounds");
+      if (calls) assert(messages.some(message => message.role === "tool" && message.callId === "resume-target" && !message.error), "the resume result is retained without rewriting the task snapshot");
+      if (!calls) {
+        assert.equal(focus.followUpOpen, true);
+        const eligible = JSON.parse(input.split("[近期已交付、可在原任务续做] ")[1].split("\n")[0]);
+        assert.deepEqual(eligible.map((task: Task) => task.id), [target.id], "the quoted task stays eligible even outside the five most recent deliveries");
+      }
+      for (const task of [other, ...newer]) assert(!input.includes(task.id), "unrelated tasks are not included in the target's injected summary");
+      assert(!input.includes("[当前活跃任务摘要]"));
+      if (calls++ === 0) return call("resume-target", "employee", { action: "resume", id: target.id, text: "改到 dev 分支" });
+      return { role: "assistant", text: "只处理引用的任务。" };
+    };
+    await f.engine.run(f.chat.id, { role: "user", text: "后端改到 dev，我写错了", quote });
+    const updated = f.employee.task(await f.employee.state(), target.id);
+    assert.equal(updated.status, "queued");
+    assert.equal(updated.workSession, target.workSession);
+    assert.match(updated.answer, /改到 dev 分支/);
+    assert.equal(f.employee.task(await f.employee.state(), other.id).answer, undefined);
+  } finally { await f.engine.close(); await f.store.close(); }
+});
+
+test("only unlinked or ambiguous quotes fall back to contextual task search", async () => {
+  const f = await fixture();
+  try {
+    const first = await f.add("第一条任务"), second = await f.add("第二条任务");
+    const sources = [
+      { text: "没有任务链接" },
+      { text: "链接了两条任务", tasks: [{ id: first.id, title: first.text, status: first.status }, { id: second.id, title: second.text, status: second.status }] },
+      { text: "已不存在的任务", tasks: [{ id: "missing-task", title: "旧任务", status: "done" }] },
+    ];
+    const prompts: string[] = [];
+    f.engine.providers.chat = async (_model, _system, messages) => {
+      prompts.push(messages.findLast(m => m.role === "user")!.text!);
+      return { role: "assistant", text: "先回答，不自动执行。" };
+    };
+    for (const source of sources) {
+      const message = await f.store.append(f.chat.id, { role: "assistant", ...source });
+      await f.engine.run(f.chat.id, { role: "user", text: "这是怎么回事？", quote: await f.store.quote(f.chat.id, message.seq!) });
+    }
+    for (const input of prompts.slice(0, 2)) {
+      assert(input.includes("[引用消息未唯一关联任务]"));
+      assert(input.includes("[当前活跃任务摘要]"));
+      assert(input.includes(first.id) && input.includes(second.id));
+      assert(!input.includes("[本次引用关联任务]"));
+    }
+    const missing = prompts[2];
+    assert.match(missing, /\[本次引用关联任务\] {"id":"missing-task","status":"unavailable"}/);
+    assert(!missing.includes("[当前活跃任务摘要]"), "a missing explicit task must not be substituted with a different task");
+    const state = await f.employee.state();
+    assert.equal(f.employee.task(state, first.id).status, "queued");
+    assert.equal(f.employee.task(state, second.id).status, "queued");
+  } finally { await f.engine.close(); await f.store.close(); }
+});
+
+test("quoting a task does not execute a question or override an explicit request about another task", async () => {
+  const f = await fixture();
+  try {
+    const first = await f.add("第一条任务"), second = await f.add("第二条任务");
+    const source = await f.store.append(f.chat.id, { role: "assistant", text: "第一条结果", tasks: [{ id: first.id, title: first.text, status: first.status }] });
+    const quote = await f.store.quote(f.chat.id, source.seq!);
+    let calls = 0;
+    f.engine.providers.chat = async (_model, _system, messages) => {
+      const input = messages.findLast(m => m.role === "user")!.text!;
+      assert.equal(JSON.parse(input.split("[本次引用关联任务] ")[1].split("\n")[0]).id, first.id);
+      if (calls++ === 1) return call("stop-other", "employee", { action: "stop", id: second.id });
+      return { role: "assistant", text: "已了解。" };
+    };
+    await f.engine.run(f.chat.id, { role: "user", text: "这是什么结果？", quote });
+    assert.equal(f.employee.task(await f.employee.state(), first.id).status, "queued");
+    await f.engine.run(f.chat.id, { role: "user", text: "另外请停掉第二条任务", quote });
+    const state = await f.employee.state();
+    assert.equal(f.employee.task(state, first.id).status, "queued");
+    assert.equal(f.employee.task(state, second.id).status, "stopped");
+  } finally { await f.engine.close(); await f.store.close(); }
+});
+
+test("an expired quoted task remains the reply target without being reopened or replaced", async () => {
+  const f = await fixture();
+  try {
+    const target = await delivered(f), other = await f.add("另一条任务");
+    const delivery = (await f.deliveries())[0];
+    await f.employee.update(state => { f.employee.task(state, target.id).finishedAt = Date.now() - FOLLOW_UP_WINDOW_MS - 1000; });
+    f.engine.providers.chat = async (_model, _system, messages) => {
+      const input = messages.findLast(m => m.role === "user")!.text!;
+      const focus = JSON.parse(input.split("[本次引用关联任务] ")[1].split("\n")[0]);
+      assert.equal(focus.id, target.id);
+      assert.equal(focus.followUpOpen, false);
+      assert(!input.includes("[近期已交付、可在原任务续做]"));
+      assert(!input.includes(other.id));
+      return { role: "assistant", text: "原任务已过续做时限。" };
+    };
+    await f.engine.run(f.chat.id, { role: "user", text: "这条怎么处理？", quote: await f.store.quote(f.chat.id, delivery.seq!) });
+    assert.equal(f.employee.task(await f.employee.state(), target.id).status, "done");
+    assert.equal(f.employee.task(await f.employee.state(), other.id).status, "queued");
+  } finally { await f.engine.close(); await f.store.close(); }
+});
+
+test("a quoted task is recalculated when a new message arrives during a chat turn", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  try {
+    const first = await f.add("第一条任务"), second = await f.add("第二条任务");
+    const source = async (task: Task) => f.store.quote(f.chat.id, (await f.store.append(f.chat.id, { role: "assistant", text: task.text, tasks: [{ id: task.id, title: task.text, status: task.status }] })).seq!);
+    const firstQuote = await source(first), secondQuote = await source(second);
+    let started!: () => void, calls = 0;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    f.engine.providers.chat = async (_model, _system, messages) => {
+      const input = messages.findLast(m => m.role === "user")!.text!;
+      const focus = JSON.parse(input.split("[本次引用关联任务] ")[1].split("\n")[0]);
+      assert.equal(focus.id, calls === 0 ? first.id : second.id);
+      if (calls++ === 0) { started(); await gate; }
+      return { role: "assistant", text: "已看到引用。" };
+    };
+    const running = f.engine.run(f.chat.id, { role: "user", text: "看第一条", quote: firstQuote });
+    await ready;
+    f.engine.steer(f.chat.id, { role: "user", text: "不，看第二条", quote: secondQuote });
+    release();
+    await running;
+    assert.equal(calls, 2);
+  } finally { release(); await f.engine.close(); await f.store.close(); }
 });
