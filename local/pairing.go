@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -262,8 +263,9 @@ p{margin:0 0 12px}small{display:block;color:var(--muted);line-height:1.55;margin
 code{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f3f4fa;padding:1px 6px;border-radius:6px;overflow-wrap:anywhere}
 label{display:block;font-weight:600;margin:8px 0 6px}
 textarea{width:100%;font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:12px 14px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;resize:vertical;min-height:96px}
-textarea:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #292177;outline-offset:2px}
+textarea:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #292177;outline-offset:2px}
 input[type=number]{width:96px;padding:9px 12px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;font:inherit}
+input[type=text],select{width:100%;padding:9px 12px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;font:inherit;color:inherit}
 .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
 button{font:inherit;padding:10px 16px;border:0;border-radius:10px;background:var(--brand);color:var(--brand-ink);cursor:pointer;font-weight:600}
 button.secondary{background:#eef0f8;color:var(--ink)}button.danger{background:#fff1f0;color:var(--danger)}
@@ -282,10 +284,10 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
 .tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
 .tabs label{margin:0;padding:8px 16px;border-radius:999px;background:#eef0f8;color:var(--muted);font-size:.92rem;cursor:pointer}
 .tabs label:hover{background:#e6e9f5}
-#tab-site:checked~.tabs label[for=tab-site],#tab-client:checked~.tabs label[for=tab-client],#tab-access:checked~.tabs label[for=tab-access],#tab-computer:checked~.tabs label[for=tab-computer],#tab-relay:checked~.tabs label[for=tab-relay]{background:var(--brand);color:var(--brand-ink)}
-#tab-site:focus-visible~.tabs label[for=tab-site],#tab-client:focus-visible~.tabs label[for=tab-client],#tab-access:focus-visible~.tabs label[for=tab-access],#tab-computer:focus-visible~.tabs label[for=tab-computer],#tab-relay:focus-visible~.tabs label[for=tab-relay]{outline:3px solid #292177;outline-offset:2px}
+#tab-site:checked~.tabs label[for=tab-site],#tab-client:checked~.tabs label[for=tab-client],#tab-access:checked~.tabs label[for=tab-access],#tab-computer:checked~.tabs label[for=tab-computer],#tab-relay:checked~.tabs label[for=tab-relay],#tab-work:checked~.tabs label[for=tab-work]{background:var(--brand);color:var(--brand-ink)}
+#tab-site:focus-visible~.tabs label[for=tab-site],#tab-client:focus-visible~.tabs label[for=tab-client],#tab-access:focus-visible~.tabs label[for=tab-access],#tab-computer:focus-visible~.tabs label[for=tab-computer],#tab-relay:focus-visible~.tabs label[for=tab-relay],#tab-work:focus-visible~.tabs label[for=tab-work]{outline:3px solid #292177;outline-offset:2px}
 .panel{display:none}
-#tab-site:checked~.panels #panel-site,#tab-client:checked~.panels #panel-client,#tab-access:checked~.panels #panel-access,#tab-computer:checked~.panels #panel-computer,#tab-relay:checked~.panels #panel-relay{display:block}
+#tab-site:checked~.panels #panel-site,#tab-client:checked~.panels #panel-client,#tab-access:checked~.panels #panel-access,#tab-computer:checked~.panels #panel-computer,#tab-relay:checked~.panels #panel-relay,#tab-work:checked~.panels #panel-work{display:block}
 </style>
 <main>
   <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p>{{if .AssistantURL}}<p><a href="{{.AssistantURL}}">← 回到客户端对话</a></p>{{end}}</div></div>
@@ -301,12 +303,14 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   <input type="radio" name="tab" id="tab-access" class="tab"{{if eq .Tab "access"}} checked{{end}}>
   <input type="radio" name="tab" id="tab-computer" class="tab"{{if eq .Tab "computer"}} checked{{end}}>
   <input type="radio" name="tab" id="tab-relay" class="tab"{{if eq .Tab "relay"}} checked{{end}}>
+  <input type="radio" name="tab" id="tab-work" class="tab"{{if eq .Tab "work"}} checked{{end}}>
   <nav class="tabs" aria-label="连接授权分区">
     <label for="tab-site">站点</label>
     <label for="tab-client">本机</label>
     <label for="tab-access">授权</label>
     <label for="tab-computer">电脑</label>
     <label for="tab-relay">账户</label>
+    <label for="tab-work">工作</label>
   </nav>
   <div class="panels">
   <section class="panel" id="panel-site">
@@ -397,6 +401,63 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   </section>
 
   </section>
+  <section class="panel" id="panel-work">
+  {{if .Work.Error}}<div class="flash warn" role="status">{{.Work.Error}}</div>{{end}}
+  {{if .Work.Note}}<section class="card"><h2>工作设置</h2><p>{{.Work.Note}}</p><small>这里只保存站点上已有的工作原则、场景模型和调度并发。职责、上下班时间已经停用，不会在这里恢复。工作原则只有一份，不另设公开和私有两套。</small></section>{{end}}
+  {{range .Work.Employees}}
+  <section class="card">
+    <h2>{{if .Name}}{{.Name}}{{else}}未命名牛马{{end}}</h2>
+    {{if .CanManage}}
+    <form method="post">
+      <input type="hidden" name="saveEmployee" value="{{.ID}}">
+      <label for="name-{{.ID}}">姓名</label>
+      <input id="name-{{.ID}}" name="employeeName" type="text" maxlength="80" required value="{{.Name}}">
+      <label for="instruction-{{.ID}}">工作原则</label>
+      <small id="instruction-help-{{.ID}}">保存后，新任务会使用更新的工作原则。最多 8000 字。不要填写密码或密钥。</small>
+      <textarea id="instruction-{{.ID}}" name="employeeInstruction" rows="6" maxlength="8000" aria-describedby="instruction-help-{{.ID}}">{{.Instruction}}</textarea>
+      <div class="row"><button name="saveEmployeeButton" value="1">保存工作原则</button></div>
+    </form>
+    {{else}}
+    <label>姓名</label>
+    <input type="text" value="{{.Name}}" readonly>
+    <label>工作原则</label>
+    <textarea rows="6" readonly>{{.Instruction}}</textarea>
+    <small>只读账号不能修改牛马设置。</small>
+    {{end}}
+  </section>
+  {{end}}
+  {{if .Work.Admin}}
+  <section class="card">
+    <h2>场景模型与调度</h2>
+    <form method="post">
+      <input type="hidden" name="saveWorkspace" value="1">
+      <small>每个场景都要单独选择模型，不再使用默认模型。浏览器操作只能选支持图片的模型，也不能开启分身。并发为 1–64，默认各为 3。</small>
+      {{if not .Work.HasModels}}<p class="empty">还没有可用模型。先在网页设置里添加服务商并获取模型；已保存但当前不可用的模型仍会显示。</p>{{end}}
+      {{range .Work.Scenes}}
+      <input type="hidden" name="sceneKey" value="{{.Key}}">
+      {{if .Computer}}<input type="hidden" name="sceneNoSpawn" value="{{.Key}}">{{end}}
+      <p><b>{{.Label}}</b></p>
+      <small>{{.Hint}}</small>
+      {{range .Rows}}
+      <label for="scene-{{.Key}}-{{.Index}}">{{if .Model}}模型 {{.Index}}{{else}}备用模型{{end}}</label>
+      <select id="scene-{{.Key}}-{{.Index}}" name="scene-{{.Key}}-{{.Index}}">
+        <option value="">不使用</option>
+        {{range .Choices}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
+      </select>
+      {{if not .Computer}}<label class="switch"><input type="checkbox" name="scene-{{.Key}}-spawn-{{.Index}}" value="1"{{if .AllowSpawn}} checked{{end}}>允许开启分身</label>{{end}}
+      {{end}}
+      {{end}}
+      <label for="globalSlots">全站同时执行上限</label>
+      <input id="globalSlots" name="globalSlots" type="number" min="1" max="64" value="{{.Work.Global}}">
+      <small>任意时刻全站最多这么多任务在跑。</small>
+      <label for="perEmployeeSlots">单牛马同时执行上限</label>
+      <input id="perEmployeeSlots" name="perEmployeeSlots" type="number" min="1" max="64" value="{{.Work.PerEmployee}}">
+      <small>同一牛马最多同时跑这么多。电脑任务仍受桌面确认时间约束。</small>
+      <div class="row"><button name="saveWorkspaceButton" value="1">保存场景和调度</button></div>
+    </form>
+  </section>
+  {{end}}
+  </section>
   </div>
 </main></html>`))
 
@@ -417,6 +478,27 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		if r.ParseForm() != nil {
 			http.Error(w, "Invalid form", 400)
+			return
+		}
+		if r.FormValue("saveEmployee") != "" || r.FormValue("saveWorkspace") == "1" {
+			var err error
+			if r.FormValue("saveWorkspace") == "1" {
+				err = a.saveWorkspace(r.Context(), r.Form)
+			} else {
+				err = a.saveWorkEmployee(r.Context(), r.FormValue("saveEmployee"), r.FormValue("employeeName"), r.FormValue("employeeInstruction"))
+			}
+			if err != nil {
+				status := http.StatusBadRequest
+				var workErr *workSettingsError
+				if errors.As(err, &workErr) && workErr.status >= 400 {
+					status = workErr.status
+				} else if errors.Is(err, errWorkUnpaired) {
+					status = http.StatusConflict
+				}
+				http.Error(w, err.Error(), status)
+				return
+			}
+			http.Redirect(w, r, r.URL.Path+"?saved=1&tab=work", http.StatusSeeOther)
 			return
 		}
 		if r.FormValue("saveSupplement") == "1" || r.FormValue("updateExtension") == "1" || r.FormValue("saveConfirm") == "1" || r.FormValue("saveBrowserMode") == "1" {
@@ -565,7 +647,7 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	extensionDir := a.extensionDir()
 	tab := r.URL.Query().Get("tab")
 	switch tab {
-	case "site", "client", "access", "computer", "relay":
+	case "site", "client", "access", "computer", "relay", "work":
 	default:
 		tab = "site"
 	}
@@ -585,7 +667,8 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		HeadlessBrowser                    bool
 		HeadlessNotice                     string
 		AssistantURL                       string
-	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts, extension, extensionDir, headlessBrowserMode, headlessNotice, assistantURL})
+		Work                               workView
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts, extension, extensionDir, headlessBrowserMode, headlessNotice, assistantURL, a.loadWorkSettings(r.Context())})
 }
 
 type loginProof struct {

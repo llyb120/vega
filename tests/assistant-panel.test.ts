@@ -117,3 +117,98 @@ test("the original attachment staging contract forwards file/image bytes and ren
   await b.desktop.main.discardStagedAttachment({ path: file.path });
   await assert.rejects(b.desktop.main.commitStagedAttachments({ paths: [file.path] }), /已失效/);
 });
+
+test("history renders the message shapes the server actually stores, and a finished stream is not shown twice", () => {
+  const b = bridge();
+  const entries = b.entriesOf([
+    { seq: 2, role: "user", displayText: "visible", text: "hidden", quote: { role: "assistant", text: "earlier" } },
+    { seq: 3, role: "assistant", notice: true, text: "joined", error: true },
+    { seq: 4, role: "assistant", text: "use the tool", calls: [{ id: "c1", name: "bash", arguments: { cmd: "ls", apiKey: "sek" } }] },
+    { seq: 5, role: "tool", callId: "c1", name: "bash", text: "ok" },
+    { seq: 6, role: "mystery", text: "odd payload" },
+    { seq: 7, role: "assistant", delivery: true, text: "please confirm", tasks: [{ id: "t1", title: "ship", status: "approval" }] },
+    { seq: 8, role: "assistant", delivery: true, text: "need detail", tasks: [{ id: "t2", title: "ask", status: "waiting" }] },
+    { seq: 9, role: "assistant", delivery: true, text: "finished", tasks: [{ id: "t3", title: "old", status: "done" }] },
+    { seq: 10, role: "system", newSession: true, text: "新会话开始" },
+  ], "employee:e1", { at: 50, text: "hello", thinking: "hmm", progress: "reading", tools: [{ id: "c2", name: "read", status: "running" }] });
+  for (const entry of entries) assert.equal(["message", "notice", "send-message", "user-attachment"].includes(entry.kind), true, entry.kind);
+  assert.equal(entries.find((entry: any) => entry.seq === 2).content, "> earlier\n\nvisible");
+  assert.equal(entries.find((entry: any) => entry.seq === 3 && entry.kind === "notice").tone, "error");
+  const call = entries.find((entry: any) => String(entry.id).endsWith(":call:c1"));
+  assert.match(call.content, /bash/);
+  assert.match(call.content, /已隐藏/);
+  assert.equal(call.content.includes("sek"), false);
+  assert.match(entries.find((entry: any) => entry.seq === 5).content, /ok/);
+  assert.match(entries.find((entry: any) => entry.seq === 6).text, /未识别/);
+  const approval = entries.find((entry: any) => String(entry.id).endsWith(":ask:t1"));
+  assert.equal(approval.respondedValue, undefined);
+  assert.equal(approval.message.widget.options.map((option: any) => option.value).join(","), "vega:approve,vega:reject");
+  const waiting = entries.find((entry: any) => String(entry.id).endsWith(":ask:t2"));
+  assert.equal(waiting.message.widget.allowCustom, true);
+  assert.equal(waiting.message.widget.options.length > 0, true);
+  assert.equal(entries.find((entry: any) => String(entry.id).endsWith(":ask:t3")).respondedValue, "已完成");
+  const live = entries.at(-1);
+  assert.equal(live.isStreaming, true);
+  assert.match(live.content, /hello/);
+  assert.match(live.content, /hmm/);
+  assert.match(live.content, /read/);
+  const stored = b.entriesOf([{ seq: 1, role: "assistant", text: "hello world" }], "employee:e1", { text: "hello", thinking: "", tools: [] });
+  assert.equal(stored.some((entry: any) => String(entry.id).endsWith(":live")), false);
+  assert.equal(stored[0].content, "hello world");
+});
+
+test("polling keeps one live bubble and drops it when the same reply is stored", async () => {
+  let step = 0;
+  const b = bridge((op, body) => {
+    if (op !== "messages") return {};
+    if (!body.after) return { messages: [{ seq: 1, role: "assistant", text: "ready", at: 10 }], lastSeq: 1, live: { at: 11, text: "partial", thinking: "", tools: [] } };
+    step += 1;
+    if (step === 1) return { messages: [], lastSeq: 1, live: { at: 11, text: "partial reply", thinking: "", tools: [] } };
+    return { messages: [{ seq: 2, role: "assistant", text: "partial reply", at: 12 }], lastSeq: 2, live: null };
+  });
+  await b.boot;
+  const page = await b.coordinator("openAgentTail", { agentId: "employee:e1" });
+  assert.equal(page.entries.some((entry: any) => entry.isStreaming), true);
+  await b.desktop.main.setViewingAgent({ agentId: "employee:e1" });
+  await b.poll();
+  const updates = b.events.filter((event: any) => event.family === "transcript" && String(event.payload.entry?.id || "").endsWith(":live"));
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].payload.type, "updated");
+  await b.poll();
+  assert.equal(b.events.filter((event: any) => event.family === "transcript" && event.payload.type === "removed").length, 1);
+  assert.equal(b.events.filter((event: any) => event.family === "transcript" && event.payload.type === "appended" && event.payload.entry?.content === "partial reply").length, 1);
+});
+
+test("a pending card resolves in place, and widget actions hit the real control route", async () => {
+  const b = bridge((op, body) => op === "messages" && !body.after ? { messages: [{ seq: 4, role: "assistant", delivery: true, text: "please confirm", at: 4, tasks: [{ id: "t1", title: "ship", status: "approval" }] }], lastSeq: 4, taskStatus: { t1: "approval" } } : { messages: [], lastSeq: 4, taskStatus: { t1: "running" } });
+  await b.boot;
+  await b.coordinator("openAgentTail", { agentId: "employee:e1" });
+  await b.desktop.main.setViewingAgent({ agentId: "employee:e1" });
+  await b.poll();
+  const updated = b.events.filter((event: any) => event.family === "transcript" && event.payload.type === "updated");
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0].payload.entry.respondedValue, "进行中");
+  await b.coordinator("respondToWidget", { agentId: "employee:e1", entryId: "employee:e1:4:ask:task1", value: "vega:reject" });
+  await b.coordinator("respondToWidget", { agentId: "employee:e1", entryId: "employee:e1:5:ask:task2", value: "补充一下" });
+  await assert.rejects(b.coordinator("respondToWidget", { agentId: "employee:e1", entryId: "employee:e1:5:ask:task2", value: "\u0000custom" }), /输入框/);
+  await assert.rejects(b.coordinator("dismissWidget", { agentId: "employee:e1", entryId: "employee:e1:5:ask:task2" }), /尚未接入/);
+  const controls = b.calls.filter(([op]: any[]) => op === "control").map(([, body]: any[]) => body);
+  assert.deepEqual(controls, [
+    { thread: "employee:e1", id: "task1", action: "approve", approved: false },
+    { thread: "employee:e1", id: "task2", action: "answer", text: "补充一下" },
+  ]);
+});
+
+test("the bot profile editor saves the real name and work principle", async () => {
+  const b = bridge((op, body) => {
+    if (op === "settings") return { employee: { name: body.name, instruction: body.instruction } };
+    if (op === "threads") return { employees: [{ thread: "employee:e1", name: body.name || "Renamed", instruction: "careful" }] };
+    return {};
+  });
+  const saved = await b.desktop.main.updateGrokBotAgent({ serverId: "employee:e1", changed: { name: "Renamed", description: "careful" } });
+  assert.equal(b.calls.find(([op]: any[]) => op === "settings")[1].employeeId, "e1");
+  assert.equal(b.calls.find(([op]: any[]) => op === "settings")[1].instruction, "careful");
+  assert.equal(saved.description, "careful");
+  await assert.rejects(b.desktop.main.updateGrokBotAgent({ serverId: "employee:e1", changed: { publicDescription: "other" } }), /公开/);
+  await assert.rejects(b.desktop.main.updateGrokBotAgent({ serverId: "employee:e1", avatarPngBase64: "xx", changed: { name: "Renamed" } }), /头像/);
+});

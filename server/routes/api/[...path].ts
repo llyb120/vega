@@ -32,6 +32,7 @@ import { installBrowserExtension } from "../../core/local-extension";
 import { assert, filterAsync, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
+import { clientSettings } from "../../core/client-settings";
 import presets from "../../../shared/provider-presets.json";
 async function inputMessage(
   a: Obj,
@@ -750,6 +751,7 @@ async function clientChat(op: string, a: Obj, userId: string) {
         thread: "employee:" + s.id, kind: "employee", id: s.id, name: s.name, avatar: s.avatar || "", mine: s.ownerId === user.id,
         unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0,
         running: !!s.chatSession && engine.active.has(s.chatSession),
+        instruction: s.instruction || "",
         runningTasks: s.tasks.filter((task) => task.status === "running").length,
         attention: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length,
         lastText: last ? String(last.text || "").slice(0, 60) : "", lastAt: last?.at || 0,
@@ -770,6 +772,7 @@ async function clientChat(op: string, a: Obj, userId: string) {
     check(a.instruction === undefined || (typeof a.instruction === "string" && a.instruction.length <= 8000), 400, "指令不能超过 8000 字");
     return await engine.employee.create({ name, instruction: a.instruction || "" }, user.id);
   }
+  if (op === "settings") return await clientSettings(engine, user, a);
   check(!["send", "control"].includes(op) || user.role !== "viewer", 403, "只读账号不能操作会话");
   const thread = String(a.thread || ""), colon = thread.indexOf(":"), kind = thread.slice(0, colon), id = thread.slice(colon + 1);
   assert(["employee", "group"].includes(kind) && id, "Invalid thread");
@@ -791,7 +794,8 @@ async function clientChat(op: string, a: Obj, userId: string) {
         for (const task of message.tasks || [])
           if (live.has(task.id)) task.status = live.get(task.id)!;
       const state = await employee.state();
-      return { thread, title: state.name, avatar: state.avatar || "", running: engine.active.has(session.id), ...page };
+      const taskStatus = Object.fromEntries(state.tasks.map((task) => [task.id, task.status]));
+      return { thread, title: state.name, avatar: state.avatar || "", running: engine.active.has(session.id), taskStatus, live: engine.live?.snapshot(session.id) ?? null, ...page };
     }
     const group = await engine.groups.mine(user, id);
     // 群聊作者头像是预设字符串（bot:shape:color），给面板解析成 BotAvatar；key 为 kind:id。
@@ -800,7 +804,7 @@ async function clientChat(op: string, a: Obj, userId: string) {
       ...(view.employees || []).map((p) => ["employee:" + p.id, { avatar: p.avatar || "" }]),
       ...(view.users || []).map((p) => ["user:" + p.id, { avatar: p.avatar || "" }]),
     ]);
-    return { thread, title: group.name, authors, running: Object.values(group.memberSessions || {}).some((s) => engine.active.has(String(s))), ...await chatHistory(store, group.session, query) };
+    return { thread, title: group.name, authors, running: Object.values(group.memberSessions || {}).some((s) => engine.active.has(String(s))), taskStatus: {}, live: engine.live?.snapshot(group.session) ?? null, ...await chatHistory(store, group.session, query) };
   }
   if (op === "read") {
     if (kind === "employee") {

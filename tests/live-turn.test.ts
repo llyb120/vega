@@ -1,0 +1,33 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { LiveTurns } from "../server/core/live-turn";
+
+test("a live turn follows the stream and disappears once the reply is stored or the run ends", () => {
+  const live = new LiveTurns();
+  live.ingest({ type: "message_start", session: "s1", data: { model: "m" } });
+  live.ingest({ type: "thinking_delta", session: "s1", data: "think" });
+  live.ingest({ type: "text_delta", session: "s1", data: "hel" });
+  live.ingest({ type: "text_delta", session: "s1", data: "lo" });
+  live.ingest({ type: "tool_start", session: "s1", data: { id: "c1", name: "bash", arguments: { apiKey: "secret" } } });
+  live.ingest({ type: "tool_progress", session: "s1", data: "reading" });
+  const partial = live.snapshot("s1");
+  assert.equal(partial?.text, "hello");
+  assert.equal(partial?.thinking, "think");
+  assert.equal(partial?.progress, "reading");
+  assert.deepEqual(partial?.tools, [{ id: "c1", name: "bash", status: "running" }]);
+  assert.equal(JSON.stringify(partial).includes("secret"), false);
+  const started = partial?.at;
+  live.ingest({ type: "text_delta", session: "s1", data: "!" });
+  assert.equal(live.snapshot("s1")?.at, started);
+  live.ingest({ type: "tool_end", session: "s1", data: { call: { id: "c1", name: "bash" }, outcome: { error: false } } });
+  live.ingest({ type: "message_end", session: "s1", data: { text: "hello!" } });
+  const stored = live.snapshot("s1");
+  assert.equal(stored?.text, "");
+  assert.equal(stored?.thinking, "");
+  assert.equal(stored?.tools[0].status, "done");
+  live.ingest({ type: "done", session: "s1", data: {} });
+  assert.equal(live.snapshot("s1"), null);
+  live.ingest({ type: "text_delta", session: "s2", data: "x" });
+  live.ingest({ type: "error", session: "s2", data: "boom" });
+  assert.equal(live.snapshot("s2"), null);
+});

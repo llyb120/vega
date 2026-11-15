@@ -18,6 +18,7 @@ import { EMPLOYEE_CHAT_RULES, EMPLOYEE_CONTINUITY_RULES, EMPLOYEE_MEMORY_RULES, 
 import { SUBAGENT_GUIDE, CHILD_DYNAMIC_TAIL, isAgentTool, formatAgentHandoff, inheritView, withoutOpenTail, reserveAgent, beginAgent, finishAgent, interruptAgent, cancelSessionAgents, resumeSessionAgents, takeReadyAgents, hasPendingAgents, awaitPendingAgents, waitUntilAgentReady, type AgentChild } from "./spawn-agent";
 import { awaitPendingBash, cancelSessionBash, hasPendingBash, pendingBash, pendingBashFinished } from "./bash-jobs";
 import { EventEmitter } from "node:events";
+import { LiveTurns } from "./live-turn";
 import { rm, stat } from "node:fs/promises";
 import { keyDir } from "./key-files";
 import { resolve } from "node:path";
@@ -135,6 +136,8 @@ export type AgentEvent = {
 };
 export class Engine {
   events = new EventEmitter();
+  /** Partial assistant turn for clients that cannot subscribe to the cookie event stream. */
+  live = new LiveTurns();
   active = new Map<
     string,
     { control: AbortController; steer: Message[]; context?: Context }
@@ -345,6 +348,7 @@ export class Engine {
   ) {
     this.providers.resolveImage = (im) => this.store.imageData(im);
     this.events.setMaxListeners(256);
+    this.events.on("event", (event) => this.live.ingest(event));
     this.vault = new Vault(store);
     const runtime: EmployeeRuntime = {
       run: (s, text, signal, taskInput, attach) => this.run(s, { role: "user", text, taskInput, images: attach?.images?.length ? attach.images : undefined, files: attach?.files?.length ? attach.files : undefined }, undefined, signal),
