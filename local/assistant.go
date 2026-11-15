@@ -10,6 +10,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -34,7 +35,7 @@ func (a *Agent) assistantMount(mux *http.ServeMux) {
 			case "close":
 				butterflyPanelPark()
 				assistantReply(w, http.StatusOK, map[string]any{"ok": true})
-			case "metadata", "threads", "messages", "send", "acceptance", "read", "control", "file", "create", "update", "cancel", "stream":
+			case "metadata", "threads", "messages", "send", "acceptance", "read", "control", "file", "create", "update", "cancel", "stream", "settings":
 				a.assistantProxy(w, r, op)
 			default:
 				http.NotFound(w, r)
@@ -67,8 +68,13 @@ func (a *Agent) assistantProxy(w http.ResponseWriter, r *http.Request, op string
 		http.Error(w, "cross-origin request denied", http.StatusForbidden)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
-	if err != nil || len(body) > 1<<20 {
+	// 普通接口 1MiB；发送可以带网页同样的附件（单个 25MiB、合计 64MiB，base64 后接近 90MiB）。
+	limit := int64(1 << 20)
+	if op == "send" {
+		limit = 90 << 20
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil || int64(len(body)) > limit {
 		http.Error(w, "unreadable body", http.StatusBadRequest)
 		return
 	}
@@ -123,7 +129,7 @@ func (a *Agent) assistantProxy(w http.ResponseWriter, r *http.Request, op string
 			}
 		}
 	}
-	limit := int64(8 << 20)
+	limit = int64(8 << 20)
 	if op == "file" || op == "messages" {
 		limit = 48 << 20 // 25MiB binary plus base64, or a page of full step outputs
 	}
@@ -167,6 +173,54 @@ func (a *Agent) assistantCredential() (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+// chatJSON 用设备凭据调用蝴蝶面板已经在用的 /api/local-agent/chat/*。错误文案来自服务端，不带凭据。
+func (a *Agent) chatJSON(op string, payload any, timeout time.Duration) (map[string]any, error) {
+	origin, token, ok := a.assistantCredential()
+	if !ok {
+		return nil, fmt.Errorf("还没有配对站点")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+"/api/local-agent/chat/"+op, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("暂时连不上站点，工作设置没能加载")
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	if err != nil {
+		return nil, fmt.Errorf("站点返回的设置无法读取")
+	}
+	var parsed map[string]any
+	if len(data) > 0 && json.Unmarshal(data, &parsed) != nil {
+		parsed = nil
+	}
+	if response.StatusCode >= 300 {
+		for _, key := range []string{"error", "statusMessage", "message"} {
+			if msg, ok := parsed[key].(string); ok && msg != "" && !strings.Contains(msg, token) {
+				return nil, fmt.Errorf("%s", msg)
+			}
+		}
+		if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("服务端还没有更新到支持这些设置的版本")
+		}
+		return nil, fmt.Errorf("设置没有保存")
+	}
+	if parsed == nil {
+		parsed = map[string]any{}
+	}
+	return parsed, nil
 }
 
 // assistantReply 出错时也回 JSON，页面直接把 error 显示在聊天区。

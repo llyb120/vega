@@ -267,6 +267,111 @@ test("frameless header resolves WebView2's unsupported drag regions and keeps ed
   assert.deepEqual(native, ["vega-window:drag", "vega-window:toggle-maximize", "vega-window:resize-bottomright"]);
 });
 
+test("history and live transcripts use one mapper for the real message shapes", async () => {
+  const blob = "blob-0123456789abcdef0123456789abcdef";
+  const rich = {
+    seq: 7, role: "assistant", at: 70, error: true,
+    text: "看这段代码\n\n```js\nconst n = 1;\n```",
+    quote: { seq: 3, role: "user", text: "原话" },
+    tasks: [{ id: "task1", title: "核对发布", status: "approval", partialDelivery: true }],
+    files: [{ name: "说明.txt", mime: "text/plain", size: 2048, blobId: blob }],
+    calls: [{ name: "bash", arguments: { token: "should-not-appear" } }],
+    images: [{ mime: "image/png", blobId: blob }],
+    mystery: { raw: true },
+  };
+  const waiting = { seq: 8, role: "assistant", text: "需要你处理：补充端口", at: 80, tasks: [{ id: "task2", title: "补充端口", status: "waiting" }] };
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+  const b = bridge(true, false, (url, body) => {
+    if (url.endsWith("stream")) return { ok: true, body: stream };
+    if (url.endsWith("file")) return { ok: true, json: async () => ({ data: "AQID" }) };
+    if (url.endsWith("threads")) return { ok: true, json: async () => ({ employees: [{ id: "e1", name: "测试牛马", thread: "employee:e1" }] }) };
+    if (url.endsWith("messages")) return { ok: true, json: async () => ({ messages: [rich, waiting], nextBeforeSeq: null }) };
+    return { ok: true, json: async () => ({ ok: true }) };
+  });
+  const tail = await b.request("openAgentTail", { id: "e1" });
+  const text = tail.value.entries[0];
+  const widget = tail.value.entries[1];
+  const form = tail.value.entries[3];
+  assert.equal(text.message.content.includes("```js"), true);
+  assert.equal(text.message.content.includes("> 引用我：原话"), true);
+  assert.equal(text.message.content.includes("核对发布（待你确认）"), true);
+  assert.equal(text.message.content.includes("说明.txt"), true);
+  assert.equal(text.message.content.includes("工具调用：bash"), true);
+  assert.equal(text.message.content.includes("**出错**"), true);
+  assert.equal(text.message.content.includes("mystery"), true);
+  assert.equal(text.replyTo, "entry-3");
+  assert.equal(JSON.stringify(tail.value).includes("should-not-appear"), false);
+  assert.equal(JSON.stringify(tail.value).includes("\"raw\":true"), false);
+  assert.equal(widget.message.widget.options[0].label, "接受部分交付");
+  assert.equal(widget.message.widget.options[1].value, "reject");
+  assert.equal(form.message.formRequest.fields[0].id, "answer");
+  for (let i = 0; i < 8 && text.message.images?.[0]?.url !== "data:image/png;base64,AQID"; i++) await new Promise(setImmediate);
+  assert.equal(text.message.images[0].url, "data:image/png;base64,AQID");
+  const push = (event: any) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+  push({ type: "text_delta", data: "第一段" });
+  push({ type: "text_delta", data: "第二段" });
+  push({ type: "thinking_delta", data: "hidden" });
+  push({ type: "message", message: { seq: 9, role: "assistant", text: "最终答复", at: 90 } });
+  await new Promise(setImmediate);
+  const snapshot = () => b.events.filter((e) => e.family === "transcript").at(-1).payload.entries;
+  const live = snapshot().filter((entry: any) => entry.streaming);
+  assert.equal(live.length, 0);
+  assert.equal(snapshot().filter((entry: any) => entry.message?.content === "第一段第二段").length, 0);
+  assert.equal(snapshot().find((entry: any) => entry.id === "entry-9").message.content, "最终答复");
+  const again = await b.request("getAgentTranscriptTail", { id: "e1" });
+  assert.equal(again.value.entries[0].message.content, text.message.content);
+  assert.equal(again.value.entries[1].message.type, "widget");
+  const approved = await b.request("respondToWidget", { agentId: "e1", entryId: "entry-7:task:task1", value: "approve" });
+  assert.equal(approved.status, "ok");
+  const approveRequest = b.requests.filter((request) => request.url.endsWith("control")).at(-1);
+  assert.ok(approveRequest);
+  assert.equal(approveRequest.body.approved, true);
+  const answered = await b.request("submitUserForm", { agentId: "e1", entryId: "entry-8:task:task2", values: { answer: "8080" } });
+  assert.equal(answered.status, "ok");
+  const answerRequest = b.requests.filter((request) => request.url.endsWith("control")).at(-1);
+  assert.ok(answerRequest);
+  assert.equal(answerRequest.body.text, "8080");
+  const before = b.requests.filter((request) => request.url.endsWith("control")).length;
+  assert.equal((await b.request("dismissUserForm", { agentId: "e1", entryId: "entry-8:task:task2" })).status, "ok");
+  assert.equal(b.requests.filter((request) => request.url.endsWith("control")).length, before);
+  assert.equal((await b.request("sendPrompt", { agentId: "e1", prompt: "接着说", clientNonce: "fixture-quote-nonce01", replyToId: "entry-7" })).value.accepted, true);
+  const quoteRequest = b.requests.at(-1);
+  assert.ok(quoteRequest);
+  assert.equal(quoteRequest.body.quoteSeq, 7);
+  assert.equal((await b.request("sendPrompt", { agentId: "e1", prompt: "看图", clientNonce: "fixture-image-nonce01", attachments: [{ mime: "image/png", data: "AQID" }] })).value.accepted, true);
+  const imageRequest = b.requests.at(-1);
+  assert.ok(imageRequest);
+  assert.equal(imageRequest.body.images[0].mime, "image/png");
+  assert.equal((await b.request("sendPrompt", { agentId: "e1", prompt: "路径", clientNonce: "fixture-path-nonce001", attachmentPaths: ["C:/secret"] })).status, "failed");
+  b.listeners.pagehide({});
+  controller.close();
+});
+
+test("settings markup follows the signed-in role and escapes stored text", async () => {
+  const operator = { role: "operator", admin: false, bots: [{ id: "e1", name: "测试", instruction: "</textarea><script>", cwd: "", idleMinutes: 10, takeoverSeconds: 15, editable: true }] };
+  const page = bridge(true, false, (url, body) => ({ ok: body.save !== "scenes", status: 403, json: async () => body.save === "scenes" ? { statusMessage: "Administrator permission required" } : url.endsWith("settings") ? operator : { employees: [] } }));
+  const html = await page.desktop.main.openVegaSettings();
+  assert.equal(html.includes("普通用户"), true);
+  assert.equal(html.includes("&lt;/textarea&gt;&lt;script&gt;"), true);
+  assert.equal(html.includes("保存工作原则"), true);
+  assert.equal(html.includes("只有管理员可以修改"), true);
+  assert.equal(html.includes("保存场景"), false);
+  assert.equal(html.includes("已停用的工作职责"), true);
+  await assert.rejects(page.desktop.main.saveVegaSceneSettings({ scenes: {} }), /Administrator/);
+  const admin = bridge(true, false, (url) => ({ ok: true, json: async () => url.endsWith("settings") ? {
+    role: "admin", admin: true, bots: [], scheduler: { globalSlots: 4, perEmployeeSlots: 2 },
+    scenes: { lightweight: [{ model: "demo/fast", allowSpawn: true }], coding: [], computer: [{ model: "demo/fast", allowSpawn: false }] },
+    providers: [{ id: "demo", name: "示例" }], models: [{ id: "demo/fast", name: "Fast", supportsImages: true }],
+  } : { employees: [] } }));
+  const adminHtml = await admin.desktop.main.openVegaSettings();
+  assert.equal(adminHtml.includes("管理员"), true);
+  assert.equal(adminHtml.includes("保存场景"), true);
+  assert.equal(adminHtml.includes("demo/fast"), true);
+  assert.equal(adminHtml.includes("示例"), true);
+  assert.equal(adminHtml.includes("value=\"4\""), true);
+});
+
 test("all embedded stylesheets parse without truncated rules or displaced prefixes", () => {
   const directory = join(resources, "assets");
   for (const name of readdirSync(directory).filter((name) => name.endsWith(".css"))) {

@@ -120,3 +120,32 @@ func TestAssistantFileProxyPreservesLargeDownloadAndChecksOrigin(t *testing.T) {
 		t.Fatalf("download proxy truncated or failed: status %d, bytes %d", response.Code, response.Body.Len())
 	}
 }
+
+func TestAssistantSendForwardsAttachmentSizedBodies(t *testing.T) {
+	const token = "fixture-device-token"
+	var got int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/local-agent/chat/send" || r.Header.Get("Authorization") != "Bearer "+token {
+			t.Errorf("unexpected request: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		got = len(body)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+	protected, err := protectToken(token)
+	if err != nil {
+		t.Skipf("token protection unavailable: %v", err)
+	}
+	agent := &Agent{pinnedOrigin: server.URL, configToken: "test", config: Config{Servers: []ServerCredential{{Origin: server.URL, Token: protected}}}}
+	mux := http.NewServeMux()
+	agent.assistantMount(mux)
+	payload := `{"text":"` + strings.Repeat("A", 2<<20) + `"}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, agent.assistantPath()+"api/send", strings.NewReader(payload))
+	request.Header.Set("Origin", "http://"+localAddress)
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || got != len(payload) {
+		t.Fatalf("attachment-sized send was not forwarded: status %d, got %d of %d", recorder.Code, got, len(payload))
+	}
+}

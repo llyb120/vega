@@ -92,7 +92,8 @@ export default defineEventHandler(async (event) => {
     let grant: { userId: string };
     try { grant = await app().clientSockets.authorize(request); }
     catch { throw createError({ statusCode: 403, statusMessage: "Client credential invalid or revoked" }); }
-    const body = await bodyJSON(event, 1 << 20);
+    // send carries the same attachment budget as the website (25MiB each, 64MiB together, base64).
+    const body = await bodyJSON(event, path[2] === "send" ? 90 << 20 : 1 << 20);
     try {
       if (path[2] === "stream") {
         const { sink, body: stream } = openStream(event);

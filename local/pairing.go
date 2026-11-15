@@ -265,6 +265,7 @@ label{display:block;font-weight:600;margin:8px 0 6px}
 textarea{width:100%;font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:12px 14px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;resize:vertical;min-height:96px}
 textarea:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #292177;outline-offset:2px}
 input[type=number]{width:96px;padding:9px 12px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;font:inherit}
+input[type=text]{width:100%;padding:9px 12px;border:1px solid #c9cee0;border-radius:12px;background:#fbfbfe;font:inherit}
 .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
 button{font:inherit;padding:10px 16px;border:0;border-radius:10px;background:var(--brand);color:var(--brand-ink);cursor:pointer;font-weight:600}
 button.secondary{background:#eef0f8;color:var(--ink)}button.danger{background:#fff1f0;color:var(--danger)}
@@ -283,10 +284,10 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
 .tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
 .tabs label{margin:0;padding:8px 16px;border-radius:999px;background:#eef0f8;color:var(--muted);font-size:.92rem;cursor:pointer}
 .tabs label:hover{background:#e6e9f5}
-#tab-site:checked~.tabs label[for=tab-site],#tab-client:checked~.tabs label[for=tab-client],#tab-access:checked~.tabs label[for=tab-access],#tab-computer:checked~.tabs label[for=tab-computer],#tab-relay:checked~.tabs label[for=tab-relay]{background:var(--brand);color:var(--brand-ink)}
-#tab-site:focus-visible~.tabs label[for=tab-site],#tab-client:focus-visible~.tabs label[for=tab-client],#tab-access:focus-visible~.tabs label[for=tab-access],#tab-computer:focus-visible~.tabs label[for=tab-computer],#tab-relay:focus-visible~.tabs label[for=tab-relay]{outline:3px solid #292177;outline-offset:2px}
+#tab-site:checked~.tabs label[for=tab-site],#tab-client:checked~.tabs label[for=tab-client],#tab-access:checked~.tabs label[for=tab-access],#tab-computer:checked~.tabs label[for=tab-computer],#tab-relay:checked~.tabs label[for=tab-relay],#tab-work:checked~.tabs label[for=tab-work]{background:var(--brand);color:var(--brand-ink)}
+#tab-site:focus-visible~.tabs label[for=tab-site],#tab-client:focus-visible~.tabs label[for=tab-client],#tab-access:focus-visible~.tabs label[for=tab-access],#tab-computer:focus-visible~.tabs label[for=tab-computer],#tab-relay:focus-visible~.tabs label[for=tab-relay],#tab-work:focus-visible~.tabs label[for=tab-work]{outline:3px solid #292177;outline-offset:2px}
 .panel{display:none}
-#tab-site:checked~.panels #panel-site,#tab-client:checked~.panels #panel-client,#tab-access:checked~.panels #panel-access,#tab-computer:checked~.panels #panel-computer,#tab-relay:checked~.panels #panel-relay{display:block}
+#tab-site:checked~.panels #panel-site,#tab-client:checked~.panels #panel-client,#tab-access:checked~.panels #panel-access,#tab-computer:checked~.panels #panel-computer,#tab-relay:checked~.panels #panel-relay,#tab-work:checked~.panels #panel-work{display:block}
 </style>
 <main>
   <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p>{{if .AssistantURL}}<p><a href="{{.AssistantURL}}">← 回到蝴蝶对话</a></p>{{end}}</div></div>
@@ -302,12 +303,14 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   <input type="radio" name="tab" id="tab-access" class="tab"{{if eq .Tab "access"}} checked{{end}}>
   <input type="radio" name="tab" id="tab-computer" class="tab"{{if eq .Tab "computer"}} checked{{end}}>
   <input type="radio" name="tab" id="tab-relay" class="tab"{{if eq .Tab "relay"}} checked{{end}}>
+  <input type="radio" name="tab" id="tab-work" class="tab"{{if eq .Tab "work"}} checked{{end}}>
   <nav class="tabs" aria-label="连接授权分区">
     <label for="tab-site">站点</label>
     <label for="tab-client">本机</label>
     <label for="tab-access">授权</label>
     <label for="tab-computer">电脑</label>
     <label for="tab-relay">账户</label>
+    <label for="tab-work">工作</label>
   </nav>
   <div class="panels">
   <section class="panel" id="panel-site">
@@ -407,8 +410,239 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   </section>
 
   </section>
+  <section class="panel" id="panel-work">
+  <section class="card">
+    <h2>工作原则</h2>
+    <small>每个牛马自己的工作原则，保存后新任务会使用。只显示你能查看的牛马，只有主人能改。已停用的工作职责不在这里恢复。密码本属于账号，不在本机页面展开。</small>
+    {{if .SettingsError}}<div class="flash warn" role="alert">{{.SettingsError}}</div>{{end}}
+    {{if not .SettingsLoaded}}<p class="empty">配对站点后，这里会按你的权限加载工作原则。场景模型、任务调度和服务商只有管理员能改。</p>{{end}}
+    {{range .Bots}}
+    <form method="post" class="account">
+      <h2>{{.Name}}</h2>
+      <input type="hidden" name="botId" value="{{.ID}}">
+      <label for="instruction-{{.ID}}">工作原则</label>
+      <textarea id="instruction-{{.ID}}" name="instruction" maxlength="8000"{{if not .Editable}} disabled{{end}}>{{.Instruction}}</textarea>
+      <label for="cwd-{{.ID}}">工作目录</label>
+      <input id="cwd-{{.ID}}" name="cwd" type="text" value="{{.Cwd}}" maxlength="4096"{{if not .Editable}} disabled{{end}}>
+      <small>留空表示不修改工作目录。</small>
+      <label for="idle-{{.ID}}">桌面空闲多少分钟后可以接管</label>
+      <input id="idle-{{.ID}}" name="idleMinutes" type="number" min="0" max="120" value="{{.IdleMinutes}}"{{if not .Editable}} disabled{{end}}>
+      <label for="takeover-{{.ID}}">接管确认等待秒数</label>
+      <input id="takeover-{{.ID}}" name="takeoverSeconds" type="number" min="1" max="120" value="{{.TakeoverSeconds}}"{{if not .Editable}} disabled{{end}}>
+      {{if .Editable}}<div class="row"><button name="saveBot" value="1">保存工作原则</button></div>{{else}}<small>只有这位牛马的主人可以修改。</small>{{end}}
+    </form>
+    {{end}}
+  </section>
+  {{if .Admin}}
+  <section class="card">
+    <h2>场景模型</h2>
+    <small>每个场景必须单独配置模型，不再使用默认模型回退。电脑场景不能开启分身，并且只应填写支持图片的模型。{{if .ModelHint}}已有模型：{{.ModelHint}}{{else}}模型 ID 形如服务商/模型。{{end}}</small>
+    <form method="post">
+      {{range $scene := .Scenes}}
+      <label>{{$scene.Label}}</label>
+      <small>{{$scene.Help}}</small>
+      {{range $i, $row := $scene.Rows}}
+      <div class="row">
+        <input name="{{$scene.Key}}Model" type="text" value="{{$row.Model}}" aria-label="{{$scene.Label}}模型">
+        {{if ne $scene.Key "computer"}}<label class="switch"><input type="checkbox" name="{{$scene.Key}}Spawn" value="{{$i}}"{{if $row.AllowSpawn}} checked{{end}}>允许开启分身</label>{{end}}
+      </div>
+      {{end}}
+      <label for="add-{{$scene.Key}}">添加模型 ID</label>
+      <input id="add-{{$scene.Key}}" name="{{$scene.Key}}Add" type="text" maxlength="200">
+      {{end}}
+      <div class="row"><button name="saveScenes" value="1">保存场景</button></div>
+    </form>
+  </section>
+  <section class="card">
+    <h2>任务调度</h2>
+    <form method="post">
+      <label for="globalSlots">全站同时执行上限</label>
+      <input id="globalSlots" name="globalSlots" type="number" min="1" max="64" value="{{.GlobalSlots}}">
+      <small>任意时刻全站最多这么多任务在跑。范围 1–64，默认 3。</small>
+      <label for="perEmployeeSlots">单牛马同时执行上限</label>
+      <input id="perEmployeeSlots" name="perEmployeeSlots" type="number" min="1" max="64" value="{{.PerEmployeeSlots}}">
+      <small>同一牛马最多同时跑这么多。电脑任务仍受桌面空闲和接管规则约束。</small>
+      <div class="row"><button name="saveScheduler" value="1">保存调度</button></div>
+    </form>
+  </section>
+  <section class="card">
+    <h2>服务商</h2>
+    <small>只显示名称，密钥不进入本页。需要改密钥或新增服务商时，用网页设置。</small>
+    {{if .Providers}}<p>{{range .Providers}}<code>{{.Name}}</code> {{end}}</p>{{else}}<p class="empty">还没有服务商。</p>{{end}}
+  </section>
+  {{else if .SettingsLoaded}}
+  <section class="card">
+    <h2>管理员设置</h2>
+    <small>场景模型、任务调度和服务商只有管理员可以修改。</small>
+  </section>
+  {{end}}
+  </section>
   </div>
 </main></html>`))
+
+type workBot struct {
+	ID, Name, Instruction, Cwd   string
+	IdleMinutes, TakeoverSeconds int
+	Editable                     bool
+}
+type workSceneRow struct {
+	Model      string
+	AllowSpawn bool
+}
+type workScene struct {
+	Key, Label, Help string
+	Rows             []workSceneRow
+}
+type workProvider struct{ Name string }
+
+type remoteSceneRow struct {
+	Model      string `json:"model"`
+	AllowSpawn bool   `json:"allowSpawn"`
+}
+
+func sceneRows(raw []remoteSceneRow) []workSceneRow {
+	rows := []workSceneRow{}
+	for _, row := range raw {
+		if strings.TrimSpace(row.Model) == "" {
+			continue
+		}
+		rows = append(rows, workSceneRow{Model: row.Model, AllowSpawn: row.AllowSpawn})
+	}
+	return rows
+}
+
+func (a *Agent) loadWorkSettings() (bots []workBot, scenes []workScene, providers []workProvider, global, per int, admin bool, hint, errText string, loaded bool) {
+	parsed, err := a.chatJSON("settings", map[string]any{}, 400*time.Millisecond)
+	if err != nil {
+		if err.Error() == "还没有配对站点" {
+			return
+		}
+		errText = err.Error()
+		return
+	}
+	raw, _ := json.Marshal(parsed)
+	var body struct {
+		Admin bool `json:"admin"`
+		Bots  []struct {
+			ID              string `json:"id"`
+			Name            string `json:"name"`
+			Instruction     string `json:"instruction"`
+			Cwd             string `json:"cwd"`
+			IdleMinutes     int    `json:"idleMinutes"`
+			TakeoverSeconds int    `json:"takeoverSeconds"`
+			Editable        bool   `json:"editable"`
+		} `json:"bots"`
+		Scenes    map[string][]remoteSceneRow `json:"scenes"`
+		Scheduler struct {
+			GlobalSlots      int `json:"globalSlots"`
+			PerEmployeeSlots int `json:"perEmployeeSlots"`
+		} `json:"scheduler"`
+		Providers []struct {
+			Name string `json:"name"`
+		} `json:"providers"`
+		Models []struct {
+			ID             string `json:"id"`
+			SupportsImages bool   `json:"supportsImages"`
+		} `json:"models"`
+	}
+	if json.Unmarshal(raw, &body) != nil {
+		return nil, nil, nil, 0, 0, false, "", "设置内容无法读取", false
+	}
+	loaded = true
+	admin = body.Admin
+	for _, bot := range body.Bots {
+		bots = append(bots, workBot{bot.ID, bot.Name, bot.Instruction, bot.Cwd, bot.IdleMinutes, bot.TakeoverSeconds, bot.Editable})
+	}
+	labels := []struct{ key, label, help string }{
+		{"lightweight", "沟通与任务起步", "新任务与沟通会话从这里起步。"},
+		{"coding", "编码", "实际进入编码工作时才升级。"},
+		{"computer", "浏览器操作", "仅应填写支持图片的模型，不能开启分身。"},
+	}
+	for _, item := range labels {
+		scenes = append(scenes, workScene{item.key, item.label, item.help, sceneRows(body.Scenes[item.key])})
+	}
+	for _, provider := range body.Providers {
+		if provider.Name != "" {
+			providers = append(providers, workProvider{provider.Name})
+		}
+	}
+	var names []string
+	for _, model := range body.Models {
+		if model.ID != "" {
+			names = append(names, model.ID)
+		}
+		if len(names) == 8 {
+			break
+		}
+	}
+	hint = strings.Join(names, "、")
+	global, per = body.Scheduler.GlobalSlots, body.Scheduler.PerEmployeeSlots
+	if global == 0 {
+		global = 3
+	}
+	if per == 0 {
+		per = 3
+	}
+	return
+}
+
+func sceneFromForm(r *http.Request, key string) []any {
+	models := append([]string{}, r.Form[key+"Model"]...)
+	if extra := strings.TrimSpace(r.FormValue(key + "Add")); extra != "" {
+		models = append(models, extra)
+	}
+	spawn := map[string]bool{}
+	for _, index := range r.Form[key+"Spawn"] {
+		spawn[index] = true
+	}
+	rows := []any{}
+	for i, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		if key != "computer" && spawn[strconv.Itoa(i)] {
+			rows = append(rows, map[string]any{"model": model, "allowSpawn": true})
+		} else {
+			rows = append(rows, model)
+		}
+	}
+	return rows
+}
+
+func (a *Agent) saveWorkSettings(r *http.Request) error {
+	var payload map[string]any
+	switch {
+	case r.FormValue("saveBot") == "1":
+		idle, err1 := strconv.Atoi(strings.TrimSpace(r.FormValue("idleMinutes")))
+		take, err2 := strconv.Atoi(strings.TrimSpace(r.FormValue("takeoverSeconds")))
+		if err1 != nil || err2 != nil {
+			return fmt.Errorf("空闲时间和接管时间要填整数")
+		}
+		bot := map[string]any{"id": r.FormValue("botId"), "instruction": r.FormValue("instruction"), "idleMinutes": idle, "takeoverSeconds": take}
+		if cwd := strings.TrimSpace(r.FormValue("cwd")); cwd != "" {
+			bot["cwd"] = cwd
+		}
+		payload = map[string]any{"save": "bot", "bot": bot}
+	case r.FormValue("saveScenes") == "1":
+		payload = map[string]any{"save": "scenes", "scenes": map[string]any{
+			"lightweight": sceneFromForm(r, "lightweight"),
+			"coding":      sceneFromForm(r, "coding"),
+			"computer":    sceneFromForm(r, "computer"),
+		}}
+	case r.FormValue("saveScheduler") == "1":
+		global, err1 := strconv.Atoi(strings.TrimSpace(r.FormValue("globalSlots")))
+		per, err2 := strconv.Atoi(strings.TrimSpace(r.FormValue("perEmployeeSlots")))
+		if err1 != nil || err2 != nil {
+			return fmt.Errorf("调度上限要填整数")
+		}
+		payload = map[string]any{"save": "scheduler", "scheduler": map[string]any{"globalSlots": global, "perEmployeeSlots": per}}
+	default:
+		return fmt.Errorf("Unknown site")
+	}
+	_, err := a.chatJSON("settings", payload, 15*time.Second)
+	return err
+}
 
 func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -457,6 +691,14 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			http.Redirect(w, r, r.URL.Path+"?saved=1&tab="+tab, http.StatusSeeOther)
+			return
+		}
+		if r.FormValue("saveBot") == "1" || r.FormValue("saveScenes") == "1" || r.FormValue("saveScheduler") == "1" {
+			if err := a.saveWorkSettings(r); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			http.Redirect(w, r, r.URL.Path+"?saved=1&tab=work", http.StatusSeeOther)
 			return
 		}
 		origin, remove := r.FormValue("origin"), r.FormValue("remove")
@@ -579,10 +821,11 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	extensionDir := a.extensionDir()
 	tab := r.URL.Query().Get("tab")
 	switch tab {
-	case "site", "client", "access", "computer", "relay":
+	case "site", "client", "access", "computer", "relay", "work":
 	default:
 		tab = "site"
 	}
+	bots, scenes, providers, globalSlots, perSlots, admin, modelHint, settingsError, settingsLoaded := a.loadWorkSettings()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pairingPage.Execute(w, struct {
 		Pending, Trusted                   []string
@@ -600,7 +843,14 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 		HeadlessBrowser                    bool
 		HeadlessNotice                     string
 		AssistantURL                       string
-	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts, extension, extensionDir, headlessBrowserMode, headlessNotice, assistantURL})
+		SettingsError                      string
+		SettingsLoaded, Admin              bool
+		Bots                               []workBot
+		Scenes                             []workScene
+		Providers                          []workProvider
+		ModelHint                          string
+		GlobalSlots, PerEmployeeSlots      int
+	}{nil, trusted, r.URL.Query().Get("approved") == "1", r.URL.Query().Get("revoked") == "1", r.URL.Query().Get("saved") == "1", r.URL.Query().Get("unpaired") == "1", supplement, a.pinnedOrigin, lastSite, butterfly, appuseConfirmSeconds(), appuseConfirmMin, appuseConfirmMax, tab, accounts, extension, extensionDir, headlessBrowserMode, headlessNotice, assistantURL, settingsError, settingsLoaded, admin, bots, scenes, providers, modelHint, globalSlots, perSlots})
 }
 
 type loginProof struct {

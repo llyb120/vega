@@ -4,26 +4,140 @@ import type { Message } from "./store";
 import type { Application } from "./application";
 import { check } from "./auth";
 import { chatHistory } from "./chat-page";
-import { ATTACHMENT_BYTES } from "./attachments";
+import { ATTACHMENT_BYTES, storeAttachments } from "./attachments";
 import { defaultBotAvatar, parseBotAvatar, isAvatarPreset } from "../../shared/employee-avatars";
+import { SCENE_KEYS, modelEntries, sceneModelRows, schedulerLimits, type Config, type SceneModelRow } from "./config";
 import { assert, filterAsync, type Obj } from "./util";
 
 type ChatApplication = Pick<Application, "engine" | "store" | "auth">;
 
-// Desktop chat must not expose the model's thinking, tool results or runtime-only instructions.
+// Desktop chat must not expose the model's thinking, tool arguments/results, or runtime-only instructions.
+// User-visible structure (quotes, files, step output, task state, errors) stays; unknown extras are named, not dumped.
+const clientImageUrl = (url?: string) => !!url && /^(https?:|data:image\/)/.test(url);
 export function clientChatMessage(message?: Message) {
-  if (!message || (message.runtime && !(message.runtime === "steer" && message.clientMessageId)) || !["user", "assistant"].includes(message.role) || !(message.text?.trim() || message.images?.length || message.tasks?.length)) return null;
-  return { seq: message.seq, role: message.role, text: message.displayText ?? message.text ?? "", at: message.at,
-    clientMessageId: message.clientMessageId, tasks: message.tasks, images: message.images, files: message.files,
-    ...(message.stepOutput ? { stepOutput: message.stepOutput } : {}) };
+  if (!message || (message.runtime && !(message.runtime === "steer" && message.clientMessageId)) || !["user", "assistant"].includes(message.role)) return null;
+  const text = message.displayText ?? message.text ?? "";
+  if (!(text.trim() || message.images?.length || message.files?.length || message.tasks?.length || message.stepOutput || message.notice || message.newSession)) return null;
+  const images = message.images?.map((image) => ({
+    mime: image.mime,
+    ...(image.blobId ? { blobId: image.blobId } : {}),
+    ...(image.data && !image.blobId ? { data: image.data } : {}),
+    ...(clientImageUrl(image.url) ? { url: image.url } : {}),
+  }));
+  const quote = message.quote ? { seq: message.quote.seq, role: message.quote.role, text: [...message.quote.text].slice(0, 500).join(""), ...(message.quote.taskId ? { taskId: message.quote.taskId } : {}) } : undefined;
+  return { seq: message.seq, role: message.role, text, at: message.at,
+    clientMessageId: message.clientMessageId, tasks: message.tasks, images, files: message.files,
+    ...(quote ? { quote } : {}),
+    ...(message.stepOutput ? { stepOutput: message.stepOutput } : {}),
+    ...(message.calls?.length ? { calls: message.calls.slice(0, 12).map((call) => ({ name: String(call.name || "工具").slice(0, 80) })) } : {}),
+    ...(message.error ? { error: true } : {}),
+    ...(message.notice ? { notice: true } : {}),
+    ...(message.progress ? { progress: true } : {}),
+    ...(message.delivery ? { delivery: true } : {}),
+    ...(message.newSession ? { newSession: true } : {}) };
+}
+
+const SCENE_LABELS: Record<(typeof SCENE_KEYS)[number], string> = {
+  lightweight: "沟通与任务起步", coding: "编码", computer: "浏览器操作",
+};
+function listedModels(config: Config) {
+  const models: { id: string; name: string; supportsImages: boolean }[] = [];
+  for (const [providerId, provider] of Object.entries(config.provider || {})) {
+    const label = String((provider as Obj).name || providerId);
+    for (const [modelId, raw] of Object.entries(modelEntries((provider as Obj).models || {}))) {
+      const model = raw as Obj;
+      const input = (model.modalities as Obj | undefined)?.input;
+      const images = model.supportsImages === true || (Array.isArray(input) && input.includes("image"));
+      models.push({ id: `${providerId}/${modelId}`, name: `${model.name || modelId} · ${label}`, supportsImages: images });
+    }
+  }
+  return models;
+}
+async function readClientSettings(application: ChatApplication, user: { id: string; role: string }) {
+  const employees = await filterAsync(await application.engine.employee.all(), (employee) => employee.accessible(user));
+  const bots = await Promise.all(employees.map(async (employee) => {
+    const state = await employee.state();
+    return {
+      id: state.id, name: state.name, instruction: state.instruction || "", cwd: state.cwd || "",
+      idleMinutes: state.idleMinutes, takeoverSeconds: state.takeoverSeconds, editable: await employee.manageable(user),
+    };
+  }));
+  if (user.role !== "admin") return { role: user.role, admin: false, bots };
+  const config = await application.engine.config();
+  const limits = schedulerLimits(config);
+  return {
+    role: user.role, admin: true, bots,
+    scenes: Object.fromEntries(SCENE_KEYS.map((key) => [key, sceneModelRows(config, key)])),
+    scheduler: { globalSlots: limits.global, perEmployeeSlots: limits.perEmployee },
+    providers: Object.entries(config.provider || {}).map(([id, provider]) => ({ id, name: String((provider as Obj).name || id) })),
+    models: listedModels(config),
+  };
+}
+async function saveClientSettings(application: ChatApplication, user: { id: string; role: string; username?: string }, a: Obj) {
+  if (a.save === "bot") {
+    const bot = a.bot as Obj;
+    assert(bot && typeof bot.id === "string" && bot.id, "Bot required");
+    const employee = await application.engine.employee.for(bot.id);
+    assert(await employee.accessible(user), "Employee not found");
+    assert(await employee.manageable(user), "Only the owner may edit this bot");
+    const patch: Obj = { action: "settings" };
+    if ("instruction" in bot) {
+      assert(typeof bot.instruction === "string" && bot.instruction.length <= 8000, "工作原则不能超过 8000 字");
+      patch.instruction = bot.instruction;
+    }
+    if ("cwd" in bot && String(bot.cwd || "").trim()) {
+      assert(typeof bot.cwd === "string" && bot.cwd.length <= 4096, "工作目录过长");
+      patch.cwd = bot.cwd;
+    }
+    if ("idleMinutes" in bot) {
+      assert(Number.isInteger(bot.idleMinutes) && bot.idleMinutes >= 0 && bot.idleMinutes <= 120, "空闲分钟数要在 0 到 120 之间");
+      patch.idleMinutes = bot.idleMinutes;
+    }
+    if ("takeoverSeconds" in bot) {
+      assert(Number.isInteger(bot.takeoverSeconds) && bot.takeoverSeconds >= 1 && bot.takeoverSeconds <= 120, "接管秒数要在 1 到 120 之间");
+      patch.takeoverSeconds = bot.takeoverSeconds;
+    }
+    assert(Object.keys(patch).length > 1, "没有可保存的工作设置");
+    await employee.control(patch);
+    return { ok: true };
+  }
+  check(user.role === "admin", 403, "Administrator permission required");
+  const previous = await application.engine.config();
+  const next: Config = { ...previous, provider: previous.provider || {} };
+  if (a.save === "scheduler") {
+    const raw = (a.scheduler || {}) as Obj;
+    assert(Number.isInteger(raw.globalSlots) && raw.globalSlots >= 1 && raw.globalSlots <= 64, "全站同时执行上限要在 1 到 64 之间");
+    assert(Number.isInteger(raw.perEmployeeSlots) && raw.perEmployeeSlots >= 1 && raw.perEmployeeSlots <= 64, "单牛马同时执行上限要在 1 到 64 之间");
+    next.scheduler = { globalSlots: raw.globalSlots, perEmployeeSlots: raw.perEmployeeSlots };
+  } else if (a.save === "scenes") {
+    const scenes = (a.scenes || {}) as Obj;
+    const missing: string[] = [];
+    next.scenes = { lightweight: [], coding: [], computer: [] };
+    for (const key of SCENE_KEYS) {
+      const rows = Array.isArray(scenes[key]) ? scenes[key] as (string | Obj)[] : [];
+      const normalized: SceneModelRow[] = [];
+      for (const row of rows) {
+        const model = typeof row === "string" ? row.trim() : String(row?.model || "").trim();
+        if (!model) continue;
+        assert(model.length <= 200, "模型 ID 过长");
+        normalized.push(key !== "computer" && row && typeof row === "object" && row.allowSpawn ? { model, allowSpawn: true } : model);
+      }
+      if (!normalized.length) missing.push(SCENE_LABELS[key]);
+      next.scenes[key] = normalized;
+    }
+    assert(!missing.length, "请为全部场景配置至少一个模型后再保存（不再使用默认模型）：" + missing.join("、"));
+  } else assert(false, "Unsupported settings action");
+  await application.engine.saveConfig(next);
+  return { ok: true };
 }
 
 export async function clientChat(application: ChatApplication, op: string, a: Obj, userId: string) {
   const { engine, store, auth } = application, user = await auth.user(userId);
   check(user && !user.disabled, 403, "User not found");
   if (op === "metadata") return { id: user.id, name: user.username };
-  if (!["threads", "messages", "read", "file", "acceptance"].includes(op))
+  if (!["threads", "messages", "read", "file", "acceptance"].includes(op) && !(op === "settings" && !a.save))
     check(user.role !== "viewer", 403, "Execution permission required");
+  if (op === "settings") return a.save ? saveClientSettings(application, user, a) : readClientSettings(application, user);
   if (op === "create") {
     assert(typeof a.clientNonce === "string" && /^[\w-]{16,80}$/.test(a.clientNonce), "Invalid creation ID");
     const key = user.id + "/" + a.clientNonce;
@@ -90,10 +204,15 @@ export async function clientChat(application: ChatApplication, op: string, a: Ob
       const session = await employee.chat(user.id);
       const page = await chatHistory(store, session.id, query);
       // 待确认气泡里的任务状态会随作答翻转：返回前把它刷成当前值，面板按它决定还能不能点。
-      const live = new Map((await employee.state()).tasks.map((task) => [task.id, task.status]));
+      // partialDelivery 只给一个布尔值，内部的步骤键不进客户端。
+      const live = new Map((await employee.state()).tasks.map((task) => [task.id, task]));
       for (const message of page.messages || [])
-        for (const task of message.tasks || [])
-          if (live.has(task.id)) task.status = live.get(task.id)!;
+        for (const task of message.tasks || []) {
+          const current = live.get(task.id);
+          if (!current) continue;
+          task.status = current.status;
+          if (current.partialDelivery) (task as { partialDelivery?: boolean }).partialDelivery = true;
+        }
       const state = await employee.state();
       return { thread, title: state.name, avatar: state.avatar || "", running: engine.active.has(session.id), ...page,
         nextBeforeSeq: "hasMore" in page && page.hasMore ? page.messages[0]?.seq ?? null : null,
@@ -153,20 +272,28 @@ export async function clientChat(application: ChatApplication, op: string, a: Ob
     return await employee.control({ id: a.id, action: a.action, approved: a.approved, text: a.text }, { token: "", name: user.username || "用户" });
   }
   if (op === "send") {
-    assert(typeof a.text === "string", "Message required");
-    const text = a.text.trim();
-    assert(text && text.length <= 2 << 20, "Message required");
+    const text = typeof a.text === "string" ? a.text : "";
+    const hasAttach = (Array.isArray(a.images) && a.images.length > 0) || (Array.isArray(a.files) && a.files.length > 0);
+    assert((text.trim() || hasAttach) && text.length <= 2 << 20, "Message required");
     if (kind === "employee") {
       const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
       assert(employee && await employee.accessible(user), "Employee not found");
       const session = await employee.chat(user.id);
       check(!employee.deleting && !employee.resetting, 409, "Bot is being reset or deleted");
       assert(typeof a.clientMessageId === "string" && /^[\w:.-]{16,200}$/.test(a.clientMessageId), "Invalid message ID");
+      const quote = a.quoteSeq === undefined ? undefined : await store.quote(session.id, a.quoteSeq);
+      const stored = hasAttach ? await storeAttachments(store, session.id, a) : { images: [], files: [] };
+      const hash = !hasAttach && a.quoteSeq === undefined ? text : JSON.stringify([text, a.images || [], a.files || [], a.quoteSeq ?? null]);
       await engine.submitChat(session.id, { role: "user", text, actorId: user.id, clientMessageId: a.clientMessageId,
-        clientMessageHash: createHash("sha256").update(text).digest("hex") });
+        clientMessageHash: createHash("sha256").update(hash).digest("hex"),
+        ...(stored.images.length ? { images: stored.images } : {}),
+        ...(stored.files.length ? { files: stored.files } : {}),
+        ...(quote ? { quote } : {}) });
       return { ok: true };
     }
-    await engine.groups.send(user, id, { text });
+    assert(a.quoteSeq === undefined, "群聊暂不能引用");
+    const stored = hasAttach ? await storeAttachments(store, (await engine.groups.mine(user, id)).session, a) : { images: [], files: [] };
+    await engine.groups.send(user, id, { text, ...(stored.images.length ? { images: stored.images } : {}), ...(stored.files.length ? { files: stored.files } : {}) });
     return { ok: true };
   }
   check(false, 404, "Chat route not found");
