@@ -3,9 +3,9 @@
 轻量主控是唯一指挥官与证据裁决者：直接处理轻量查询、制定与更新计划（`task_progress`）、向用户求助/审批与最终交付（`task_complete`），不在主控直接调用 `chrome_*`，也不再暴露重叠的 `switch_scene`。
 
 - **`code_agent({task})`**：整块委派编码、源码审查、深入排错与构建测试（模型模式或 `codex` / `antigravity` CLI 统一为隔离执行）。子阶段仅具备编码相关工具，不包含 `task_*`、`browser_agent`、`switch_scene` 或 `spawn_agent`。
-- **`browser_agent({task})`**：委派真实浏览器渲染、交互、登录与截图取证（隔离执行）。子阶段仅具备 `chrome_*`、`read`（读存档）与密码本工具，**不提供通用 `bash`**；遇代理/网络超时、扩展不可用、短信验证码/2FA 或需用户审批时快速失败并以 `[BLOCKED]` 交回主控。
+- **`browser_agent({task})`**：委派真实浏览器渲染、交互、登录与截图取证（隔离执行）。子阶段仅具备 `chrome_*`、`read`（读存档）与密码本工具，**不提供通用 `bash`**；遇代理/网络超时（连续 2 次触发宿主硬熔断）、扩展不可用、短信验证码/2FA 或需用户审批时快速失败并以 `[BLOCKED]` 交回主控。
 
-两个阶段不能互相调用；主控根据返回的结构化硬证据决定下一步（例如编码返回改动与单测退出码后再派发 `browser_agent` 验收；浏览器返回缺陷复现证据且原任务已授权修复时再派发 `code_agent`）。
+两个阶段不能互相调用，但**主控可以在同一拍并发派出多个独立阶段**（例如同时调用 `code_agent` 与 `browser_agent`，或多个独立 `code_agent`）。运行时根据当前系统调度余量动态分配并发度（同一浏览器的多个 `browser_agent` 自动串行避免焦点冲突），并以**严格 Fork-Join 屏障**等待整批全部完成后，将各自的结构化硬证据一次性交回主控；阶段工具不允许与主控普通工具混在同一拍，也不允许挂着未完成的后台 `bash` 启动阶段专家。
 
 在设置的场景页，选择 **编码 → 执行方式**，然后保存场景。`model`（默认）使用配置的编码模型；`codex`、`antigravity` 分别要求执行端账号的 PATH 中已有且已登录的 `codex`、`agy`。旧版桌面 IDE 的启动命令不能代替支持 `--print` 的 agy。轻量和浏览器仍使用各自配置的模型。
 
@@ -15,9 +15,17 @@
 
 - `status`：`completed` / `blocked` / `error` / `interrupted_by_steer` / `queued`
 - `executor`：`model/<selection>`、`codex` 或 `antigravity`
-- `result`：专家的精简客观结论（不代写面向用户的长篇报告）
+- `result`：专家的精简客观结论（不代写面向用户的长篇报告；临近轮次上限时留有强制无工具收尾轮，避免半途截断丢失已采集证据）
 - `evidence`：由运行时直接从真实工具回执采集的不可伪造证据（`code_agent` 含 `filesChanged`、`commands` 及退出码、`failedCommands`；`browser_agent` 含 `visitedUrls`、`tabs`、`screenshots`、`documentPaths`、`errors`）
 - `phaseSession`（模型模式）：独立落库的完整子阶段会话 ID，与主任务共享文件存档目录、浏览器标签与工作区写锁
+
+## 后台命令（Bash）与事件驱动等待
+
+- `bash` 默认前台同步等待 **60 秒**，绝大多数构建、单测与脚本一次返回结果；`detach=true` 的长驻服务立即返回 `jobId` 且不自动等待。
+- 超过 60 秒转入后台的非 `detach` 命令，主控无需循环调用 `bash_poll`：结束本拍后由运行时按完成事件（Promise）零轮询等待并自动交付。
+  - **无任务竞争时**：留在内存中事件休眠，完成后毫秒级原地续跑，零挂起与续做提示开销；
+  - **有其他任务排队争槽时**：短合并（5 秒）后平滑挂起让出执行名额，后台命令完成后由事件静默唤醒（Silent Wake），仅注入紧凑 `[后台结果]`。
+- `bash_poll` 仅用于短时查看后台输出尾部或传 `kill=true` 主动终止卡死任务；无运行时句柄的外部等待统一走 `task_wait`。
 
 会话时间线上每次委托对应一张可展开的阶段卡，展示结论、硬证据摘要、步骤清单（最多 80 项），并可一键打开对应的完整子阶段记录。调试会话的 JSON 导出保留主会话完整 `messages`、`agentPhases` 索引，并在存在隔离模型子阶段时附带 `phaseTranscripts`（按 `phaseSession` 索引完整子阶段消息，不污染主会话消息表）；旧版同会话阶段记录保持向后兼容。导出可能包含项目路径、命令参数和页面数据，分享前应检查。
 

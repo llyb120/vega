@@ -4,21 +4,36 @@ const parse = (text) => { try { return JSON.parse(text); } catch { return null; 
 export function agentPhases(messages) {
   const phases = new Map(), pending = new Map();
   let legacy;
-  const phaseFor = (seq, name) => {
-    if (!phases.has(seq)) phases.set(seq, { seq, name, status: "unconfirmed", rows: [] });
-    return phases.get(seq);
+  const keyFor = (seq, callId) => callId ? `${seq}:${callId}` : String(seq);
+  const phaseFor = (seq, name, callId) => {
+    const key = keyFor(seq, callId);
+    if (!phases.has(key)) phases.set(key, { seq, name, ...(callId ? { callId } : {}), status: "unconfirmed", rows: [] });
+    return phases.get(key);
   };
   for (let i = 0; i < messages.length; i++) {
-    const m = messages[i], call = m.role === "assistant" && m.calls?.length === 1 && m.calls[0];
-    let p = m.agentPhase && phaseFor(m.agentPhase.seq, m.agentPhase.name);
-    const root = !p && call && scenes.has(call.name) && (!m.toolScene || m.toolScene === "lightweight");
-    if (root) {
+    const m = messages[i];
+    const phaseCalls = m.role === "assistant" && Array.isArray(m.calls) && m.calls.length && m.calls.every(c => scenes.has(c.name)) ? m.calls : null;
+    if (!m.agentPhase && phaseCalls && (!m.toolScene || m.toolScene === "lightweight")) {
       legacy = undefined;
-      p = phaseFor(m.seq, call.name);
-      p.callId = call.id;
-      p.task = call.arguments?.task;
+      const multi = phaseCalls.length > 1;
+      for (const call of phaseCalls) {
+        const p = phaseFor(m.seq, call.name, multi ? call.id : undefined);
+        p.callId = call.id;
+        p.task = call.arguments?.task;
+        p.rows.push(m);
+        pending.set(call.id, p);
+      }
+      continue;
+    }
+    let p = m.agentPhase
+      ? (phases.get(keyFor(m.agentPhase.seq, m.agentPhase.callId))
+        || (m.role === "tool" ? pending.get(m.callId) : undefined)
+        || phaseFor(m.agentPhase.seq, m.agentPhase.name, m.agentPhase.callId))
+      : undefined;
+    if (!p && m.role === "tool") {
+      p = pending.get(m.callId);
+      pending.delete(m.callId);
     } else if (m.role === "tool") {
-      p ||= pending.get(m.callId);
       pending.delete(m.callId);
     } else if (!p && legacy) {
       // Old records: only accept a matching tool scene, or a reply followed by the runtime return receipt.

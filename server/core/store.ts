@@ -134,7 +134,7 @@ export type Session = {
   phaseSeq?: number;
   createdAt: number;
 };
-export type AgentPhase = { seq: number; name: "code_agent" | "browser_agent" };
+export type AgentPhase = { seq: number; name: "code_agent" | "browser_agent"; callId?: string };
 export type SceneFrame = { scene?: string; model?: string; resume?: string; agent?: AgentPhase["name"]; phase?: AgentPhase };
 /** Schema version kept in settings; a database of another version is refused (no migrations). */
 const SCHEMA = 6;

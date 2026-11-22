@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { assert, type Obj } from "./util";
 import { assertShellCommand } from "./shell-policy";
 import {
+  BASH_YIELD_SECS,
   appendBashOutput,
   backgroundBashMessage,
   consumeBashJob,
@@ -292,7 +293,7 @@ export async function localShell(hub: LocalAgents, agent: Agent, cwd: string, a:
   });
   let r: Obj;
   try {
-    r = await hub.request(agent, "exec", { cwd, command: a.command, timeout, yieldSecs: 10, jobId: String(job.id), detach }, signal);
+    r = await hub.request(agent, "exec", { cwd, command: a.command, timeout, yieldSecs: detach ? 1 : Math.min(timeout, BASH_YIELD_SECS), jobId: String(job.id), detach }, signal);
   } catch (error) {
     // The request may have reached the client even if no launch result came back.
     retainRemoteBashExecution(job);

@@ -1,7 +1,7 @@
 /** Background bash jobs: 10s yield, explicit polls and automatic result delivery. */
 import type { BackgroundResult } from "./background-result";
 
-export const BASH_YIELD_SECS = 10;
+export const BASH_YIELD_SECS = 60;
 export const BASH_JOB_KEEP_MS = 60_000;
 
 export type BashPoll =
@@ -38,6 +38,7 @@ type Waiter = () => void;
 
 const jobs = new Map<number, BashJob>();
 const waiters = new Map<number, Set<Waiter>>();
+const sessionWaiters = new Map<string, Set<Waiter>>();
 const executions = new Map<string, Set<Promise<void>>>();
 let seq = 1;
 
@@ -61,11 +62,20 @@ function killJob(job: BashJob) {
   catch { /* already gone */ }
 }
 
-function notify(id: number) {
+function notify(id: number, session?: string) {
   const list = waiters.get(id);
-  if (!list?.size) return;
-  waiters.delete(id);
-  for (const fn of list) fn();
+  if (list?.size) {
+    waiters.delete(id);
+    for (const fn of list) fn();
+  }
+  const s = session || jobs.get(id)?.session;
+  if (s) {
+    const sList = sessionWaiters.get(s);
+    if (sList?.size) {
+      sessionWaiters.delete(s);
+      for (const fn of sList) fn();
+    }
+  }
 }
 
 function subscribe(id: number, fn: Waiter) {
@@ -78,13 +88,23 @@ function subscribe(id: number, fn: Waiter) {
   };
 }
 
+function subscribeSession(session: string, fn: Waiter) {
+  const list = sessionWaiters.get(session) || new Set<Waiter>();
+  list.add(fn);
+  sessionWaiters.set(session, list);
+  return () => {
+    list.delete(fn);
+    if (!list.size && sessionWaiters.get(session) === list) sessionWaiters.delete(session);
+  };
+}
+
 function gc(now = Date.now()) {
   for (const [id, job] of jobs) {
     if (now < job.deadline + BASH_JOB_KEEP_MS) continue;
     job.dropped = true;
     if (!job.done) killJob(job);
     jobs.delete(id);
-    notify(id);
+    notify(id, job.session);
   }
 }
 
@@ -178,7 +198,7 @@ export function consumeBashJob(job: BashJob) {
   job.done = true;
   job.dropped = true;
   jobs.delete(job.id);
-  notify(job.id);
+  notify(job.id, job.session);
 }
 
 export function pendingBashAll(session: string): number[] {
@@ -299,7 +319,85 @@ export async function pollBash(
   } finally { job.polling = false; }
 }
 
-/** End-of-turn delivery: wait for the earliest waitable job; one job per call, like nova. */
+/** Explicitly terminate a running background job and return its captured output. */
+export function killBashJob(session: string, id: number): Extract<BashPoll, { status: "finished" }> {
+  const job = jobs.get(id);
+  if (!job) throw new Error(`没有可终止的后台任务 ${id}：可能已完成、已清理，或不属于本会话`);
+  if (job.session !== session) throw new Error(`后台任务 ${id} 不属于本会话`);
+  const safe = job.redact || ((text: string) => text);
+  if (!terminal(job)) {
+    job.cancelled = true;
+    killJob(job);
+    notify(job.id, job.session);
+  }
+  const text = job.cancelled ? cancelText(job) : job.expired ? timeoutText(job) : job.error && !job.output ? job.error : formatOutput(job);
+  const error = job.cancelled || job.expired || !!job.error || (job.exitCode != null && job.exitCode !== 0);
+  consumeBashJob(job);
+  return { status: "finished", text: safe(text), jobId: id, exitCode: job.exitCode, error };
+}
+
+/** Pure event wait until any waitable job for `session` finishes (or disappears), or signal/interrupted fires. */
+export function waitBashReady(session: string, signal?: AbortSignal, interrupted?: () => boolean): Promise<void> {
+  if (signal?.aborted || interrupted?.() || pendingBash(session) == null || pendingBashFinished(session))
+    return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const check = () => {
+      if (signal?.aborted || interrupted?.() || pendingBash(session) == null || pendingBashFinished(session)) {
+        cleanup();
+        resolve();
+      }
+    };
+    let unsub = subscribeSession(session, () => {
+      if (signal?.aborted || interrupted?.() || pendingBash(session) == null || pendingBashFinished(session)) {
+        cleanup();
+        resolve();
+      } else {
+        // Re-subscribe because notify() clears one-shot waiters on intermediate output events.
+        unsub = subscribeSession(session, onEvent);
+      }
+    });
+    const onEvent = () => {
+      if (signal?.aborted || interrupted?.() || pendingBash(session) == null || pendingBashFinished(session)) {
+        cleanup();
+        resolve();
+      } else {
+        unsub = subscribeSession(session, onEvent);
+      }
+    };
+    const cleanup = () => {
+      unsub();
+      signal?.removeEventListener("abort", check);
+    };
+    signal?.addEventListener("abort", check, { once: true });
+    check();
+  });
+}
+
+function waitForTerminal(job: BashJob, signal?: AbortSignal, interrupted?: () => boolean): Promise<void> {
+  if (terminal(job) || signal?.aborted || interrupted?.()) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let unsub = () => {};
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      if (timer) clearTimeout(timer);
+      unsub();
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const rearm = () => {
+      if (Date.now() >= job.deadline) expireJob(job);
+      if (terminal(job) || signal?.aborted || interrupted?.()) return finish();
+      unsub = subscribe(job.id, rearm);
+    };
+    const delay = Math.max(0, job.deadline - Date.now());
+    timer = setTimeout(() => { expireJob(job); finish(); }, delay);
+    timer.unref?.();
+    signal?.addEventListener("abort", finish, { once: true });
+    rearm();
+  });
+}
+
+/** End-of-turn delivery: wait for the earliest waitable job via completion events (no polling for local jobs). */
 export async function awaitPendingBash(
   session: string,
   signal?: AbortSignal,
@@ -308,13 +406,25 @@ export async function awaitPendingBash(
   const id = pendingBash(session);
   if (id == null) return;
   const job = jobs.get(id)!;
-  return readReceipt(job, 1, signal, interrupted, true);
+  return readReceipt(job, 15, signal, interrupted, true);
 }
 
 async function readReceipt(job: BashJob, wait: number, signal?: AbortSignal, interrupted?: () => boolean, consume = false) {
   const { id, session } = job;
   const others = pendingBashAll(session).length - 1;
   const note = others > 0 ? `（还有 ${others} 个后台任务结果未交付）` : "";
+  if (!job.pollRemote) {
+    await waitForTerminal(job, signal, interrupted);
+    if (signal?.aborted || interrupted?.()) return;
+    if (Date.now() >= job.deadline) expireJob(job);
+    const safe = job.redact || ((text: string) => text);
+    const text = job.cancelled ? cancelText(job) : job.expired ? timeoutText(job) : job.error && !job.output ? job.error : formatOutput(job);
+    const error = job.cancelled || job.expired || !!job.error || (job.exitCode != null && job.exitCode !== 0);
+    if (consume && !signal?.aborted) consumeBashJob(job);
+    return error && job.exitCode === undefined
+      ? `[后台任务 ${id} 未能取回结果] ${safe(text)}`
+      : `[后台任务 ${id} ${error ? "执行失败" : "已完成"}] exit=${job.exitCode ?? (error ? -1 : 0)}${note}\n${safe(text)}`;
+  }
   while (!signal?.aborted && !interrupted?.()) {
     try {
       const done = await pollBash(session, id, wait, signal, consume);
@@ -337,7 +447,7 @@ export function backgroundBashResult(session: string, id = pendingBash(session),
   const job = id == null ? undefined : jobs.get(id);
   if (!job?.waitable || job.session !== session || (runningOnly && terminal(job))) return;
   return {
-    wait: signal => readReceipt(job, 30, signal),
+    wait: signal => readReceipt(job, 15, signal),
     acknowledge: () => consumeBashJob(job),
   };
 }
@@ -352,16 +462,15 @@ export function cancelSessionBash(session: string) {
     if (job.session !== session || job.done || job.cancelled) continue;
     job.cancelled = true;
     killJob(job);
-    notify(job.id);
+    notify(job.id, job.session);
   }
 }
 
 export function backgroundBashMessage(id: number, timeoutSecs: number, detach: boolean, tail = "") {
-  let text = `命令超过 ${BASH_YIELD_SECS}s 仍未结束，已转到后台：job_id=${id}。${
-    detach
-      ? "这是 detach 的长驻任务，本轮不会等它，也不会自动交付结果。"
-      : "现在先处理不依赖它的工作；只剩等待时，结束本轮即可自动收到结果，无需轮询 bash_poll。调度任务若短等后仍未就绪，会挂起并让出执行名额。"
-  }后台仍受 timeout=${timeoutSecs}s 限制，到点强杀，会话被取消时同样被杀。`;
+  let text = detach
+    ? `已作为 detach 长驻任务启动：job_id=${id}。本轮不会等它，也不会自动交付结果；需要看输出或停止时用 bash_poll(job_id=${id}) / kill=true。`
+    : `命令超过 ${BASH_YIELD_SECS}s 仍未结束，已转到后台：job_id=${id}。若已无其他独立工作，结束本轮即可由运行时事件等待并自动交付结果（无其他任务排队时原地等待，有竞争才自动让出名额，无需循环 bash_poll）；卡死时可用 bash_poll(job_id=${id}, kill=true) 终止。`;
+  text += `后台仍受 timeout=${timeoutSecs}s 限制，到点强杀，会话被取消时同样被杀。`;
   if (tail.trim()) text += "\n--- 已有输出尾部 ---\n" + tail;
   return text;
 }
@@ -374,5 +483,6 @@ export function resetBashJobs() {
   }
   jobs.clear();
   waiters.clear();
+  sessionWaiters.clear();
   seq = 1;
 }

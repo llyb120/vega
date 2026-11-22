@@ -60,6 +60,7 @@ import {
   redactBashJob,
   completeBashJob,
   createBashJob,
+  killBashJob,
   pollBash,
 } from "./bash-jobs";
 import { agentTools, isAgentTool } from "./spawn-agent";
@@ -223,12 +224,12 @@ export class Tools {
         : "[MCP] 当前热心市民没有已启用的外部服务；请区分「技能 / MCP」与「对外 MCP」，不要猜服务名或借用其他热心市民的配置。");
       else if (servers.length) parts.push("[MCP] 当前热心市民已配置外部 MCP，但电脑场景不提供 mcp。任务明确需要 MCP 时，先完成当前浏览器步骤，再回主任务的轻量或编码场景；不在壳命令里绕过场景限制。");
     }
-    if (this.yieldBackground && names.has("bash")) parts.push("[后台结果] 有运行时句柄时先推进独立工作；只剩等结果就用一句进度结束本轮，不轮询。运行时短等后自动让出名额，结果回来在原会话续做。没有句柄、只能以后自行核对时才用 task_wait。");
+    if (this.yieldBackground && names.has("bash")) parts.push("[后台结果] bash 默认前台同步等待 60s（常规命令直接返回，detach=true 立即转长驻后台）。超时转后台的命令若无其他独立工作，直接结束本拍即可由运行时按事件自动等待并交付（无其他任务抢槽时原地等待、有竞争才让出名额），不要循环 bash_poll；卡死可用 bash_poll(kill=true) 终止。无运行时句柄的外部等待用 task_wait，禁止在 bash 里用 sleep 轮询。");
     if (names.has("workspace_probe")) parts.push("[工作区] workspace_probe 核对执行端平台和绝对路径是否为目录，不占写锁。命令使用绝对路径，或在同一条命令中先 cd 到绝对路径且失败即停止；切目录不会延续到下一次调用。");
     if (ctx.kind !== "chat" && !this.session.readOnly && !this.session.agentChild && this.session.scene === "lightweight" && !sceneModels(this.config, "computer").length)
       parts.push("[电脑场景未配置] 设置里没有为 computer 场景选择模型，所以本会话无法进入电脑场景，不能派发浏览器阶段。需要网页/浏览器操作时如实说明“computer 场景未配置模型（需选择支持图片的模型，可与其他场景共用同一个）”，请用户到设置里补上（任务中用 task_ask_user）；这不是浏览器扩展连接问题，不要让用户重连扩展，也不要用 bash 或脚本绕行。");
     if (names.has("code_agent") || names.has("browser_agent")) {
-      parts.push("[阶段委派] 编码/排错/构建测试整块委派给 code_agent；真实网页渲染/交互/登录/截图委派给 browser_agent；轻量查询、计划与最终报告由主控自己完成。每个阶段隔离运行并带回运行时采集的 evidence（改动文件、命令退出码、访问 URL、截图、错误）；主控以 evidence 为据推进，绝不重复写多份报告。");
+      parts.push("[阶段委派] 编码/排错/构建测试整块委派给 code_agent；真实网页渲染/交互/登录/截图委派给 browser_agent；轻量查询、计划与最终报告由主控自己完成。互相独立的阶段（如 code_agent + browser_agent，或多个独立 code_agent）可在同一拍并发发出，运行时动态分配并发度并等待全部阶段结束后统一返回 evidence；禁止把阶段工具与主控普通工具混在同一拍，也不要挂着未完成后台 bash 启动阶段专家。主控以 evidence 为据推进，绝不重复写多份报告。");
       const cli = externalCoding(this.config);
       if (cli && names.has("code_agent")) parts.push(`[编码执行器] code_agent 交由 ${cli} CLI。task 写明编码目标、约束、分支与验收条件；不传秘密或全部历史；完成后先检查编码回执与 evidence，再按授权单独调用 browser_agent 验收，失败不自动重试或改用模型开发。`);
     }
@@ -328,20 +329,21 @@ export class Tools {
         ),
         schema(
           "bash",
-          "Use absolute paths for all filesystem targets, or cd to an absolute directory within the same command and stop on cd failure. Never rely on an implicit working directory. Windows uses PowerShell. Default timeout 120s, max 600s. A command still running after 10 seconds is moved to the background and returns jobId immediately so the rest of the turn is not blocked: issue independent short work in the same turn, then continue other work after you have the jobId. **Backgrounded commands are auto-delivered when you stop issuing new tool calls; bash_poll is usually unnecessary.** In a scheduled task, a result not ready after a brief wait suspends the task until ready. Poll only for a one-off observation, not back-to-back. detach=true means a long-running service: do not wait and do not auto-deliver at end of turn. Background jobs still honor the total timeout and are killed if the session is cancelled. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; chrome_* run only in the computer scene: the lightweight coordinator delegates webpage work to browser_agent. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
+          "Use absolute paths for all filesystem targets, or cd to an absolute directory within the same command and stop on cd failure. Never rely on an implicit working directory. Windows uses PowerShell. Default timeout 120s, max 600s. Runs synchronously for up to 60 seconds so normal scripts/builds/tests return directly; a command still running after 60 seconds moves to the background and returns jobId. **Backgrounded commands are auto-delivered via completion events when you stop issuing new tool calls (waiting in memory while idle, yielding the slot only under task contention); do NOT poll bash_poll in a loop or run shell sleep to wait for external events (use task_wait).** detach=true returns immediately for a long-running service without automatic wait or delivery. Background jobs still honor the total timeout and are killed if the session is cancelled. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; chrome_* run only in the computer scene: the lightweight coordinator delegates webpage work to browser_agent. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
           {
             command: string,
             timeout: positive,
-            detach: { type: "boolean", description: "true = long-running service, no automatic wait or delivery; by default the runtime delivers background results without bash_poll" },
+            detach: { type: "boolean", description: "true = long-running service, returns immediately with jobId, no automatic wait or delivery; by default commands run synchronously up to 60s and then auto-deliver via events" },
           },
           ["command"],
         ),
         schema(
           "bash_poll",
-          "Fetch later output from a background bash job. bash moves a command still running after 10 seconds to the background and returns jobId. Use for a one-off observation, not to repeatedly wait for results. In a scheduled task, a lone poll of an auto-delivered job with wait >= 30s keeps the slot for up to 30s, then suspends the task if the job is still running. Explicit short polls and detached jobs return the result or current tail. Background job records are kept for 60 seconds after timeout.",
+          "Inspect output or explicitly terminate a background bash job. Most commands finish synchronously within 60s and backgrounded non-detach jobs are auto-delivered by completion events when you end the turn, so use bash_poll only to peek at a detach service/running output (short wait, default 10s) or to kill a stuck job (kill=true). Never poll back-to-back.",
           {
             job_id: { type: "integer", description: "jobId returned by bash" },
-            wait: { type: "integer", description: "seconds to wait, default 30; more than 60 is usually just idle waiting unless you truly have nothing else to do" },
+            wait: { type: "integer", description: "seconds to peek (default 10; 1-600); avoid long waits when you can simply end the turn for event-driven delivery" },
+            kill: { type: "boolean", description: "true = terminate the running background job immediately and return captured output" },
           },
           ["job_id"],
         ),
@@ -460,8 +462,8 @@ export class Tools {
     if (this.offersPhaseTools) {
       let offeredPhase = false;
       for (const [scene, name, desc] of [
-        ["coding", "code_agent", "委派隔离的编码专家完成代码修改、深入排错、代码审查或构建测试；单独调用。task 写清目标、相关路径、约束与验收标准（不含凭据）。按分析→修改→验证整块委派，只读简单查询请主控直接处理。完成后自动返回结论与真实文件/命令证据。"],
-        ["computer", "browser_agent", "委派隔离的浏览器专家通过已授权 Chrome 完成真实网页交互、登录操作、页面观察与截图取证；单独调用。task 写清目标 URL/tabTag、具体操作与要核实的事实（不含凭据）。无通用 bash；遇代理/网络/验证码/审批阻塞会快速交回主控决策。"],
+        ["coding", "code_agent", "委派隔离的编码专家完成代码修改、深入排错、代码审查或构建测试。可与其他独立的 code_agent 或 browser_agent 同批并发调用（运行时动态分配并发度并等待全部完成，不可与主控普通工具混批）。task 写清目标、相关路径、约束与验收标准（不含凭据）。按分析→修改→验证整块委派，只读简单查询请主控直接处理。完成后自动返回结论与真实文件/命令证据。"],
+        ["computer", "browser_agent", "委派隔离的浏览器专家通过已授权 Chrome 完成真实网页交互、登录操作、页面观察与截图取证。可与 code_agent 同批并发调用（运行时等待全部完成，不可与主控普通工具混批）；同网站多个标签/面板尽量合并在一次调用中完成。task 写清目标 URL/tabTag、具体操作与要核实的事实（不含凭据）。无通用 bash；遇代理/网络/验证码/审批阻塞会快速交回主控决策。"],
       ] as const) {
         if (!sceneAvailable(this.config, scene)) continue;
         if (this.session.readOnly && (scene === "computer" || externalCoding(this.config))) continue;
@@ -770,11 +772,15 @@ export class Tools {
     if (call.name === "bash_poll") {
       const jobId = a.job_id ?? a.jobId;
       assert(Number.isInteger(jobId) && jobId >= 1, "job_id required");
-      const wait = a.wait ?? 30;
+      if (a.kill === true) {
+        const result = killBashJob(this.session.id, jobId);
+        return { value: { jobId: result.jobId, output: result.text, exitCode: result.exitCode, killed: true }, error: !!result.error };
+      }
+      const wait = a.wait ?? 10;
       assert(Number.isInteger(wait) && wait >= 1 && wait <= 600, "wait must be 1–600");
-      if (this.yieldBackground && this.batchCalls?.length === 1 && wait * 1000 >= BACKGROUND_GRACE_MS) {
+      if (this.yieldBackground && this.batchCalls?.length === 1 && wait >= 15) {
         const background = backgroundBashResult(this.session.id, jobId, true);
-        if (background) return { value: { running: true, jobId, message: "已交给运行时短等；若结果仍未就绪，挂起后自动交付。" }, background };
+        if (background) return { value: { running: true, jobId, message: "已交给运行时按事件等待；无竞争时原地等待，有其他任务排队时让出名额并在完成后自动交付。" }, background };
       }
       const result = await pollBash(this.session.id, jobId, wait, this.signal);
       return { value: result.status === "running" ? { running: true, jobId: result.jobId, output: result.text } : { jobId: result.jobId, output: result.text, exitCode: result.exitCode }, error: result.status === "finished" && !!result.error };
@@ -1286,6 +1292,7 @@ export async function shell(
   cloud?: CloudRuntime,
   env?: Record<string, string>,
   session?: string,
+  yieldMsOverride?: number,
 ): Promise<Outcome> {
   assert(typeof a.command === "string" && a.command.trim(), "command required");
   assertShellCommand(a.command);
@@ -1296,7 +1303,8 @@ export async function shell(
   );
   const detach = a.detach === true;
   const hardMs = timeout * 1000;
-  const yieldMs = session ? Math.min(hardMs, BASH_YIELD_SECS * 1000) : hardMs;
+  const defaultYieldMs = detach ? 500 : BASH_YIELD_SECS * 1000;
+  const yieldMs = session ? Math.min(hardMs, yieldMsOverride ?? defaultYieldMs) : hardMs;
   const started = Date.now();
   const win = process.platform === "win32",
     bin = win ? windowsShell() : "/bin/sh";

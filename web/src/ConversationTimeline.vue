@@ -20,10 +20,16 @@ const props = defineProps({
 });
 const emit = defineEmits(["open"]);
 const turns = computed((previous) => conversationTurns(props.messages, { running: props.running, live: props.live, thinking: props.thinking, model: props.model }, previous));
-// Attach each phase to the turn containing its first loaded row, including pages starting mid-phase.
+// Attach each phase to the turn containing its first loaded row, including pages starting mid-phase and concurrent phases on the same seq.
 const phasesByTurn = computed(() => {
-  const bySeq = new Map(agentPhases(props.messages).map(p => [p.rows[0].seq, p]));
-  return turns.value.map(turn => turn.body.map(m => bySeq.get(m.seq)).filter(Boolean));
+  const bySeq = new Map();
+  for (const p of agentPhases(props.messages)) {
+    const seq = p.rows[0].seq;
+    const list = bySeq.get(seq) || [];
+    list.push(p);
+    bySeq.set(seq, list);
+  }
+  return turns.value.map(turn => turn.body.flatMap(m => bySeq.get(m.seq) || []));
 });
 // 「新」分界：进来时上次看到的位置之后的第一轮（内容可能是旧用户消息加新回复）；来了新消息就收起。
 const markGone = ref(false);
@@ -45,7 +51,7 @@ watch(() => props.messages.at(-1)?.seq || 0, (seq) => {
       <FileCard v-for="(file, n) in turn.user.files || []" :key="'f' + n" :file="file" />
     </article>
     <div v-if="turn.body.length || turn.running" class="message-meta"><span>{{ name }}</span></div>
-    <AgentPhaseDetails v-for="phase in phasesByTurn[index]" :key="phase.seq" :phase="phase" @open="emit('open', $event)" />
+    <AgentPhaseDetails v-for="phase in phasesByTurn[index]" :key="phase.callId ? `${phase.seq}:${phase.callId}` : phase.seq" :phase="phase" @open="emit('open', $event)" />
     <TurnProcess v-if="turn.process.length" :messages="turn.body" :started-at="turn.user?.at" :running="turn.running">
       <template v-for="(entry, i) in turn.process" :key="entry.key">
         <p v-if="entry.kind === 'model'" class="turn-model">当前模型 · <code>{{ entry.model }}</code></p>

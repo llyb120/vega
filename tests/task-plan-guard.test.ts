@@ -408,3 +408,35 @@ test("反复微调计划措辞或错别字只锚定初始基线，不滚雪球�
     assert.match(restored.value.next, /task_complete/);
   } finally { employee.close(); await store.close(); }
 });
+
+test("删去步骤末尾 task_complete 动作字样不触发假 outlineReview；progress message 允许至 400 字；驳回保留正文防重写提示", async () => {
+  const { store, employee, id } = await fixture();
+  try {
+    await running(employee, id);
+    const work = await store.newSession({ cwd: process.cwd(), employeeId: employee.employeeId, taskId: id });
+    await employee.update(s => { employee.task(s, id).workSession = work.id; });
+    const longProgressMsg = "进".repeat(250);
+    await employee.execute(id, { action: "progress", text: longProgressMsg, plan: [
+      { content: "抓取官方定价页", status: "in_progress" },
+      { content: "汇总中文报告，并调用 task_complete 交付", status: "pending" },
+    ] });
+    const settled = await employee.execute(id, { action: "progress", text: "全部完成", plan: [
+      { content: "抓取官方定价页", status: "completed" },
+      { content: "汇总中文报告", status: "completed" },
+    ] });
+    assert.equal(settled.value.outlineReviewRequired, undefined, "stripping task_complete action suffix must not trigger false outlineReview");
+    assert.match(settled.value.next, /task_complete/);
+
+    // Simulate a substantial report already written in workSession
+    const report = await store.append(work.id, { role: "assistant", model: "p/light", text: "正文".repeat(220) });
+    await assert.rejects(
+      employee.execute(id, { action: "complete", text: "证据", summary: "字".repeat(410) }),
+      (e: any) => {
+        assert.match(e.message, /Delivery summary requires 1–400 characters/);
+        assert.match(e.message, new RegExp(`deliverableRefs:\\[${report.seq}\\]`));
+        assert.match(e.message, /严禁重写正文/);
+        return true;
+      },
+    );
+  } finally { employee.close(); await store.close(); }
+});

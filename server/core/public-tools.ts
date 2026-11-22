@@ -162,8 +162,8 @@ export function employeeTools(ctx: ToolContext): Tool[] {
   }
   if (task) {
     out.push(tool("task_progress",
-      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；同一步骤推进时保持 content 原文不变、只改 status，执行细节写 message（改写已有步骤 content 会触发交付前全量 outlineReview）。计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、工作原则和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。stepOutput 仅用于独立交付，不能代替进度记录；正文和文件不混入对话消息。不新建任务或会话、不结束本轮，最终仍需 task_complete。回执 outlineReviewRequired=true 时，首次交付就逐项复核 changedSteps，不要空提等驳回。",
-      { message: str("当前进度，1–200 字", { minLength: 1, maxLength: 200 }),
+      "保存当前任务的进度：message 是一句进度（≤400 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；同一步骤推进时保持 content 原文不变、只改 status，执行细节写 message（改写已有步骤 content 会触发交付前全量 outlineReview）。计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、工作原则和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。stepOutput 仅用于独立交付，不能代替进度记录；正文和文件不混入对话消息。不新建任务或会话、不结束本轮，最终仍需 task_complete。回执 outlineReviewRequired=true 时，首次交付就逐项复核 changedSteps，不要空提等驳回。",
+      { message: str("当前进度，1–400 字", { minLength: 1, maxLength: 400 }),
         plan: { type: "array", minItems: 1, maxItems: 50, description: "完整计划，包括未来步骤", items: obj({
           content: str("步骤描述，1–500 字", { minLength: 1, maxLength: 500 }),
           status: str("", { enum: ["pending", "in_progress", "completed", "failed", "blocked", "cancelled"] }),

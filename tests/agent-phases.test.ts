@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { agentPhases, phaseIndex } from '../web/src/agent-phases.js';
 import { codexActivity } from '../server/core/coding-cli';
-import { classifyPhaseStatus, cliEvidence, extractPhaseEvidence } from '../server/core/agent-phase';
+import { classifyPhaseStatus, cliEvidence, extractFinalPhaseText, extractPhaseEvidence } from '../server/core/agent-phase';
 import { Redactor } from '../server/core/util';
 
 const phase = { name: 'browser_agent', seq: 1 };
@@ -92,4 +92,47 @@ test('isolated phase evidence extraction captures host-verified code/browser pro
   assert.equal(indexed.phaseSession, 'child-1');
   assert.equal(indexed.executor, 'model/p/vision');
   assert.deepEqual(indexed.messageSeqs, [4, 5]);
+});
+
+test('transient tab errors clear after recovery, service worker noise is skipped, extractFinalPhaseText ignores opening fillers, and concurrent phases index separately', () => {
+  const rows: any[] = [
+    { seq: 1, role: 'assistant', text: '我先查找标签。', calls: [{ id: 'n1', name: 'chrome_navigate', arguments: { url: 'https://cursor.com/pricing' } }] },
+    { seq: 2, role: 'tool', callId: 'n1', name: 'chrome_navigate', text: JSON.stringify({
+      tabTag: 'C2',
+      tabs: [{ tag: 'C2', url: 'chrome-error://chromewebdata/', active: true }],
+      pages: [{ url: 'chrome-error://chromewebdata/', headings: [{ text: 'This site can’t be reached' }] }],
+    }) },
+    { seq: 3, role: 'assistant', calls: [{ id: 'n2', name: 'chrome_tab_control', arguments: { tabTag: 'C2', command: 'reload' } }] },
+    { seq: 4, role: 'tool', callId: 'n2', name: 'chrome_tab_control', text: JSON.stringify({
+      tabTag: 'C2',
+      tabs: [{ tag: 'C2', url: 'https://cursor.com/pricing', title: 'Cursor · Pricing', active: true }],
+      pages: [
+        { url: 'https://cursor.com/pricing', title: 'Cursor · Pricing', headings: [{ text: 'Pricing' }] },
+        { url: 'https://cursor.com/metrics/_/service_worker/6b40/sw_iframe.html', isSubframe: true, headings: [{ text: 'This site can’t be reached' }] },
+      ],
+    }) },
+  ];
+  const { evidence } = extractPhaseEvidence('browser_agent', rows);
+  assert.deepEqual((evidence as any).errors, [], 'recovered transient error and subframe noise must not stay in errors');
+  assert.deepEqual((evidence as any).visitedUrls, [{ url: 'https://cursor.com/pricing', title: 'Cursor · Pricing' }]);
+  assert.equal(extractFinalPhaseText(rows), '', 'opening filler attached to a tool call must not be returned as final text');
+
+  const concurrentParent: any[] = [
+    { seq: 10, role: 'assistant', toolScene: 'lightweight', calls: [
+      { id: 'c-code', name: 'code_agent', arguments: { task: 'check config' } },
+      { id: 'c-browser', name: 'browser_agent', arguments: { task: 'check page' } },
+    ] },
+    { seq: 11, role: 'tool', callId: 'c-code', name: 'code_agent', agentPhase: { seq: 10, name: 'code_agent', callId: 'c-code' },
+      text: JSON.stringify({ status: 'completed', executor: 'model/p/code', phaseSession: 'stage-code', result: 'code ok', evidence: { filesChanged: [], commands: [], failedCommands: 0 } }) },
+    { seq: 12, role: 'tool', callId: 'c-browser', name: 'browser_agent', agentPhase: { seq: 10, name: 'browser_agent', callId: 'c-browser' },
+      text: JSON.stringify({ status: 'completed', executor: 'model/p/vision', phaseSession: 'stage-browser', result: 'page ok', evidence: { visitedUrls: [], tabs: [], screenshots: [], documentPaths: [], errors: [] } }) },
+  ];
+  const indexed = phaseIndex(concurrentParent);
+  assert.equal(indexed.length, 2, 'concurrent phases on the same seq must produce two distinct phase cards');
+  assert.equal(indexed[0].callId, 'c-code');
+  assert.equal(indexed[0].phaseSession, 'stage-code');
+  assert.deepEqual(indexed[0].messageSeqs, [10, 11]);
+  assert.equal(indexed[1].callId, 'c-browser');
+  assert.equal(indexed[1].phaseSession, 'stage-browser');
+  assert.deepEqual(indexed[1].messageSeqs, [10, 12]);
 });

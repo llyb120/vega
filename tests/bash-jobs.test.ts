@@ -16,6 +16,8 @@ import {
   hasPendingBash,
   awaitPendingBash,
   cancelSessionBash,
+  killBashJob,
+  waitBashReady,
   backgroundBashMessage,
   resetBashJobs,
   bashJob,
@@ -24,8 +26,8 @@ import { shell } from "../server/core/tools";
 
 afterEach(() => resetBashJobs());
 
-test("bash yield is 10s and finished jobs stay pending until delivered", async () => {
-  assert.equal(BASH_YIELD_SECS, 10);
+test("bash yield is 60s and finished jobs stay pending until delivered", async () => {
+  assert.equal(BASH_YIELD_SECS, 60);
   assert.equal(BASH_JOB_KEEP_MS, 60_000);
   const session = "s1";
   const job = createBashJob({ session, waitable: true, timeoutSecs: 120, kill: () => {} });
@@ -151,40 +153,59 @@ test("bash_poll is one-shot: a still-running job is returned after the wait, not
 test("backgroundBashMessage distinguishes detach from auto-delivered jobs", () => {
   const wait = backgroundBashMessage(3, 120, false);
   assert.match(wait, /job_id=3/);
-  assert.match(wait, /只剩等待时，结束本轮即可自动收到结果/);
+  assert.match(wait, /结束本轮即可由运行时事件等待并自动交付结果/);
+  assert.match(wait, /kill=true/);
   assert.doesNotMatch(wait, /不会自动交付结果/);
   const detached = backgroundBashMessage(4, 120, true);
-  assert.match(detached, /detach 的长驻任务/);
+  assert.match(detached, /detach 长驻任务/);
   assert.match(detached, /也不会自动交付结果/);
 });
 
-test("server shell backgrounds a command after 10s and auto-delivers the result", async () => {
+test("killBashJob terminates a stuck job and waitBashReady wakes immediately via events", async () => {
+  const session = "s-kill-wait";
+  let killed = false;
+  const job = createBashJob({ session, waitable: true, timeoutSecs: 60, kill: () => { killed = true; } });
+  let woke = false;
+  const waiting = waitBashReady(session).then(() => { woke = true; });
+  const killedResult = killBashJob(session, job.id);
+  assert.equal(killed, true);
+  assert.equal(killedResult.status, "finished");
+  assert.equal(killedResult.error, true);
+  assert.match(killedResult.text, /命令已被取消/);
+  await waiting;
+  assert.equal(woke, true);
+  assert.equal(hasPendingBash(session), false);
+});
+
+test("server shell backgrounds a command past its yield window, fast-returns detach, and auto-delivers via events", async () => {
   const session = "s-shell";
   const started = Date.now();
-  // A node child works under both sh and PowerShell; sleep/&& do not (&& is PowerShell 7 syntax),
-  // and an absolute path may not survive PowerShell 5.1's ANSI command-line code page.
-  const command = `node -e "setTimeout(() => console.log('yielded-ok'), 12000)"`;
-  const outcome = await shell(process.cwd(), { command, timeout: 30 }, new AbortController().signal, () => {}, undefined, undefined, session);
+  const command = `node -e "setTimeout(() => console.log('yielded-ok'), 1200)"`;
+  const outcome = await shell(process.cwd(), { command, timeout: 30 }, new AbortController().signal, () => {}, undefined, undefined, session, 400);
   const elapsed = Date.now() - started;
-  assert.ok(elapsed >= 9000 && elapsed < 16000, `yield took ${elapsed}ms`);
+  assert.ok(elapsed >= 300 && elapsed < 1100, `yield took ${elapsed}ms`);
   assert.equal(outcome.value.jobId, 1);
   assert.equal(outcome.value.running, true);
   assert.match(String(outcome.value.message), /转到后台：job_id=1/);
   const delivered = await awaitPendingBash(session);
   assert.match(delivered || "", /yielded-ok/);
   assert.match(delivered || "", /exit=0/);
+
+  const detachStart = Date.now();
+  const detached = await shell(process.cwd(), { command: `node -e "setTimeout(() => {}, 5000)"`, timeout: 10, detach: true }, new AbortController().signal, () => {}, undefined, undefined, session);
+  assert.ok(Date.now() - detachStart < 2500, "detach returns quickly without waiting 60s");
+  assert.equal(detached.value.running, true);
+  killBashJob(session, detached.value.jobId);
 });
 
 test("server shell timeout kills the background process", async () => {
   const session = "s-kill";
   const name = `vega-bash-kill-${process.pid}-${Date.now()}`, marker = join(tmpdir(), name);
-  // Same portable child: it would write the marker after 30s, and the 12s timeout must kill it first.
-  // The child resolves the temp directory itself; an absolute path would cross PowerShell's code page.
   const script = `setTimeout(() => require('fs').writeFileSync(require('path').join(require('os').tmpdir(), '${name}'), 'survived'), 30000)`;
-  const outcome = await shell(process.cwd(), { command: `node -e "${script}"`, timeout: 12 }, new AbortController().signal, () => {}, undefined, undefined, session);
+  const outcome = await shell(process.cwd(), { command: `node -e "${script}"`, timeout: 2 }, new AbortController().signal, () => {}, undefined, undefined, session, 400);
   assert.equal(outcome.value.running, true);
   const delivered = await awaitPendingBash(session);
-  assert.match(delivered || "", /命令超过 12s 未结束，已终止/);
+  assert.match(delivered || "", /命令超过 2s 未结束，已终止/);
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(existsSync(marker), false, "timeout must kill the process before it writes the marker");
 });

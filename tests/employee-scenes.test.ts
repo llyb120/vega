@@ -791,3 +791,154 @@ test("one model for every scene: lightweight coordinator delegates code_agent th
     assert.equal((await store.session(job.workSession)).scene, "lightweight", "coordinator stays lightweight throughout");
   } finally { await engine.close(); await store.close(); }
 });
+
+test("Fork-Join phase barrier: concurrent code_agent + browser_agent run in parallel and block coordinator until both finish; mixed batches and pending bash are rejected", async () => {
+  const { store, engine, add, segment } = await fixture();
+  const config = await engine.config();
+  config.scheduler = { globalSlots: 4, perEmployeeSlots: 4 };
+  await store.put("config", config);
+  let activeSpecialists = 0, peakSpecialists = 0;
+  let releaseBoth!: () => void;
+  let arrived = 0;
+  const barrier = new Promise<void>((resolve) => { releaseBoth = resolve; });
+  let coordTurn = 0;
+  engine.providers.chat = async (model, _system, messages) => {
+    if (model.selection === "p/light") {
+      coordTurn++;
+      if (coordTurn === 1) {
+        // Mixed batch with coordinator tool must be rejected without executing either
+        return { role: "assistant", calls: [
+          { id: "mix-code", name: "code_agent", arguments: { task: "分析代码" } },
+          { id: "mix-read", name: "context_budget", arguments: {} },
+        ] };
+      }
+      if (coordTurn === 2) {
+        const err = messages.findLast(m => m.role === "tool" && m.callId === "mix-code")!;
+        assert(err.error && /不能与主控普通工具混在同一批/.test(err.text!));
+        // Now issue a pure concurrent phase batch: code_agent + browser_agent together
+        return { role: "assistant", calls: [
+          { id: "par-code", name: "code_agent", arguments: { task: "检查服务端配置" } },
+          { id: "par-browser", name: "browser_agent", arguments: { task: "抓取定价页面" } },
+        ] };
+      }
+      if (coordTurn === 3) {
+        // Coordinator only resumes after BOTH specialists completed
+        const codeReceipt = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "par-code")!.text!);
+        const browserReceipt = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "par-browser")!.text!);
+        assert.equal(codeReceipt.status, "completed");
+        assert.equal(browserReceipt.status, "completed");
+        assert.match(codeReceipt.result, /服务端配置已核对/);
+        assert.match(browserReceipt.result, /定价页面已核对/);
+        return verified();
+      }
+      return completed();
+    }
+    activeSpecialists++;
+    peakSpecialists = Math.max(peakSpecialists, activeSpecialists);
+    if (++arrived === 2) releaseBoth();
+    await barrier;
+    activeSpecialists--;
+    return { role: "assistant", text: model.selection === "p/code" ? "服务端配置已核对。" : "定价页面已核对。" };
+  };
+  try {
+    const job = await segment(await add("并发检查代码与网页"));
+    assert.equal(job.status, "done");
+    assert.equal(peakSpecialists, 2, "code_agent and browser_agent must execute concurrently");
+    assert.equal(coordTurn, 4);
+    const sessions = await store.sessions();
+    assert.equal(sessions.filter(s => s.phaseRole === "code_agent").length, 1);
+    assert.equal(sessions.filter(s => s.phaseRole === "browser_agent").length, 1);
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("browser_agent host circuit breaker halts after 2 consecutive ERR_SOCKS errors and forces a clean wrap-up turn", async () => {
+  const { store, engine, add, segment } = await fixture();
+  let navCalls = 0;
+  (engine as any).chromeFor = async () => ({
+    execute: async () => {
+      navCalls++;
+      return {
+        tabTag: "C3-net",
+        tabs: [{ tag: "C3-net", url: "chrome-error://chromewebdata/", title: "docs.cursor.com", active: true }],
+        pages: [{ url: "chrome-error://chromewebdata/", headings: [{ level: "H1", text: "This site can’t be reached" }], visibleText: "ERR_SOCKS_CONNECTION_FAILED" }],
+      };
+    },
+  });
+  let coordTurn = 0, browserTurn = 0;
+  engine.providers.chat = async (model, _system, messages, definitions) => {
+    if (model.selection === "p/light") {
+      coordTurn++;
+      if (coordTurn === 1) return call("b-net", "browser_agent", { task: "依次打开 6 个 docs 链接" });
+      if (coordTurn === 2) {
+        const receipt = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-net")!.text!);
+        assert.equal(receipt.status, "blocked");
+        assert.equal(receipt.circuitBroken, true);
+        assert.match(receipt.result, /\[BLOCKED\]/);
+        return verified();
+      }
+      return completed();
+    }
+    browserTurn++;
+    if (browserTurn <= 2) {
+      assert(definitions.some(d => d.name === "chrome_navigate"));
+      return { role: "assistant", text: "尝试打开第 " + browserTurn + " 个链接", calls: [{ id: "nav-" + browserTurn, name: "chrome_navigate", arguments: { url: `https://docs.cursor.com/p${browserTurn}`, target: { kind: "new_tab" } } }] };
+    }
+    // Turn 3 must be forced wrap-up with empty definitions!
+    assert.deepEqual(definitions, [], "host circuit breaker must disable tools on forced wrap-up turn");
+    assert(JSON.stringify(messages).includes("[宿主熔断]"));
+    return { role: "assistant", text: "[BLOCKED] docs.cursor.com 连续 2 次 ERR_SOCKS_CONNECTION_FAILED，已停止重试。" };
+  };
+  try {
+    const job = await segment(await add("打开 docs 核实"));
+    assert.equal(job.status, "done");
+    assert.equal(navCalls, 2, "circuit breaker must stop after 2 consecutive network errors instead of trying 6 URLs");
+    assert.equal(browserTurn, 3);
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("phase graceful wrap-up turn preserves collected work at maxTurns instead of picking an opening filler", async () => {
+  const { store, engine, add, segment } = await fixture();
+  (engine as any).chromeFor = async () => ({
+    execute: async () => ({
+      tabTag: "C2-ok",
+      tabs: [{ tag: "C2-ok", url: "https://cursor.com/pricing", title: "Cursor · Pricing", active: true }],
+      pages: [{ url: "https://cursor.com/pricing", headings: [{ level: "H1", text: "Pricing" }], visibleText: "Teams $30/$100/$200" }],
+    }),
+  });
+  let coordTurn = 0, browserTurn = 0, sawNearLimit = false, sawForcedWrapUp = false;
+  engine.providers.chat = async (model, _system, messages, definitions) => {
+    if (model.selection === "p/light") {
+      coordTurn++;
+      if (coordTurn === 1) return call("b-wrap", "browser_agent", { task: "读取 Teams 面板" });
+      if (coordTurn === 2) {
+        const receipt = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-wrap")!.text!);
+        assert.equal(receipt.status, "completed");
+        assert.equal(receipt.truncatedByTurnLimit, true);
+        assert.match(receipt.result, /Teams 面板实测价格/);
+        assert.doesNotMatch(receipt.result, /我先查找标签/);
+        return verified();
+      }
+      return completed();
+    }
+    browserTurn++;
+    const payload = JSON.stringify(messages);
+    if (payload.includes("[阶段即将到达轮次上限]")) sawNearLimit = true;
+    if (definitions.length === 0) {
+      sawForcedWrapUp = true;
+      assert(payload.includes("[阶段强制收尾]"));
+      return { role: "assistant", text: "Teams 面板实测价格：$30 / $100 / $200。" };
+    }
+    return {
+      role: "assistant",
+      text: browserTurn === 1 ? "我先查找标签。" : "",
+      calls: [{ id: "t-" + browserTurn, name: "chrome_inspect", arguments: { tabTag: "C2-ok" } }],
+    };
+  };
+  try {
+    const job = await segment(await add("读取 Teams 面板"));
+    assert.equal(job.status, "done");
+    assert.equal(browserTurn, 18, "browser_agent runs up to 18 turns with final wrap-up turn");
+    assert.equal(sawNearLimit, true);
+    assert.equal(sawForcedWrapUp, true);
+  } finally { await engine.close(); await store.close(); }
+});

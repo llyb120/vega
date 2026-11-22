@@ -168,6 +168,9 @@ const matchesApprovedPartial = (t: Task, steps: { content: string }[]) => {
 };
 const outlineSteps = (t: Task, unfinished = unfinishedSteps(t.plan)) =>
   [...new Set<string>([...(t.outlineReferences || []), ...unfinished.map((step) => step.content.trim())])];
+/** Strip trailing task_complete action wording so removing the forbidden tool name from a step never triggers a false outlineReview. */
+const stripCompleteActionSuffix = (step: string) =>
+  step.trim().replace(/[，,、；;\s]*(?:并|然后|最后)?(?:单独)?(?:调用|使用)?\s*task_complete(?:\s*交付)?\s*$/i, "").trim();
 type OutlineDraft = {
   token: string; scope: string; evidence: string; summary?: string; deliverableRef?: number | number[];
   review: Obj[]; missing: string[];
@@ -415,6 +418,8 @@ export class Employee {
   busy = new Map<string, { computer: boolean; session: string; outlineDraft?: OutlineDraft }>();
   writers = new Map<string, WorkspaceWriter>();
   private suspensions = new Map<string, LiveSuspension>();
+  private contendedEmployees = new Set<string>();
+  private contentionListeners = new Set<() => void>();
   members = new Map<string, Employee>();
   membersLoaded = false;
   /** In-flight first-employee creation per owner, so two page loads cannot create two. */
@@ -902,6 +907,25 @@ export class Employee {
     this.cancelSuspensions();
     if (!this.root) for (const employee of this.members.values()) employee.close();
   }
+  /** True when at least one runnable task across employees is waiting solely for an execution slot. */
+  hasSlotContention(): boolean {
+    return (this.root || this).contendedEmployees.size > 0;
+  }
+  /** Subscribe to slot-contention notifications so idle background waits can yield immediately under load. */
+  onSlotContention(fn: () => void): () => void {
+    const root = this.root || this;
+    root.contentionListeners.add(fn);
+    return () => { root.contentionListeners.delete(fn); };
+  }
+  private setSlotContention(contended: boolean) {
+    const root = this.root || this;
+    if (contended) {
+      root.contendedEmployees.add(this.employeeId);
+      for (const fn of [...root.contentionListeners]) fn();
+    } else {
+      root.contendedEmployees.delete(this.employeeId);
+    }
+  }
   cancelSuspensions() {
     for (const [taskId, entry] of this.suspensions) this.cancelSuspension(taskId, entry.session);
   }
@@ -1186,6 +1210,10 @@ export class Employee {
               const sessionRows = t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [];
               const stepOutputs = (t.stepOutputs || []).filter((output: Obj) => output.session === t.workSession);
               const excludeAuto = stepOutputs.map((output: Obj) => output.ref);
+              const latestSavedBody = latestBody(candidateList(sessionRows, since).candidates, BODY_CHARS);
+              const bodySavedHint = latestSavedBody
+                ? `\n提示：你写出的正文（#${latestSavedBody.seq}，${bodyLength(latestSavedBody)}字）已原样保存，修正参数重试时请直接传 deliverableRefs:[${latestSavedBody.seq}]（或省略），严禁重写正文。`
+                : "";
               const cited = resolveDeliverable(sessionRows, deliverableRef, { since, confirmEmpty: t.deliverableNeeded?.emptyGuard, excludeAuto, stepOutputs });
               if (cited.error) {
                 // The refusal rolls this transaction back; only this record is kept (see the catch around update).
@@ -1236,14 +1264,14 @@ export class Employee {
               }
               // One refusal names every problem, so a single retry fixes summary, citation and outlineReview together.
               assert(!summaryError && !cited.error && !outlineError,
-                [summaryError, cited.error && "尚未交付：" + cited.error, outlineError].filter(Boolean).join("\n另外："));
+                [summaryError, cited.error && "尚未交付：" + cited.error, outlineError].filter(Boolean).join("\n另外：") + bodySavedHint);
               if ((t.outlineReviewRequired || unfinished.length) && !review) {
                 return {
                   ok: false, code: "outline_review_required",
                   task: t.text,
                   principles: principlesText(s.instruction),
                   changedSteps: references,
-                  next: "计划可重写、合并或删改，旧步骤只是线索而非必须照搬。对照原始任务、工作原则和用户最新变更，逐项核对要求与实际回执后用 outlineReview 交付；changedSteps 每条也须在 requirement 原样列出并说明完成或不适用的依据。未完成应继续、按授权澄清或等待，确需部分交付才标 cancelled 并请求确认。",
+                  next: "计划可重写、合并或删改，旧步骤只是线索而非必须照搬。对照原始任务、工作原则和用户最新变更，逐项核对要求与实际回执后用 outlineReview 交付；changedSteps 每条也须在 requirement 原样列出（或用 changedStep 序号）并说明完成或不适用的依据。未完成应继续、按授权澄清或等待，确需部分交付才标 cancelled 并请求确认。" + bodySavedHint,
                 };
               }
               const unchecked = references.filter((reference) => !(review || []).some((item: Obj) => item.requirement.trim() === reference));
@@ -1254,9 +1282,9 @@ export class Employee {
                 return {
                   ok: false, code: "outline_review_incomplete", changedSteps: unchecked,
                   ...(token ? { outlineReviewRetry: token } : {}),
-                  next: token
+                  next: (token
                     ? "保留本次摘要、证据和已提交的复核项。下次只传 outlineReviewRetry 和缺项 outlineReview：每项用 changedStep 指向本回执 changedSteps 的序号（从 1 开始），填 status 和 evidence，无需抄 requirement。"
-                    : "每条变更/取消的旧步骤须在 outlineReview 的 requirement 原样列出，说明被替代、已完成或不再适用的依据；旧步骤可以改写，不必恢复原计划。",
+                    : "每条变更/取消的旧步骤须在 outlineReview 的 requirement 原样列出，说明被替代、已完成或不再适用的依据；旧步骤可以改写，不必恢复原计划。") + bodySavedHint,
                 };
               }
               if (run) delete run.outlineDraft;
@@ -1327,7 +1355,7 @@ export class Employee {
               assert(t, "Action requires a running task");
               assert(content, "text required");
               if (action === "progress") {
-                assert([...content].length <= 200, "task_progress.message is at most 200 chars");
+                assert([...content].length <= 400, "task_progress.message is at most 400 chars");
                 if (a.plan) {
                   assert(
                     Array.isArray(a.plan) &&
@@ -1360,7 +1388,13 @@ export class Employee {
                   }
                   const remaining = [...next];
                   const missing = (t.baselinePlan as string[]).filter((step) => {
-                    const index = remaining.indexOf(step);
+                    let index = remaining.indexOf(step);
+                    if (index < 0) {
+                      const norm = stripCompleteActionSuffix(step);
+                      if (norm && norm !== step) {
+                        index = remaining.findIndex((cand) => stripCompleteActionSuffix(cand) === norm);
+                      }
+                    }
                     if (index < 0) return true;
                     remaining.splice(index, 1);
                     return false;
@@ -2118,6 +2152,7 @@ export class Employee {
         const writers = root.writers;
         const rank = (t: Task) => (t.schedule || t.proactive ? 1 : 0);
         const ordered = [...s.tasks].sort((a, b) => rank(a) - rank(b));
+        let slotContended = false;
         for (const t of ordered) {
           const canStart = ["queued", "deferred", "recovering"].includes(t.status) || (t.status === "failed" && !!t.schedule);
           if (this.busy.has(t.id) || !canStart || (t.backgroundWait && !t.backgroundWait.ready))
@@ -2129,10 +2164,10 @@ export class Employee {
             next = Math.min(next, t.nextCheckAt);
             continue;
           }
-          if (globalSlots <= 0 || localSlots <= 0) continue;
           if (this.runtime.isRunning(t.side === "computer" ? t.computerSession : t.workSession)) { next = Math.min(next, now + 1000); continue; }
           const computer = t.side === "computer" || t.profile === "computer";
           if (t.workspaceWait && workspaceBusy(writers, t.workspaceWait.key, t.id)) continue;
+          if (globalSlots <= 0 || localSlots <= 0) { slotContended = true; continue; }
           if (computer) {
             if ([...this.busy.values()].some((v) => v.computer)) continue;
             if (this.locked || !desk?.available || desk.locked) {
@@ -2192,10 +2227,11 @@ export class Employee {
             }
             delete t.schedule.queuedFire;
           }
-          jobs.push(clone(t));
+          jobs.push(resumingResult ? Object.assign(clone(t), { _resumingBackground: true }) : clone(t));
           changed = true;
         }
         if (changed) await this.save(s);
+        this.store.afterCommit(() => this.setSlotContention(slotContended));
       });
     } catch (error) {
       // Nothing was saved: undo this pass's reservations.
@@ -2343,7 +2379,9 @@ export class Employee {
           });
         }
       }
-      suspension = await this.runtime.run(session, prompt, undefined, input, attach);
+      // Silent Wake: background result was already appended by tick(); avoid pasting another 1800-char resume header.
+      const silentWake = !!(job as Obj)._resumingBackground && continuing && !supplement && !task.recovery?.attempts && !handoff && !quotation && !attach.images.length && !attach.files.length;
+      suspension = await this.runtime.run(session, silentWake ? "" : prompt, undefined, input, attach);
       const last = await this.store.lastMessage(session);
       if (last?.role === "assistant" && !last.calls?.length && last.seq! > after) {
         lastReply = last;

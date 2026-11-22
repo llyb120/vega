@@ -1,5 +1,5 @@
-// Coalesce fast completions before paying for a scheduler round-trip.
-export const BACKGROUND_GRACE_MS = 30_000;
+// Short coalesce window used only when another queued task is contending for execution slots.
+export const BACKGROUND_GRACE_MS = 5_000;
 
 /** A tool's result handle. Abort stops observation, not the operation; observing must never replay it. */
 export type BackgroundResult = {

@@ -10,6 +10,7 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { completeBashJob, createBashJob, type BashJob } from "../server/core/bash-jobs";
+import { BACKGROUND_GRACE_MS } from "../server/core/background-result";
 import { sleep } from "../server/core/util";
 
 const until = async (condition: () => unknown, why: string) => {
@@ -27,12 +28,12 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-// Fire the real 30s grace timer on demand; leave scheduler and other timers alone.
+// Fire the real contention coalesce timer (BACKGROUND_GRACE_MS or its remaining slice) on demand; leave scheduler and other timers alone.
 function waitWindow(t: TestContext) {
   const expiry = deferred<() => void>(), set = globalThis.setTimeout;
   let captured = false;
   t.mock.method(globalThis, "setTimeout", (callback: (...args: any[]) => void, ms?: number, ...args: any[]) => {
-    if (ms !== 30_000 || captured) return set(callback, ms, ...args);
+    if (captured || typeof ms !== "number" || ms > BACKGROUND_GRACE_MS || ms < BACKGROUND_GRACE_MS - 1500) return set(callback, ms, ...args);
     captured = true;
     expiry.resolve(() => callback(...args));
     return set(() => {}, ms).unref();
@@ -137,15 +138,29 @@ test("a lone long bash_poll parks without unlocking an active writer", { timeout
 for (const parked of [false, true]) test(`stop ${parked ? "after parking" : "during the grace period"} ignores late results`, { timeout: 12000 }, async t => {
   const { engine, store, employee, add, task, runs, start } = await fixture(t);
   const id = await add("wait, then stop"), waiting = deferred<string>();
-  const window = waitWindow(t);
+  const other = parked ? await add("queued contender") : undefined;
+  const window = parked ? waitWindow(t) : undefined;
   let observed: AbortSignal | undefined, requests = 0, acknowledgements = 0;
-  engine.backgroundResults.push(() => ({ wait: signal => { observed = signal; return waiting.promise; }, acknowledge: () => { acknowledgements++; } }));
-  engine.providers.chat = async () => { requests++; return { role: "assistant", text: "waiting" }; };
+  let firstSession = "";
+  engine.backgroundResults.push(session => {
+    if (!firstSession || session !== firstSession) return undefined;
+    return { wait: signal => { observed = signal; return waiting.promise; }, acknowledge: () => { acknowledgements++; } };
+  });
+  engine.providers.chat = async (_m, _s, messages, _d, _sig, _e, session) => {
+    const tid = (await store.session(session!)).taskId!;
+    if (tid === id) {
+      firstSession ||= session!;
+      requests++;
+      return { role: "assistant", text: "waiting" };
+    }
+    return finish(tid, messages);
+  };
   await start();
-  const expire = await window;
   if (parked) {
-    expire();
-    await until(async () => (await task(id)).status === "deferred" && !employee.busy.has(id), "the task must first park");
+    (await window!)();
+    await until(async () => (await task(id)).status === "deferred" && !employee.busy.has(id), "the task must first park under contention");
+  } else {
+    await until(() => !!observed, "background wait must start");
   }
   assert.equal((await employee.control({ action: "stop", id })).executionStopped, true);
   assert(observed?.aborted);
@@ -156,6 +171,46 @@ for (const parked of [false, true]) test(`stop ${parked ? "after parking" : "dur
   assert.equal(requests, 1);
   assert.equal(acknowledgements, 0);
   assert(!(await store.messages((await task(id)).workSession)).some(m => m.text?.includes("late unsolicited result")));
+});
+
+test("contention-aware wait: no queued contender keeps slot in memory without parking, and mid-wait contention yields immediately with Silent Wake", { timeout: 12000 }, async t => {
+  const { engine, store, employee, add, task, runs, start } = await fixture(t);
+  const first = await add("idle wait task");
+  const reply = deferred<string>(), entered = deferred<void>();
+  let originalSession = "", acknowledgements = 0;
+  engine.backgroundResults.push(session => session === originalSession && !acknowledgements ? {
+    wait: () => { entered.resolve(); return reply.promise; },
+    acknowledge: () => { acknowledgements++; },
+  } : undefined);
+  engine.providers.chat = async (_m, _s, messages, _d, _sig, _e, session) => {
+    const tid = (await store.session(session!)).taskId!;
+    if (tid === first) {
+      originalSession ||= session!;
+      if (!messages.some(m => m.text?.includes("event-delivered-result"))) return { role: "assistant", text: "waiting for background" };
+    }
+    return finish(tid, messages);
+  };
+  await start();
+  await entered.promise;
+  // Without any contender, the task stays in memory instead of parking blindly.
+  await sleep(60);
+  assert.equal(employee.busy.has(first), true);
+  assert.equal((await task(first)).status, "running");
+
+  // Enqueue a second task while slot=1 is occupied: contention immediately arms grace and yields slot.
+  const window = waitWindow(t);
+  const second = await add("urgent contender");
+  (await window)();
+  await until(async () => (await task(second)).status === "done" && !employee.busy.has(first), "second task must acquire yielded slot and finish");
+  assert.equal((await task(first)).status, "deferred");
+
+  // Deliver the background result: Silent Wake resumes first without appending a redundant 1800-char resume header.
+  reply.resolve("event-delivered-result");
+  await until(async () => (await task(first)).status === "done" && !employee.busy.size, "first task should silently wake and complete");
+  const rows = await store.messages(originalSession);
+  assert.equal(rows.filter(m => m.role === "user" && m.text?.includes("续做，不是新派单")).length, 0, "Silent Wake must not append redundant resume boilerplate");
+  assert.equal(rows.filter(m => m.text?.includes("event-delivered-result")).length, 1);
+  assert.equal((await runs(first)).length, 2);
 });
 
 test("restart recovers a persisted missing handle without resubmitting the operation", async t => {
