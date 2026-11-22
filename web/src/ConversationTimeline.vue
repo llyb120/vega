@@ -18,6 +18,7 @@ const props = defineProps({
   model: String,
   newFrom: { type: Number, default: 0 },
 });
+const emit = defineEmits(["open"]);
 const turns = computed((previous) => conversationTurns(props.messages, { running: props.running, live: props.live, thinking: props.thinking, model: props.model }, previous));
 // Attach each phase to the turn containing its first loaded row, including pages starting mid-phase.
 const phasesByTurn = computed(() => {
@@ -44,7 +45,7 @@ watch(() => props.messages.at(-1)?.seq || 0, (seq) => {
       <FileCard v-for="(file, n) in turn.user.files || []" :key="'f' + n" :file="file" />
     </article>
     <div v-if="turn.body.length || turn.running" class="message-meta"><span>{{ name }}</span></div>
-    <AgentPhaseDetails v-for="phase in phasesByTurn[index]" :key="phase.seq" :phase="phase" />
+    <AgentPhaseDetails v-for="phase in phasesByTurn[index]" :key="phase.seq" :phase="phase" @open="emit('open', $event)" />
     <TurnProcess v-if="turn.process.length" :messages="turn.body" :started-at="turn.user?.at" :running="turn.running">
       <template v-for="(entry, i) in turn.process" :key="entry.key">
         <p v-if="entry.kind === 'model'" class="turn-model">当前模型 · <code>{{ entry.model }}</code></p>

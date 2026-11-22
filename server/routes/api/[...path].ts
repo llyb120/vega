@@ -54,21 +54,30 @@ async function inputMessage(
 async function sessionRecord(engine: ReturnType<typeof app>["engine"], session: Session, query: URLSearchParams, canWrite: boolean) {
   const store = engine.store, key = session.id;
   const history = await chatHistory(store, key, query);
-  const parentId = session.spawnParent || (session.agentChild ? session.stageSource : undefined);
+  const parentId = session.spawnParent || session.phaseParent || (session.agentChild || session.phaseRole ? session.stageSource : undefined);
   const parent = parentId && parentId !== key ? await store.session(parentId).catch(() => undefined) : undefined;
   const siblings = await store.sessionsByStageSource(parentId || key);
-  const agentSessions = siblings.filter((item) => item.agentChild).map((item) => ({
+  const agentSessions = siblings.filter((item) => item.agentChild || item.phaseRole).map((item) => ({
     id: item.id,
     title: item.title,
     agentName: item.agentName,
+    phaseRole: item.phaseRole,
+    phaseSeq: item.phaseSeq,
     status: engine.active.has(item.id) ? "running" : "idle",
     running: engine.active.has(item.id),
     updated: item.createdAt,
   }));
+  // Full session export (unpaginated): include isolated child phase transcripts alongside the coordinator transcript.
+  const fullExport = !query.has("limit") && !query.has("before") && !query.has("after");
+  const childPhases = fullExport && !session.phaseRole ? siblings.filter((item) => item.phaseRole) : [];
+  const phaseTranscripts = childPhases.length
+    ? Object.fromEntries(await Promise.all(childPhases.map(async (item) => [item.id, await store.messages(item.id)])))
+    : undefined;
   return {
     session,
     parentSession: parent ? { id: parent.id, title: parent.title || "主会话", status: engine.active.has(parent.id) ? "running" : "idle" } : undefined,
     agentSessions,
+    ...(phaseTranscripts ? { phaseTranscripts } : {}),
     canWrite,
     ...history,
     folds: (await store.all("SELECT data FROM folds WHERE session=?", key)).map((r) => JSON.parse(r.data)),
@@ -199,7 +208,7 @@ export default defineEventHandler(async (event) => {
         const session = await store.session(id);
         return { ...session, ...owner(session.ownerId), employeeId: "", employeeName: "旁白 · " + name, taskText: "", kind: "narrator", running: false };
       }))).filter(Boolean);
-      return [...narratorSessions, ...await Promise.all(sessions.map(async (session) => {
+      return [...narratorSessions, ...await Promise.all(sessions.filter((session) => !session.phaseRole).map(async (session) => {
         const linked = session.taskId ? await store.employeeTask(session.taskId) : undefined;
         const employeeId = session.employeeId || linked?.employee || "";
         const profile = profiles.get(employeeId);
@@ -496,7 +505,7 @@ export default defineEventHandler(async (event) => {
         check(false, 404, "Private sessions cannot be shared");
 
       if (path.length === 2 && method === "GET")
-        return await sessionRecord(engine, session, getRequestURL(event).searchParams, !session.taskId && !session.agentChild && auth.canWrite(user, session));
+        return await sessionRecord(engine, session, getRequestURL(event).searchParams, !session.taskId && !session.agentChild && !session.phaseRole && auth.canWrite(user, session));
       if (path.length === 2 && method === "DELETE") {
         const family = await store.sessionFamily(key);
         assert(
@@ -521,7 +530,7 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
       if (["messages", "steer"].includes(path[2]) && method === "POST") {
-        assert(!session.agentChild, "分身记录只读，不能继续发消息");
+        assert(!session.agentChild && !session.phaseRole, "分身或阶段子记录只读，不能继续发消息");
         assert(!session.taskId, "Use employee controls to resume tasks");
         const message = await inputMessage(a, store, key);
         if (path[2] === "steer") {

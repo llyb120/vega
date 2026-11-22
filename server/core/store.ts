@@ -128,6 +128,10 @@ export type Session = {
   spawnParent?: string;
   agentName?: string;
   agentChild?: boolean;
+  /** Parent session id when this is an isolated code_agent / browser_agent phase session. */
+  phaseParent?: string;
+  phaseRole?: "code_agent" | "browser_agent";
+  phaseSeq?: number;
   createdAt: number;
 };
 export type AgentPhase = { seq: number; name: "code_agent" | "browser_agent" };
@@ -589,6 +593,38 @@ export class Store {
       allowSpawnFrozen: source.allowSpawnFrozen,
       sceneEnumFrozen: source.sceneEnumFrozen,
       readOnly: false,
+    });
+  }
+  /** Isolated specialist phase session (code_agent / browser_agent), sharing task files, tabs and workspace lock with its coordinator. */
+  async phaseStage(
+    source: Session,
+    role: "code_agent" | "browser_agent",
+    scene: "coding" | "computer",
+    model: string,
+    seq: number,
+  ) {
+    const label = role === "code_agent" ? "编码阶段" : "浏览器阶段";
+    return await this.newSession({
+      cwd: source.cwd,
+      title: `[${label}] ${source.title}`,
+      stageSource: source.id,
+      phaseParent: source.id,
+      phaseRole: role,
+      phaseSeq: seq,
+      ownerId: source.ownerId,
+      employeeId: source.employeeId,
+      taskId: source.taskId,
+      localAgent: source.localAgent,
+      localBrowser: source.localBrowser,
+      localPlatform: source.localPlatform,
+      clientId: source.clientId,
+      clientName: source.clientName,
+      browserClientId: source.browserClientId,
+      executionCwds: source.executionCwds,
+      readerIds: source.readerIds,
+      model,
+      scene,
+      readOnly: !!source.readOnly,
     });
   }
   async sessionsByStageSource(source: string) {

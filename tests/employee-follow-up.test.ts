@@ -41,9 +41,10 @@ const CLICK = { content: "点击第一条自然结果并核实目标页", status
 /** First delivery: search done in the computer scene of the task's own work session. */
 async function delivered(f: Awaited<ReturnType<typeof fixture>>) {
   let phase = 0;
-  f.engine.providers.chat = async () => {
-    if (phase++ === 0) return call("browser", "switch_scene", { scene: "computer", message: "百度搜索你好" });
-    return phase === 2 ? progress("p1", [SEARCH]) : complete("c1", "已搜索你好，结果页首条为百度百科");
+  f.engine.providers.chat = async (model) => {
+    if (phase++ === 0) return call("browser", "browser_agent", { task: "百度搜索你好" });
+    if (model.selection === "p/vision") return { role: "assistant", text: "已搜索你好，结果页首条为百度百科" };
+    return phase === 3 ? progress("p1", [SEARCH]) : complete("c1", "已搜索你好，结果页首条为百度百科");
   };
   const job = await f.segment(await f.add("在服务端浏览器百度搜索「你好」"));
   assert.equal(job.status, "done");
@@ -67,25 +68,27 @@ test("a direct follow-up long after delivery continues the original task and kee
     assert.equal(job.deliveries[0].summary, "已搜索你好，结果页首条为百度百科", "previous delivery is archived, not erased");
     assert.deepEqual(job.plan, [SEARCH], "plan kept");
 
-    assert.equal((await f.store.session(work)).scene, "lightweight", "delivery restored the scene the task entered computer from");
+    assert.equal((await f.store.session(work)).scene, "lightweight", "coordinator stays in lightweight throughout");
     let phase = 0;
     f.engine.providers.chat = async (model, _system, messages, definitions) => {
       if (phase++ === 0) {
-        assert.equal(model.selection, "p/light", "the follow-up starts from the restored origin scene");
-        assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("computer"), "the browser is one same-session switch away");
-        assert(messages.some(m => m.calls?.some(c => c.name === "switch_scene")), "earlier history of the same session is present");
+        assert.equal(model.selection, "p/light", "the follow-up starts from the lightweight coordinator");
+        assert(definitions.some(tool => tool.name === "browser_agent"), "browser specialist is directly callable");
+        assert(!definitions.some(tool => tool.name === "switch_scene"), "legacy switch_scene stays hidden on coordinator");
+        assert(messages.some(m => m.calls?.some(c => c.name === "browser_agent")), "earlier history of the same session is present");
         const latest = messages.filter(m => m.role === "user" && m.runtime !== "dynamic").at(-1)!.text!;
         assert.match(latest, /在同一结果页点击第一条自然结果/);
         assert.match(latest, /已交付任务的直接后续.*不要重做/s);
         assert.match(latest, /在百度搜索「你好」并核实结果页/, "existing plan is shown to the run");
-        return call("browser-again", "switch_scene", { scene: "computer", message: "在同一结果页点击第一条自然结果" });
+        return call("browser-again", "browser_agent", { task: "在同一结果页点击第一条自然结果" });
       }
-      if (phase === 2) {
-        assert.equal(model.selection, "p/vision");
+      if (model.selection === "p/vision") {
         assert(definitions.some(tool => tool.name === "chrome_navigate"));
-        return complete("early", "未做新步骤就交付");
+        assert(!definitions.some(tool => tool.name === "bash" || tool.name === "task_complete"));
+        return { role: "assistant", text: "已点击首条结果，打开百度百科词条页" };
       }
-      if (phase === 3) {
+      if (phase === 3) return complete("early", "未做新步骤就交付");
+      if (phase === 4) {
         const refused = messages.findLast(m => m.role === "tool" && m.name === "task_complete")!;
         assert(refused.error && /planRevision=0，revision=1/.test(refused.text!), "the old revision cannot be re-delivered before applying the supplement");
         return progress("p2", [SEARCH, CLICK]);
@@ -95,7 +98,7 @@ test("a direct follow-up long after delivery continues the original task and kee
     job = await f.segment(job);
     assert.equal(job.status, "done");
     assert.equal(job.workSession, work, "same work session");
-    assert.equal((await f.store.sessions()).filter(s => s.taskId).length, 1, "no new task session");
+    assert.equal((await f.store.sessions()).filter(s => s.taskId && !s.phaseRole).length, 1, "one main task session");
     assert.equal((await f.employee.state()).tasks.length, 1, "no new task");
     assert.deepEqual(job.plan, [SEARCH, CLICK]);
     assert.equal(job.summary, "已点击首条结果，打开百度百科词条页");

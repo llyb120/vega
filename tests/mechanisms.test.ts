@@ -266,7 +266,7 @@ test("Responses reasoning survives new user turns and invalid continuation falls
   assert.deepEqual((await store.messages(session.id))[1].opaque, [reasoning], "wire normalization must not alter stored native state");
   assert.equal(count, 3);
 });
-test("employee external-job defer and same-session Chrome switch keep one task session", async () => {
+test("employee external-job defer and isolated browser_agent phase keep one coordinator session", async () => {
   let calls = 0;
   const url = await http(async (req: any, res: any) => {
     const q = await body(req);
@@ -274,15 +274,14 @@ test("employee external-job defer and same-session Chrome switch keep one task s
     if (calls === 1)
       completion(res, {
         tool_calls: [
-          call("scene", "switch_scene", {
-            scene: "computer",
-            message: "inspect authorized page",
+          call("phase-browser", "browser_agent", {
+            task: "inspect authorized page",
           }),
         ],
       });
     else if (calls === 2) {
       assert.equal(q.model, "vision");
-      assert(!JSON.stringify(q.messages).includes("Chrome result"), "the computer scene starts before any Chrome result");
+      assert(!JSON.stringify(q.messages).includes("Chrome result"), "the browser specialist starts before any Chrome result");
       completion(res, { content: "Chrome result" });
     } else if (calls === 3) {
       assert(JSON.stringify(q.messages).includes("Chrome result"));
@@ -318,6 +317,8 @@ test("employee external-job defer and same-session Chrome switch keep one task s
   });
   const key = created.value.id;
   for (let segment = 0; segment < 4; segment++) {
+    const before = (await e.employee.state()).tasks.find((t) => t.id === key)!;
+    if (before.status === "done") break;
     await e.employee.update((s) => {
             const t = s.tasks.find((t) => t.id === key)!;
             t.status = "running";
@@ -333,9 +334,11 @@ test("employee external-job defer and same-session Chrome switch keep one task s
   const task = (await e.employee.state()).tasks.find((t) => t.id === key)!;
   assert.equal(task.status, "done");
   assert(task.workSession, "the task keeps its main session");
-  assert.equal((await e.store.sessions()).length, 1, "switch_scene runs in the same session instead of a second isolated one");
-  // 1 switch_scene + computer turn + deferred resume + progress + complete, then the closing turn.
-  assert.equal(calls, 6);
+  const allSessions = await e.store.sessions();
+  assert.equal(allSessions.filter((s) => !s.phaseRole).length, 1, "one coordinator session");
+  assert.equal(allSessions.filter((s) => s.phaseRole === "browser_agent").length, 1, "one isolated browser_agent phase session");
+  // 1 browser_agent call + vision specialist + defer, then deferred resume + progress + complete.
+  assert.equal(calls, 5);
   assert.equal(e.employee.busy.size, 0);
 });
 test("all Vue components use Vapor compiler, not VDOM fallback", () => {

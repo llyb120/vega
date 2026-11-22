@@ -101,6 +101,19 @@ test('export links stage details to original messages outside the displayed page
   assert.equal(data.messages[2].cliActivity.steps[0].detail, 'npm test');
 });
 
+test('export includes isolated child phase transcripts when present', async () => {
+  const payload: any = fixture();
+  const phase = { seq: 2, name: 'browser_agent' };
+  Object.assign(payload.messages[1], { calls: [{ id: 'b1', name: phase.name, arguments: { task: 'open pricing' } }] });
+  Object.assign(payload.messages[2], { role: 'tool', agentPhase: phase, name: phase.name, callId: 'b1', text: JSON.stringify({ status: 'completed', executor: 'model/p/vision', phaseSession: 'phase-1', result: 'ok', evidence: { visitedUrls: [{ url: 'https://example.test' }], tabs: [], screenshots: [], documentPaths: [], errors: [] } }) });
+  payload.phaseTranscripts = { 'phase-1': [{ seq: 1, role: 'user', text: 'open pricing' }, { seq: 2, role: 'assistant', text: 'ok' }] };
+  const state = mount(async path => path.includes('?limit=') ? { ...payload, messages: payload.messages.slice(-60), hasMore: true } : payload);
+  await state.refresh(); await state.exportSession();
+  const data = JSON.parse(await state.blobs[0].text());
+  assert.equal(data.agentPhases[0].phaseSession, 'phase-1');
+  assert.equal(data.phaseTranscripts['phase-1'].length, 2);
+});
+
 test("exporting the same session before and after loading older pages returns the same messages", async () => {
   const payload = fixture();
   const state = mount(async (path) => {

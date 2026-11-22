@@ -48,7 +48,7 @@ async function refresh() {
       sessionPath() + (initial ? "?limit=" + CHAT_PAGE_SIZE : "?after=" + last),
     );
     if (current !== version || request !== refreshVersion) return;
-    if (!result.session.taskId && !result.session.agentChild && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是热心市民的会话");
+    if (!result.session.taskId && !result.session.agentChild && !result.session.phaseRole && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是热心市民的会话");
     if (!initial && Number.isSafeInteger(result.lastSeq) && result.lastSeq < last) {
       record.value = null;
       messages.value = [];
@@ -99,7 +99,7 @@ async function loadOlder() {
       sessionPath() + "?before=" + first + "&limit=" + CHAT_PAGE_SIZE,
     );
     if (request !== version || messages.value[0]?.seq !== first) return;
-    if (!result.session.taskId && !result.session.agentChild && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是热心市民的会话");
+    if (!result.session.taskId && !result.session.agentChild && !result.session.phaseRole && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是热心市民的会话");
     const height = el?.scrollHeight ?? 0, top = el?.scrollTop ?? 0;
     messages.value = mergeMessages(result.messages || [], messages.value);
     hasMore.value = !!result.hasMore;
@@ -142,6 +142,7 @@ async function exportSession() {
       exportedAt: new Date().toISOString(),
       session: full.session,
       agentPhases: phaseIndex(full.messages),
+      ...(full.phaseTranscripts ? { phaseTranscripts: full.phaseTranscripts } : {}),
       messages: full.messages,
       folds: full.folds,
       fire: full.fire,
@@ -170,14 +171,15 @@ const stages = computed(() => {
   const parent = rec.parentSession;
   const agents = rec.agentSessions || [];
   const items = [];
-  const main = parent || (current.agentChild ? null : current);
+  const main = parent || (current.agentChild || current.phaseRole ? null : current);
   if (main) items.push({ id: main.id, title: main.title || "主会话", kind: "main", status: main.status, current: main.id === current.id });
   for (const agent of agents) {
     if (items.some((item) => item.id === agent.id)) continue;
-    items.push({ id: agent.id, title: agent.title || agent.agentName || "分身", kind: "agent", status: agent.status, current: agent.id === current.id });
+    const label = agent.phaseRole ? `${agent.phaseRole === "code_agent" ? "编码" : "浏览器"} #${agent.phaseSeq || ""}` : (agent.title || agent.agentName || "分身");
+    items.push({ id: agent.id, title: label, kind: agent.phaseRole || "agent", status: agent.status, current: agent.id === current.id });
   }
-  if (current.agentChild && !items.some((item) => item.id === current.id))
-    items.push({ id: current.id, title: current.title || current.agentName || "分身", kind: "agent", status: current.status, current: true });
+  if ((current.agentChild || current.phaseRole) && !items.some((item) => item.id === current.id))
+    items.push({ id: current.id, title: current.title || current.agentName || (current.phaseRole === "code_agent" ? "编码阶段" : "浏览器阶段"), kind: current.phaseRole || "agent", status: current.status, current: true });
   return items;
 });
 watch(
@@ -194,7 +196,7 @@ watch(() => props.model, async (model) => {
 onBeforeUnmount(() => { version++; });
 </script>
 <template>
-  <PageHeader :title="session?.title || '热心市民会话记录'" :subtitle="debug ? '调试会话' : (session?.agentChild ? '分身只读记录' : '只读执行记录')" :back="debug ? '调试会话' : '返回工作区'" @back="emit('back')">
+  <PageHeader :title="session?.title || '热心市民会话记录'" :subtitle="debug ? '调试会话' : (session?.phaseRole ? '阶段子记录' : session?.agentChild ? '分身只读记录' : '只读执行记录')" :back="debug ? '调试会话' : '返回工作区'" @back="emit('back')">
     <template #title-extra><span :class="['badge', running ? 'info' : '']"><span v-if="running" class="dot info pulse"></span>{{ running ? "执行中" : "执行记录" }}</span></template>
     <button v-if="debug" type="button" class="sm" :aria-pressed="raw" @click="raw = !raw"><Icon name="code" :size="14" /><span class="hide-mobile">{{ raw ? '整理视图' : '原始消息' }}</span></button>
     <button v-if="debug" type="button" class="sm" :disabled="busy || !record" title="导出该会话的全部记录（JSON）" aria-label="导出会话（JSON）" @click="exportSession"><Icon name="download" :size="14" /><span class="hide-mobile">导出会话</span></button>
@@ -227,7 +229,7 @@ onBeforeUnmount(() => { version++; });
       <span v-if="loadingOlder" class="spinner" role="status" aria-label="正在加载更早的记录"></span>
       <button v-else type="button" class="sm ghost" @click="loadOlder">上滑查看更早的记录</button>
     </div>
-    <ConversationTimeline v-if="!raw" :key="sessionId" :messages="messages" :running="running" :model="model" />
+    <ConversationTimeline v-if="!raw" :key="sessionId" :messages="messages" :running="running" :model="model" @open="emit('open', $event)" />
     <template v-else><article
       v-for="(message, i) in messages"
       :key="sessionId + '-' + (message.seq || i)"

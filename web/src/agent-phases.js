@@ -35,8 +35,12 @@ export function agentPhases(messages) {
     if (m.role === "tool" && m.name === p.name && (!p.callId || m.callId === p.callId)) {
       const receipt = parse(m.text);
       p.executor = receipt?.executor;
+      if (typeof receipt?.phaseSession === "string") p.phaseSession = receipt.phaseSession;
+      if (receipt?.evidence && typeof receipt.evidence === "object") p.evidence = receipt.evidence;
       if (typeof receipt?.result === 'string') p.resultSeq = m.seq;
       if (m.error) p.status = receipt?.status === "queued" ? "queued" : "error";
+      else if (receipt?.status === "blocked") p.status = "blocked";
+      else if (receipt?.status === "interrupted_by_steer") p.status = "interrupted";
       else if (receipt?.executor) p.status = "returned";
       else if (!m.agentPhase && receipt?.scene === scenes.get(p.name)) legacy = p;
     }

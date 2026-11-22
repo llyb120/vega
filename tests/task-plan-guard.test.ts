@@ -377,3 +377,34 @@ test("澄清等待多次续做保留原任务、工作原则和外部回执，�
     assert.equal((await store.sessions()).length, 1);
   } finally { employee.close(); await store.close(); }
 });
+
+test("反复微调计划措辞或错别字只锚定初始基线，不滚雪球；全步结束提示直接 task_complete", async () => {
+  const { store, employee, id } = await fixture();
+  try {
+    await running(employee, id);
+    await employee.execute(id, { action: "progress", text: "登记计划", plan: [
+      { content: "抓取官方定价页", status: "in_progress" },
+      { content: "撰写中文报告", status: "pending" },
+    ] });
+    // Draft typo rewrite #1
+    await employee.execute(id, { action: "progress", text: "微调1", plan: [
+      { content: "获取后官方定价页", status: "completed" },
+      { content: "撰写中文报告", status: "in_progress" },
+    ] });
+    // Typo fix rewrite #2 + all completed
+    const doneProgress = await employee.execute(id, { action: "progress", text: "微调2", plan: [
+      { content: "获取官方定价页", status: "completed" },
+      { content: "撰写中文报告", status: "completed" },
+    ] });
+    assert.equal(doneProgress.value.outlineReviewRequired, true);
+    assert.deepEqual(doneProgress.value.changedSteps, ["抓取官方定价页"], "transient typo draft must not snowball into changedSteps");
+    assert.match(doneProgress.value.next, /task_complete/, "settled plan must steer directly to task_complete");
+    // Restoring original baseline wording clears spurious review requirement
+    const restored = await employee.execute(id, { action: "progress", text: "恢复原步骤名", plan: [
+      { content: "抓取官方定价页", status: "completed" },
+      { content: "撰写中文报告", status: "completed" },
+    ] });
+    assert.equal(restored.value.outlineReviewRequired, undefined);
+    assert.match(restored.value.next, /task_complete/);
+  } finally { employee.close(); await store.close(); }
+});

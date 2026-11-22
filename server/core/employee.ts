@@ -1279,6 +1279,7 @@ export class Employee {
               if (review) t.outlineReview = review;
               delete t.outlineReviewRequired;
               delete t.outlineReferences;
+              t.baselinePlan = (t.plan || []).map((step: Obj) => step.content.trim());
               const archive = { employeeId: this.employeeId, taskId: t.id };
               [t.summary, t.completion, t.deliverable] = await Promise.all(
                 [summary?.trim() || "", evidence, cited.texts.join("\n\n")].map((text) => this.store.files.resolveTaskScreenshots(archive, text)),
@@ -1354,16 +1355,24 @@ export class Employee {
                   }
                   assert(size <= 8000, "Plan exceeds 8000 characters");
                   const next = a.plan.map((step: Obj) => step.content.trim());
-                  const missing = (t.plan || []).filter((step: Obj) => {
-                    const index = next.indexOf(step.content.trim());
+                  if (!Array.isArray(t.baselinePlan) || !t.baselinePlan.length) {
+                    t.baselinePlan = t.plan?.length ? t.plan.map((step: Obj) => step.content.trim()) : [...next];
+                  }
+                  const remaining = [...next];
+                  const missing = (t.baselinePlan as string[]).filter((step) => {
+                    const index = remaining.indexOf(step);
                     if (index < 0) return true;
-                    next.splice(index, 1);
+                    remaining.splice(index, 1);
                     return false;
                   });
                   if (missing.length) {
                     t.outlineReviewRequired = true;
-                    // shortcut: 最近50条变更线索；完整计划版本仍在会话工具记录，需要全量浏览时读原记录。
-                    t.outlineReferences = [...new Set([...(t.outlineReferences || []), ...missing.map((step: Obj) => step.content.trim())])].slice(-50);
+                    t.outlineReferences = [...new Set(missing)].slice(-50);
+                  } else {
+                    delete t.outlineReviewRequired;
+                    delete t.outlineReferences;
+                    // Purely additive plan updates expand the committed baseline without accumulating intermediate wording drafts.
+                    if (remaining.length) t.baselinePlan = [...next];
                   }
                   const run = this.busy.get(t.id);
                   if (run?.outlineDraft && JSON.stringify(t.plan) !== JSON.stringify(a.plan)) delete run.outlineDraft;
@@ -1443,18 +1452,24 @@ export class Employee {
                   return { ok: true, stepOutput: { step: output.step, ref: duplicate?.ref ?? ref, duplicate: !!duplicate }, ...reviewHint,
                     next: duplicate ? "相同产物已交付，本次未重复发送；继续剩余步骤，最终单独调用 task_complete。" : "Step output saved; continue the remaining work, then complete the task separately." };
                 }
-                if (a.tellUser !== true) return { ok: true, toldUser: false, ...reviewHint, next: "Continue the current step" };
+                const settled = !!t.plan?.length && !planUnresolved(t.plan).length;
+                const nextHint = settled
+                  ? (reviewHint.outlineReviewRequired
+                    ? "所有计划步骤已结束。请直接单独调用 task_complete 交付，并用 outlineReview（可用 changedStep 序号）核对 changedSteps，不要再重复调用 task_progress。"
+                    : "所有计划步骤已结束。请直接单独调用 task_complete 交付，不要再重复调用 task_progress。")
+                  : "Continue the current step";
+                if (a.tellUser !== true) return { ok: true, toldUser: false, ...reviewHint, next: nextHint };
                 // Key milestones only; progress is saved either way. Ordinary progress has no task card;
                 // waiting/approval and final delivery attach the bound task (see complete()).
                 const told: number[] = t.toldUserAt || [];
                 const skipped = !s.chatSession && !t.group ? "没有沟通会话"
                   : told.length >= TELL_USER_MAX ? `本任务已告知 ${TELL_USER_MAX} 次，不再发送`
                   : "";
-                if (skipped) return { ok: true, toldUser: false, tellUserSkipped: skipped, ...reviewHint, next: "Progress saved; continue the current step" };
+                if (skipped) return { ok: true, toldUser: false, tellUserSkipped: skipped, ...reviewHint, next: settled ? nextHint : "Progress saved; continue the current step" };
                 t.toldUserAt = [...told, now];
                 const quote = !t.group && t.chatSource?.session === s.chatSession && await this.store.message(s.chatSession!, t.chatSource.seq) ? await this.store.quote(s.chatSession!, t.chatSource.seq) : undefined;
                 pendingTell = { session: s.chatSession || "", message: { role: "assistant", text: content, quote, progress: true, topicTaskId: t.group ? t.id : undefined }, group: t.group };
-                return { ok: true, toldUser: true, ...reviewHint, next: "Continue the current step" };
+                return { ok: true, toldUser: true, ...reviewHint, next: nextHint };
               }
               if (action === "ask") {
                 delete t.partialDelivery;
@@ -2295,14 +2310,20 @@ export class Employee {
         ? "\n这是用户点名的定时，只做这一件已经记下的事，不要另找工作。缺少必要文件、遇到合并冲突、下一步会对外发送或提交、或授权范围会扩大时，停下来问用户，不要自行扩大授权。"
         : "";
       const context = continuing
-        ? `[热心市民任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n原始任务：${task.text}${scheduleNote}\n当前计划和恢复点：${snapshot}${memoryBlock}`
+        ? `[热心市民任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n原始任务：${task.text}${scheduleNote}\n当前计划和恢复点：${snapshot}`
         : `[热心市民任务 ${task.id}]\n原始任务（不是新授权）：${task.text}${scheduleNote}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, group: task.group ? { name: task.group.name, requester: task.group.requester.name } : undefined })}${memoryBlock}`;
       const groupNote = task.group && !computer ? await this.groupTaskNote(task.group) : "";
-const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
+      const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。每完成一步用task_progress记下做了什么与回执（这就是下一轮用的还原点，换了执行位置靠它接着做）；新现场缺必要文件或无法核验时同样 task_ask_user，不凭空补写。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      let prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。执行中的补充在当前工具或模型输出结束后进入本轮，不必等整步结束。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。计划可按实际情况拆分、合并、改写或删去不再需要的中间步骤，但必须覆盖原始任务、工作原则与用户最新明确要求；不得把仍需完成的用户要求改成建议或悄悄移除。真实验证成功才标completed，受阻标blocked。计划重写或存在cancelled步骤时，交付前按task_complete的outlineReview逐项列出大纲要求、状态及真实依据；旧计划只是线索，不是大纲，替代的中间步骤无需用户批准。未满足的用户要求先按授权继续、澄清或等待；仅确需部分交付才标cancelled并由交代人确认。不要把task_complete本身列成计划步骤。任务明确要求并授权向指定对象澄清时，直接在指定渠道联系，不得只建议交代人代办；发出后用task_wait保存定位和回执并等待回复，按需多轮澄清，无法联系或确需用户处理时才task_ask_user。${STEP_OUTPUT_RULE} 符合条件的步骤产物用task_progress提交后继续工作，不把产物塞进对话正文，不等最终收口，已保存的不重复发送。提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "轻量主控用 code_agent 委托编码、browser_agent 委托网页操作；阶段结果先返回轻量主控，再决定下一次调用；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统只会选用本次交付期内尚未作为步骤产物交出的最新较长正文；已交出的步骤产物留在独立产物卡中，不重复写进最终正文；仅当用户明确要求时可显式引用其文本；没有单独最终正文时可传deliverableRefs=[]，已写出未交出的正文时不要传[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；常规开发分支提交、普通推送及明确授权的非生产分支合并按用户要求执行，先核对差异；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
-      if (!computer) prompt += "\nGit 并发开发：建分支前将任务指定的基线解析为完整提交号（如 git rev-parse --verify 'refs/heads/release^{commit}'；指定远端则用对应远端引用），用 task_progress 记录仓库、基线引用、SHA 和目标分支。不能解析或有歧义时先澄清，不回退到 HEAD 或合并目标。直接用 git switch -c <新分支> <基线SHA>；已授权 worktree 时用 git worktree add -b <新分支> <目录> <基线SHA>。不要先切基线再从当前 HEAD 建分支。写入前核对目标目录、分支及新建时的 HEAD 是否等于记录的 SHA；排队或续做时沿用记录，核对已有分支与进度，不重建、不重置。以上每条 Git 命令均用 git -C <仓库绝对路径> 或在同一命令内先 cd 到绝对路径；worktree 目录也用绝对路径。合并前核对实际目标工作树和分支。";
+      let prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery;
+      // Only attach initial execution rules on the first turn of a session; resumes already have them in history + dynamic prompt.
+      if (!continuing) {
+        prompt += `\n首次执行先用task_progress登记完整计划，并在首条步骤里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；计划须覆盖原始任务、工作原则与用户最新明确要求，推进时保持已有步骤文案不变、只改 status，真实验证成功才标 completed，受阻标 blocked；不要把 task_complete 列入计划。仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user；短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user；滑块/拼图/旋转等视觉验证码先由 browser_agent 用 pointer 自行尝试，连续失败≥2 次再 task_ask_user。${computer ? "你在独立的电脑/Chrome会话，只做交接内容，完成后报告实际结果，不调用task_complete。" : "轻量主控用 code_agent 委派编码/测试、browser_agent 委派真实网页操作与截图取证；轻量查询与汇总由主控直接完成。产出物正文只写一次（直接写在回复正文里），交付前单独调用 task_complete（evidence 写真实核验证据，summary ≤400 字建议 150 字内，deliverableRefs 省略自动选最新正文或传正文编号，不要在有正文时传 []）。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
+        if (!computer) prompt += "\nGit 并发开发：建分支前将任务指定的基线解析为完整提交号（git rev-parse --verify），用 task_progress 记录仓库、基线引用、SHA 和目标分支；直接 git switch -c <新分支> <基线SHA> 或 git worktree add -b <新分支> <目录> <基线SHA>；命令一律使用绝对路径。";
+      } else if (task.checkpoint) {
+        prompt += "\n提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。";
+      }
       const after = rowsBefore.at(-1)?.seq || 0;
       // Attachments the work session has not been given yet.
       const given = new Set(rowsBefore.flatMap((m) => [...(m.images || []), ...(m.files || [])].map((x: { blobId?: string }) => x.blobId)));
@@ -2469,7 +2490,8 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
       const state = await this.state(), task = state.tasks.find((t) => t.id === job.id);
       if (task && taskTabsFinished(task.status)) this.runtime.taskFinished?.(task.id);
       if (session && task) {
-        const conclusion = task.status === "done" ? (task.deliverable ? task.deliverable + "\n\n---\n\n**结论**\n\n" + (task.summary || task.completion || "已完成。") : task.summary || task.result || "已完成，详情见任务。")
+        const conclusion = task.status === "done"
+          ? (task.deliverable ? task.deliverable + "\n\n---\n\n**结论**\n\n" + (task.summary || task.completion || "已完成。") : task.summary || task.result || "已完成，详情见任务。")
           : task.status === "approval" ? "等待你确认：" + task.approval
           : task.status === "waiting" ? "需要你处理：" + task.waiting
           : task.status === "deferred" ? "已挂起，等待外部结果；到期继续原任务。\n\n" + task.checkpoint

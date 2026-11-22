@@ -201,7 +201,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
             evidence: str("实际回执、验证证据或不适用/未完成的原因", { minLength: 1, maxLength: 2000 }),
           }, ["status", "evidence"]) },
           outlineReviewRetry: str("仅补交缺项时复制最近一次 outline_review_incomplete 的同名字段；只传此字段及缺项 outlineReview，不传 evidence、summary 或 deliverableRefs", { minLength: 1, maxLength: 100 }),
-          summary: str("交付摘要，1–400 字，建议 100–150 字以内；先结论，简单任务一两句即可，勿写小标题清单", { minLength: 1, maxLength: 400 }),
+          summary: str("交付摘要，1–400 字（务必控制在 150 字以内）；只写核心结论、重要限制或需用户处理事项，勿超 400 字、勿写小标题清单", { minLength: 1, maxLength: 400 }),
           deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则选用尚未作为步骤产物交出的最新较长正文；仅无单独最终正文时传 []" } }));
     }
   }
