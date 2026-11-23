@@ -792,7 +792,7 @@ test("one model for every scene: lightweight coordinator delegates code_agent th
   } finally { await engine.close(); await store.close(); }
 });
 
-test("Fork-Join phase barrier: concurrent code_agent + browser_agent run in parallel and block coordinator until both finish; mixed batches and pending bash are rejected", async () => {
+test("Fork-Join phase barrier: mixed coordinator + concurrent code_agent/browser_agent run together while standalone tools still cannot mix with phases", async () => {
   const { store, engine, add, segment } = await fixture();
   const config = await engine.config();
   config.scheduler = { globalSlots: 4, perEmployeeSlots: 4 };
@@ -806,32 +806,41 @@ test("Fork-Join phase barrier: concurrent code_agent + browser_agent run in para
     if (model.selection === "p/light") {
       coordTurn++;
       if (coordTurn === 1) {
-        // Mixed batch with coordinator tool must be rejected without executing either
+        // Standalone tools like task_complete still cannot mix with phase tools
         return { role: "assistant", calls: [
-          { id: "mix-code", name: "code_agent", arguments: { task: "分析代码" } },
-          { id: "mix-read", name: "context_budget", arguments: {} },
+          { id: "bad-code", name: "code_agent", arguments: { task: "分析代码" } },
+          { id: "bad-done", name: "task_complete", arguments: { evidence: "premature", summary: "premature" } },
         ] };
       }
       if (coordTurn === 2) {
-        const err = messages.findLast(m => m.role === "tool" && m.callId === "mix-code")!;
-        assert(err.error && /不能与主控普通工具混在同一批/.test(err.text!));
-        // Now issue a pure concurrent phase batch: code_agent + browser_agent together
+        const err = messages.findLast(m => m.role === "tool" && m.callId === "bad-code")!;
+        assert(err.error && /task_complete must be called alone/.test(err.text!));
+        // Mixed batch: task_progress + context_budget + concurrent code_agent + browser_agent together in ONE turn!
         return { role: "assistant", calls: [
+          { id: "mix-plan", name: "task_progress", arguments: { message: "登记计划并并发执行", plan: [{ content: "检查配置与定价页", status: "in_progress" }] } },
           { id: "par-code", name: "code_agent", arguments: { task: "检查服务端配置" } },
           { id: "par-browser", name: "browser_agent", arguments: { task: "抓取定价页面" } },
+          { id: "mix-budget", name: "context_budget", arguments: {} },
         ] };
       }
       if (coordTurn === 3) {
-        // Coordinator only resumes after BOTH specialists completed
+        // Coordinator only resumes after ALL coordinator tools and BOTH specialists finished, in original call order
+        const planReceipt = messages.findLast(m => m.role === "tool" && m.callId === "mix-plan")!;
         const codeReceipt = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "par-code")!.text!);
         const browserReceipt = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "par-browser")!.text!);
+        const budgetReceipt = messages.findLast(m => m.role === "tool" && m.callId === "mix-budget")!;
+        assert(!planReceipt.error && !budgetReceipt.error);
         assert.equal(codeReceipt.status, "completed");
         assert.equal(browserReceipt.status, "completed");
         assert.match(codeReceipt.result, /服务端配置已核对/);
         assert.match(browserReceipt.result, /定价页面已核对/);
-        return verified();
+        // Close out in ONE turn: task_progress(completed) + task_complete together!
+        return { role: "assistant", calls: [
+          { id: "close-plan", name: "task_progress", arguments: { message: "全部核对完成", plan: [{ content: "检查配置与定价页", status: "completed" }] } },
+          { id: "close-done", name: "task_complete", arguments: { deliverableRefs: [], evidence: "服务端配置与定价页均已核对。", summary: "核对完成。" } },
+        ] };
       }
-      return completed();
+      throw Error("unexpected extra coordinator turn " + coordTurn);
     }
     activeSpecialists++;
     peakSpecialists = Math.max(peakSpecialists, activeSpecialists);
@@ -844,10 +853,16 @@ test("Fork-Join phase barrier: concurrent code_agent + browser_agent run in para
     const job = await segment(await add("并发检查代码与网页"));
     assert.equal(job.status, "done");
     assert.equal(peakSpecialists, 2, "code_agent and browser_agent must execute concurrently");
-    assert.equal(coordTurn, 4);
+    assert.equal(coordTurn, 3, "mixed launch + single-turn closeout completes in 3 coordinator turns");
     const sessions = await store.sessions();
     assert.equal(sessions.filter(s => s.phaseRole === "code_agent").length, 1);
     assert.equal(sessions.filter(s => s.phaseRole === "browser_agent").length, 1);
+    const phases = phaseIndex(await store.messages(job.workSession));
+    assert.deepEqual(
+      phases.map(p => [p.name, p.status]),
+      [["code_agent", "error"], ["code_agent", "returned"], ["browser_agent", "returned"]],
+      "rejected and mixed-batch phases both index cleanly in UI timeline",
+    );
   } finally { await engine.close(); await store.close(); }
 });
 
@@ -948,7 +963,7 @@ test("same-batch duplicate browser_agent calls short-circuit immediately after t
   } finally { await engine.close(); await store.close(); }
 });
 
-test("phase graceful wrap-up turn preserves collected work at maxTurns instead of picking an opening filler", async () => {
+test("complex browser_agent phase has no artificial turn limit and finishes multi-step collection with host-verified evidence", async () => {
   const { store, engine, add, segment } = await fixture();
   (engine as any).chromeFor = async () => ({
     execute: async () => ({
@@ -957,16 +972,17 @@ test("phase graceful wrap-up turn preserves collected work at maxTurns instead o
       pages: [{ url: "https://cursor.com/pricing", headings: [{ level: "H1", text: "Pricing" }], visibleText: "Teams $30/$100/$200" }],
     }),
   });
-  let coordTurn = 0, browserTurn = 0, sawNearLimit = false, sawForcedWrapUp = false;
+  let coordTurn = 0, browserTurn = 0;
   engine.providers.chat = async (model, _system, messages, definitions) => {
     if (model.selection === "p/light") {
       coordTurn++;
-      if (coordTurn === 1) return call("b-wrap", "browser_agent", { task: "读取 Teams 面板" });
+      if (coordTurn === 1) return call("b-long", "browser_agent", { task: "完整采集多站点与多面板定价" });
       if (coordTurn === 2) {
-        const receipt = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-wrap")!.text!);
+        const receipt = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-long")!.text!);
         assert.equal(receipt.status, "completed");
-        assert.equal(receipt.truncatedByTurnLimit, true);
-        assert.match(receipt.result, /Teams 面板实测价格/);
+        assert.equal(receipt.truncatedByTurnLimit, undefined);
+        assert.equal(receipt.evidence.visitedUrls[0].url, "https://cursor.com/pricing");
+        assert.match(receipt.result, /全部面板采集完成/);
         assert.doesNotMatch(receipt.result, /我先查找标签/);
         return verified();
       }
@@ -974,23 +990,20 @@ test("phase graceful wrap-up turn preserves collected work at maxTurns instead o
     }
     browserTurn++;
     const payload = JSON.stringify(messages);
-    if (payload.includes("[阶段即将到达轮次上限]")) sawNearLimit = true;
-    if (definitions.length === 0) {
-      sawForcedWrapUp = true;
-      assert(payload.includes("[阶段强制收尾]"));
-      return { role: "assistant", text: "Teams 面板实测价格：$30 / $100 / $200。" };
+    assert(!payload.includes("[阶段即将到达轮次上限]") && !payload.includes("[阶段强制收尾]"), "no artificial turn-limit warning or cutoff");
+    assert(definitions.some(d => d.name === "chrome_inspect"), "tools remain available past 18 turns");
+    if (browserTurn <= 22) {
+      return {
+        role: "assistant",
+        text: browserTurn === 1 ? "我先查找标签。" : "",
+        calls: [{ id: "t-" + browserTurn, name: "chrome_inspect", arguments: { tabTag: "C2-ok" } }],
+      };
     }
-    return {
-      role: "assistant",
-      text: browserTurn === 1 ? "我先查找标签。" : "",
-      calls: [{ id: "t-" + browserTurn, name: "chrome_inspect", arguments: { tabTag: "C2-ok" } }],
-    };
+    return { role: "assistant", text: "全部面板采集完成：Teams $30 / $100 / $200。" };
   };
   try {
-    const job = await segment(await add("读取 Teams 面板"));
+    const job = await segment(await add("完整采集多站点定价"));
     assert.equal(job.status, "done");
-    assert.equal(browserTurn, 18, "browser_agent runs up to 18 turns with final wrap-up turn");
-    assert.equal(sawNearLimit, true);
-    assert.equal(sawForcedWrapUp, true);
+    assert.equal(browserTurn, 23, "browser_agent finishes all 22 tool turns plus concluding summary without forced truncation");
   } finally { await engine.close(); await store.close(); }
 });

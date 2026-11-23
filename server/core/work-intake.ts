@@ -13,7 +13,7 @@ export const FEW_MINUTES = 3;
 const MINUTE = 60_000;
 const ENDED = new Set(["done", "failed", "stopped", "cancelled", "sealed"]);
 const WEEKDAY = "日一二三四五六";
-const ASKED = /检查|查看|汇总|提醒|看|跑|执行|同步|汇报|巡检|确认|盯|跟进|整理|统计|通知|复查|核对|更新|收一下|记一下/;
+const ASKED = /检查|查看|汇总|提醒|看|跑|执行|同步|汇报|巡检|确认|盯|跟进|整理|统计|通知|复查|核对|更新|收一下|记一下|发一下|发送|发给|拉取|抓取|部署|备份|清理|重启|叫我|告诉我/;
 
 export type WorkKind = "issue" | "ci" | "thread" | "schedule" | "mention" | "assignment" | "message";
 export type WorkItem = { kind: WorkKind; id: string };
@@ -123,13 +123,78 @@ function minutesOf(raw: string | undefined) {
 const PART = "(凌晨|早上|上午|中午|下午|晚上)";
 const HM = "(\\d{1,2})\\s*(?:[:：点时])\\s*(\\d{1,2})?";
 
+/** 屏蔽括号、引号、反引号内的举例/说明/引用文本，保持字符偏移不变，避免将业务术语误判为定时指令。 */
+function maskEmbeddedExamples(text: string) {
+  let out = text;
+  const patterns = [
+    /（[^（）\n]*）/g,
+    /\([^()\n]*\)/g,
+    /「[^「」\n]*」/g,
+    /『[^『』\n]*』/g,
+    /“[^“”\n]*”/g,
+    /"[^"\n]*"/g,
+    /‘[^‘’\n]*’/g,
+    /'[^'\n]*'/g,
+    /`[^`\n]*`/g,
+  ];
+  for (let pass = 0; pass < 3; pass++) {
+    let next = out;
+    for (const re of patterns) next = next.replace(re, (m) => " ".repeat(m.length));
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+const DESCRIPTIVE_BEFORE = /(?:不要|别再|不用|无需|不必|取消|停止|不再|非|不是|如|例如|比如|譬如|类似|像是|包括|包含|所谓|写着|写明|叫做|称为|关于|查清|查询|了解|统计|说明|规则|额度|上限|周期|频率|支持|是否)\s*[：:是为]?\s*$/;
+const METRIC_OR_MODIFIER_AFTER = /^\s*(?:的|内|里|中|间|制|档|配额|额度|上限|下限|限制|限额|限流|次数|条|个|元|美元|美金|积分|tokens?|prompts?|requests?|rpm|tpm|qps|失败|报错|异常|超时|过期|刷新|重置|清零|扣费|计费|结算|发放|变化|变动|波动|涨|跌|触发|产生|生成|出现|发布|上线|截止|前|之前|以前|以内)/i;
+const STRUCTURED_BRIEF = /(?:^|\s)[1-9][.、）)]\s*[\s\S]*?(?:^|\s)[2-9][.、）)]/;
+
+function clauseBounds(text: string, index: number, length: number) {
+  let start = 0;
+  for (let i = index - 1; i >= 0; i--) {
+    if (/[。！？；;\n]/.test(text[i])) { start = i + 1; break; }
+  }
+  let end = text.length;
+  for (let i = index + length; i < text.length; i++) {
+    if (/[。！？；;\n]/.test(text[i])) { end = i; break; }
+  }
+  return { start, end };
+}
+
 function stripped(text: string, phrase: string) {
   return text.replace(phrase, " ").replace(/^(?:请|帮我|记得|麻烦)+/u, "").replace(/\s+/g, " ").trim();
 }
 
-function finish(source: string, phrase: string, schedule: ExplicitSchedule) {
+function finish(source: string, masked: string, match: RegExpMatchArray, schedule: ExplicitSchedule) {
+  const phrase = match[0];
+  const index = match.index ?? -1;
+  if (index < 0) return;
+
+  const { start, end } = clauseBounds(masked, index, phrase.length);
+  const clauseBefore = masked.slice(start, index);
+  const clauseAfter = masked.slice(index + phrase.length, end);
+  const beforeAll = masked.slice(0, index).trim();
+  const clause = masked.slice(start, end);
+
+  if (DESCRIPTIVE_BEFORE.test(clauseBefore)) return;
+  if (/不要每|别再每|不用每|取消每|不再每/.test(clause)) return;
+  if (METRIC_OR_MODIFIER_AFTER.test(clauseAfter)) return;
+  // 「每 N 分钟/小时 X 次」只有在紧接动作动词时才可能是定时（如「每 5 分钟一次检查」），否则多为频率描述（如「每 5 分钟一次失败」/「每 5 小时 100 次」）。
+  if (/^\s*次(?:\s*$|\s*[^检查查看汇总提醒看跑执行同步汇报巡检确认盯跟进整理统计通知复查核对更新发拉抓部备清重叫告])/.test(clauseAfter)) return;
+
+  const totalChars = [...source].length;
+  const isShortSingleIntent = totalChars <= 120 && !STRUCTURED_BRIEF.test(source);
+  // 长文本/多条目需求说明中，只有句首（首句前缀 ≤ 40 字且未进入条目/冒号正文）出现的时间周期才视为定时指令；
+  // 防止把多段需求说明书里夹带的“每 5 小时”“周三”“今天下午 3 点”等业务条件误判为定时任务。
+  const atRequestHead = start === 0 && [...beforeAll].length <= 40 && !/[：:]/.test(beforeAll) && !/(?:^|\s)[1-9][.、）)]/.test(beforeAll);
+  if (!atRequestHead && !isShortSingleIntent) return;
+
   const action = stripped(source, phrase);
-  if (action && !ASKED.test(source)) return;
+  if (action) {
+    const scope = isShortSingleIntent ? masked : clause;
+    if (!ASKED.test(scope)) return;
+  }
   const text = action || source.trim();
   return {
     action: text,
@@ -145,54 +210,55 @@ function finish(source: string, phrase: string, schedule: ExplicitSchedule) {
 export function parseExplicitSchedule(text: string, now: number) {
   const source = text.replace(/\s+/g, " ").trim();
   if (!source || [...source].length > 8000) return;
-  if (/不要每|别再每|不用每|取消每/.test(source)) return;
+  const masked = maskEmbeddedExamples(source);
+  if (/不要每|别再每|不用每|取消每/.test(masked)) return;
 
-  const fewMin = source.match(/每隔\s*几\s*分钟|每\s*几\s*分钟/);
-  if (fewMin) return finish(source, fewMin[0], { dueAt: now + FEW_MINUTES * MINUTE, repeat: { kind: "interval", everyMinutes: FEW_MINUTES }, request: source });
-  const fewHour = source.match(/每隔\s*几\s*小时|每\s*几\s*小时/);
-  if (fewHour) return finish(source, fewHour[0], { dueAt: now + FEW_MINUTES * 60 * MINUTE, repeat: { kind: "interval", everyMinutes: FEW_MINUTES * 60 }, request: source });
+  const fewMin = masked.match(/每隔\s*几\s*分钟|每\s*几\s*分钟/);
+  if (fewMin) return finish(source, masked, fewMin, { dueAt: now + FEW_MINUTES * MINUTE, repeat: { kind: "interval", everyMinutes: FEW_MINUTES }, request: source });
+  const fewHour = masked.match(/每隔\s*几\s*小时|每\s*几\s*小时/);
+  if (fewHour) return finish(source, masked, fewHour, { dueAt: now + FEW_MINUTES * 60 * MINUTE, repeat: { kind: "interval", everyMinutes: FEW_MINUTES * 60 }, request: source });
 
-  const everyMin = source.match(/每隔\s*(\d+)\s*分钟|每\s*(\d+)\s*分钟/);
+  const everyMin = masked.match(/每隔\s*(\d+)\s*分钟|每\s*(\d+)\s*分钟/);
   if (everyMin) {
     const n = minutesOf(everyMin.slice(1).find(Boolean));
     if (!n) return;
-    return finish(source, everyMin[0], { dueAt: now + n * MINUTE, repeat: { kind: "interval", everyMinutes: n }, request: source });
+    return finish(source, masked, everyMin, { dueAt: now + n * MINUTE, repeat: { kind: "interval", everyMinutes: n }, request: source });
   }
-  const everyHour = source.match(/每隔\s*(\d+)\s*小时|每\s*(\d+)\s*小时/);
+  const everyHour = masked.match(/每隔\s*(\d+)\s*小时|每\s*(\d+)\s*小时/);
   if (everyHour) {
     const n = minutesOf(String(Number(everyHour.slice(1).find(Boolean)) * 60));
     if (!n) return;
-    return finish(source, everyHour[0], { dueAt: now + n * MINUTE, repeat: { kind: "interval", everyMinutes: n }, request: source });
+    return finish(source, masked, everyHour, { dueAt: now + n * MINUTE, repeat: { kind: "interval", everyMinutes: n }, request: source });
   }
-  const afterMin = source.match(/(\d+)\s*分钟(?:后|之后)/);
+  const afterMin = masked.match(/(\d+)\s*分钟(?:后|之后)/);
   if (afterMin) {
     const n = minutesOf(afterMin[1]);
     if (!n) return;
-    return finish(source, afterMin[0], { dueAt: now + n * MINUTE, request: source });
+    return finish(source, masked, afterMin, { dueAt: now + n * MINUTE, request: source });
   }
-  const afterHour = source.match(/(\d+)\s*小时(?:后|之后)/);
+  const afterHour = masked.match(/(\d+)\s*小时(?:后|之后)/);
   if (afterHour) {
     const n = minutesOf(String(Number(afterHour[1]) * 60));
     if (!n) return;
-    return finish(source, afterHour[0], { dueAt: now + n * MINUTE, request: source });
+    return finish(source, masked, afterHour, { dueAt: now + n * MINUTE, request: source });
   }
 
-  const daily = source.match(new RegExp(`每天(?:\\s*${PART})?\\s*${HM}`));
+  const daily = masked.match(new RegExp(`每天(?:\\s*${PART})?\\s*${HM}`));
   if (daily) {
     const at = clock(daily[1], daily[2], daily[3]);
     if (!at) return;
     const repeat: Repeat = { kind: "daily", time: at.time };
-    return finish(source, daily[0], { dueAt: nextDue(repeat, now), repeat, request: source });
+    return finish(source, masked, daily, { dueAt: nextDue(repeat, now), repeat, request: source });
   }
-  const weekly = source.match(new RegExp(`每\\s*(?:周|星期)([一二三四五六日天])(?:\\s*${PART})?(?:\\s*${HM})?`));
+  const weekly = masked.match(new RegExp(`每\\s*(?:周|星期)([一二三四五六日天])(?:\\s*${PART})?(?:\\s*${HM})?`));
   if (weekly) {
     const day = WEEKDAY.indexOf(weekly[1] === "天" ? "日" : weekly[1]);
     const at = clock(weekly[2], weekly[3], weekly[4]) || clock("早上", undefined, undefined);
     if (day < 0 || !at) return;
     const repeat: Repeat = { kind: "weekly", weekday: day, time: at.time };
-    return finish(source, weekly[0], { dueAt: nextDue(repeat, now), repeat, request: source });
+    return finish(source, masked, weekly, { dueAt: nextDue(repeat, now), repeat, request: source });
   }
-  const relative = source.match(new RegExp(`(今天|明天|后天)(?:\\s*${PART})?(?:\\s*${HM})?`));
+  const relative = masked.match(new RegExp(`(今天|明天|后天)(?:\\s*${PART})?(?:\\s*${HM})?`));
   if (relative) {
     const at = clock(relative[2], relative[3], relative[4]);
     if (!at) return;
@@ -200,20 +266,20 @@ export function parseExplicitSchedule(text: string, now: number) {
     const p = beijingParts(now);
     const dueAt = beijingTimestamp(p.year, p.month, p.day + shift, at.hour, at.minute);
     if (dueAt <= now) return;
-    return finish(source, relative[0], { dueAt, request: source });
+    return finish(source, masked, relative, { dueAt, request: source });
   }
-  const weekday = source.match(new RegExp(`(?:周|星期)([一二三四五六日天])(?:\\s*${PART})?(?:\\s*${HM})?`));
+  const weekday = masked.match(new RegExp(`(?:周|星期)([一二三四五六日天])(?:\\s*${PART})?(?:\\s*${HM})?`));
   if (weekday) {
     const day = WEEKDAY.indexOf(weekday[1] === "天" ? "日" : weekday[1]);
     const at = clock(weekday[2], weekday[3], weekday[4]) || clock("早上", undefined, undefined);
     if (day < 0 || !at) return;
-    return finish(source, weekday[0], { dueAt: nextClock(now, at.hour, at.minute, day), request: source });
+    return finish(source, masked, weekday, { dueAt: nextClock(now, at.hour, at.minute, day), request: source });
   }
-  const absolute = source.match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/);
+  const absolute = masked.match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/);
   if (absolute) {
     const dueAt = beijingTimestamp(Number(absolute[1]), Number(absolute[2]) - 1, Number(absolute[3]), Number(absolute[4]), Number(absolute[5]));
     if (!Number.isFinite(dueAt) || beijingDateTime(dueAt) !== absolute[0] || dueAt <= now) return;
-    return finish(source, absolute[0], { dueAt, request: source });
+    return finish(source, masked, absolute, { dueAt, request: source });
   }
   return;
 }

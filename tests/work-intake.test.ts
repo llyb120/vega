@@ -60,8 +60,14 @@ test("explicit schedules parse one-shot times and repeating cadences, including 
   assert.equal(parseExplicitSchedule("有空看看有没有新问题", now), undefined);
   assert.equal(parseExplicitSchedule("有空就去仓库里找点事做", now), undefined);
   assert.equal(parseExplicitSchedule("这个构建每 5 分钟失败一次", now), undefined);
+  assert.equal(parseExplicitSchedule("帮我看一下，这个构建每 5 分钟失败一次", now), undefined);
   assert.equal(parseExplicitSchedule("不要每 5 分钟检查", now), undefined);
   assert.equal(parseExplicitSchedule("今天早上 9 点检查 CI", now), undefined);
+  assert.equal(parseExplicitSchedule("查清 GLM 套餐：额度规则（如每 5 小时 prompts 数、每周/每月上限）并核对价格", now), undefined);
+  assert.equal(parseExplicitSchedule("目标：查清智谱 GLM 当前的各项套餐。\n1. 区分两类套餐。\n2. 每档给出价格、额度规则如每 5 小时 prompts 数与并发限制，确认差异。", now), undefined);
+  assert.equal(parseExplicitSchedule("帮我核对一下今天下午 6 点前要交的报告", now), undefined);
+  assert.equal(parseExplicitSchedule("查清每天 9 点的同步任务报错原因", now), undefined);
+  assert.equal(parseExplicitSchedule("帮我检查构建，每隔 5 分钟", now)?.schedule.repeat?.kind, "interval");
 
   assert.equal(
     repeatOf("每隔 1 分钟检查构建", now).item.id,
@@ -435,6 +441,58 @@ test("a held authority gate does not run, and a user task beats a due schedule",
     assert.equal(tasks.find((task) => task.id === scheduled?.taskId)?.status, "deferred");
     assert.equal(tasks.filter((task) => task.schedule).length, 1);
     assert.equal(box.started(), 1);
+  } finally {
+    await box.finish();
+  }
+});
+
+test("multi-point brief mentioning 每 5 小时 creates a normal one-shot task; a real recurring task delivers its completed round to chat before arming next tick", async () => {
+  const box = await harness();
+  try {
+    const glm = await box.employee.execute("", {
+      action: "add",
+      kind: "todo",
+      text: "目标：查清智谱 GLM 当前的各项套餐。\n1. 覆盖 Coding Plan 与 API 按量计费。\n2. 每档给出价格、额度规则（如每 5 小时 prompts 数、每周/每月上限）、可用模型并核对差异。",
+    });
+    assert.equal(glm.value.scheduled, undefined);
+    const glmTask = (await box.employee.state()).tasks.find((t) => t.id === glm.value.id)!;
+    assert.equal(glmTask.status, "queued");
+    assert.equal(glmTask.schedule, undefined);
+
+    const chat = await box.employee.chat("owner");
+    const now = Date.now();
+    const recurring = await box.employee.acceptUserSchedule("每隔 1 分钟检查构建", now);
+    assert.ok(recurring?.taskId);
+    box.employee.runtime.run = async () => {
+      await box.employee.execute(recurring!.taskId!, {
+        action: "progress",
+        text: "构建已检查",
+        plan: [{ content: "检查构建状态", status: "completed" }],
+      });
+      await box.employee.execute(recurring!.taskId!, {
+        action: "complete",
+        deliverableRef: [],
+        text: "最新构建 #42 通过。",
+        summary: "构建 #42 通过。",
+      });
+    };
+    const due = now + MINUTE;
+    await box.employee.tick(due);
+    await until(() => box.employee.busy.size === 0 && (box.employee.runtime.run as any) !== undefined);
+    // Wait briefly for post-commit chat delivery
+    for (let i = 0; i < 50; i++) {
+      const msgs = await box.employee.store.messages(chat.id);
+      if (msgs.some((m) => m.delivery)) break;
+      await sleep(10);
+    }
+    const state = await box.employee.state();
+    const recTask = state.tasks.find((t) => t.id === recurring!.taskId)!;
+    assert.equal(recTask.status, "deferred");
+    assert.ok((recTask.nextCheckAt || 0) > due);
+    const chatMsgs = await box.employee.store.messages(chat.id);
+    const delivery = chatMsgs.find((m) => m.delivery);
+    assert.ok(delivery, "completed recurring round must still deliver its summary to chat");
+    assert.match(delivery!.text || "", /构建 #42 通过/);
   } finally {
     await box.finish();
   }

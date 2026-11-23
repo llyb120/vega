@@ -1,6 +1,6 @@
 // CDP isolated world: references are never recovered by text or a page-supplied selector.
 (() => {
-  if (globalThis.__novaWebview?.apiVersion === 28) return;
+  if (globalThis.__novaWebview?.apiVersion === 29) return;
   const compact = (text, max = 160) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
   // Icon-only controls (sort carets, filter funnels, close ×) carry their meaning in class names.
   const iconHint = e => {
@@ -192,7 +192,7 @@
     return entry;
   };
   const api = {
-    apiVersion: 28,
+    apiVersion: 29,
     stamp,
     async evaluate(expression, expectedDocument, expectedUrl) {
       // Check and start in the same JS turn: navigation must never redirect a script to a new document.
@@ -455,7 +455,7 @@
       const e=ref?entryFor(ref).e:wheel?document.scrollingElement:null,started=performance.now();
       if(!e)throw Error('缺少目标引用');
       if (mode==='fill' && !editable(e)) throw Error('目标不是可填写字段或只读');
-      let previous,stableFrames=0,scrolled=false,reason='目标正在移动';
+      let previous,stableFrames=0,scrolled=0,reason='目标正在移动';
       do {
         if(ref)entryFor(ref);
         // Hovering a disabled control is allowed: its tooltip often explains why it is disabled.
@@ -465,8 +465,23 @@
           // Measure this target, not ancestor animation metadata (which can run forever without moving it).
           stableFrames=p && sameRect(previous,r) ? stableFrames+1 : 0;
           if (stableFrames>=2) return {...p,localX:p.x,localY:p.y,rect:r,identity:identity(e),editable:editable(e),password:e.type==='password',canvas:e.tagName==='CANVAS',scroll:wheel?{left:e.scrollLeft,top:e.scrollTop}:undefined};
-          if (!p && !scrolled && !wheel) {e.scrollIntoView({block:'nearest',inline:'nearest',behavior:'instant'});scrolled=true;previous=undefined;}
-          else {if (!stableFrames) previous=r;reason=p?'目标正在移动':'目标被遮挡或在视口之外';}
+          if (!p && !wheel && scrolled===0) {
+            e.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});
+            scrolled=1;previous=undefined;
+          } else if (!p && !wheel && scrolled===1) {
+            // If a compact fixed/sticky header or footer bar still covers the target after centering, scroll past its edge.
+            const cx=Math.max(1,Math.min(innerWidth-1,r.x+r.width/2)),cy=Math.max(1,Math.min(innerHeight-1,r.y+r.height/2));
+            const hit=hitAt(cx,cy);
+            const overlay=hit && !contains(e,hit) ? ancestors(hit).find(n=>n.nodeType===1 && /^(fixed|sticky)$/.test(getComputedStyle(n).position)) : null;
+            if (overlay) {
+              const br=overlay.getBoundingClientRect();
+              if (br.height>0 && br.height<innerHeight*0.4) {
+                const delta=br.top<=innerHeight/2 ? -(br.bottom-r.y+16) : (r.y+r.height-br.top+16);
+                if (Math.abs(delta)>1) window.scrollBy({top:delta,behavior:'instant'});
+              }
+            }
+            scrolled=2;previous=undefined;
+          } else {if (!stableFrames) previous=r;reason=p?'目标正在移动':'目标被遮挡或在视口之外';}
         }
         await tick();
       } while (performance.now()-started<1200);

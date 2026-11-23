@@ -12,8 +12,8 @@ export function agentPhases(messages) {
   };
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
-    const phaseCalls = m.role === "assistant" && Array.isArray(m.calls) && m.calls.length && m.calls.every(c => scenes.has(c.name)) ? m.calls : null;
-    if (!m.agentPhase && phaseCalls && (!m.toolScene || m.toolScene === "lightweight")) {
+    const phaseCalls = m.role === "assistant" && Array.isArray(m.calls) ? m.calls.filter(c => scenes.has(c.name)) : [];
+    if (!m.agentPhase && phaseCalls.length && (!m.toolScene || m.toolScene === "lightweight")) {
       legacy = undefined;
       const multi = phaseCalls.length > 1;
       for (const call of phaseCalls) {

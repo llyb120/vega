@@ -135,4 +135,19 @@ test('transient tab errors clear after recovery, service worker noise is skipped
   assert.equal(indexed[1].callId, 'c-browser');
   assert.equal(indexed[1].phaseSession, 'stage-browser');
   assert.deepEqual(indexed[1].messageSeqs, [10, 12]);
+
+  const mixedParent: any[] = [
+    { seq: 20, role: 'assistant', toolScene: 'lightweight', calls: [
+      { id: 'm-plan', name: 'task_progress', arguments: { message: 'start' } },
+      { id: 'm-browser', name: 'browser_agent', arguments: { task: 'check page' } },
+    ] },
+    { seq: 21, role: 'tool', callId: 'm-plan', name: 'task_progress', text: JSON.stringify({ ok: true }) },
+    { seq: 22, role: 'tool', callId: 'm-browser', name: 'browser_agent', agentPhase: { seq: 20, name: 'browser_agent' },
+      text: JSON.stringify({ status: 'completed', executor: 'model/p/vision', phaseSession: 'stage-mixed', result: 'ok', evidence: { visitedUrls: [], tabs: [], screenshots: [], documentPaths: [], errors: [] } }) },
+  ];
+  const mixedIndexed = phaseIndex(mixedParent);
+  assert.equal(mixedIndexed.length, 1, 'mixed coordinator+phase turn indexes only the specialist phase');
+  assert.equal(mixedIndexed[0].name, 'browser_agent');
+  assert.equal(mixedIndexed[0].phaseSession, 'stage-mixed');
+  assert.deepEqual(mixedIndexed[0].messageSeqs, [20, 22]);
 });

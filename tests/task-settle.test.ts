@@ -145,3 +145,48 @@ test("resolveDeliverable upgrades a stale citation past a newer long body", () =
   assert.deepEqual(r.refs, [3]);
   assert.equal(r.texts[0], newer.trim());
 });
+
+test("same-turn [task_progress, task_complete] closes out with body text while keeping evidence and standalone guards intact", async () => {
+  const { store, engine, employee } = await fixture();
+  try {
+    const created = await employee.execute("", { action: "add", kind: "todo", text: "输出调研结论" });
+    const body = "# 调研结论\n\n" + "实测价格与额度数据明细。".repeat(30);
+    let turn = 0;
+    engine.providers.chat = async (_model, _system, messages) => {
+      turn++;
+      if (turn === 1) {
+        // Mixing bash + task_complete must still be rejected
+        return {
+          role: "assistant",
+          model: "fixture/model",
+          calls: [
+            { id: "bad-read", name: "context_budget", arguments: {} },
+            { id: "bad-done", name: "task_complete", arguments: { evidence: "premature", summary: "premature" } },
+          ],
+        };
+      }
+      if (turn === 2) {
+        assert(messages.findLast(m => m.callId === "bad-done")?.error);
+        // Same-turn report body + task_progress(completed) + task_complete succeeds in ONE turn
+        return {
+          role: "assistant",
+          model: "fixture/model",
+          text: body,
+          calls: [
+            { id: "p1", name: "task_progress", arguments: { message: "完成调研与报告", plan: [{ content: "核查并输出调研结论", status: "completed" }] } },
+            { id: "c1", name: "task_complete", arguments: { evidence: "已核对官方页面原文与价格。", summary: "调研结论已交付。" } },
+          ],
+        };
+      }
+      throw Error("unexpected extra turn " + turn);
+    };
+    await employee.update(state => { state.tasks[0].status = "running"; });
+    employee.busy.set(created.value.id, { computer: false, session: "" });
+    await employee.run((await employee.state()).tasks[0]);
+    const done = (await employee.state()).tasks[0];
+    assert.equal(done.status, "done");
+    assert.equal(turn, 2);
+    assert.equal(done.deliverable, body);
+    assert.match(done.result || "", /已核对官方页面原文与价格/);
+  } finally { await engine.close(); await store.close(); }
+});

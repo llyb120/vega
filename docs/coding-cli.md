@@ -5,7 +5,7 @@
 - **`code_agent({task})`**：整块委派编码、源码审查、深入排错与构建测试（模型模式或 `codex` / `antigravity` CLI 统一为隔离执行）。子阶段仅具备编码相关工具，不包含 `task_*`、`browser_agent`、`switch_scene` 或 `spawn_agent`。
 - **`browser_agent({task})`**：委派真实浏览器渲染、交互、登录与截图取证（隔离执行）。子阶段仅具备 `chrome_*`、`read`（读存档）与密码本工具，**不提供通用 `bash`**；遇代理/网络超时（连续 2 次触发宿主硬熔断）、扩展不可用、短信验证码/2FA 或需用户审批时快速失败并以 `[BLOCKED]` 交回主控。
 
-两个阶段不能互相调用，但**主控可以在同一拍并发派出多个独立阶段**（例如同时调用 `code_agent` 与 `browser_agent`，或多个独立 `code_agent`）。运行时根据当前系统调度余量动态分配并发度（同一浏览器的多个 `browser_agent` 自动串行避免焦点冲突），并以**严格 Fork-Join 屏障**等待整批全部完成后，将各自的结构化硬证据一次性交回主控；阶段工具不允许与主控普通工具混在同一拍，也不允许挂着未完成的后台 `bash` 启动阶段专家。
+两个阶段不能互相调用，但**主控可以在同一拍并发派出多个独立阶段以及互不冲突的主控普通工具**（例如同时调用 `task_progress`、`bash` 抓取与 `browser_agent`，或同时调用 `code_agent` 与 `browser_agent`）。运行时根据当前系统调度余量动态分配并发度（同一浏览器的多个 `browser_agent` 自动串行避免焦点冲突；与 `code_agent` 存在工作区冲突的写入/壳命令或 `vault_get` 会先于阶段执行），并以 **Fork-Join 屏障**等待整批全部完成后，将各自的结构化硬证据按原顺序交回主控；仅挂着未完成的后台 `bash` 时不新启 `code_agent`。阶段子会话不设人为轮次上限，保证简单任务高效、复杂任务充分执行。
 
 在设置的场景页，选择 **编码 → 执行方式**，然后保存场景。`model`（默认）使用配置的编码模型；`codex`、`antigravity` 分别要求执行端账号的 PATH 中已有且已登录的 `codex`、`agy`。旧版桌面 IDE 的启动命令不能代替支持 `--print` 的 agy。轻量和浏览器仍使用各自配置的模型。
 
@@ -15,7 +15,7 @@
 
 - `status`：`completed` / `blocked` / `error` / `interrupted_by_steer` / `queued`
 - `executor`：`model/<selection>`、`codex` 或 `antigravity`
-- `result`：专家的精简客观结论（不代写面向用户的长篇报告；临近轮次上限时留有强制无工具收尾轮，避免半途截断丢失已采集证据）
+- `result`：专家的精简客观结论（不代写面向用户的长篇报告；无硬轮次上限，遇连续网络故障触发宿主熔断时留有强制无工具收尾轮，避免丢失已采集证据）
 - `evidence`：由运行时直接从真实工具回执采集的不可伪造证据（`code_agent` 含 `filesChanged`、`commands` 及退出码、`failedCommands`；`browser_agent` 含 `visitedUrls`、`tabs`、`screenshots`、`documentPaths`、`errors`）
 - `phaseSession`（模型模式）：独立落库的完整子阶段会话 ID，与主任务共享文件存档目录、浏览器标签与工作区写锁
 

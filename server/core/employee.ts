@@ -1085,8 +1085,8 @@ export class Employee {
                 !a.key || (typeof a.key === "string" && [...a.key].length <= 200),
                 "key exceeds 200",
               );
-              // 用户话里已经点了时刻或周期：并进同一条定时，不另开。
-              if (parseExplicitSchedule(content, now)) {
+              // 用户话里明确点了时刻或周期（且调用方未另行显式指定 runAt/delayMinutes）：并进同一条定时，不另开。
+              if (!a.nextAt && !a.nextCheckInMinutes && parseExplicitSchedule(content, now)) {
                 const outcome = this.applyEvent(s, explicitScheduleEvent(content, now)!, now);
                 return { id: outcome.taskId, exists: outcome.action !== "start", scheduled: true, status: outcome.status, next: outcome.reason };
               }
@@ -2355,7 +2355,7 @@ export class Employee {
       let prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery;
       // Only attach initial execution rules on the first turn of a session; resumes already have them in history + dynamic prompt.
       if (!continuing) {
-        prompt += `\n首次执行先用task_progress登记完整计划，并在首条步骤里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；计划须覆盖原始任务、工作原则与用户最新明确要求，推进时保持已有步骤文案不变、只改 status，真实验证成功才标 completed，受阻标 blocked；不要把 task_complete 列入计划。仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user；短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user；滑块/拼图/旋转等视觉验证码先由 browser_agent 用 pointer 自行尝试，连续失败≥2 次再 task_ask_user。${computer ? "你在独立的电脑/Chrome会话，只做交接内容，完成后报告实际结果，不调用task_complete。" : "轻量主控用 code_agent 委派编码/测试、browser_agent 委派真实网页操作与截图取证；轻量查询与汇总由主控直接完成。产出物正文只写一次（直接写在回复正文里），交付前单独调用 task_complete（evidence 写真实核验证据，summary ≤400 字建议 150 字内，deliverableRefs 省略自动选最新正文或传正文编号，不要在有正文时传 []）。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
+        prompt += `\n首次执行用task_progress登记计划（可与首拍的只读查询或阶段专家同批发出，不必单独浪费一轮），并在首条步骤里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；计划须覆盖原始任务、工作原则与用户最新明确要求，推进时保持已有步骤文案不变、只改 status，真实验证成功才标 completed，受阻标 blocked；不要把 task_complete 列入计划。仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user；短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user；滑块/拼图/旋转等视觉验证码先由 browser_agent 用 pointer 自行尝试，连续失败≥2 次再 task_ask_user。${computer ? "你在独立的电脑/Chrome会话，只做交接内容，完成后报告实际结果，不调用task_complete。" : "轻量主控用 code_agent 委派编码/测试、browser_agent 委派真实网页操作与截图取证；轻量查询与汇总由主控直接完成。产出物正文只写一次（直接写在回复正文里），可直接在写完正文（或核验完结）的同一拍按序发出 task_progress(标 completed) 与 task_complete 一次性交付，或更新完计划后单独调用 task_complete（evidence 写真实核验证据，summary ≤400 字建议 150 字内，deliverableRefs 省略自动选最新正文或传正文编号，不要在有正文时传 []）。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
         if (!computer) prompt += "\nGit 并发开发：建分支前将任务指定的基线解析为完整提交号（git rev-parse --verify），用 task_progress 记录仓库、基线引用、SHA 和目标分支；直接 git switch -c <新分支> <基线SHA> 或 git worktree add -b <新分支> <目录> <基线SHA>；命令一律使用绝对路径。";
       } else if (task.checkpoint) {
         prompt += "\n提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。";
@@ -2393,7 +2393,7 @@ export class Employee {
     } finally {
       stopMonitor();
       this.releaseWorkspace(job.id);
-      let parked = false;
+      let parked = false, repeatDelivered = false;
       try {
         await this.update(async (s) => {
                 const t = s.tasks.find((t) => t.id === job.id);
@@ -2433,9 +2433,6 @@ export class Employee {
                     });
                   } else if (this.absorbStep(t)) {
                     // 这一步已经结束，才吸收期间送到的事件或被错过的一拍。
-                  } else if (t.schedule?.repeat) {
-                    t.result = result;
-                    this.armSchedule(t, Date.now());
                   } else if (error) {
                     t.failures = (t.failures || 0) + 1;
                     this.recover(t, result);
@@ -2468,6 +2465,10 @@ export class Employee {
                     t.settlePreferred = false;
                     delete t.deliverableNeeded;
                     delete t.settleNudges;
+                    if (t.schedule?.repeat) repeatDelivered = true;
+                  } else if (t.schedule?.repeat) {
+                    t.result = result;
+                    this.armSchedule(t, Date.now());
                   } else if (t.settlePreferred) {
                     t.status = "waiting";
                     t.nextCheckAt = 0;
@@ -2532,6 +2533,7 @@ export class Employee {
           ? (task.deliverable ? task.deliverable + "\n\n---\n\n**结论**\n\n" + (task.summary || task.completion || "已完成。") : task.summary || task.result || "已完成，详情见任务。")
           : task.status === "approval" ? "等待你确认：" + task.approval
           : task.status === "waiting" ? "需要你处理：" + task.waiting
+          : task.status === "deferred" && repeatDelivered ? (task.summary || task.result || "本轮已完成。") + "\n\n" + task.checkpoint
           : task.status === "deferred" ? "已挂起，等待外部结果；到期继续原任务。\n\n" + task.checkpoint
           : task.status === "recovering" ? "本轮未完成，将在原会话恢复。\n\n原因：" + task.recovery?.reason
           : task.status === "queued" && task.side === "computer" ? "已交接电脑会话，等待执行结果；主任务尚未完成。"
@@ -2541,15 +2543,16 @@ export class Employee {
           this.runtime.emit("employee_changed", { employeeId: this.employeeId });
         }
       }
-      if ((state.chatSession || task?.group) && task && ["done", "waiting", "approval"].includes(task.status)) {
+      if ((state.chatSession || task?.group) && task && (["done", "waiting", "approval"].includes(task.status) || repeatDelivered)) {
         // Chat stays brief for done (full evidence lives on task.result / TaskDetail / export).
         // waiting/approval keep the full prompt so the user can answer from the bubble.
-        const heading = task.status === "done" ? "已交付" : task.group ? "需要处理" : "需要你处理";
-        const full = task.status === "done"
+        const delivered = task.status === "done" || repeatDelivered;
+        const heading = delivered ? "已交付" : task.group ? "需要处理" : "需要你处理";
+        const full = delivered
           ? task.summary || task.result || "已完成，详情见任务。"
           : task.waiting || task.approval || "需要处理。";
         const chars = [...String(full)];
-        const body = (task.status === "done" && chars.length > 400 ? chars.slice(0, 400).join("") + "…" : String(full)) + (task.status === "done" && task.deliverable ? "\n\n完整交付物见任务详情。" : "");
+        const body = (delivered && chars.length > 400 ? chars.slice(0, 400).join("") + "…" : String(full)) + (delivered && task.deliverable ? "\n\n完整交付物见任务详情。" : "");
         const quote = !task.group && task.chatSource?.session === state.chatSession && await this.store.message(state.chatSession!, task.chatSource.seq) ? await this.store.quote(state.chatSession!, task.chatSource.seq) : undefined;
         const message: Message = { role: "assistant", text: "**" + heading + "**\n\n" + body, quote, delivery: true, tasks: [{ id: task.id, title: task.text.slice(0, 80), status: task.status }] };
         // In a group, a result or a question goes back to whoever asked (see Groups.post).

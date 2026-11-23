@@ -592,7 +592,7 @@ export class Chrome {
           {
             objectId: object,
             functionDeclaration:
-              "async function(){const r=this.getBoundingClientRect();if(r.bottom<=0||r.top>=innerHeight||r.right<=0||r.left>=innerWidth){this.scrollIntoView({block:'nearest',inline:'nearest',behavior:'instant'});await new Promise(r=>setTimeout(r,50));}}",
+              "async function(){const r=this.getBoundingClientRect();if(r.bottom<=0||r.top>=innerHeight||r.right<=0||r.left>=innerWidth){this.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});await new Promise(r=>setTimeout(r,50));}}",
             awaitPromise: true,
           },
           parent.session,
