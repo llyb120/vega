@@ -35,6 +35,7 @@ COPY --from=golang:1.26-bookworm /usr/local/go /usr/local/go
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates chromium chromium-sandbox git openssh-client ripgrep tini util-linux passwd python3 \
+        curl jq wget unzip zip procps file dnsutils \
         fontconfig fonts-liberation fonts-croscore fonts-crosextra-carlito \
         fonts-crosextra-caladea fonts-dejavu-core fonts-noto-core fonts-noto-mono \
         fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei \

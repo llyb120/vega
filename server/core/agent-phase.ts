@@ -350,7 +350,7 @@ export function phaseReceiptNext(role: PhaseRole, status: PhaseStatus): string {
   }
   if (status === "blocked") {
     return role === "browser_agent"
-      ? `${base} 浏览器阶段已受阻交回：若需用户提供验证码/登录/审批，请立即 task_ask_user 或 task_request_approval；若是本机 Chrome 未启动，主控可先用 bash 仅启动 Chrome 进程（不带导航 URL）再重调 browser_agent；若仅因浏览器代理/网络打不开公开资料页且原任务未强制要求浏览器交互，主控可直接用轻量工具核查或如实标注未确认项。`
+      ? `${base} 浏览器阶段已受阻交回：若需用户提供验证码/登录/审批，请立即 task_ask_user 或 task_request_approval；若是本机 Chrome 未启动，主控可先用 bash 仅启动 Chrome 进程（不带导航 URL）再重调 browser_agent；若仅因网络打不开公开资料页且原任务未强制要求浏览器交互，可对静态页/公开接口做 1–2 次轻量脚本核查（若需多轮解析则交 code_agent，动态交互专属项直接标注未确认，勿连刷碎片脚本硬扒压缩 JS）。`
       : `${base} 编码阶段已受阻交回：按阻塞原因决定补充信息、请求审批/协助，或基于已有证据继续下一步。`;
   }
   if (status === "error") {

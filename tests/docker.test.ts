@@ -190,6 +190,8 @@ test("Docker runtime provides target-platform Go and Python 3 on the isolated ta
     assert.match(runtime, /COPY --from=golang:1\.26-bookworm \/usr\/local\/go \/usr\/local\/go/);
     const packages = runtime.match(/apt-get install -y --no-install-recommends\s+\\([\s\S]*?)&&/)?.[1] || "";
     assert.match(packages, /\bpython3\b/);
+    for (const tool of ["curl", "jq", "wget", "unzip", "zip", "procps", "file", "dnsutils"])
+      assert.match(packages, new RegExp(`\\b${tool}\\b`), `${file} must install ${tool}`);
     assert.match(runtime, /ln -s \/usr\/local\/go\/bin\/go \/usr\/local\/go\/bin\/gofmt \/usr\/local\/bin\//);
     assert.match(runtime, /&& go version/);
     assert.match(runtime, /&& python3 --version/);
