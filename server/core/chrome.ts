@@ -15,7 +15,12 @@ import {
   Mutex,
   type Obj,
 } from "./util";
-export type TabHooks = { used: (tag: string) => Promise<void>; opened: (tag: string) => Promise<void> };
+export type TabHooks = {
+  used: (tag: string) => Promise<void>;
+  opened: (tag: string) => Promise<void>;
+  /** When true, this owner holds exclusive runtime ownership of tabs it opens/uses until releaseTabs(owner). */
+  exclusive?: boolean;
+};
 async function recordOpened(hooks: TabHooks | undefined, tag: string) {
   if (!hooks || !tag) return;
   try { await hooks.opened(tag); }
@@ -48,11 +53,39 @@ export const contextLost = (message?: string) =>
 
 export class Chrome {
   gate = new Mutex();
+  /** Short mutex serializing viewport-activating operations (capture, tab open, select_tab) across concurrent tabs. */
+  visualGate = new Mutex();
   tabGates = new Map<string, Mutex>();
+  /** Runtime tab ownership: maps tabTag → active owning session id so concurrent sessions never collide on tabs. */
+  tabOwners = new Map<string, string>();
   tabGate(tag: string) {
     let gate = this.tabGates.get(tag);
     if (!gate) this.tabGates.set(tag, (gate = new Mutex()));
     return gate;
+  }
+  private isHumanView(owner: string) {
+    return owner.startsWith("browser-view:");
+  }
+  claimTab(owner: string, tag: string, exclusive = false) {
+    if (!tag || this.isHumanView(owner)) return;
+    const holder = this.tabOwners.get(tag);
+    assert(
+      !holder || holder === owner,
+      `标签 ${tag} 正由另一个并行会话占用，不能跨会话操作；请用 chrome_navigate(target={kind:"new_tab"}) 新开你自己的独立标签，或只操作你已打开的标签。`,
+    );
+    if (exclusive) this.tabOwners.set(tag, owner);
+  }
+  releaseTabs(owner: string) {
+    for (const [tag, holder] of this.tabOwners) {
+      if (holder === owner) this.tabOwners.delete(tag);
+    }
+  }
+  private visibleTabs(owner: string, tabs: Obj[] | undefined) {
+    if (!Array.isArray(tabs) || this.isHumanView(owner)) return tabs;
+    return tabs.filter((t) => {
+      const holder = typeof t?.tag === "string" ? this.tabOwners.get(t.tag) : undefined;
+      return !holder || holder === owner;
+    });
   }
   observations = new Map<string, Observation>();
   /** Held left-button drag across chrome_act calls (captcha sliders, etc.). */
@@ -269,6 +302,7 @@ export class Chrome {
     if (captureRef && !a.expandScroll) region = (await this.point(o, a.frame || 0, captureRef, "capture")).rect;
     let full = !region && (a.fullPage === true || !!a.expandScroll);
     let expanded: Obj | undefined, fullPageFallback: string | undefined, layout = false, resized = false;
+    return await this.visualGate.run(async () => {
     try {
       if (full) {
         layout = true;
@@ -451,6 +485,7 @@ export class Chrome {
       }
       if (errors.length) throw Error("截图后恢复页面布局失败，请重新观察：" + errors.join("; "));
     }
+    });
   }
   summarize(o: Observation, a: Obj) {
     // Summary only (documentPath keeps the full record): drop what is derivable or a default.
@@ -1253,6 +1288,44 @@ export class Chrome {
       assert(matches.length === 1, "Explicit tabTag required; no active tab guessing");
       target = matches[0][1].tabTag;
     }
+    if (args.operation === "open" || args.operation === "new_tab") {
+      const control = new AbortController();
+      this.cancelled.set(owner, control);
+      const signal = AbortSignal.any([
+        control.signal,
+        ...(parent ? [parent] : []),
+      ]);
+      try {
+        let tag = "";
+        // Hold global/visual locks only for the fast tab creation + atomic ownership claim,
+        // then settle and observe on this tab's own mutex so concurrent tabs load in parallel.
+        const result = await this.gate.run(() =>
+          this.visualGate.run(async () => {
+            const opened = await this.bridge.request(args.operation, { ...input, tabTag: target }, signal);
+            tag = opened.tabTag || target || "";
+            if (tag) {
+              this.claimTab(owner, tag, !!hooks?.exclusive);
+              await recordOpened(hooks, tag);
+            }
+            if (opened?.tabs) opened.tabs = this.visibleTabs(owner, opened.tabs);
+            return opened;
+          }),
+        );
+        if (input.observe === "none" || !tag) return notes === undefined ? result : { ...result, notes };
+        return await this.tabGate(tag).run(async () => {
+          const tabs = await this.settleNavigation(tag, input.settleMs, signal);
+          const out = {
+            ...result,
+            ...(tabs && result.tabs ? { tabs: this.visibleTabs(owner, tabs) } : {}),
+            ...(await this.feedback(owner, tag, input, input.observe || "inspect", signal)),
+          };
+          return notes === undefined ? out : { ...out, notes };
+        });
+      } finally {
+        if (this.cancelled.get(owner) === control) this.cancelled.delete(owner);
+      }
+    }
+    if (target) this.claimTab(owner, target, !!hooks?.exclusive);
     return await (target ? this.tabGate(target) : this.gate).run(async () => {
       if (target && hooks) await hooks.used(target);
       const control = new AbortController();
@@ -1329,12 +1402,14 @@ export class Chrome {
     if (op === "downloads") return this.bridge.request(op, a, signal);
     if (op === "tabs") {
       const result = await this.bridge.request("tabs", a, signal);
+      const visible = this.visibleTabs(owner, result.tabs) || [];
       const query = String(a.query || "").toLowerCase();
-      result.tabs = result.tabs.filter(
+      result.tabs = visible.filter(
         (t: Obj) =>
           !query || (t.title + " " + t.url).toLowerCase().includes(query),
       );
       if (result.tabs.length === 1) {
+        this.claimTab(owner, result.tabs[0].tag, !!hooks?.exclusive);
         if (hooks) await hooks.used(result.tabs[0].tag);
         return {
           ...result,
@@ -1361,26 +1436,32 @@ export class Chrome {
         "close_tab",
       ].includes(op)
     ) {
-      const result = await this.bridge.request(
-        op,
-        { ...a, tabTag: tag },
-        signal,
-      );
+      const send = () => this.bridge.request(op, { ...a, tabTag: tag }, signal);
+      const result = ["open", "new_tab", "select_tab"].includes(op)
+        ? await this.visualGate.run(send)
+        : await send();
       tag = result.tabTag || tag;
-      if ((op === "open" || op === "new_tab") && result.tabTag) await recordOpened(hooks, result.tabTag);
+      if (result?.tabs) result.tabs = this.visibleTabs(owner, result.tabs);
+      if ((op === "open" || op === "new_tab") && result.tabTag) {
+        this.claimTab(owner, result.tabTag, !!hooks?.exclusive);
+        await recordOpened(hooks, result.tabTag);
+      }
       if (["close_tab", "goto", "back", "forward", "reload"].includes(op)) {
         await this.releaseHold(tag);
         for (const [key, observation] of this.observations)
           if (observation.tabTag === tag) this.observations.delete(key);
       }
-      if (op === "close_tab") return result;
+      if (op === "close_tab") {
+        if (tag && this.tabOwners.get(tag) === owner) this.tabOwners.delete(tag);
+        return result;
+      }
       if (a.observe === "none") return result;
       if (tag) {
         const tabs = await this.settleNavigation(tag, a.settleMs, signal);
         return {
           ...result,
           // The bridge listed tabs as the navigation started; report them as they are after settling.
-          ...(tabs && result.tabs ? { tabs } : {}),
+          ...(tabs && result.tabs ? { tabs: this.visibleTabs(owner, tabs) } : {}),
           ...(await this.feedback(
             owner,
             tag,
@@ -1472,10 +1553,17 @@ export class Chrome {
     let error: string | undefined, value: unknown, opened: Obj[] = [], tabDiscoveryError: string | undefined;
     const discover = async () => {
       const { tabs } = await this.bridge.request("tabs", {}, signal);
-      const found = tabs.filter((t: Obj) => t.openerTag === tag && !before.some((b: Obj) => b.tag === t.tag));
+      const found = tabs.filter((t: Obj) => {
+        if (t.openerTag !== tag || before.some((b: Obj) => b.tag === t.tag)) return false;
+        const holder = typeof t.tag === "string" ? this.tabOwners.get(t.tag) : undefined;
+        return !holder || holder === owner;
+      });
       if (found.length) {
         opened = found;
-        for (const tab of found) await recordOpened(hooks, tab.tag);
+        for (const tab of found) {
+          this.claimTab(owner, tab.tag, !!hooks?.exclusive);
+          await recordOpened(hooks, tab.tag);
+        }
       }
     };
     if (script) {

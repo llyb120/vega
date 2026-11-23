@@ -272,6 +272,65 @@ test("a local task reclaims tabs through its bound client's browser lease", asyn
   assert.equal(calls.at(-1), "release");
 });
 
+test("runtime tab ownership isolates concurrent sessions, overlaps tab loading, and preserves human browser-view access", async (t) => {
+  const f = await fixture(t);
+  const hooks = { used: async () => {}, opened: async () => {}, exclusive: true };
+
+  // Two concurrent opens must overlap their settleNavigation instead of serializing behind chrome.gate.
+  let activeSettles = 0, peakSettles = 0;
+  let releaseSettles!: () => void;
+  const bothSettling = new Promise<void>((r) => { releaseSettles = r; });
+  (f.chrome as any).settleNavigation = async () => {
+    activeSettles++;
+    peakSettles = Math.max(peakSettles, activeSettles);
+    if (activeSettles === 2) releaseSettles();
+    await bothSettling;
+    activeSettles--;
+    return f.bridge.tabs.map((tab) => ({ ...tab }));
+  };
+  (f.chrome as any).feedback = async (_owner: string, tag: string) => {
+    const tab = f.bridge.tabs.find((item) => item.tag === tag)!;
+    return { tabTag: tag, pages: [{ title: "ok", url: tab.url }], images: [] };
+  };
+
+  const [openA, openB] = await Promise.all([
+    f.chrome.execute("session-A", ".", { operation: "open", url: "https://site-a.test/" }, undefined, [], hooks),
+    f.chrome.execute("session-B", ".", { operation: "open", url: "https://site-b.test/" }, undefined, [], hooks),
+  ]);
+  assert.equal(peakSettles, 2, "concurrent tab opens must settle in parallel after fast creation");
+  assert.equal(f.chrome.tabOwners.get(openA.tabTag), "session-A");
+  assert.equal(f.chrome.tabOwners.get(openB.tabTag), "session-B");
+
+  // Each session's chrome_tabs only sees unowned tabs and its own tabs, never the other's.
+  const tabsForB = await f.chrome.execute("session-B", ".", { operation: "tabs" }, undefined, [], hooks);
+  assert(tabsForB.tabs.some((tab: any) => tab.tag === openB.tabTag));
+  assert(!tabsForB.tabs.some((tab: any) => tab.tag === openA.tabTag));
+
+  // Cross-session goto / select_tab / close_tab on A's tab are synchronously rejected.
+  await assert.rejects(
+    f.chrome.execute("session-B", ".", { operation: "goto", tabTag: openA.tabTag, url: "https://evil.test/", observe: "none" }, undefined, [], hooks),
+    /正由另一个并行会话占用/,
+  );
+  await assert.rejects(
+    f.chrome.execute("session-B", ".", { operation: "close_tab", tabTag: openA.tabTag }, undefined, [], hooks),
+    /正由另一个并行会话占用/,
+  );
+
+  // Human live view (browser-view:*) is never blocked by agent leases.
+  const human = await f.chrome.execute("browser-view:alice", ".", { operation: "goto", tabTag: openA.tabTag, url: "https://human.test/", observe: "none" });
+  assert.equal(human.tabTag, openA.tabTag);
+
+  // Releasing session-A's leases lets session-B cleanly reuse openA.tabTag.
+  f.chrome.releaseTabs("session-A");
+  assert.equal(f.chrome.tabOwners.get(openA.tabTag), undefined);
+  assert.equal(f.chrome.tabOwners.get(openB.tabTag), "session-B");
+  const reused = await f.chrome.execute("session-B", ".", { operation: "goto", tabTag: openA.tabTag, url: "https://reused.test/", observe: "none" }, undefined, [], hooks);
+  assert.equal(reused.tabTag, openA.tabTag);
+  assert.equal(f.chrome.tabOwners.get(openA.tabTag), "session-B");
+  f.chrome.releaseTabs("session-B");
+  assert.equal(f.chrome.tabOwners.size, 0);
+});
+
 test("real isolated Chrome closes a finished task's tab while preserving the user's existing page", { skip: process.env.VEGA_TEST_CHROME !== "1", timeout: 60000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-task-tabs-")), previous = process.env.VEGA_DB;
   process.env.VEGA_DB = join(dir, "vega.db");

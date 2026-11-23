@@ -911,8 +911,10 @@ test("browser_agent host circuit breaker halts after 2 consecutive ERR_SOCKS err
   } finally { await engine.close(); await store.close(); }
 });
 
-test("same-batch duplicate browser_agent calls short-circuit immediately after the first triggers host circuit breaker", async () => {
+test("queued same-batch browser_agent short-circuits after an earlier phase trips the host circuit breaker", async () => {
   const { store, engine, add, segment } = await fixture();
+  const cfg = await store.get<any>("config", {});
+  await store.put("config", { ...cfg, scheduler: { globalSlots: 1, perEmployeeSlots: 1 } });
   let navCalls = 0;
   (engine as any).chromeFor = async () => ({
     execute: async () => {
@@ -924,43 +926,195 @@ test("same-batch duplicate browser_agent calls short-circuit immediately after t
       };
     },
   });
-  let coordTurn = 0, browserTurn = 0;
-  engine.providers.chat = async (model, _system, messages, definitions) => {
+  let coordTurn = 0;
+  const turns = new Map<string, number>();
+  let releaseSecond!: () => void;
+  const secondHold = new Promise<void>((r) => { releaseSecond = r; });
+  engine.providers.chat = async (model, _system, messages, definitions, _sig, _emit, sessionId) => {
     if (model.selection === "p/light") {
       coordTurn++;
       if (coordTurn === 1) {
         return { role: "assistant", calls: [
-          { id: "b-1", name: "browser_agent", arguments: { task: "打开首页" } },
-          { id: "b-2", name: "browser_agent", arguments: { task: "打开文档页" } },
+          { id: "b-1", name: "browser_agent", arguments: { task: "打开站点 A" } },
+          { id: "b-2", name: "browser_agent", arguments: { task: "打开站点 B" } },
+          { id: "b-3", name: "browser_agent", arguments: { task: "打开站点 C" } },
         ] };
       }
       if (coordTurn === 2) {
         const r1 = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-1")!.text!);
-        const r2 = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-2")!.text!);
+        const r3 = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-3")!.text!);
         assert.equal(r1.status, "blocked");
         assert.equal(r1.circuitBroken, true);
-        assert.equal(r2.status, "blocked");
-        assert.equal(r2.circuitBroken, true);
-        assert.equal(r2.executor, "host/circuit_breaker");
-        assert.match(r2.result, /短路跳过/);
+        assert.equal(r3.status, "blocked");
+        assert.equal(r3.circuitBroken, true);
+        assert.equal(r3.executor, "host/circuit_breaker");
+        assert.match(r3.result, /短路跳过/);
         return verified();
       }
       return completed();
     }
-    browserTurn++;
-    if (browserTurn <= 2) {
-      return { role: "assistant", calls: [{ id: "nav-" + browserTurn, name: "chrome_navigate", arguments: { url: `https://docs.cursor.com/x${browserTurn}`, target: { kind: "new_tab" } } }] };
+    const text = String(messages.find((m) => m.role === "user")?.text || "");
+    const t = (turns.get(sessionId!) || 0) + 1;
+    turns.set(sessionId!, t);
+    if (text.includes("站点 B")) {
+      await secondHold;
+      return { role: "assistant", text: "站点 B 已完成。" };
+    }
+    if (t <= 2) {
+      return { role: "assistant", calls: [{ id: "nav-" + t, name: "chrome_navigate", arguments: { url: `https://docs.cursor.com/x${t}`, target: { kind: "new_tab" } } }] };
     }
     assert.deepEqual(definitions, []);
+    setTimeout(releaseSecond, 20);
     return { role: "assistant", text: "[BLOCKED] 网络连接连续失败，已停止。" };
   };
   try {
     const job = await segment(await add("核实多个页面"));
     assert.equal(job.status, "done");
-    assert.equal(navCalls, 2, "second queued browser_agent must short-circuit with zero extra Chrome calls");
-    assert.equal(browserTurn, 3, "second queued browser_agent must not launch a second child LLM session");
-    assert.equal((await store.sessions()).filter(s => s.phaseRole === "browser_agent").length, 1);
-  } finally { await engine.close(); await store.close(); }
+    assert.equal(navCalls, 2, "queued third browser_agent must short-circuit with zero extra Chrome calls");
+    assert.equal((await store.sessions()).filter(s => s.phaseRole === "browser_agent").length, 2, "queued third browser_agent must not launch a child LLM session");
+  } finally { releaseSecond(); await engine.close(); await store.close(); }
+});
+
+test("concurrent browser_agent phases run in parallel with runtime per-session tab ownership and clean release", async () => {
+  const { store, engine, add, segment } = await fixture();
+  let serial = 0;
+  const fakeTabs: any[] = [{ tag: "C0-existing", url: "about:blank", title: "blank", active: true, controllable: true }];
+  const bridge = new ChromeBridge();
+  (bridge as any).request = async (op: string, args: any) => {
+    if (op === "tabs") return { tabs: fakeTabs.map((t) => ({ ...t })) };
+    if (op === "open" || op === "new_tab") {
+      const tab = { tag: "C" + ++serial, url: args.url, title: args.url, active: true, controllable: true };
+      for (const t of fakeTabs) t.active = false;
+      fakeTabs.push(tab);
+      return { tabTag: tab.tag, tabs: fakeTabs.map((t) => ({ ...t })) };
+    }
+    if (op === "goto") {
+      const tab = fakeTabs.find((t) => t.tag === args.tabTag)!;
+      tab.url = args.url;
+      tab.title = args.url;
+      return { tabTag: tab.tag, tabs: fakeTabs.map((t) => ({ ...t })) };
+    }
+    throw Error("unexpected bridge op " + op);
+  };
+  const chrome = new Chrome(store, bridge, "");
+  (chrome as any).settleNavigation = async () => fakeTabs.map((t) => ({ ...t }));
+  (chrome as any).feedback = async (_owner: string, tag: string) => {
+    const tab = fakeTabs.find((t) => t.tag === tag)!;
+    return { tabTag: tag, pages: [{ url: tab.url, title: tab.title, visibleText: "content of " + tab.url }], images: [] };
+  };
+  (engine as any).chromeFor = async () => chrome;
+
+  let coordTurn = 0, activeBrowsers = 0, peakBrowsers = 0;
+  let releaseBoth!: () => void, zaiOpened!: () => void, bigmodelCheckedConflict!: () => void;
+  const bothEntered = new Promise<void>((r) => { releaseBoth = r; });
+  const waitZaiOpen = new Promise<void>((r) => { zaiOpened = r; });
+  const waitBigmodelConflict = new Promise<void>((r) => { bigmodelCheckedConflict = r; });
+  let enteredCount = 0;
+  let zaiTabTag = "";
+  const phaseTurns = new Map<string, number>();
+
+  engine.providers.chat = async (model, _system, messages, _definitions, _sig, _emit, sessionId) => {
+    if (model.selection === "p/light") {
+      coordTurn++;
+      if (coordTurn === 1) {
+        return { role: "assistant", calls: [
+          { id: "b-zai", name: "browser_agent", arguments: { task: "核实国际站 z.ai 定价" } },
+          { id: "b-cn", name: "browser_agent", arguments: { task: "核实国内站 bigmodel.cn 定价" } },
+        ] };
+      }
+      if (coordTurn === 2) {
+        const rZai = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-zai")!.text!);
+        const rCn = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-cn")!.text!);
+        assert.equal(rZai.status, "completed");
+        assert.equal(rCn.status, "completed");
+        // Strict per-phase evidence isolation: z.ai never leaks bigmodel.cn and vice versa!
+        assert(rZai.evidence.visitedUrls.every((u: any) => u.url.includes("z.ai")), JSON.stringify(rZai.evidence.visitedUrls));
+        assert(rCn.evidence.visitedUrls.every((u: any) => u.url.includes("bigmodel.cn")), JSON.stringify(rCn.evidence.visitedUrls));
+        assert.equal(chrome.tabOwners.size, 0, "all runtime tab leases must be released once phases end");
+        // Follow-up phase must be able to reuse zaiTabTag after lease release!
+        return call("b-reuse", "browser_agent", { task: `复用 ${zaiTabTag} 复查` });
+      }
+      if (coordTurn === 3) {
+        const rReuse = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-reuse")!.text!);
+        assert.equal(rReuse.status, "completed");
+        assert(rReuse.evidence.visitedUrls.some((u: any) => u.url === "https://z.ai/docs"));
+        assert.equal(chrome.tabOwners.size, 0);
+        return verified();
+      }
+      return completed();
+    }
+
+    const promptText = String(messages.find((m) => m.role === "user")?.text || "");
+    const turn = (phaseTurns.get(sessionId!) || 0) + 1;
+    phaseTurns.set(sessionId!, turn);
+
+    if (promptText.includes("复查")) {
+      if (turn === 1) {
+        return { role: "assistant", calls: [{ id: "reuse-goto", name: "chrome_navigate", arguments: { url: "https://z.ai/docs", target: { kind: "existing_tab", tabTag: zaiTabTag } } }] };
+      }
+      return { role: "assistant", text: "复查完成。" };
+    }
+
+    // Both concurrent phases must receive the runtime tab-isolation notice
+    assert(JSON.stringify(messages).includes("[并发标签隔离]"), "concurrent browser_agent phases must get tab isolation notice");
+
+    if (turn === 1) {
+      activeBrowsers++;
+      peakBrowsers = Math.max(peakBrowsers, activeBrowsers);
+      if (++enteredCount === 2) releaseBoth();
+      await bothEntered;
+    }
+
+    if (promptText.includes("z.ai")) {
+      if (turn === 1) {
+        return { role: "assistant", calls: [{ id: "open-zai", name: "chrome_navigate", arguments: { url: "https://z.ai/pricing", target: { kind: "new_tab" } } }] };
+      }
+      if (turn === 2) {
+        const opened = JSON.parse(messages.findLast((m) => m.role === "tool" && m.callId === "open-zai")!.text!);
+        zaiTabTag = opened.tabTag;
+        assert.equal(chrome.tabOwners.get(zaiTabTag), sessionId, "opened tab must be owned by z.ai phase");
+        zaiOpened();
+        // Stay alive until bigmodel.cn attempts to inspect/steal zaiTabTag
+        await waitBigmodelConflict;
+        activeBrowsers--;
+        return { role: "assistant", text: "z.ai 定价核实完成。" };
+      }
+    }
+
+    if (promptText.includes("bigmodel.cn")) {
+      if (turn === 1) {
+        await waitZaiOpen;
+        // 1. chrome_tabs must hide z.ai's owned tab
+        return { role: "assistant", calls: [{ id: "cn-tabs", name: "chrome_tabs", arguments: {} }] };
+      }
+      if (turn === 2) {
+        const listed = JSON.parse(messages.findLast((m) => m.role === "tool" && m.callId === "cn-tabs")!.text!);
+        assert(!listed.tabs.some((t: any) => t.tag === zaiTabTag), "other concurrent phase's tab must be hidden from chrome_tabs");
+        // 2. Trying to directly hijack zaiTabTag must be rejected at runtime
+        return { role: "assistant", calls: [{ id: "cn-hijack", name: "chrome_navigate", arguments: { url: "https://bigmodel.cn/hijack", target: { kind: "existing_tab", tabTag: zaiTabTag } } }] };
+      }
+      if (turn === 3) {
+        const rejected = messages.findLast((m) => m.role === "tool" && m.callId === "cn-hijack")!;
+        assert(rejected.error && /正由另一个并行会话占用/.test(rejected.text!), "hijacking another phase's tab must be rejected: " + rejected.text);
+        assert.equal(fakeTabs.find((t) => t.tag === zaiTabTag)!.url, "https://z.ai/pricing", "z.ai tab URL must remain untouched");
+        bigmodelCheckedConflict();
+        return { role: "assistant", calls: [{ id: "open-cn", name: "chrome_navigate", arguments: { url: "https://bigmodel.cn/pricing", target: { kind: "new_tab" } } }] };
+      }
+      activeBrowsers--;
+      return { role: "assistant", text: "bigmodel.cn 定价核实完成。" };
+    }
+    throw Error("unexpected phase prompt: " + promptText);
+  };
+
+  try {
+    const job = await segment(await add("同时从零查 z.ai 与 bigmodel.cn 套餐"));
+    assert.equal(job.status, "done");
+    assert.equal(peakBrowsers, 2, "two browser_agent phases in the same batch must execute concurrently");
+    assert.equal(chrome.tabOwners.size, 0);
+  } finally {
+    releaseBoth(); zaiOpened(); bigmodelCheckedConflict();
+    await engine.close(); await store.close();
+  }
 });
 
 test("complex browser_agent phase has no artificial turn limit and finishes multi-step collection with host-verified evidence", async () => {

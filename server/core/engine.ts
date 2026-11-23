@@ -144,6 +144,7 @@ export type AgentEvent = {
 type TurnState = { control: AbortController; steer: Message[]; context?: Context; phase?: Message["agentPhase"]; wakeBackground?: () => void };
 type RunPhaseOptions = {
   parentRedact?: Redactor;
+  notice?: string;
   onPause?: (reason: string) => void;
   onCircuitBreak?: (reason: string) => void;
 };
@@ -1363,7 +1364,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         let model = await this.catalog.resolve(config, session.model);
         tools.config = latest;
         dynamic += await tools.rules(model, assigned?.text);
-        const phaseNotice = wrapUpTurn ? forceWrapUpReason : "";
+        const phaseNotice = [phaseOpts?.notice, wrapUpTurn ? forceWrapUpReason : ""].filter(Boolean).join("\n");
         if (mainTask && frames.length && !session.agentChild) {
           const caller = frames.findLast((f) => f.resume), origin = frames[0];
           const returnHint = tools.specialist ? "直接回复阶段结果、不带工具调用" : "直接回复阶段结果、不带工具调用，或调用 task_complete";
@@ -1725,6 +1726,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         let runPhase: ((call: Call, index: number) => Promise<Outcome>) | undefined;
         let cleanupPhase: (() => void) | undefined;
         if (phaseIndices.length > 0) {
+          const browserPhaseCount = phaseIndices.filter((i) => calls[i].name === "browser_agent").length;
           const limits = schedulerLimits(latest);
           const otherBusy = Math.max(0, this.employee.busyTotal() - (session.taskId ? 1 : 0));
           const maxPhaseConcurrent = Math.max(2, Math.min(8, limits.global - otherBusy + 1));
@@ -1743,21 +1745,21 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           cleanupPhase = () => { control.signal.removeEventListener("abort", onParentAbort); state.wakeBackground = previousWake; };
           runPhase = async (call, index) => {
             const phase = phaseMeta.get(index)!;
-            if (phase.name === "browser_agent" && browserCircuitBreakReason) {
-              return {
-                value: {
-                  status: "blocked",
-                  executor: "host/circuit_breaker",
-                  circuitBroken: true,
-                  result: `[BLOCKED] 同批前序 browser_agent 已因网络/代理连续加载失败触发熔断（${browserCircuitBreakReason}），本项已短路跳过，不再重复探测。`,
-                  evidence: { visitedUrls: [], tabs: [], screenshots: [], documentPaths: [], errors: [browserCircuitBreakReason] },
-                  next: phaseReceiptNext("browser_agent", "blocked"),
-                },
-              };
-            }
             await acquirePhase();
             try {
-              const res = await this.executeSinglePhase(session!, call, phase, latest, tools!, emit, redact, control, groupControl, () => steered);
+              if (phase.name === "browser_agent" && browserCircuitBreakReason) {
+                return {
+                  value: {
+                    status: "blocked",
+                    executor: "host/circuit_breaker",
+                    circuitBroken: true,
+                    result: `[BLOCKED] 同批前序 browser_agent 已因网络/代理连续加载失败触发熔断（${browserCircuitBreakReason}），本项已短路跳过，不再重复探测。`,
+                    evidence: { visitedUrls: [], tabs: [], screenshots: [], documentPaths: [], errors: [browserCircuitBreakReason] },
+                    next: phaseReceiptNext("browser_agent", "blocked"),
+                  },
+                };
+              }
+              const res = await this.executeSinglePhase(session!, call, phase, latest, tools!, emit, redact, control, groupControl, () => steered, browserPhaseCount > 1);
               if (phase.name === "browser_agent" && res.circuitBroken) browserCircuitBreakReason = res.circuitBreakReason || "连续网络/页面加载失败";
               if (res.checkReturnModel) checkReturnModel = true;
               if (res.isCode && res.stageId) codeStages.push(res.stageId);
@@ -1963,6 +1965,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     control: AbortController,
     groupControl: AbortController,
     isSteered: () => boolean,
+    concurrentBrowser = false,
   ): Promise<{ outcome: Outcome; stop: boolean; pause?: string; checkReturnModel?: boolean; stageId?: string; isCode?: boolean; circuitBroken?: boolean; circuitBreakReason?: string }> {
     const specialist = phase.name;
     const targetScene = specialist === "code_agent" ? "coding" : "computer";
@@ -2017,6 +2020,9 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           false,
           {
             parentRedact: redact,
+            notice: specialist === "browser_agent" && concurrentBrowser
+              ? "[并发标签隔离] 当前有多个 browser_agent 并发共用同一浏览器，宿主已按会话强制隔离标签归属：请直接用 chrome_navigate(target={kind:\"new_tab\"}) 新开独立标签并只操作自己打开的 tabTag，不要复用或关闭其他并发会话的标签。"
+              : undefined,
             onPause: (reason) => { phasePause = reason; },
             onCircuitBreak: (reason) => { circuitBroken = true; circuitBreakReason = reason; },
           },
@@ -2512,7 +2518,6 @@ const barrier = (name: string) =>
   ].includes(name);
 async function conflicts(cwd: string, a: Call, b: Call) {
   if (isPhaseName(a.name) || isPhaseName(b.name)) {
-    if (a.name === "browser_agent" && b.name === "browser_agent") return true;
     if (isPhaseName(a.name) && isPhaseName(b.name)) return false;
     const [phase, other] = isPhaseName(a.name) ? [a.name, b.name] : [b.name, a.name];
     if (isPhaseParallelSafe(other)) return false;

@@ -105,6 +105,7 @@ export class Tools {
   /** Message attachments put on disk for this run (see attachments.ts). */
   attachments: AttachmentFiles;
   private browserTab?: string;
+  private usedBrowsers = new Set<Awaited<ReturnType<Engine["chromeFor"]>>>();
   /** 本机 SSH 密钥只取一次（每次运行）。 */
   private localSsh?: Promise<string>;
   sceneStack: string[] = [];
@@ -1003,13 +1004,18 @@ export class Tools {
       if (!failure) throw error;
       return { value: { connected: false, privateBrowser: "start_failed", ...failure } };
     }
+    this.usedBrowsers.add(browser);
     const result = await browser.execute(
       this.session.id,
       this.session.cwd,
       a,
       this.signal,
       this.credentials,
-      { used: (tag) => this.engine.taskTabs.used(this.session.taskId, tag), opened: (tag) => this.engine.taskTabs.opened(this.session, tag) },
+      {
+        used: (tag) => this.engine.taskTabs.used(this.session.taskId, tag),
+        opened: (tag) => this.engine.taskTabs.opened(this.session, tag),
+        exclusive: this.engine.active.has(this.session.id),
+      },
     );
     this.browserTab = result.tabTag || a.tabTag || this.browserTab;
     const images: Outcome["images"] = [];
@@ -1192,7 +1198,11 @@ export class Tools {
     try {
       if (workspaceIdle) void workspaceIdle.then(() => this.keys.clear()).catch(() => {});
       else await this.keys.clear();
-    } finally { if (this.signal.aborted) await this.engine.releaseSession(this.session.id); }
+    } finally {
+      for (const browser of this.usedBrowsers) browser.releaseTabs?.(this.session.id);
+      this.usedBrowsers.clear();
+      if (this.signal.aborted) await this.engine.releaseSession(this.session.id);
+    }
   }
 }
 export async function mutate(cwd: string, name: string, a: Obj, fs = filesystem) {
