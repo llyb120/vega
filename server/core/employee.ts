@@ -2269,7 +2269,7 @@ export class Employee {
           stored.employeeId = this.employeeId;
           if (computer && planned.execution?.localAgent && !stored.localAgent) {
             Object.assign(stored, planned.execution, { cwd: planned.cwd });
-            notes.push("电脑会话已恢复到任务绑定的客户端；历史网页结果来自服务端，不得复用旧标签/ref。先用 chrome_tabs/chrome_inspect 核对本机现场，不重放已提交的操作。");
+            notes.push("电脑会话已恢复到任务绑定的客户端；历史网页结果来自服务端，不得复用旧标签/ref。先用 browser_tabs/browser_view 核对本机现场，不重放已提交的操作。");
           }
           stored.ownerId ||= planned.execution?.ownerId || initial.ownerId || undefined;
           stored.scene ||= scene;

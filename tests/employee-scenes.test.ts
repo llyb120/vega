@@ -185,9 +185,9 @@ test("isolated browser and code phases return structured evidence without pollut
         case 2:
           assert.equal(model.selection, "p/vision");
           assert(!names.some(n => ["bash", "bash_poll", "write", "edit", "code_agent", "browser_agent", "switch_scene", "task_progress", "task_complete", "spawn_agent", "employee_task_create"].includes(n)), "browser_agent strictly drops bash and task lifecycle tools");
-          assert(names.includes("chrome_navigate") && names.includes("read") && names.includes("vault_get"));
+          assert(names.includes("browser_tabs") && names.includes("read") && names.includes("vault_get"));
           assert(!system.includes("首次执行先用task_progress"), "specialist does not inherit coordinator boilerplate");
-          return call("nav", "chrome_navigate", { url: "https://cursor.com/pricing", target: { kind: "new_tab" } });
+          return call("nav", "browser_tabs", { action: "open", url: "https://cursor.com/pricing" });
         case 3:
           assert.equal(model.selection, "p/vision");
           return { role: "assistant", text: "browser finding" };
@@ -202,12 +202,12 @@ test("isolated browser and code phases return structured evidence without pollut
           assert.equal(receipt.evidence.screenshots[0].url, "/api/files/employees/e/t/shot.webp");
           assert.equal(receipt.evidence.tabs[0].tabTag, "C1-1");
           assert(receipt.phaseSession);
-          assert(!rows.some(r => r.name === "chrome_navigate"), "coordinator history is never polluted with inner specialist tool calls");
+          assert(!rows.some(r => r.name === "browser_tabs" || r.name === "chrome_navigate"), "coordinator history is never polluted with inner specialist tool calls");
           return call("code", "code_agent", { task: "check the browser finding" });
         }
         case 5:
           assert.equal(model.selection, "p/code");
-          assert(!names.some(n => ["chrome_navigate", "code_agent", "browser_agent", "switch_scene", "task_progress", "task_complete", "spawn_agent", "employee_task_create"].includes(n)));
+          assert(!names.some(n => ["browser_tabs", "chrome_navigate", "code_agent", "browser_agent", "switch_scene", "task_progress", "task_complete", "spawn_agent", "employee_task_create"].includes(n)));
           assert(names.includes("read") && names.includes("edit") && names.includes("bash"));
           return { role: "assistant", text: "coding finding" };
         case 6: {
@@ -250,7 +250,7 @@ test("browser_agent fail-fast reports blocked status and error evidence when sit
     engine.providers.chat = async (model, _sys, rows) => {
       step++;
       if (step === 1) return call("b", "browser_agent", { task: "打开 cursor.com/pricing" });
-      if (step === 2) return call("n", "chrome_navigate", { url: "https://cursor.com/pricing", target: { kind: "new_tab" } });
+      if (step === 2) return call("n", "browser_tabs", { action: "open", url: "https://cursor.com/pricing" });
       if (step === 3) return { role: "assistant", text: "[BLOCKED] Chrome 代理故障无法打开 cursor.com/pricing" };
       if (step === 4) {
         assert.equal(model.selection, "p/light");
@@ -316,7 +316,7 @@ test("even a coding-profile task starts lightweight and routes coding and browse
     if (phase === 4) {
       assert.equal(model.selection, "p/vision");
       assert(!definitions.some(tool => ["bash", "write", "edit", "switch_scene", "task_complete"].includes(tool.name)));
-      assert(definitions.some(tool => tool.name === "chrome_navigate"));
+      assert(definitions.some(tool => tool.name === "browser_tabs"));
       return { role: "assistant", text: "浏览器已验证" };
     }
     assert.equal(model.selection, "p/light");
@@ -582,7 +582,7 @@ test("lightweight candidate failures stay within the lightweight list instead of
   } finally { await engine.close(); await store.close(); }
 });
 
-const chromeNames = (definitions: { name: string }[]) => definitions.filter(tool => tool.name.startsWith("chrome_")).map(tool => tool.name);
+const chromeNames = (definitions: { name: string }[]) => definitions.filter(tool => tool.name.startsWith("browser_") && tool.name !== "browser_agent").map(tool => tool.name);
 
 test("a scene covered by the current preferred model stays reachable: code_agent is offered and executes an isolated coding phase", async () => {
   const { store, engine, add, segment } = await fixture();
@@ -639,14 +639,14 @@ test("attached log scenario: lightweight task whose model is shared with compute
       assert(!names.includes("switch_scene"));
       assert(names.includes("task_progress") && names.includes("task_complete"));
       return { role: "assistant", calls: [
-        { id: "early-nav", name: "chrome_navigate", arguments: { url: "https://www.baidu.com/" } },
-        { id: "early-status", name: "chrome_connection", arguments: { command: "status" } },
+        { id: "early-nav", name: "browser_tabs", arguments: { action: "open", url: "https://www.baidu.com/" } },
+        { id: "early-status", name: "browser_debug", arguments: { kind: "downloads" } },
       ] };
     }
     if (phase === 2) {
       for (const id of ["early-nav", "early-status"]) {
         const rejected = messages.find(message => message.role === "tool" && message.callId === id)!;
-        assert(rejected.error && /当前会话未授权工具：chrome_/.test(rejected.text!), "out-of-scene batch call is rejected with guidance");
+        assert(rejected.error && /当前会话未授权工具：browser_/.test(rejected.text!), "out-of-scene batch call is rejected with guidance");
       }
       assert.equal(driver, 0, "rejected calls never reach the browser driver");
       work = (await store.sessions()).find(s => !s.phaseRole)!.id;
@@ -658,7 +658,7 @@ test("attached log scenario: lightweight task whose model is shared with compute
       assert(JSON.stringify(messages).includes("[Chrome 规则]") && !JSON.stringify(messages).includes("[Chrome 场景]") && !system.includes("[Chrome 规则]") && !system.includes("[Chrome 场景]"), "full Chrome rules only in browser_agent dynamic segment");
       assert(!names.includes("bash") && !names.includes("write") && !names.includes("edit") && !names.includes("task_complete") && !names.includes("task_progress") && !names.includes("switch_scene"), "browser_agent has strict tool isolation");
       assert(!system.includes("[电脑场景未配置]"));
-      return call("status", "chrome_connection", { command: "status" });
+      return call("status", "browser_debug", { kind: "downloads" });
     }
     if (phase === 4) {
       const status = messages.findLast(message => message.role === "tool" && message.callId === "status")!;
@@ -710,7 +710,7 @@ test("lightweight and computer on different models: browser_agent uses vision mo
     }
     if (phase === 2) {
       assert.equal(model.selection, "p/vision");
-      assert(chromeNames(definitions).includes("chrome_navigate"));
+      assert(chromeNames(definitions).includes("browser_tabs"));
       assert(!definitions.some(tool => tool.name === "bash" || tool.name === "task_complete"));
       return { role: "assistant", text: "网页核实通过。" };
     }
@@ -895,8 +895,8 @@ test("browser_agent host circuit breaker halts after 2 consecutive ERR_SOCKS err
     }
     browserTurn++;
     if (browserTurn <= 2) {
-      assert(definitions.some(d => d.name === "chrome_navigate"));
-      return { role: "assistant", text: "尝试打开第 " + browserTurn + " 个链接", calls: [{ id: "nav-" + browserTurn, name: "chrome_navigate", arguments: { url: `https://docs.cursor.com/p${browserTurn}`, target: { kind: "new_tab" } } }] };
+      assert(definitions.some(d => d.name === "browser_tabs"));
+      return { role: "assistant", text: "尝试打开第 " + browserTurn + " 个链接", calls: [{ id: "nav-" + browserTurn, name: "browser_tabs", arguments: { action: "open", url: `https://docs.cursor.com/p${browserTurn}` } }] };
     }
     // Turn 3 must be forced wrap-up with empty definitions!
     assert.deepEqual(definitions, [], "host circuit breaker must disable tools on forced wrap-up turn");
@@ -961,7 +961,7 @@ test("queued same-batch browser_agent short-circuits after an earlier phase trip
       return { role: "assistant", text: "站点 B 已完成。" };
     }
     if (t <= 2) {
-      return { role: "assistant", calls: [{ id: "nav-" + t, name: "chrome_navigate", arguments: { url: `https://docs.cursor.com/x${t}`, target: { kind: "new_tab" } } }] };
+      return { role: "assistant", calls: [{ id: "nav-" + t, name: "browser_tabs", arguments: { action: "open", url: `https://docs.cursor.com/x${t}` } }] };
     }
     assert.deepEqual(definitions, []);
     setTimeout(releaseSecond, 20);
@@ -1050,7 +1050,7 @@ test("concurrent browser_agent phases run in parallel with runtime per-session t
 
     if (promptText.includes("复查")) {
       if (turn === 1) {
-        return { role: "assistant", calls: [{ id: "reuse-goto", name: "chrome_navigate", arguments: { url: "https://z.ai/docs", target: { kind: "existing_tab", tabTag: zaiTabTag } } }] };
+        return { role: "assistant", calls: [{ id: "reuse-goto", name: "browser_tabs", arguments: { action: "goto", url: "https://z.ai/docs", tab: zaiTabTag } }] };
       }
       return { role: "assistant", text: "复查完成。" };
     }
@@ -1067,11 +1067,11 @@ test("concurrent browser_agent phases run in parallel with runtime per-session t
 
     if (promptText.includes("z.ai")) {
       if (turn === 1) {
-        return { role: "assistant", calls: [{ id: "open-zai", name: "chrome_navigate", arguments: { url: "https://z.ai/pricing", target: { kind: "new_tab" } } }] };
+        return { role: "assistant", calls: [{ id: "open-zai", name: "browser_tabs", arguments: { action: "open", url: "https://z.ai/pricing" } }] };
       }
       if (turn === 2) {
         const opened = JSON.parse(messages.findLast((m) => m.role === "tool" && m.callId === "open-zai")!.text!);
-        zaiTabTag = opened.tabTag;
+        zaiTabTag = opened.tab || opened.tabTag;
         assert.equal(chrome.tabOwners.get(zaiTabTag), sessionId, "opened tab must be owned by z.ai phase");
         zaiOpened();
         // Stay alive until bigmodel.cn attempts to inspect/steal zaiTabTag
@@ -1084,21 +1084,21 @@ test("concurrent browser_agent phases run in parallel with runtime per-session t
     if (promptText.includes("bigmodel.cn")) {
       if (turn === 1) {
         await waitZaiOpen;
-        // 1. chrome_tabs must hide z.ai's owned tab
-        return { role: "assistant", calls: [{ id: "cn-tabs", name: "chrome_tabs", arguments: {} }] };
+        // 1. browser_tabs(list) must hide z.ai's owned tab
+        return { role: "assistant", calls: [{ id: "cn-tabs", name: "browser_tabs", arguments: { action: "list" } }] };
       }
       if (turn === 2) {
         const listed = JSON.parse(messages.findLast((m) => m.role === "tool" && m.callId === "cn-tabs")!.text!);
-        assert(!listed.tabs.some((t: any) => t.tag === zaiTabTag), "other concurrent phase's tab must be hidden from chrome_tabs");
+        assert(!listed.tabs.some((t: any) => t.tag === zaiTabTag), "other concurrent phase's tab must be hidden from browser_tabs");
         // 2. Trying to directly hijack zaiTabTag must be rejected at runtime
-        return { role: "assistant", calls: [{ id: "cn-hijack", name: "chrome_navigate", arguments: { url: "https://bigmodel.cn/hijack", target: { kind: "existing_tab", tabTag: zaiTabTag } } }] };
+        return { role: "assistant", calls: [{ id: "cn-hijack", name: "browser_tabs", arguments: { action: "goto", url: "https://bigmodel.cn/hijack", tab: zaiTabTag } }] };
       }
       if (turn === 3) {
         const rejected = messages.findLast((m) => m.role === "tool" && m.callId === "cn-hijack")!;
         assert(rejected.error && /正由另一个并行会话占用/.test(rejected.text!), "hijacking another phase's tab must be rejected: " + rejected.text);
         assert.equal(fakeTabs.find((t) => t.tag === zaiTabTag)!.url, "https://z.ai/pricing", "z.ai tab URL must remain untouched");
         bigmodelCheckedConflict();
-        return { role: "assistant", calls: [{ id: "open-cn", name: "chrome_navigate", arguments: { url: "https://bigmodel.cn/pricing", target: { kind: "new_tab" } } }] };
+        return { role: "assistant", calls: [{ id: "open-cn", name: "browser_tabs", arguments: { action: "open", url: "https://bigmodel.cn/pricing" } }] };
       }
       activeBrowsers--;
       return { role: "assistant", text: "bigmodel.cn 定价核实完成。" };
@@ -1145,12 +1145,12 @@ test("complex browser_agent phase has no artificial turn limit and finishes mult
     browserTurn++;
     const payload = JSON.stringify(messages);
     assert(!payload.includes("[阶段即将到达轮次上限]") && !payload.includes("[阶段强制收尾]"), "no artificial turn-limit warning or cutoff");
-    assert(definitions.some(d => d.name === "chrome_inspect"), "tools remain available past 18 turns");
+    assert(definitions.some(d => d.name === "browser_view"), "tools remain available past 18 turns");
     if (browserTurn <= 22) {
       return {
         role: "assistant",
         text: browserTurn === 1 ? "我先查找标签。" : "",
-        calls: [{ id: "t-" + browserTurn, name: "chrome_inspect", arguments: { tabTag: "C2-ok" } }],
+        calls: [{ id: "t-" + browserTurn, name: "browser_view", arguments: { tab: "C2-ok", screenshot: false } }],
       };
     }
     return { role: "assistant", text: "全部面板采集完成：Teams $30 / $100 / $200。" };

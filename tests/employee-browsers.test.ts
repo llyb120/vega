@@ -153,9 +153,10 @@ test("a reloaded private worker immediately replaces a stale peer without replay
 
 
 test("bridge request timeouts give navigation and probes at least 10s headroom", async (t) => {
-  for (const op of ["tabs", "goto", "open", "new_tab", "status", "set_proxy", "close_tab", "back", "forward", "reload", "cdp", "devtools"])
+  for (const op of ["tabs", "status", "set_proxy", "close_tab", "back", "forward", "cdp", "devtools", "debug", "select_tab", "downloads"])
     assert.equal(requestTimeout(op), 10000, op);
-  assert.equal(requestTimeout("act"), 8000);
+  for (const op of ["goto", "open", "new_tab", "reload", "view", "act", "eval"])
+    assert.equal(requestTimeout(op), 25000, op);
   assert.equal(requestTimeout("evaluate"), 8000);
   assert.equal(requestTimeout("inspect"), 8000);
   const bridge = new ChromeBridge(true);

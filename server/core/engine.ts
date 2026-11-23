@@ -1259,7 +1259,11 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       const legacyEmployeePrompt = !session.phaseRole && (session.frozenSystem?.includes("\n[当前数字牛马] ") ||
         (session.frozenSystem?.startsWith("你是 Vega，谨慎、简洁地完成用户授权的工作。") &&
           session.frozenSystem.includes("用户说“交给牛马：xxx”时，只用 employee_task_create")));
-      const legacyChromePrompt = !session.phaseRole && session.frozenSystem?.includes("chrome_* 工具在各场景都会列出");
+      const legacyChromePrompt = !session.phaseRole && (
+        session.frozenSystem?.includes("chrome_* 工具在各场景都会列出") ||
+        session.frozenSystem?.includes("只通过 Vega 扩展授权的 chrome_* 工具") ||
+        session.frozenSystem?.includes("appuse_screenshot")
+      );
       if (!session.frozenSystem || legacyPrinciples || legacyEmployeePrompt || legacyChromePrompt) {
         const epic = session.frozenSystem ? !!session.boostFrozen : /\/variant\/niu-m$/.test(session.model || "");
         if (epic) stable += "\n\n" + BOOST;
@@ -1810,7 +1814,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             const name = reply.calls[i].name;
             if (isChromeNetworkErrorOutcome(name, outcome)) {
               consecutiveChromeNetErrors++;
-            } else if (["chrome_navigate", "chrome_tab_control", "chrome_inspect"].includes(name) && !outcome.error) {
+            } else if (["browser_tabs", "browser_view", "chrome_navigate", "chrome_tab_control", "chrome_inspect"].includes(name) && !outcome.error) {
               consecutiveChromeNetErrors = 0;
             }
           }
@@ -1905,7 +1909,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           await this.store.saveSession(session);
         }
         const browser = session?.localBrowser ? this.localBrowsers.peek(key) : session?.ownerId && (session.employeeId || session.taskId || cloudFor(session)) ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : session?.employeeId ? undefined : this.chrome;
-        if (browser) await (await browser.experiencesFor(key)).finish(key, !error);
+        if (browser) {
+          browser.releaseTurn(this.active.size > 1);
+          await (await browser.experiencesFor(key)).finish(key, !error);
+        }
       } catch (cleanupError: any) {
         suspension?.cancel();
         cancelSessionAgents(key);
@@ -2021,7 +2028,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           {
             parentRedact: redact,
             notice: specialist === "browser_agent" && concurrentBrowser
-              ? "[并发标签隔离] 当前有多个 browser_agent 并发共用同一浏览器，宿主已按会话强制隔离标签归属：请直接用 chrome_navigate(target={kind:\"new_tab\"}) 新开独立标签并只操作自己打开的 tabTag，不要复用或关闭其他并发会话的标签。"
+              ? "[并发标签隔离] 当前有多个 browser_agent 并发共用同一浏览器，宿主已按会话强制隔离标签归属：请直接用 browser_tabs(action=\"open\") 新开独立标签并只操作自己打开的 tab，不要复用或关闭其他并发会话的标签。"
               : undefined,
             onPause: (reason) => { phasePause = reason; },
             onCircuitBreak: (reason) => { circuitBroken = true; circuitBreakReason = reason; },

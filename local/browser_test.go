@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -320,5 +323,137 @@ func TestLocalBrowserUploadOnlyAllowsRegularWorkspaceFiles(t *testing.T) {
 	_ = large.Close()
 	if r := fileOperation(fileReq{Op: "read_workspace", Cwd: root, Path: "large.bin"}); r["error"] == nil {
 		t.Fatal("oversized workspace file allowed", r)
+	}
+}
+
+func TestBrowserBridgeHealthAndWebSocketHelloAndCommandRoundtrip(t *testing.T) {
+	b := newBrowserBridge()
+	server := httptest.NewServer(b)
+	defer server.Close()
+
+	// 1. /health pre-probe identifies Vega bridge.
+	req, _ := http.NewRequest("GET", server.URL+"/health", nil)
+	req.Header.Set("Origin", extensionOrigin)
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var health map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&health)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || health["ok"] != true || health["app"] != "vega" || health["version"] != extensionVersion {
+		t.Fatalf("unexpected /health: %d %+v", resp.StatusCode, health)
+	}
+
+	// 2. Pair and open authenticated /ws connection.
+	pairReq, _ := http.NewRequest("POST", server.URL+"/pair", nil)
+	pairReq.Header.Set("Origin", extensionOrigin)
+	pairResp, err := server.Client().Do(pairReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pair map[string]any
+	_ = json.NewDecoder(pairResp.Body).Decode(&pair)
+	pairResp.Body.Close()
+	token := pair["token"].(string)
+
+	host := strings.TrimPrefix(server.URL, "http://")
+	conn, err := net.DialTimeout("tcp", host, 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	wsKey := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef"))
+	handshake := "GET /ws?clientId=" + browserClient + "&token=" + token + " HTTP/1.1\r\n" +
+		"Host: " + host + "\r\n" +
+		"Origin: " + extensionOrigin + "\r\n" +
+		"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + wsKey + "\r\nSec-WebSocket-Version: 13\r\n" +
+		"User-Agent: Mozilla/5.0 Chrome/130.0.0.0\r\n\r\n"
+	if _, err := conn.Write([]byte(handshake)); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(statusLine, "101") {
+		t.Fatalf("unexpected WS upgrade: %q %v", statusLine, err)
+	}
+	expectedAccept := sha1.Sum([]byte(wsKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	wantAccept := base64.StdEncoding.EncodeToString(expectedAccept[:])
+	sawAccept := false
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(strings.ToLower(line), "sec-websocket-accept:") && strings.Contains(line, wantAccept) {
+			sawAccept = true
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+	if !sawAccept {
+		t.Fatal("missing Sec-WebSocket-Accept")
+	}
+
+	// 3. Receive hello carrying version + single-source page_runtime.js.
+	op, payload, err := readWebSocketFrame(reader)
+	if err != nil || op != 1 {
+		t.Fatalf("hello read failed: op=%d err=%v", op, err)
+	}
+	var hello map[string]any
+	if err := json.Unmarshal(payload, &hello); err != nil {
+		t.Fatal(err)
+	}
+	if hello["type"] != "hello" || hello["version"] != extensionVersion || !strings.Contains(hello["runtime"].(string), "__novaBrowser") {
+		t.Fatalf("unexpected hello payload: %+v", hello)
+	}
+
+	// 4. Execute compound `view` command over WS and release triggers cursor_hide.
+	owner, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if r := b.execute(owner, owner, browserJob("acquire", browserSession)); r["error"] != nil {
+		t.Fatal(r)
+	}
+	resultCh := make(chan map[string]any, 1)
+	go func() {
+		resultCh <- b.execute(owner, owner, browserJob("view", browserSession))
+	}()
+	_, cmdPayload, err := readWebSocketFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cmd map[string]any
+	if err := json.Unmarshal(cmdPayload, &cmd); err != nil {
+		t.Fatal(err)
+	}
+	if cmd["type"] != "cmd" || cmd["op"] != "view" {
+		t.Fatalf("expected WS view cmd, got %+v", cmd)
+	}
+	if remaining := time.Until(time.UnixMilli(int64(cmd["expiresAt"].(float64)))); remaining <= 10*time.Second || remaining > 25*time.Second {
+		t.Fatalf("view did not use 25s budget: %v", remaining)
+	}
+	replyBytes, _ := json.Marshal(map[string]any{
+		"type":   "reply",
+		"id":     cmd["id"],
+		"result": map[string]any{"title": "OK"},
+	})
+	if err := writeWebSocketText(conn, replyBytes); err != nil {
+		t.Fatal(err)
+	}
+	res := <-resultCh
+	if res["error"] != nil || res["result"].(map[string]any)["title"] != "OK" {
+		t.Fatalf("WS reply failed: %+v", res)
+	}
+
+	b.execute(owner, owner, browserJob("release", browserSession))
+	_, hidePayload, err := readWebSocketFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hideCmd map[string]any
+	_ = json.Unmarshal(hidePayload, &hideCmd)
+	if hideCmd["op"] != "cursor_hide" {
+		t.Fatalf("expected cursor_hide on release, got %+v", hideCmd)
 	}
 }

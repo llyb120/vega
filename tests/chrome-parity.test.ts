@@ -44,13 +44,14 @@ async function fixture(t: TestContext) {
 }
 
 test("Chrome intent notes are bounded metadata, never page input or proof of success", async (t) => {
-  const f = await fixture(t), schema = CHROME_TOOL_DEFINITIONS.find(tool => tool.name === "chrome_act")!.parameters;
+  const f = await fixture(t), schema = CHROME_TOOL_DEFINITIONS.find(tool => tool.name === "browser_act")!.parameters;
+  const steps = [{ op: "click", x: 20, y: 20 }];
   const actions = [{ action: "click", ref: "save" }];
   const notes = "提交保存；这只是意图，不是成功回执";
-  const mapped = toInternal("chrome_act", checkArgs(schema, { tabTag: "tab", notes, actions }), { kind: "normal" }).args;
+  const mapped = toInternal("browser_act", checkArgs(schema, { tab: "tab", notes, steps }), { kind: "normal" }).args;
   assert.equal(mapped.notes, notes);
   await f.observe();
-  const result = await f.act(mapped);
+  const result = await f.act({ notes, actions });
   assert.equal(result.notes, notes);
   assert.equal(result.completedActions, 1);
   assert(!JSON.stringify(f.calls).includes(notes));
@@ -59,7 +60,7 @@ test("Chrome intent notes are bounded metadata, never page input or proof of suc
   const count = f.sent.length;
   await assert.rejects(f.act({ notes: "字".repeat(12001), actions }), /notes/);
   await assert.rejects(f.act({ notes: { intent: "no" }, actions }), /notes/);
-  assert.throws(() => checkArgs(schema, { tabTag: "tab", notes: "字".repeat(12001), actions }), /notes/);
+  assert.throws(() => checkArgs(schema, { tab: "tab", notes: "字".repeat(4001), steps }), /notes/);
   assert.equal(f.sent.length, count, "invalid notes cannot send any input");
   await f.observe();
   f.chrome.mouse = async () => { throw Error("fixture input failure"); };
@@ -132,7 +133,7 @@ test("a still-loading page and stale refs or screenshot coordinates never send i
   assert.equal(loading.status, "not_executed");
   assert.equal(loading.inputAttempted, false);
   assert.match(loading.reason, /仍在加载.*未执行/);
-  assert.match(loading.next, /chrome_inspect/);
+  assert.match(loading.next, /browser_view/);
 });
 
 test("automatic reading refuses incomplete documents even when the tab reports loaded", async (t) => {
@@ -155,7 +156,7 @@ test("automatic reading refuses incomplete documents even when the tab reports l
     assert.equal(loading.inputAttempted, false);
     assert.equal(loading.completedActions, 0);
     assert.equal(loading.loading, true);
-    assert.match(loading.next, /chrome_inspect/);
+    assert.match(loading.next, /browser_view/);
     assert(probes > 0, "document readiness was checked");
     assert.equal(observations, 0, "an incomplete document is not used as an automatic observation");
     assert.equal(f.sent.length, 0, "no input is sent");
@@ -218,7 +219,7 @@ test("wait-plus-input batches still require a ready page and execute no prefix",
   assert.equal(result.status, "not_executed");
   assert.equal(result.completedActions, 0);
   assert.equal(result.inputAttempted, false);
-  assert.match(result.next, /chrome_inspect/);
+  assert.match(result.next, /browser_view/);
   assert.equal(observe.mock.callCount(), 0);
   assert.equal(f.sent.length, 0);
 });
@@ -478,12 +479,17 @@ async function screenshotFixture(t: TestContext, width = 800, height = 3000) {
   return { ...f, captures, layouts };
 }
 
-test("explicit screenshots return images even with the compatible visual=none flag", async (t) => {
-  const f = await screenshotFixture(t), schema = CHROME_TOOL_DEFINITIONS.find(tool => tool.name === "chrome_screenshot")!.parameters;
+test("explicit screenshots return images from browser_view and legacy inspect", async (t) => {
+  const f = await screenshotFixture(t), schema = CHROME_TOOL_DEFINITIONS.find(tool => tool.name === "browser_view")!.parameters;
+  for (const args of [
+    { tab: "tab", screenshot: true, maxItems: 3, maxTextChars: 60 },
+    { tab: "tab", maxItems: 3, maxTextChars: 60 },
+  ]) {
+    const checked = checkArgs(schema, args);
+    assert.deepEqual(toInternal("browser_view", checked, { kind: "normal" }).args, { operation: "browser_view", ...checked });
+  }
   for (const visual of [undefined, "auto", "none"]) {
-    const args = { tabTag: "tab", capture: { kind: "viewport" }, maxItems: 3, maxTextChars: 60, ...(visual ? { visual } : {}) };
-    const mapped = toInternal("chrome_screenshot", checkArgs(schema, args), { kind: "normal" }).args;
-    const result = await f.chrome.execute("owner", ".", mapped);
+    const result = await f.chrome.execute("owner", ".", { operation: "screenshot", tabTag: "tab", maxItems: 3, maxTextChars: 60, ...(visual ? { visual } : {}) });
     assert.equal(result.images.length, 1, String(visual));
     assert(result.images[0].path && result.snapshotId);
     assert.equal(f.chrome.observations.get("owner:tab")!.screenshot, true);

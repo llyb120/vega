@@ -24,6 +24,7 @@ class LocalBridge extends ChromeBridge {
   async start() { this.info = await this.send("status", {}); }
   status() { return this.info; }
   request(operation: string, args: Obj, signal?: AbortSignal) { return this.send(operation, args, signal); }
+  hideCursor() { /* local/browser.go dispatches cursor_hide automatically on lease release. */ }
   close() { /* Native browser and its login data belong to the user. */ }
 }
 
@@ -42,7 +43,10 @@ export class LocalBrowsers {
       const chrome = new Chrome(this.store, bridge, this.pageScript, clientExperienceKind(agent.userId, agent.clientId));
       const shared = [...this.sessions.values()].find(value => value.agent === agent);
       // Navigation affects every session on this browser; observation keys still isolate input ownership.
-      if (shared) chrome.observations = shared.chrome.observations;
+      if (shared) {
+        chrome.observations = shared.chrome.observations;
+        chrome.snapshots = shared.chrome.snapshots;
+      }
       chrome.workspaceFile = async (cwd, path) => {
         absoluteFilePath(path, agent.platform === "windows");
         const r = await bridge.request("workspace_file", { cwd, path });

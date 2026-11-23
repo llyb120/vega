@@ -91,7 +91,7 @@ export class EmployeeBrowsers {
     let entry = this.entries.get(id);
     if (!entry) {
       this.profile(id);
-      const bridge = new ChromeBridge(true);
+      const bridge = new ChromeBridge(true, this.pageScript);
       bridge.onPoll = this.onPoll;
       entry = { chrome: new Chrome(this.store, bridge, this.pageScript, "experience:" + id), browser: new HeadlessBrowser() };
       this.entries.set(id, entry);
@@ -115,6 +115,7 @@ export class EmployeeBrowsers {
         if (failure && failure.retryAt > Date.now())
           throw Error(`${failure.error}；已连续失败 ${failure.count} 次，${Math.ceil((failure.retryAt - Date.now()) / 1000)} 秒后才会再次尝试启动`);
         current.chrome.observations.clear();
+        current.chrome.snapshots.clear();
         current.chrome.bridge.close();
         current.probedAt = undefined;
         current.proxySynced = false;

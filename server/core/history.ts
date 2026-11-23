@@ -1,6 +1,8 @@
-import { CHROME_TOOLS } from "./public-tools";
+import { CHROME_TOOLS, LEGACY_CHROME_TOOLS } from "./public-tools";
 import type { Message } from "./store";
 import { clip, type Obj } from "./util";
+
+const isBrowserToolName = (name: string) => CHROME_TOOLS.has(name) || LEGACY_CHROME_TOOLS.has(name);
 export type Unit = { start: number; end: number; ref?: number; open: boolean };
 export const refName = (seq: number) => "m" + String(seq).padStart(5, "0");
 export function units(rows: Message[]): Unit[] {
@@ -74,7 +76,7 @@ export function sceneHistory(rows: Message[], scene?: string): Message[] {
       if (!row.images?.length && text.length <= 480) return row;
       const parsed = resultBody(row)?.value;
       const receipt = receiptFields(parsed);
-      for (const k of ["tabTag", "documentPath", "archivePath"]) if (typeof parsed?.[k] === "string") receipt[k] = parsed[k];
+      for (const k of ["tab", "tabTag", "documentPath", "archivePath"]) if (typeof parsed?.[k] === "string") receipt[k] = parsed[k];
       const files = row.images?.slice(-8).map(im => im.url || im.path || im.blobId).filter(Boolean);
       return { ...row, images: undefined, text: `[Scene receipt #${row.seq}; original: recall(positions:[${row.seq}]); do not replay] ` +
         JSON.stringify({ ...receipt, ...(files?.length ? { files } : {}), ...(row.error || !Object.keys(receipt).length ? { excerpt: text.slice(0, 180) } : {}) }) };
@@ -86,7 +88,7 @@ export function sceneHistory(rows: Message[], scene?: string): Message[] {
     let changed = false;
     const calls = row.calls.map(c => {
       // Legacy batches have no provenance: Chrome alone unambiguously identifies its scene.
-      if (!(toolScene ? privateTools.has(c.name) || CHROME_TOOLS.has(c.name) || c.name.startsWith("jianlai_") : scene !== "computer" && CHROME_TOOLS.has(c.name))) return c;
+      if (!(toolScene ? privateTools.has(c.name) || isBrowserToolName(c.name) || c.name.startsWith("jianlai_") || c.name.startsWith("appuse_") : scene !== "computer" && isBrowserToolName(c.name))) return c;
       foreign.add(c.id);
       changed = true;
       if (JSON.stringify(c.arguments).length <= 320) return c;
@@ -138,15 +140,15 @@ export function promptHistory(
   for (let i = rows.length - 1; i >= 0; i--) {
     let m = rows[i];
     if (m.role !== "tool") continue;
-    const parsed = CHROME_TOOLS.has(m.name || "") ? resultBody(m) : undefined,
+    const parsed = isBrowserToolName(m.name || "") ? resultBody(m) : undefined,
       value = parsed?.value,
-      tab = value?.tabTag;
-    // An archived observation keeps documentPath; its preview stands in for pages.
-    if (tab && (value.pages?.length || (value.archivePath && value.documentPath && value.preview))) {
+      tab = value?.tabTag ?? value?.tab;
+    // An archived observation keeps documentPath; its preview stands in for pages / frameStream.
+    if (tab && value && (value.pages?.length || value.frameStream?.length || (value.archivePath && value.documentPath && value.preview))) {
       const n = (dom.get(tab) || 0) + 1;
       dom.set(tab, n);
       if (n > 2) {
-        const { pages: _pages, preview: _preview, ...rest } = value;
+        const { pages: _pages, frameStream: _frameStream, preview: _preview, ...rest } = value;
         rest.domOmitted = `[DOM 已移出上下文：${rest.documentPath}，需要时用 read 分页读回]`;
         m = rows[i] = { ...m, text: parsed!.prefix + JSON.stringify(rest) };
       }
@@ -158,9 +160,9 @@ export function promptHistory(
 /** Text kept in context for an oversized result. Chrome results keep the fields history pruning relies on. */
 export function archivedResult(name: string, value: Obj, raw: string, archivePath: string, warning?: string) {
   const tail = { archivePath, truncated: true, ...(warning ? { archiveWarning: warning } : {}), next: "完整结果已保存于 archivePath，用 read 按 offset/limit 分页读，hasMore 时从 nextOffset 继续" };
-  if (!CHROME_TOOLS.has(name) || !value || typeof value !== "object") return JSON.stringify({ ...receiptFields(value), preview: clip(raw, 32000), ...tail });
-  const { tabTag, snapshotId, images, documentPath, ...rest } = value,
-    head = { ...receiptFields(value), tabTag, snapshotId, images, documentPath };
+  if (!isBrowserToolName(name) || !value || typeof value !== "object") return JSON.stringify({ ...receiptFields(value), preview: clip(raw, 32000), ...tail });
+  const { tab, tabTag, snapshotId, images, documentPath, ...rest } = value,
+    head = { ...receiptFields(value), ...(tab !== undefined ? { tab } : {}), ...(tabTag !== undefined ? { tabTag } : {}), snapshotId, images, documentPath };
   return JSON.stringify({ ...head, preview: clip(JSON.stringify(rest), Math.max(4000, 32000 - JSON.stringify(head).length)), ...tail });
 }
 
@@ -179,11 +181,11 @@ export function historyImages(
   for (let i = rows.length - 1; i >= 0; i--) {
     const m = rows[i];
     if (m.role !== "tool" || !m.images?.length) continue;
-    const chrome = CHROME_TOOLS.has(m.name || ""),
+    const chrome = isBrowserToolName(m.name || ""),
       parsed = chrome ? resultBody(m) : undefined;
     const keep = m.images.map(() => true);
     if (chrome) {
-      const key = String(parsed?.value.tabTag ?? "");
+      const key = String(parsed?.value.tabTag ?? parsed?.value.tab ?? "");
       let tab = tabs.get(key);
       if (!tab) tabs.set(key, tab = { results: 0, paths: new Set() });
       const full = tab.results >= 2;

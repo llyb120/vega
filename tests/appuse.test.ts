@@ -4,7 +4,7 @@ import test from "node:test";
 import { LocalAgents } from "../server/core/local-agent";
 import { Tools } from "../server/core/tools";
 import { Store } from "../server/core/store";
-import { APPUSE_TOOLS, appuseArguments, normalizeDesktopAction } from "../server/core/appuse-tools";
+import { APPUSE_TOOLS, appuseArguments, appuseResult, normalizeDesktopAction } from "../server/core/appuse-tools";
 import { DesktopObservations } from "../server/core/desktop-observations";
 
 const client = { instance: "a".repeat(32), clientId: "b".repeat(32), name: "笔记本", platform: "windows", cwd: "C:\\client" };
@@ -20,13 +20,12 @@ async function setup(t: any) {
   return { store, hub, session, tools, engine };
 }
 
-test("desktop tools are the nine narrow ones, listed only in a Windows client session", async (t) => {
+test("desktop tools are the five narrow ones, listed only in a Windows client session", async (t) => {
   const { store, tools } = await setup(t);
   const names = (await tools.definitions()).map((tool) => tool.name);
   assert.deepEqual([...APPUSE_TOOLS].sort(), names.filter((name) => name.startsWith("appuse_")).sort());
-  assert.equal(APPUSE_TOOLS.size, 9);
+  assert.equal(APPUSE_TOOLS.size, 5);
   assert.match(await tools.rules(), /\[桌面操作\]/);
-  // 单个 appuse 已不再列出：模型乱塞字段的根因就是那个扁平 schema。
   assert(!names.includes("appuse"));
   const server = await Tools.create({ store, localAgents: new LocalAgents(), mcpFor: () => ({}) } as any, await store.newSession({ ownerId: "alice" }), { model: "", provider: {} }, new AbortController().signal, () => {});
   assert(!(await server.definitions()).some((tool) => tool.name.startsWith("appuse_")));
@@ -35,13 +34,15 @@ test("desktop tools are the nine narrow ones, listed only in a Windows client se
   assert(!(await linux.definitions()).some((tool) => tool.name.startsWith("appuse_")));
 });
 
-test("elements are read-only queries and physical screen input is validated before dispatch", async (t) => {
+test("appuse_view(screenshot=false) is read-only and physical screen input is validated before dispatch", async (t) => {
   const { hub, tools } = await setup(t);
   let seen: any, calls = 0;
   (hub as any).request = async (_agent: unknown, _op: string, args: any) => { calls++; seen = args; return { elements: [], truncated: true }; };
-  const result = await tools.execute({ id: "tree", name: "appuse_elements", arguments: { windowId: 42, depth: 4, maxItems: 60, filter: "Save" } }, {} as any);
+  const result = await tools.execute({ id: "tree", name: "appuse_view", arguments: { screenshot: false, windowId: 42, depth: 4, maxItems: 60, filter: "Save" } }, {} as any);
   assert.equal(seen.operation, "elements");
   assert.equal(seen.windowId, 42);
+  assert.equal(seen.depth, 4);
+  assert.equal(seen.maxItems, 60);
   assert.equal(result.value.truncated, true);
   const actions = [{ action: "click", x: -120, y: 20 }];
   await tools.execute({ id: "screen", name: "appuse_act", arguments: { coordinateSpace: "screen", actions } }, {} as any);
@@ -55,51 +56,59 @@ test("elements are read-only queries and physical screen input is validated befo
     { coordinateSpace: "screen", actions: [{ action: "press", key: "Enter" }] },
     { actions },
   ]) await assert.rejects(tools.execute({ id: "bad", name: "appuse_act", arguments: arguments_ }, {} as any));
-  for (const arguments_ of [{ x: 1 }, { x: 1, y: 2, windowId: 42 }, { depth: 21 }, { maxItems: 201 }])
-    await assert.rejects(tools.execute({ id: "bad-tree", name: "appuse_elements", arguments: arguments_ }, {} as any));
+  for (const arguments_ of [
+    { screenshot: false, x: 1 },
+    { screenshot: false, x: 1, y: 2, windowId: 42 },
+    { screenshot: false, depth: 7 },
+    { screenshot: false, maxItems: 121 },
+  ])
+    await assert.rejects(tools.execute({ id: "bad-tree", name: "appuse_view", arguments: arguments_ }, {} as any));
   assert.equal(calls, before, "invalid requests never reach the client");
 });
 
-test("screenshot capture kinds map onto the executor without changing region spaces", () => {
+test("unified desktop tool shapes map cleanly onto executor operations", () => {
   const owner = "session-1";
   assert.deepEqual(appuseArguments("appuse_windows", { query: "Nova", observe: true }, owner), { operation: "windows", query: "Nova", observe: true, owner });
-  // appuse_window-only 选项不再让别的操作整批退回，但它们也不会被翻译进截图/输入。
-  assert.deepEqual(appuseArguments("appuse_activate", { windowId: 42 }, owner), { operation: "activate", windowId: 42, owner });
-  const desktop = appuseArguments("appuse_screenshot", { capture: { kind: "desktop" } }, owner);
+  assert.deepEqual(appuseArguments("appuse_windows", { action: "activate", windowId: 42 }, owner), { operation: "activate", windowId: 42, owner });
+  const desktop = appuseArguments("appuse_view", { target: "desktop" }, owner);
   assert.equal(desktop.operation, "screenshot");
   assert.equal(desktop.regionSpace, undefined);
-  const imageRegion = appuseArguments("appuse_screenshot", {
-    capture: { kind: "image_region", snapshotId: "s", imageId: "i", region: { x: 0, y: 1, width: 2, height: 3 } },
+  const zoomId = appuseArguments("appuse_view", { target: "zoom", zoom: { id: 3 } }, owner);
+  assert.equal(zoomId.operation, "screenshot");
+  assert.equal(zoomId.zoomId, 3);
+  const imageRegion = appuseArguments("appuse_view", {
+    target: "zoom", snapshotId: "s", imageId: "i", zoom: { x: 0, y: 1, width: 2, height: 3 },
   }, owner);
   assert.equal(imageRegion.regionSpace, "image");
   assert.equal(imageRegion.snapshotId, "s");
-  const windowRegion = appuseArguments("appuse_screenshot", {
-    capture: { kind: "window_region", windowId: 1, region: { x: 0, y: 1, width: 2, height: 3 } },
+  assert.deepEqual(imageRegion.region, { x: 0, y: 1, width: 2, height: 3 });
+  const windowRegion = appuseArguments("appuse_view", {
+    target: "zoom", windowId: 1, zoom: { x: 0, y: 1, width: 2, height: 3, space: "source" },
   }, owner);
   assert.equal(windowRegion.regionSpace, "source");
   assert.equal(windowRegion.windowId, 1);
-  const act = appuseArguments("appuse_act", { actions: [{ action: "wait", ms: 10 }] }, owner);
+  const act = appuseArguments("appuse_act", { actions: [{ action: "click", id: 2 }, { action: "dismiss" }, { action: "wait", ms: 10 }] }, owner);
   assert.equal(act.operation, "act");
-  assert.equal(act.actions.length, 1);
+  assert.equal(act.actions.length, 3);
 });
 
-test("desktop dispatch binds the owner and stores returned screenshots as session files", async (t) => {
+test("desktop dispatch binds the owner and stores returned JPEG screenshots as session files", async (t) => {
   const { hub, session, tools } = await setup(t);
   let seen: { op?: string; args?: any } = {};
+  const jpg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
   (hub as any).request = async (_agent: unknown, op: string, args: any) => {
     seen = { op, args };
-    return { snapshotId: "snap1", images: [{ imageId: "monitor-0", mime: "image/png", path: "C:\\shots\\monitor-0.png", data: png.toString("base64") }] };
+    return { snapshotId: "snap1", images: [{ imageId: "monitor-0", mime: "image/jpeg", path: "C:\\shots\\monitor-0.jpg", data: jpg.toString("base64") }] };
   };
-  const result = await tools.execute({ id: "shot", name: "appuse_screenshot", arguments: { capture: { kind: "monitor", monitorId: 0 } } }, {} as any);
+  const result = await tools.execute({ id: "shot", name: "appuse_view", arguments: { target: "monitor", monitorId: 0 } }, {} as any);
   assert.equal(seen.op, "appuse");
   assert.equal(seen.args.owner, session.id);
   assert.equal(seen.args.monitorId, 0);
   assert.equal(seen.args.operation, "screenshot");
   const image = result.images![0];
-  assert.equal(image.mime, "image/png");
-  assert.match(image.url!, /^\/api\/files\//);
-  assert((await readFile(image.path!)).equals(png));
-  // The base64 payload is dropped from the tool result; only the saved path and URL stay.
+  assert.equal(image.mime, "image/jpeg");
+  assert.match(image.url!, /^\/api\/files\/.*\.jpg$/);
+  assert((await readFile(image.path!)).equals(jpg));
   assert.equal(result.value.images[0].data, undefined);
   assert.equal(result.value.images[0].path, image.path);
 });
@@ -139,10 +148,9 @@ test("a stray field is rejected against the narrow schema before any desktop wor
   const { hub, tools } = await setup(t);
   let called = false;
   (hub as any).request = async () => { called = true; return {}; };
-  // 旧单个 appuse 会把 observe 塞给 activate；窄工具里它根本不属于该工具的参数。
   await assert.rejects(
-    () => tools.execute({ id: "x", name: "appuse_activate", arguments: { windowId: 1, observe: false } }, {} as any),
-    /不接受字段 observe/,
+    () => tools.execute({ id: "x", name: "appuse_windows", arguments: { action: "activate", windowId: 1, observe: false } }, {} as any),
+    /action=activate 不接受字段 observe/,
   );
   assert.equal(called, false);
 });
@@ -166,21 +174,60 @@ test("desktop experience save and feedback verify the actual latest session wind
     if (args.operation === "act") { valid = false; return { status: "executed", completedActions: 1 }; }
     throw Error("unexpected desktop request");
   };
-  const save = { scope: "Editor", task: "Save a document", conditions: ["Document open"], steps: ["Save", "Confirm"], checks: ["Saved"], evidence: "Saved", redacted: true };
-  await assert.rejects(tools.execute({ id: "before", name: "appuse_experience_save", arguments: save }, {} as any), /目标窗口截图/);
+  const save = { action: "save", scope: "Editor", task: "Save a document", conditions: ["Document open"], steps: ["Save", "Confirm"], checks: ["Saved"], evidence: "Saved", redacted: true };
+  await assert.rejects(tools.execute({ id: "before", name: "appuse_experience", arguments: save }, {} as any), /目标窗口截图/);
   await tools.execute({ id: "observe", name: "appuse_windows", arguments: { windowId: 42, observe: true } }, {} as any);
-  const saved = await tools.execute({ id: "save", name: "appuse_experience_save", arguments: save }, {} as any);
+  const saved = await tools.execute({ id: "save", name: "appuse_experience", arguments: save }, {} as any);
   assert.equal(saved.value.saved, true);
   assert.equal((await store.objects("experience:desktop:alice")).length, 1);
   assert.equal((await store.objects("experience")).length, 0);
-  const feedback = { snapshotId: "snap-1", routeId: saved.value.experience.id, scope: "Editor", task: save.task, outcome: "success", reason: "confirmed", evidence: "Saved", redacted: true };
-  assert.equal((await tools.execute({ id: "feedback", name: "appuse_experience_feedback", arguments: feedback }, {} as any)).value.saved, true);
+  const feedback = { action: "feedback", snapshotId: "snap-1", routeId: saved.value.experience.id, scope: "Editor", task: save.task, outcome: "success", reason: "confirmed", evidence: "Saved", redacted: true };
+  assert.equal((await tools.execute({ id: "feedback", name: "appuse_experience", arguments: feedback }, {} as any)).value.saved, true);
   assert.equal(checks, 2);
-  await assert.rejects(tools.execute({ id: "stale", name: "appuse_experience_save", arguments: { ...save, snapshotId: "old" } }, {} as any), /snapshotId/);
-  await assert.rejects(tools.execute({ id: "wrong-app", name: "appuse_experience_save", arguments: { ...save, scope: "Other" } }, {} as any), /scope/);
+  await assert.rejects(tools.execute({ id: "stale", name: "appuse_experience", arguments: { ...save, snapshotId: "old" } }, {} as any), /snapshotId/);
+  await assert.rejects(tools.execute({ id: "wrong-app", name: "appuse_experience", arguments: { ...save, scope: "Other" } }, {} as any), /scope/);
   const otherSession = await store.newSession({ ownerId: "alice", cwd: client.cwd, localAgent: true, localPlatform: "windows", clientId: client.clientId });
   const other = await Tools.create(engine as any, otherSession, { model: "", provider: {} }, new AbortController().signal, () => {});
-  await assert.rejects(other.execute({ id: "other", name: "appuse_experience_save", arguments: save }, {} as any), /目标窗口截图/);
+  await assert.rejects(other.execute({ id: "other", name: "appuse_experience", arguments: save }, {} as any), /目标窗口截图/);
   await tools.execute({ id: "input", name: "appuse_act", arguments: { feedback: "none", actions: [{ action: "click", x: 1, y: 1 }] } }, {} as any);
-  await assert.rejects(tools.execute({ id: "invalidated", name: "appuse_experience_save", arguments: save }, {} as any), /快照已失效/);
+  await assert.rejects(tools.execute({ id: "invalidated", name: "appuse_experience", arguments: save }, {} as any), /快照已失效/);
+});
+
+test("appuse_act id/dismiss/type(clear,submit), appuse_view zoom.id, appuse_windows activate, and appuseResult remapping", () => {
+  const owner = "sess-1";
+  const act = appuseArguments("appuse_act", {
+    windowId: 7,
+    actions: [
+      { action: "type", id: 3, text: "hello", clear: true, submit: true },
+      { action: "click", id: 4 },
+      { action: "dismiss" },
+    ],
+  }, owner);
+  assert.equal(act.operation, "act");
+  assert.equal(act.windowId, 7);
+  assert.deepEqual(act.actions, [
+    { action: "type", id: 3, text: "hello", clear: true, submit: true },
+    { action: "click", id: 4 },
+    { action: "dismiss" },
+  ]);
+
+  const zoomed = appuseArguments("appuse_view", { windowId: 7, zoom: { id: 5 } }, owner);
+  assert.equal(zoomed.operation, "screenshot");
+  assert.equal(zoomed.zoomId, 5);
+
+  const activated = appuseArguments("appuse_windows", { action: "activate", windowId: 7 }, owner);
+  assert.equal(activated.operation, "activate");
+  assert.equal(activated.windowId, 7);
+
+  const remapped = appuseResult(
+    {
+      status: "not_executed",
+      nextCall: { operation: "activate", windowId: 7 },
+      nextArguments: { operation: "act", actions: [{ action: "click", id: 4 }] },
+    },
+    { windowId: 7 },
+  );
+  assert.deepEqual(remapped.nextCall, { tool: "appuse_windows", arguments: { windowId: 7, action: "activate" } });
+  assert.equal(remapped.nextTool, "appuse_act");
+  assert.deepEqual(remapped.nextArguments, { windowId: 7, actions: [{ action: "click", id: 4 }] });
 });

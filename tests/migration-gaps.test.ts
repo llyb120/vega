@@ -306,7 +306,7 @@ test("removed image service is hidden and unavailable while reading image pixels
     const limited = await tools.read({ path: documentPath, offset: 3, limit: 2 });
     assert.match(limited.value.text, /^3\|/);
     assert.equal(limited.value.nextOffset, 5);
-    assert((await tools.definitions(model)).some((tool) => tool.name === "chrome_screenshot"));
+    assert((await tools.definitions(model)).some((tool) => tool.name === "browser_view"));
     assert(!("image" in (await e.saveConfig(legacy))));
     assert(!("image" in await store.get<any>("config", {})));
   } finally {

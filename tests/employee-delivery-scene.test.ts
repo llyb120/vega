@@ -141,9 +141,9 @@ test("export replay: 429 inside isolated browser_agent returns error to lightwei
     }
     if (phase === 5) {
       assert.equal(model.selection, "p/vision");
-      assert.deepEqual(definitions.filter((t: any) => t.name.startsWith("chrome_")).map((t: any) => t.name), CHROME_TOOL_DEFINITIONS.map(t => t.name), "chrome schemas stay stable");
+      assert.deepEqual(definitions.filter((t: any) => t.name.startsWith("browser_")).map((t: any) => t.name), CHROME_TOOL_DEFINITIONS.map(t => t.name), "chrome schemas stay stable");
       assert(!definitions.some((t: any) => ["bash", "task_progress", "task_complete", "switch_scene"].includes(t.name)), "browser_agent has strict scoped tools");
-      return call("status", "chrome", { operation: "status" });
+      return call("status", "chrome", { operation: "tabs" });
     }
     if (phase === 6) return { role: "assistant", text: "浏览器勘察完成：7 张截图已保存。" };
     if (phase === 7) {

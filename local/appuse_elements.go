@@ -23,19 +23,83 @@ func (r appuseControlRect) value() map[string]any {
 }
 
 type appuseControl struct {
+	ID           int
 	Name         string
 	Role         string
 	AutomationID string
 	ClassName    string
+	Value        string
+	State        string
+	Interactive  bool
 	ControlType  int32
 	Enabled      bool
 	Rect         appuseControlRect
 }
+
+type appuseUIANode struct {
+	ID           int
+	Role         string
+	Name         string
+	AutomationID string
+	Value        string
+	State        string
+	Enabled      bool
+	Interactive  bool
+	Overlay      bool
+	Scrollable   bool
+	Rect         appuseControlRect
+	Depth        int
+	Order        int
+}
+
+type appuseOverlayInfo struct {
+	Kind         string
+	Role         string
+	Name         string
+	ScreenRect   appuseControlRect
+	OutsidePoint *appusePoint
+}
+
+type appuseScrollInfo struct {
+	Scrollable bool   `json:"scrollable"`
+	Direction  string `json:"direction,omitempty"`
+	Percent    *int   `json:"percent,omitempty"`
+	ViewSize   *int   `json:"viewSize,omitempty"`
+	AtTop      bool   `json:"atTop,omitempty"`
+	AtBottom   bool   `json:"atBottom,omitempty"`
+}
+
+type appuseUIAExtract struct {
+	WindowID      uint32
+	PID           uint32
+	Visited       int
+	Truncated     bool
+	TruncatedBy   string
+	Nodes         []appuseUIANode
+	Overlay       *appuseOverlayInfo
+	PrimaryScroll *appuseScrollInfo
+}
+
+type appuseControlItem struct {
+	ID         int
+	Role       string
+	Name       string
+	Value      string
+	State      string
+	ImageX     int
+	ImageY     int
+	ImageRect  appuseControlRect
+	SourceRect appuseRegion
+	ScreenRect appuseControlRect
+}
+
 type appuseControlTree struct {
-	Elements    []appuseControl
-	Visited     int
-	Truncated   bool
-	TruncatedBy string
+	Elements      []appuseControl
+	Visited       int
+	Truncated     bool
+	TruncatedBy   string
+	Overlay       *appuseOverlayInfo
+	PrimaryScroll *appuseScrollInfo
 }
 type appuseElementObservation struct {
 	Owner    string
@@ -53,13 +117,13 @@ func appuseElementsOperation(request *appuseRequest) map[string]any {
 	}
 	depth, limit := request.Depth, request.MaxItems
 	if depth == 0 {
-		depth = 3
+		depth = 5
 	}
 	if limit == 0 {
 		limit = 40
 	}
-	if depth < 1 || depth > 20 || limit < 1 || limit > 200 || len([]rune(request.Filter)) > 200 {
-		return failure("elements 的 depth 允许 1–20，maxItems 允许 1–200，filter 最多 200 字")
+	if depth < 1 || depth > 6 || limit < 1 || limit > 120 || len([]rune(request.Filter)) > 60 {
+		return failure("elements 的 depth 允许 1–6，maxItems 允许 1–120，filter 最多 60 字")
 	}
 	snapshot := appuseCurrent(request.Owner, request.SnapshotID)
 	if request.SnapshotID != "" && (snapshot == nil || snapshot.Invalidated != "") {
@@ -119,7 +183,16 @@ func appuseElementsOperation(request *appuseRequest) map[string]any {
 	items := make([]map[string]any, 0, len(tree.Elements))
 	for _, control := range tree.Elements {
 		row := map[string]any{"name": control.Name, "role": control.Role, "automationId": control.AutomationID,
-			"className": control.ClassName, "enabled": control.Enabled, "screen": control.Rect.value()}
+			"className": control.ClassName, "enabled": control.Enabled, "interactive": control.Interactive, "screen": control.Rect.value()}
+		if control.ID > 0 {
+			row["id"] = control.ID
+		}
+		if control.Value != "" {
+			row["value"] = control.Value
+		}
+		if control.State != "" {
+			row["state"] = control.State
+		}
 		rect := control.Rect
 		if mapped, ok := appuseControlImageRect(rect, shot); ok {
 			rect = mapped
@@ -139,6 +212,29 @@ func appuseElementsOperation(request *appuseRequest) map[string]any {
 		"focused": appuseSameForeground(windowID), "screenInputReady": false}
 	if tree.Truncated {
 		result["truncatedBy"] = tree.TruncatedBy
+	}
+	if tree.PrimaryScroll != nil {
+		result["scrollHint"] = tree.PrimaryScroll
+	}
+	if tree.Overlay != nil {
+		overlayMap := map[string]any{
+			"kind":       tree.Overlay.Kind,
+			"role":       tree.Overlay.Role,
+			"name":       tree.Overlay.Name,
+			"screenRect": tree.Overlay.ScreenRect.value(),
+		}
+		if tree.Overlay.OutsidePoint != nil {
+			ptMap := map[string]any{"screen": map[string]int32{"x": tree.Overlay.OutsidePoint.X, "y": tree.Overlay.OutsidePoint.Y}}
+			if shot != nil {
+				if ix, iy, ok := appuseScreenPointToImage(*tree.Overlay.OutsidePoint, shot); ok {
+					ptMap["x"] = ix
+					ptMap["y"] = iy
+					ptMap["imageId"] = shot.ImageID
+				}
+			}
+			overlayMap["outsidePoint"] = ptMap
+		}
+		result["overlay"] = overlayMap
 	}
 	if shot != nil {
 		result["coordinateSpace"] = "image-pixels"
@@ -198,6 +294,34 @@ func appuseControlImageRect(r appuseControlRect, shot *appuseShot) (appuseContro
 		return r, false
 	}
 	return appuseControlRect{X: left, Y: top, Width: right - left, Height: bottom - top}, true
+}
+
+func appuseScreenPointToImage(pt appusePoint, shot *appuseShot) (int, int, bool) {
+	if shot == nil || shot.WindowID != nil {
+		return 0, 0, false
+	}
+	origin := shot.Origin
+	if origin.W == 0 || origin.H == 0 {
+		origin = shot.Surface
+	}
+	if origin.W == 0 || origin.H == 0 || shot.SourceW == 0 || shot.SourceH == 0 || shot.PixelsW == 0 || shot.PixelsH == 0 {
+		return 0, 0, false
+	}
+	crop := appuseRegion{Width: shot.SourceW, Height: shot.SourceH}
+	if shot.Region != nil {
+		crop = *shot.Region
+	}
+	if crop.Width == 0 || crop.Height == 0 {
+		return 0, 0, false
+	}
+	sx := float64(int64(pt.X)-int64(origin.X))*float64(shot.SourceW)/float64(origin.W) - float64(crop.X)
+	sy := float64(int64(pt.Y)-int64(origin.Y))*float64(shot.SourceH)/float64(origin.H) - float64(crop.Y)
+	ix := int(math.Round(sx * float64(shot.PixelsW) / float64(crop.Width)))
+	iy := int(math.Round(sy * float64(shot.PixelsH) / float64(crop.Height)))
+	if ix < 0 || iy < 0 || ix >= int(shot.PixelsW) || iy >= int(shot.PixelsH) {
+		return 0, 0, false
+	}
+	return ix, iy, true
 }
 func appuseScreenShot(snapshot *appuseSnapshot, x, y *int) *appuseShot {
 	if x == nil || y == nil {

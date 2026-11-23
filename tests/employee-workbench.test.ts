@@ -169,7 +169,7 @@ test("employee chat delegates evidence-dependent questions, follows an existing 
     assert(system.includes("不能以沟通会话没有 shell") && system.includes("不是实际发起的请求地址"));
     assert(system.includes("用户明确要求只讨论、不执行时遵守") && system.includes("不得擅自重启用户停止的任务或绕过审批"));
     assert(system.includes("自动安排只读调查") && system.includes("不要重复派单"));
-    assert(!definitions.some((tool) => ["bash", "write", "edit", "switch_scene"].includes(tool.name) || tool.name.startsWith("chrome_")));
+    assert(!definitions.some((tool) => ["bash", "write", "edit", "switch_scene"].includes(tool.name) || (tool.name.startsWith("browser_") && tool.name !== "browser_agent") || tool.name.startsWith("chrome_")));
     const last = messages.filter(m => m.runtime !== "dynamic").at(-1)!;
     if (last.role === "user" && last.text?.includes("1+1")) return { role: "assistant", text: "2" };
     if (last.role === "user") return follow("inspect", { action: "list" });
@@ -294,7 +294,7 @@ test("computer execution keeps a real final answer once and never treats tool na
         await store.append(session, toolOnly
                     ? { role: "assistant", text: "正在检查网页。", calls: [{ id: "inspect", ...chromeCall({ operation: "inspect" }) }] }
                     : { role: "assistant", text: "已核实网页结果，没有再次提交。" });
-        if (toolOnly) await store.append(session, { role: "tool", name: "chrome_inspect", callId: "inspect", text: "inspection failed", error: true });
+        if (toolOnly) await store.append(session, { role: "tool", name: "browser_view", callId: "inspect", text: "inspection failed", error: true });
       };
       const current = await segment(employee, employee.task(await employee.state(), job.id));
       const messages = await store.messages(current.computerSession), conclusion = messages.at(-1)!;

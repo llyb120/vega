@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	"image/png"
 	"math"
 	"math/rand"
 	"os"
@@ -47,12 +46,15 @@ func (r appuseRegion) validate(width, height uint32) error {
 
 type appuseAction struct {
 	Action string  `json:"action"`
+	ID     *int    `json:"id"`
 	X      *int    `json:"x"`
 	Y      *int    `json:"y"`
 	ToX    *int    `json:"toX"`
 	ToY    *int    `json:"toY"`
 	Button *string `json:"button"`
 	Text   *string `json:"text"`
+	Clear  *bool   `json:"clear"`
+	Submit *bool   `json:"submit"`
 	Key    *string `json:"key"`
 	Delta  *int    `json:"delta"`
 	Axis   *string `json:"axis"`
@@ -67,6 +69,8 @@ type appuseRequest struct {
 	MonitorID       *uint32        `json:"monitorId"`
 	Region          *appuseRegion  `json:"region"`
 	RegionSpace     string         `json:"regionSpace"`
+	ZoomID          *int           `json:"zoomId"`
+	Controls        *bool          `json:"controls"`
 	SnapshotID      string         `json:"snapshotId"`
 	ImageID         string         `json:"imageId"`
 	Feedback        string         `json:"feedback"`
@@ -108,19 +112,22 @@ type appuseSurface struct {
 }
 
 type appuseShot struct {
-	ImageID  string
-	Surface  appuseSurface
-	PixelsW  uint32
-	PixelsH  uint32
-	SourceW  uint32
-	SourceH  uint32
-	Region   *appuseRegion
-	Path     string
-	Data     []byte
-	Cursor   *appusePoint
-	WindowID *uint32
-	Monitor  uint32
-	Screen   bool
+	ImageID        string
+	Surface        appuseSurface
+	Origin         appuseSurface
+	PixelsW        uint32
+	PixelsH        uint32
+	SourceW        uint32
+	SourceH        uint32
+	Region         *appuseRegion
+	Path           string
+	Data           []byte
+	Cursor         *appusePoint
+	Controls       []appuseControlItem
+	OverlayOutside *appusePoint
+	WindowID       *uint32
+	Monitor        uint32
+	Screen         bool
 }
 
 type appuseSnapshot struct {
@@ -168,6 +175,12 @@ func appuseExecute(raw json.RawMessage) map[string]any {
 	}
 	if request.Region != nil && request.Operation != "screenshot" {
 		return failure("region 仅用于 screenshot")
+	}
+	if request.ZoomID != nil && request.Operation != "screenshot" {
+		return failure("zoomId 仅用于 screenshot")
+	}
+	if request.ZoomID != nil && request.Region != nil {
+		return failure("zoom.id 与 region 不能同时使用")
 	}
 	if request.RegionSpace != "" && request.RegionSpace != "source" && request.RegionSpace != "image" {
 		return failure("regionSpace 必须是 source 或 image")
@@ -322,9 +335,10 @@ func appuseWindowsOperation(request *appuseRequest, maxEdge uint32) map[string]a
 		result["windows"] = matched
 	}
 	observe := request.Observe != nil && *request.Observe
+	controlsOn := request.Controls == nil || *request.Controls
 	emptyQuery := strings.TrimSpace(request.Query) == ""
 	if observe && (target != nil || emptyQuery) {
-		if observed := appuseCapture(request.Owner, target, nil, nil, maxEdge); observed != nil {
+		if observed := appuseCaptureWithOptions(request.Owner, target, nil, nil, maxEdge, controlsOn); observed != nil {
 			for key, value := range observed {
 				result[key] = value
 			}
@@ -346,6 +360,44 @@ func appuseWindowsOperation(request *appuseRequest, maxEdge uint32) map[string]a
 }
 
 func appuseScreenshotOperation(request *appuseRequest, maxEdge uint32) map[string]any {
+	controlsOn := request.Controls == nil || *request.Controls
+	if request.ZoomID != nil {
+		snapshot := appuseCurrent(request.Owner, request.SnapshotID)
+		if snapshot == nil {
+			return failure("局部放大依据已失效，请先重新截图")
+		}
+		shot, ctrl := appuseFindControl(snapshot, request.ImageID, *request.ZoomID)
+		if shot == nil || ctrl == nil {
+			return failure(fmt.Sprintf("当前最新截图中不存在控件编号 [%d]，请核对编号或省略 id 重新截图", *request.ZoomID))
+		}
+		padX := maxInt(96, int(ctrl.SourceRect.Width)/2)
+		padY := maxInt(72, int(ctrl.SourceRect.Height)/2)
+		x0 := maxInt(0, int(ctrl.SourceRect.X)-padX)
+		y0 := maxInt(0, int(ctrl.SourceRect.Y)-padY)
+		x1 := minInt(int(shot.SourceW), int(ctrl.SourceRect.X+ctrl.SourceRect.Width)+padX)
+		y1 := minInt(int(shot.SourceH), int(ctrl.SourceRect.Y+ctrl.SourceRect.Height)+padY)
+		if x1-x0 < 320 && shot.SourceW >= 320 {
+			cx := (x0 + x1) / 2
+			x0 = maxInt(0, minInt(int(shot.SourceW)-320, cx-160))
+			x1 = minInt(int(shot.SourceW), x0+320)
+		}
+		if y1-y0 < 220 && shot.SourceH >= 220 {
+			cy := (y0 + y1) / 2
+			y0 = maxInt(0, minInt(int(shot.SourceH)-220, cy-110))
+			y1 = minInt(int(shot.SourceH), y0+220)
+		}
+		crop := appuseRegion{X: uint32(x0), Y: uint32(y0), Width: uint32(maxInt(1, x1-x0)), Height: uint32(maxInt(1, y1-y0))}
+		monitorID, windowID := &shot.Monitor, shot.WindowID
+		if windowID != nil {
+			monitorID = nil
+		}
+		result := appuseCaptureWithOptions(request.Owner, windowID, monitorID, &crop, maxEdge, controlsOn)
+		if result == nil {
+			return failure("局部放大失败")
+		}
+		result["zoomedControlId"] = ctrl.ID
+		return result
+	}
 	if request.WindowID != nil && request.MonitorID != nil {
 		return failure("windowId 和 monitorId 不能同时用于截图")
 	}
@@ -374,7 +426,7 @@ func appuseScreenshotOperation(request *appuseRequest, maxEdge uint32) map[strin
 	} else if request.Region != nil && request.WindowID == nil && request.MonitorID == nil {
 		return failure("原始像素 region 需要 windowId 或 monitorId")
 	}
-	result := appuseCapture(request.Owner, windowID, monitorID, region, maxEdge)
+	result := appuseCaptureWithOptions(request.Owner, windowID, monitorID, region, maxEdge, controlsOn)
 	if result == nil {
 		return failure("截图失败")
 	}
@@ -480,10 +532,14 @@ func appuseActOperation(request *appuseRequest, maxEdge uint32) map[string]any {
 			appuseObserve(request.Owner, nil, nil, maxEdge, result)
 			return result
 		}
-		shot = appuseFindShot(snapshot, request.ImageID)
-		if shot == nil {
-			return failure(appuseImageListError(snapshot))
+		var shotErr error
+		shot, shotErr = appuseShotForActions(snapshot, request.ImageID, request.Actions)
+		if shotErr != nil {
+			return failure(shotErr.Error())
 		}
+	}
+	if err := appuseResolveActions(request, shot); err != nil {
+		return failure(err.Error() + "；本批次尚未执行")
 	}
 	for index := range request.Actions {
 		if err := request.Actions[index].validate(shot); err != nil {
@@ -614,6 +670,100 @@ func appuseFindShot(snapshot *appuseSnapshot, imageID string) *appuseShot {
 	return nil
 }
 
+func appuseFindControl(snapshot *appuseSnapshot, imageID string, controlID int) (*appuseShot, *appuseControlItem) {
+	if snapshot == nil || controlID <= 0 {
+		return nil, nil
+	}
+	if imageID != "" {
+		shot := appuseFindShot(snapshot, imageID)
+		if shot == nil {
+			return nil, nil
+		}
+		for i := range shot.Controls {
+			if shot.Controls[i].ID == controlID {
+				return shot, &shot.Controls[i]
+			}
+		}
+		return shot, nil
+	}
+	for si := range snapshot.Shots {
+		shot := &snapshot.Shots[si]
+		for ci := range shot.Controls {
+			if shot.Controls[ci].ID == controlID {
+				return shot, &shot.Controls[ci]
+			}
+		}
+	}
+	return nil, nil
+}
+
+func appuseShotForActions(snapshot *appuseSnapshot, imageID string, actions []appuseAction) (*appuseShot, error) {
+	if shot := appuseFindShot(snapshot, imageID); shot != nil {
+		return shot, nil
+	}
+	// 多屏快照未写 imageId 时，如果动作里带了唯一的控件编号 id，可据此锁定所在截图（不猜测）。
+	var matched *appuseShot
+	for _, act := range actions {
+		if act.ID == nil {
+			continue
+		}
+		s, c := appuseFindControl(snapshot, "", *act.ID)
+		if s == nil || c == nil {
+			return nil, fmt.Errorf("控件编号 [%d] 不在当前最新截图中；可用 imageId 请核对截图", *act.ID)
+		}
+		if matched != nil && matched != s {
+			return nil, fmt.Errorf("同一批次的控件编号跨多张截图，请拆分并指定 imageId")
+		}
+		matched = s
+	}
+	if matched != nil {
+		return matched, nil
+	}
+	return nil, fmt.Errorf("%s", appuseImageListError(snapshot))
+}
+
+func appuseResolveActions(request *appuseRequest, shot *appuseShot) error {
+	for i := range request.Actions {
+		act := &request.Actions[i]
+		if act.ID != nil {
+			if request.CoordinateSpace == "screen" {
+				return fmt.Errorf("actions[%d]：screen 坐标模式不支持按 id 操作，请改用 x/y", i)
+			}
+			switch act.Action {
+			case "click", "double_click", "move", "type", "scroll":
+			default:
+				return fmt.Errorf("actions[%d]（%s）不支持 id 字段", i, act.Action)
+			}
+			if act.X != nil || act.Y != nil {
+				return fmt.Errorf("actions[%d] 不能同时传 id 与 x/y", i)
+			}
+			var found *appuseControlItem
+			if shot != nil {
+				for ci := range shot.Controls {
+					if shot.Controls[ci].ID == *act.ID {
+						found = &shot.Controls[ci]
+						break
+					}
+				}
+			}
+			if found == nil {
+				count := 0
+				if shot != nil {
+					count = len(shot.Controls)
+				}
+				return fmt.Errorf("actions[%d]：当前截图中没有编号 [%d]（已标注 %d 个控件），请核对截图或改用 x/y", i, *act.ID, count)
+			}
+			x, y := found.ImageX, found.ImageY
+			act.X, act.Y = &x, &y
+		}
+		if act.Action == "dismiss" && act.X == nil && act.Y == nil && shot != nil && shot.OverlayOutside != nil {
+			ox, oy := int(shot.OverlayOutside.X), int(shot.OverlayOutside.Y)
+			act.X, act.Y = &ox, &oy
+		}
+	}
+	return nil
+}
+
 func appuseImageIDs(snapshot *appuseSnapshot) []string {
 	ids := make([]string, 0, len(snapshot.Shots))
 	for _, shot := range snapshot.Shots {
@@ -634,9 +784,68 @@ func appuseImageListError(snapshot *appuseSnapshot) string {
 	return fmt.Sprintf("imageId 缺失或不属于此截图；可用 imageId：%s。x/y 须按所选图片的像素坐标重算；沿用当前 snapshotId 并修正 imageId，无需重新截图", strings.Join(list, ", "))
 }
 
-// appuseCapture 只截可见桌面像素；windowId 用于定位所在显示器，并在能取到窗口自身像素时优先用它
-// （与 Nova 一致：普通模式指定 windowId 就调窗口自身像素，被遮挡也不会截错内容）。
+// appuseCapture 只截可见桌面像素；windowId 用于定位所在显示器，并在能取到窗口自身像素时优先用它。
 func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegion, maxEdge uint32) map[string]any {
+	return appuseCaptureWithOptions(owner, windowID, monitorID, region, maxEdge, true)
+}
+
+func appuseSelfProtectedRects() []appuseControlRect {
+	ownPID := uint32(os.Getpid())
+	wins, err := appuseListWindows()
+	if err != nil {
+		return nil
+	}
+	var out []appuseControlRect
+	for _, w := range wins {
+		if w.PID == ownPID {
+			out = append(out, appuseControlRect{X: int(w.X), Y: int(w.Y), Width: int(w.W), Height: int(w.H)})
+		}
+	}
+	return out
+}
+
+func appuseCloneRGBA(src *image.RGBA) *image.RGBA {
+	if src == nil {
+		return nil
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, src.Bounds().Dx(), src.Bounds().Dy()))
+	for y := 0; y < src.Bounds().Dy(); y++ {
+		sOff := y * src.Stride
+		dOff := y * dst.Stride
+		copy(dst.Pix[dOff:dOff+dst.Rect.Dx()*4], src.Pix[sOff:sOff+src.Rect.Dx()*4])
+	}
+	return dst
+}
+
+func appuseFormatControlLine(id int, node appuseUIANode, cx, cy int) string {
+	label := strings.TrimSpace(node.Name)
+	if label == "" {
+		label = strings.TrimSpace(node.AutomationID)
+	}
+	if len([]rune(label)) > 36 {
+		r := []rune(label)
+		label = string(r[:36]) + "…"
+	}
+	parts := []string{fmt.Sprintf("[%d] %s", id, node.Role)}
+	if label != "" {
+		parts = append(parts, fmt.Sprintf("%q", label))
+	}
+	parts = append(parts, fmt.Sprintf("@(%d,%d)", cx, cy))
+	if node.Value != "" && node.Value != label {
+		val := node.Value
+		if len([]rune(val)) > 24 {
+			r := []rune(val)
+			val = string(r[:24]) + "…"
+		}
+		parts = append(parts, fmt.Sprintf("val=%q", val))
+	}
+	if node.State != "" {
+		parts = append(parts, "["+node.State+"]")
+	}
+	return strings.Join(parts, " ")
+}
+
+func appuseCaptureWithOptions(owner string, windowID, monitorID *uint32, region *appuseRegion, maxEdge uint32, controlsOn bool) map[string]any {
 	started := time.Now()
 	target := monitorID
 	var window *appuseWindow
@@ -665,8 +874,34 @@ func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegi
 	id := appuseID()
 	cursor, hasCursor := appuseCursor()
 	before := appuseForegroundWindow()
+
+	var uiaMs int64
+	var encodeMs int64
+	var uiaExtract appuseUIAExtract
+	if controlsOn {
+		uiaStarted := time.Now()
+		var uiaWin uint32
+		if windowID != nil {
+			uiaWin = *windowID
+		} else if before != nil {
+			uiaWin = *before
+		}
+		if uiaWin != 0 {
+			uiaExtract = appuseCollectFastUIA(uiaWin, appuseSelfProtectedRects())
+		}
+		uiaMs = time.Since(uiaStarted).Milliseconds()
+	}
+
 	images := []map[string]any{}
 	shots := []appuseShot{}
+	elementsAll := []string{}
+	var overlayAll map[string]any
+	var scrollAll *appuseScrollInfo
+	if controlsOn && uiaExtract.PrimaryScroll != nil {
+		scrollAll = uiaExtract.PrimaryScroll
+	}
+	nextControlID := 1
+
 	// 上一帧的原始像素：用来判断这次画面是否真的变了（unchanged 不重传图）。
 	previous := appusePreviousFrame(owner)
 	changed := false
@@ -682,6 +917,11 @@ func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegi
 		if sourceW == 0 || sourceH == 0 {
 			return map[string]any{"observationError": "截图范围为空"}
 		}
+		origin := monitor
+		if window != nil && sourceW == window.W && sourceH == window.H {
+			origin = appuseSurface{ID: monitor.ID, PID: window.PID, X: window.X, Y: window.Y, W: window.W, H: window.H}
+		}
+
 		if prior := previous[monitor.ID]; prior != nil {
 			if region == nil && appuseEqualPixels(prior.Image, grab, 0.002) {
 				// 画面没变：沿用上一张图与它的路径，不重传、也不占用新的快照 ID。
@@ -693,16 +933,27 @@ func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegi
 				if appuseEntryGeometryMatches(candidate, monitor, sourceW, sourceH) {
 					candidate["unchanged"] = true
 					shots = append(shots, appuseShot{
-						ImageID: candidate["imageId"].(string), Surface: monitor,
+						ImageID: candidate["imageId"].(string), Surface: monitor, Origin: origin,
 						PixelsW: uint32(candidate["width"].(int)), PixelsH: uint32(candidate["height"].(int)),
 						SourceW: prior.SourceW, SourceH: prior.SourceH, Path: candidate["path"].(string),
+						Controls: prior.Controls, OverlayOutside: prior.OverlayOutside,
 						WindowID: windowID, Monitor: monitor.ID,
 					})
+					if controlsOn {
+						elementsAll = append(elementsAll, prior.ElementsText...)
+						if overlayAll == nil && prior.OverlayPayload != nil {
+							overlayAll = prior.OverlayPayload
+						}
+						if scrollAll == nil && prior.ScrollHint != nil {
+							scrollAll = prior.ScrollHint
+						}
+					}
 					images = append(images, candidate)
 					continue
 				}
 			}
 		}
+
 		changed = true
 		imageID := fmt.Sprintf("monitor-%d", monitor.ID)
 		delivered := grab
@@ -715,26 +966,133 @@ func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegi
 			imageID = fmt.Sprintf("%s-region-%d-%d-%d-%d", imageID, region.X, region.Y, region.Width, region.Height)
 			delivered = grab.SubImage(image.Rect(int(region.X), int(region.Y), int(region.X+region.Width), int(region.Y+region.Height))).(*image.RGBA)
 		}
-		delivered = appuseScale(delivered, maxEdge, region != nil)
+		scaled := appuseScale(delivered, maxEdge, region != nil)
+		// 绝不就地修改原始 grab 像素，保证 GuardFrames 与 unchanged 检测拿到零标注纯画面。
+		if scaled == delivered {
+			delivered = appuseCloneRGBA(scaled)
+		} else {
+			delivered = scaled
+		}
+		delW, delH := delivered.Bounds().Dx(), delivered.Bounds().Dy()
+
+		shotControls := []appuseControlItem{}
+		shotElementsText := []string{}
+		somBoxes := []appuseSomBox{}
+		var shotOutside *appusePoint
+		var shotOverlayPayload map[string]any
+
+		mapRectToDelivered := func(sr appuseControlRect) (x, y, w, h int, srcRegion appuseRegion, ok bool) {
+			if origin.W == 0 || origin.H == 0 || crop.Width == 0 || crop.Height == 0 {
+				return 0, 0, 0, 0, srcRegion, false
+			}
+			srcL := float64(int64(sr.X)-int64(origin.X)) * float64(sourceW) / float64(origin.W)
+			srcT := float64(int64(sr.Y)-int64(origin.Y)) * float64(sourceH) / float64(origin.H)
+			srcR := float64(int64(sr.X+sr.Width)-int64(origin.X)) * float64(sourceW) / float64(origin.W)
+			srcB := float64(int64(sr.Y+sr.Height)-int64(origin.Y)) * float64(sourceH) / float64(origin.H)
+			if srcR <= float64(crop.X) || srcB <= float64(crop.Y) || srcL >= float64(crop.X+crop.Width) || srcT >= float64(crop.Y+crop.Height) {
+				return 0, 0, 0, 0, srcRegion, false
+			}
+			cL := math.Max(srcL, float64(crop.X))
+			cT := math.Max(srcT, float64(crop.Y))
+			cR := math.Min(srcR, float64(crop.X+crop.Width))
+			cB := math.Min(srcB, float64(crop.Y+crop.Height))
+			srcRegion = appuseRegion{
+				X: uint32(math.Max(0, math.Floor(cL))), Y: uint32(math.Max(0, math.Floor(cT))),
+				Width:  uint32(math.Max(1, math.Ceil(cR)-math.Floor(cL))),
+				Height: uint32(math.Max(1, math.Ceil(cB)-math.Floor(cT))),
+			}
+			ix0 := int(math.Round((cL - float64(crop.X)) * float64(delW) / float64(crop.Width)))
+			iy0 := int(math.Round((cT - float64(crop.Y)) * float64(delH) / float64(crop.Height)))
+			ix1 := int(math.Round((cR - float64(crop.X)) * float64(delW) / float64(crop.Width)))
+			iy1 := int(math.Round((cB - float64(crop.Y)) * float64(delH) / float64(crop.Height)))
+			if ix1-ix0 < 3 || iy1-iy0 < 3 {
+				return 0, 0, 0, 0, srcRegion, false
+			}
+			return ix0, iy0, ix1 - ix0, iy1 - iy0, srcRegion, true
+		}
+
+		mapPtToDelivered := func(pt appusePoint) *appusePoint {
+			if origin.W == 0 || origin.H == 0 || crop.Width == 0 || crop.Height == 0 {
+				return nil
+			}
+			sx := float64(int64(pt.X)-int64(origin.X))*float64(sourceW)/float64(origin.W) - float64(crop.X)
+			sy := float64(int64(pt.Y)-int64(origin.Y))*float64(sourceH)/float64(origin.H) - float64(crop.Y)
+			if sx < 0 || sy < 0 || sx >= float64(crop.Width) || sy >= float64(crop.Height) {
+				return nil
+			}
+			ix := maxInt(0, minInt(delW-1, int(math.Round(sx*float64(delW)/float64(crop.Width)))))
+			iy := maxInt(0, minInt(delH-1, int(math.Round(sy*float64(delH)/float64(crop.Height)))))
+			return &appusePoint{X: int32(ix), Y: int32(iy)}
+		}
+
+		if controlsOn && len(uiaExtract.Nodes) > 0 {
+			for _, node := range uiaExtract.Nodes {
+				bx, by, bw, bh, srcReg, ok := mapRectToDelivered(node.Rect)
+				if !ok {
+					continue
+				}
+				cx := maxInt(0, minInt(delW-1, bx+bw/2))
+				cy := maxInt(0, minInt(delH-1, by+bh/2))
+				cid := nextControlID
+				nextControlID++
+				shotControls = append(shotControls, appuseControlItem{
+					ID: cid, Role: node.Role, Name: node.Name, Value: node.Value, State: node.State,
+					ImageX: cx, ImageY: cy,
+					ImageRect:  appuseControlRect{X: bx, Y: by, Width: bw, Height: bh},
+					SourceRect: srcReg, ScreenRect: node.Rect,
+				})
+				somBoxes = append(somBoxes, appuseSomBox{ID: cid, X: bx, Y: by, W: bw, H: bh})
+				if len(shotElementsText) < 60 {
+					shotElementsText = append(shotElementsText, appuseFormatControlLine(cid, node, cx, cy))
+				}
+			}
+		}
+		if controlsOn && uiaExtract.Overlay != nil {
+			ov := uiaExtract.Overlay
+			if bx, by, bw, bh, _, ok := mapRectToDelivered(ov.ScreenRect); ok {
+				shotOverlayPayload = map[string]any{
+					"kind": ov.Kind, "role": ov.Role, "name": ov.Name,
+					"rect": map[string]int{"x": bx, "y": by, "width": bw, "height": bh},
+				}
+				if ov.OutsidePoint != nil {
+					if opt := mapPtToDelivered(*ov.OutsidePoint); opt != nil {
+						shotOutside = opt
+						shotOverlayPayload["outsidePoint"] = map[string]any{"x": opt.X, "y": opt.Y, "imageId": imageID}
+					}
+				}
+			}
+		}
+
+		// 先把离线 [1][2] SoM 标注画在模型副本上，再画系统剑形落点。
+		if len(somBoxes) > 0 {
+			appuseDrawSomRaw(delivered, somBoxes)
+		}
 		var marked *appusePoint
 		if hasCursor && before != nil {
-			marked = appuseMarkCursor(delivered, monitor, appusePoint{X: int32(sourceW), Y: int32(sourceH)}, crop, cursor)
+			marked = appuseMarkCursor(delivered, origin, appusePoint{X: int32(sourceW), Y: int32(sourceH)}, crop, cursor)
 		}
-		path := filepath.Join(folder, fmt.Sprintf("%s-%s.png", id, imageID))
-		data, err := appuseEncodePNG(path, delivered)
+
+		encStarted := time.Now()
+		path := filepath.Join(folder, fmt.Sprintf("%s-%s.jpg", id, imageID))
+		rawJPEG, data, err := appuseEncodeJPEG(delivered)
 		if err != nil {
 			return map[string]any{"observationError": err.Error()}
 		}
+		if err := os.WriteFile(path, rawJPEG, 0o600); err != nil {
+			return map[string]any{"observationError": err.Error()}
+		}
+		encodeMs += time.Since(encStarted).Milliseconds()
+
 		entry := map[string]any{
-			"imageId": imageID, "width": delivered.Bounds().Dx(), "height": delivered.Bounds().Dy(),
-			"pixelWidth": delivered.Bounds().Dx(), "pixelHeight": delivered.Bounds().Dy(),
+			"imageId": imageID, "width": delW, "height": delH,
+			"pixelWidth": delW, "pixelHeight": delH,
 			"snapshotId": id, "capturedAt": time.Now().UTC().Format(time.RFC3339),
 			"stability":     map[string]any{"status": "not_checked", "samples": 1},
 			"originalWidth": sourceW, "originalHeight": sourceH,
 			"desktopBounds": map[string]any{"x": monitor.X, "y": monitor.Y, "width": monitor.W, "height": monitor.H},
-			"monitorId":     monitor.ID, "mime": "image/png", "path": path, "data": data,
+			"monitorId":     monitor.ID, "mime": "image/jpeg", "path": path, "data": data,
 		}
-		appuseRememberFrame(owner, monitor.ID, grab, entry)
+		appuseRememberFrame(owner, monitor.ID, grab, entry, shotControls, shotOutside, shotElementsText, shotOverlayPayload, scrollAll)
 		if region != nil {
 			entry["region"] = region
 		}
@@ -742,10 +1100,15 @@ func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegi
 			entry["cursor"] = map[string]any{"x": marked.X, "y": marked.Y, "marker": "sword-tip", "source": "system-pointer"}
 		}
 		shots = append(shots, appuseShot{
-			ImageID: imageID, Surface: monitor, PixelsW: uint32(delivered.Bounds().Dx()), PixelsH: uint32(delivered.Bounds().Dy()),
+			ImageID: imageID, Surface: monitor, Origin: origin, PixelsW: uint32(delW), PixelsH: uint32(delH),
 			SourceW: sourceW, SourceH: sourceH, Region: region, Path: path,
-			Cursor: marked, WindowID: windowID, Monitor: monitor.ID,
+			Cursor: marked, Controls: shotControls, OverlayOutside: shotOutside,
+			WindowID: windowID, Monitor: monitor.ID,
 		})
+		elementsAll = append(elementsAll, shotElementsText...)
+		if overlayAll == nil && shotOverlayPayload != nil {
+			overlayAll = shotOverlayPayload
+		}
 		images = append(images, entry)
 	}
 	if len(images) == 0 {
@@ -759,12 +1122,22 @@ func appuseCapture(owner string, windowID, monitorID *uint32, region *appuseRegi
 		ID: id, Owner: owner, Taken: time.Now(), Shots: shots,
 		MaxEdge: maxEdge,
 	}
-	return map[string]any{
+	out := map[string]any{
 		"snapshotId": id, "historical": false, "windowId": windowID, "images": images,
 		"coordinateSpace": "image-pixels", "expiresInMs": int64(appuseSnapshotTTL / time.Millisecond),
 		"foreground": foreground, "maxEdge": maxEdge, "changed": changed,
-		"timingsMs": map[string]any{"capture": time.Since(started).Milliseconds()},
+		"timingsMs": map[string]any{"capture": time.Since(started).Milliseconds(), "uia": uiaMs, "encode": encodeMs},
 	}
+	if len(elementsAll) > 0 {
+		out["elements"] = elementsAll
+	}
+	if overlayAll != nil {
+		out["overlay"] = overlayAll
+	}
+	if scrollAll != nil {
+		out["scrollHint"] = scrollAll
+	}
+	return out
 }
 
 func appuseObserve(owner string, windowID, monitorID *uint32, maxEdge uint32, out map[string]any) {
@@ -794,9 +1167,12 @@ func appuseScale(src *image.RGBA, maxEdge uint32, forced bool) *image.RGBA {
 	if height > width {
 		long = float64(height)
 	}
-	scale := 1.0
+	scale := appuseVisionScale(width, height)
 	if maxEdge > 0 && (forced || long > float64(maxEdge)) {
-		scale = float64(maxEdge) / long
+		edgeScale := float64(maxEdge) / long
+		if edgeScale < scale {
+			scale = edgeScale
+		}
 	}
 	// 模型看到的图不会超过 vision_scale 给出的像素；再放大反而让坐标对不上。
 	if scale > 1 {
@@ -844,19 +1220,8 @@ func appuseMarkCursor(img *image.RGBA, surface appuseSurface, source appusePoint
 	imageY := toImage(y, int64(source.Y), height, edgeH)
 	const size = 32
 	pixels := appusePointerPixels(size, appuseMarkerGlow)
-	appuseBlendPointer(&appuseImage{Pix: img.Pix, W: int(edgeW), H: int(edgeH)}, size, int(appusePointerTip), pixels, imageX, imageY)
+	appuseBlendPointer(&appuseImage{Pix: img.Pix, W: int(edgeW), H: int(edgeH)}, size, int(math.Floor(appusePointerTip)), pixels, imageX, imageY)
 	return &appusePoint{X: int32(imageX), Y: int32(imageY)}
-}
-
-func appuseEncodePNG(path string, img *image.RGBA) (string, error) {
-	var buffer bytes.Buffer
-	if err := png.Encode(&buffer, img); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(path, buffer.Bytes(), 0o600); err != nil {
-		return "", err
-	}
-	return base64Encode(buffer.Bytes()), nil
 }
 
 func appuseShotFolder(owner string) string {
@@ -886,9 +1251,13 @@ func appusePointOf(shot *appuseShot, x, y *int) (appusePoint, error) {
 	if shot.Region != nil {
 		crop = *shot.Region
 	}
+	origin := shot.Origin
+	if origin.W == 0 || origin.H == 0 {
+		origin = shot.Surface
+	}
 	pw, ph := int64(shot.PixelsW), int64(shot.PixelsH)
-	px := int64(shot.Surface.X) + (2*int64(crop.X)*pw+int64(2*(*x)+1)*int64(crop.Width))*int64(shot.Surface.W)/(2*pw*int64(shot.SourceW))
-	py := int64(shot.Surface.Y) + (2*int64(crop.Y)*ph+int64(2*(*y)+1)*int64(crop.Height))*int64(shot.Surface.H)/(2*ph*int64(shot.SourceH))
+	px := int64(origin.X) + (2*int64(crop.X)*pw+int64(2*(*x)+1)*int64(crop.Width))*int64(origin.W)/(2*pw*int64(shot.SourceW))
+	py := int64(origin.Y) + (2*int64(crop.Y)*ph+int64(2*(*y)+1)*int64(crop.Height))*int64(origin.H)/(2*ph*int64(shot.SourceH))
 	return appusePoint{X: int32(px), Y: int32(py)}, nil
 }
 
@@ -955,7 +1324,7 @@ func appuseCheckTarget(snapshot *appuseSnapshot, shot *appuseShot, action appuse
 // 让人和模型先看新图——绝不直接点一个可能已经不是它以为是的东西的位置。
 func appuseGuardPixels(snapshot *appuseSnapshot, shot *appuseShot, action appuseAction) error {
 	switch action.Action {
-	case "click", "double_click", "drag":
+	case "click", "double_click", "drag", "dismiss":
 	default:
 		return nil
 	}
@@ -1015,36 +1384,9 @@ func appusePressCombo(raw string) error {
 	return appuseKeyRelease(keys)
 }
 
-func appusePerform(shot *appuseShot, action appuseAction) error {
-	switch action.Action {
-	case "wait":
-		time.Sleep(time.Duration(action.milliseconds()) * time.Millisecond)
-		return nil
-	case "type":
-		if action.Text == nil {
-			return fmt.Errorf("type 缺少 text")
-		}
-		// Windows 走整段粘贴：逐键输入会被中文输入法改写/吞掉。
-		return appusePasteText(*action.Text)
-	case "press":
-		if action.Key == nil {
-			return fmt.Errorf("press 缺少 key")
-		}
-		return appusePressCombo(*action.Key)
-	}
-	target, err := appusePointOf(shot, action.X, action.Y)
-	if err != nil {
-		return err
-	}
-	button := "left"
-	if action.Button != nil {
-		button = *action.Button
-	}
-	// 指针默认沿轨迹可见地移过去（用户能看清在做什么）；glide:false 才瞬移。滚动始终瞬移定位。
-	glide := action.Glide == nil || (*action.Glide && action.Action != "scroll")
+func appuseGlideAndMove(target appusePoint, glide bool) error {
 	if glide {
-		from, ok := appuseCursor()
-		if ok {
+		if from, ok := appuseCursor(); ok {
 			if err := appuseGlide(from, target); err != nil {
 				return err
 			}
@@ -1057,6 +1399,80 @@ func appusePerform(shot *appuseShot, action appuseAction) error {
 		if absInt32(actual.X-target.X) > 2 || absInt32(actual.Y-target.Y) > 2 {
 			return fmt.Errorf("系统鼠标落点与请求不符（请求 %d,%d，实际 %d,%d），未按下按钮；请根据新图继续", target.X, target.Y, actual.X, actual.Y)
 		}
+	}
+	return nil
+}
+
+func appusePerform(shot *appuseShot, action appuseAction) error {
+	glide := action.Glide == nil || (*action.Glide && action.Action != "scroll")
+	switch action.Action {
+	case "wait":
+		time.Sleep(time.Duration(action.milliseconds()) * time.Millisecond)
+		return nil
+	case "type":
+		if action.Text == nil {
+			return fmt.Errorf("type 缺少 text")
+		}
+		if action.X != nil && action.Y != nil {
+			target, err := appusePointOf(shot, action.X, action.Y)
+			if err != nil {
+				return err
+			}
+			if err := appuseGlideAndMove(target, glide); err != nil {
+				return err
+			}
+			if err := appuseClick("left"); err != nil {
+				return err
+			}
+			time.Sleep(60 * time.Millisecond)
+		}
+		if action.Clear != nil && *action.Clear {
+			if err := appusePressCombo("ctrl+a"); err != nil {
+				return err
+			}
+			time.Sleep(25 * time.Millisecond)
+			if err := appusePressCombo("backspace"); err != nil {
+				return err
+			}
+			time.Sleep(35 * time.Millisecond)
+		}
+		// Windows 走整段粘贴：逐键输入会被中文输入法改写/吞掉。
+		if err := appusePasteText(*action.Text); err != nil {
+			return err
+		}
+		if action.Submit != nil && *action.Submit {
+			time.Sleep(50 * time.Millisecond)
+			return appusePressCombo("enter")
+		}
+		return nil
+	case "press":
+		if action.Key == nil {
+			return fmt.Errorf("press 缺少 key")
+		}
+		return appusePressCombo(*action.Key)
+	case "dismiss":
+		if action.X == nil || action.Y == nil {
+			return appusePressCombo("escape")
+		}
+		target, err := appusePointOf(shot, action.X, action.Y)
+		if err != nil {
+			return err
+		}
+		if err := appuseGlideAndMove(target, glide); err != nil {
+			return err
+		}
+		return appuseClick("left")
+	}
+	target, err := appusePointOf(shot, action.X, action.Y)
+	if err != nil {
+		return err
+	}
+	button := "left"
+	if action.Button != nil {
+		button = *action.Button
+	}
+	if err := appuseGlideAndMove(target, glide); err != nil {
+		return err
 	}
 	switch action.Action {
 	case "move":
@@ -1137,9 +1553,12 @@ func (a appuseAction) milliseconds() int {
 
 func (a appuseAction) validate(shot *appuseShot) error {
 	switch a.Action {
-	case "click", "double_click", "move", "drag", "type", "press", "scroll", "wait":
+	case "click", "double_click", "move", "drag", "type", "press", "scroll", "dismiss", "wait":
 	default:
-		return fmt.Errorf("未知动作；可用：click/double_click/move/drag/type/press/scroll/wait，按键用 press+key")
+		return fmt.Errorf("未知动作；可用：click/double_click/move/drag/type/press/scroll/dismiss/wait")
+	}
+	if (a.X == nil) != (a.Y == nil) {
+		return fmt.Errorf("x 与 y 必须同时提供")
 	}
 	if a.Button != nil && *a.Button != "left" && *a.Button != "right" && *a.Button != "middle" {
 		return fmt.Errorf("button 仅允许 left/right/middle")
@@ -1147,11 +1566,18 @@ func (a appuseAction) validate(shot *appuseShot) error {
 	if a.Axis != nil && *a.Axis != "vertical" && *a.Axis != "horizontal" {
 		return fmt.Errorf("axis 仅允许 vertical/horizontal")
 	}
-	if a.Glide != nil && a.Action != "click" && a.Action != "double_click" && a.Action != "move" && a.Action != "drag" {
-		return fmt.Errorf("glide 仅用于 click/double_click/move/drag")
+	if a.Glide != nil {
+		switch a.Action {
+		case "click", "double_click", "move", "drag", "type", "dismiss":
+		default:
+			return fmt.Errorf("glide 仅用于 click/double_click/move/drag/type/dismiss")
+		}
 	}
-	if a.MS != nil && (*a.MS < 0 || *a.MS > 2000) {
-		return fmt.Errorf("ms=%d，允许范围为 0–2000", *a.MS)
+	if (a.Clear != nil || a.Submit != nil) && a.Action != "type" {
+		return fmt.Errorf("clear/submit 仅用于 type")
+	}
+	if a.MS != nil && (*a.MS < 0 || *a.MS > 10000) {
+		return fmt.Errorf("ms=%d，允许范围为 0–10000", *a.MS)
 	}
 	switch a.Action {
 	case "click", "double_click", "move", "drag", "scroll":
@@ -1160,6 +1586,15 @@ func (a appuseAction) validate(shot *appuseShot) error {
 		}
 		if _, err := appusePointOf(shot, a.X, a.Y); err != nil {
 			return err
+		}
+	case "type", "dismiss":
+		if a.X != nil && a.Y != nil {
+			if shot == nil {
+				return fmt.Errorf("坐标动作需要截图")
+			}
+			if _, err := appusePointOf(shot, a.X, a.Y); err != nil {
+				return err
+			}
 		}
 	}
 	if a.Action == "drag" {
@@ -1202,7 +1637,7 @@ func appuseActionDelay(actions []appuseAction, index int) time.Duration {
 	redundant := actions[index].Action == "wait" || actions[index].Action == "move" ||
 		(index+1 < len(actions) && actions[index+1].Action == "wait")
 	reacts := index+1 == len(actions) || actions[index].Action == "click" || actions[index].Action == "double_click" ||
-		actions[index].Action == "type" || actions[index].Action == "scroll"
+		actions[index].Action == "type" || actions[index].Action == "scroll" || actions[index].Action == "dismiss"
 	switch {
 	case redundant:
 		return 0
@@ -1243,6 +1678,12 @@ func appuseExecutedNotice(actions []appuseAction, completed int, notes string) s
 				}
 				done = append(done, fmt.Sprintf("scroll(%s,%d)", axis, *action.Delta))
 			}
+		case "dismiss":
+			if action.X != nil && action.Y != nil {
+				done = append(done, fmt.Sprintf("dismiss(%d,%d)", *action.X, *action.Y))
+			} else {
+				done = append(done, "dismiss(Esc)")
+			}
 		}
 	}
 	if len(done) == 0 {
@@ -1255,16 +1696,23 @@ func appuseExecutedNotice(actions []appuseAction, completed int, notes string) s
 	return notice
 }
 
-// appuseGlide 拟人位移：时长随距离增长（Fitts）、最小抖动缓动、略微弧线。
+// appuseGlide Flash-Hogan 非对称最小急动度拟人位移：长距离先快后缓，末尾微过冲回正（t=1 精确落点）。
 func appuseGlide(from, to appusePoint) error {
 	distance := math.Hypot(float64(to.X-from.X), float64(to.Y-from.Y))
-	milliseconds := math.Min(400, 80+60*math.Log2(1+distance/24))
-	bend := (rand.Float64() - 0.5) * 0.2
+	if distance < 2 {
+		return appuseMovePointer(to.X, to.Y, true)
+	}
+	milliseconds := math.Min(380, 90+56*math.Log2(1+distance/22))
+	bend := (rand.Float64() - 0.5) * 0.22
+	overshoot := 0.0
+	if distance > 140 {
+		// 仅长距离才附加约 2%-4% 的自然过冲再平滑回稳。
+		overshoot = 0.02 + rand.Float64()*0.02
+	}
 	started := time.Now()
 	for {
-		// 按经过时间取样，不按步数：系统 sleep 粒度不能把动作拉长。
 		t := math.Min(1, float64(time.Since(started).Milliseconds())/math.Max(1, milliseconds))
-		point := appuseGlideAt(from, to, bend, t)
+		point := appuseGlideAt(from, to, bend, overshoot, t)
 		if err := appuseMovePointer(point.X, point.Y, true); err != nil {
 			return err
 		}
@@ -1275,15 +1723,28 @@ func appuseGlide(from, to appusePoint) error {
 	}
 }
 
-func appuseGlideAt(from, to appusePoint, bend, t float64) appusePoint {
+func appuseGlideAt(from, to appusePoint, bend, overshoot, t float64) appusePoint {
+	if t <= 0 {
+		return from
+	}
+	if t >= 1 {
+		return to
+	}
+	// 非对称时间扭曲：前半程加快接近、后半程收敛精调（u = 1 - (1-t)^1.22）。
+	u := 1 - math.Pow(1-t, 1.22)
+	s := u * u * u * (10 - 15*u + 6*u*u)
+	if overshoot != 0 && u > 0.65 {
+		// 单周期衰减过冲在 u=1 时严格归 0，保证终点 zero-error。
+		phase := (u - 0.65) / 0.35
+		s += overshoot * math.Sin(phase*math.Pi)
+	}
 	fx, fy := float64(from.X), float64(from.Y)
 	dx, dy := float64(to.X-from.X), float64(to.Y-from.Y)
 	cx, cy := fx+dx/2-dy*bend, fy+dy/2+dx*bend
-	s := t * t * t * (10 - 15*t + 6*t*t)
-	u := 1 - s
+	inv := 1 - s
 	return appusePoint{
-		X: int32(math.Round(u*u*fx + 2*u*s*cx + s*s*float64(to.X))),
-		Y: int32(math.Round(u*u*fy + 2*u*s*cy + s*s*float64(to.Y))),
+		X: int32(math.Round(inv*inv*fx + 2*inv*s*cx + s*s*float64(to.X))),
+		Y: int32(math.Round(inv*inv*fy + 2*inv*s*cy + s*s*float64(to.Y))),
 	}
 }
 

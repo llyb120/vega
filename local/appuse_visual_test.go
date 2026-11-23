@@ -29,27 +29,26 @@ func TestPointerIsASwordWithAnInkDotAtTheTip(t *testing.T) {
 			return pixels[(int(y*float64(size)/32))*size+int(x*float64(size)/32)]
 		}
 		// 四角必须透明：指针不能被一个方框罩住。
-		for _, corner := range [][2]float64{{0.5, 0.5}, {31, 0.5}, {0.5, 31}, {31, 31}} {
+		for _, corner := range [][2]float64{{0.2, 0.2}, {31.5, 0.5}, {0.5, 31.5}, {31.5, 31.5}} {
 			if alpha := at(corner[0], corner[1]) >> 24; alpha != 0 {
 				t.Fatalf("%dpx 角 (%v,%v) 应透明，得到 alpha=%d", size, corner[0], corner[1], alpha)
 			}
 		}
-		// 沿对角线是剑身：不透明且偏浅蓝白。
-		blade := at(15.5, 15.5)
-		if blade>>24 != 255 {
-			t.Fatalf("%dpx 对角线上应是剑身：%08x", size, blade)
+		// 沿对角线是玄黑剑身 + 电光青剑脊，不透明。
+		spine := at(13.0, 13.0)
+		if spine>>24 != 255 {
+			t.Fatalf("%dpx 对角线上应是剑身：%08x", size, spine)
 		}
-		if blade&0xff <= 200 {
-			t.Fatalf("%dpx 剑身是浅蓝白：%08x", size, blade)
+		b := spine & 0xff
+		r := (spine >> 16) & 0xff
+		if b <= 160 || b <= r {
+			t.Fatalf("%dpx 剑脊应是电光青：%08x", size, spine)
 		}
 		// 剑尖周围是天蓝墨点：由浓到淡，始终半透明以免糊住落点。
-		near := at(7, 9) >> 24
-		far := at(4, 10) >> 24
+		near := at(2.8, 5.5) >> 24
+		far := at(1.2, 5.5) >> 24
 		if !(near > far && far > 0 && near < 255) {
 			t.Fatalf("%dpx 光晕应由浓到淡：%d -> %d", size, near, far)
-		}
-		if at(4, 10)&0xff <= 200 {
-			t.Fatalf("%dpx 光晕是天蓝色", size)
 		}
 	}
 }
@@ -58,12 +57,10 @@ func TestScreenshotMarkerGlowIsFainterThanTheCursor(t *testing.T) {
 	alpha := func(p []uint32, x, y int) uint32 { return p[y*32+x] >> 24 }
 	cursor := appusePointerPixels(32, appuseCursorGlow)
 	marker := appusePointerPixels(32, appuseMarkerGlow)
-	// 只有光晕、没有剑身也没有描边的一点。
-	if !(alpha(marker, 6, 10)*2 < alpha(cursor, 6, 10) && alpha(marker, 6, 10) < 64) {
-		t.Fatalf("反馈图里的光晕应明显更淡：%d vs %d", alpha(marker, 6, 10), alpha(cursor, 6, 10))
+	if !(alpha(marker, 2, 5)*2 < alpha(cursor, 2, 5) && alpha(marker, 2, 5) < 64) {
+		t.Fatalf("反馈图里的光晕应明显更淡：%d vs %d", alpha(marker, 2, 5), alpha(cursor, 2, 5))
 	}
-	// 剑身本身仍然实心可辨。
-	if alpha(marker, 16, 16) != 255 {
+	if alpha(marker, 13, 13) != 255 {
 		t.Fatal("剑身必须实心")
 	}
 }
@@ -278,7 +275,7 @@ func TestRememberedFramesEnableUnchangedReuse(t *testing.T) {
 		"originalWidth": uint32(100), "originalHeight": uint32(50),
 		"monitorId": uint32(0), "path": "C:\\shots\\a.png", "data": "base64-should-be-dropped",
 	}
-	appuseRememberFrame("owner-frames", 0, grab, entry)
+	appuseRememberFrame("owner-frames", 0, grab, entry, nil, nil, nil, nil, nil)
 	frame := appusePreviousFrame("owner-frames")[0]
 	if frame == nil || frame.Image == nil {
 		t.Fatal("应记住这次交付")

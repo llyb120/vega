@@ -59,7 +59,7 @@ test("ordinary conversations do not depend on employee state, schedule or task r
     const rules = await tools.rules(model);
     assert(rules.includes("普通会话"));
     assert(rules.includes("不受热心市民的启用状态或工作时间限制"));
-    assert((await tools.definitions(model)).some((tool) => tool.name === "chrome_act"));
+    assert((await tools.definitions(model)).some((tool) => tool.name === "browser_act"));
     assert(!(await tools.definitions(model)).some((tool) => tool.name.startsWith("vault_")), "a plain session belongs to no employee and has no vault");
     assert(!rules.includes("[密码本]"));
     const readOnlyTools = await Tools.create(engine, await store.newSession({ title: "readonly", readOnly: true }), config, new AbortController().signal, () => {});

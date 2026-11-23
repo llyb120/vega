@@ -4,7 +4,7 @@ import { Store } from "../server/core/store";
 import { Vault } from "../server/core/vault";
 import { Tools } from "../server/core/tools";
 import {
-  ArgumentError, CHROME_TOOL_DEFINITIONS, STANDALONE_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type ToolContext,
+  ArgumentError, BROWSER_TOOLS, CHROME_TOOL_DEFINITIONS, STANDALONE_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type ToolContext,
 } from "../server/core/public-tools";
 
 const all = (ctx: ToolContext) => [...employeeTools(ctx), ...vaultTools(ctx), ...CHROME_TOOL_DEFINITIONS];
@@ -19,55 +19,48 @@ const chat: ToolContext = { kind: "chat" };
 
 test("every public tool maps onto the unchanged internal executor arguments", () => {
   const cases: [string, any, any, ToolContext?][] = [
-    ["chrome_tabs", { query: "jira" }, { operation: "tabs", query: "jira" }],
-    ["chrome_tabs", { incognito: false }, { operation: "tabs", incognito: false }],
-    ["chrome_navigate", { url: "https://a.test", target: { kind: "new_tab" } }, { operation: "open", url: "https://a.test" }],
-    ["chrome_navigate", { url: "https://a.test", target: { kind: "new_tab", incognito: true } }, { operation: "open", url: "https://a.test", incognito: true }],
-    ["chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab", tabTag: "C1" } }, { operation: "goto", tabTag: "C1", url: "https://a.test" }],
-    ["chrome_tab_control", { tabTag: "C1", command: "select" }, { operation: "select_tab", tabTag: "C1" }],
-    ["chrome_tab_control", { tabTag: "C1", command: "close" }, { operation: "close_tab", tabTag: "C1" }],
-    ["chrome_tab_control", { tabTag: "C1", command: "reload" }, { operation: "reload", tabTag: "C1" }],
-    ["chrome_tab_control", { tabTag: "C1", command: "back", observe: "none" }, { operation: "back", tabTag: "C1", observe: "none" }],
-    ["chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab", tabTag: "C1" }, observe: "screenshot", settleMs: 3000, visual: "none" },
-      { operation: "goto", tabTag: "C1", url: "https://a.test", observe: "screenshot", settleMs: 3000, visual: "none" }],
-    ["chrome_tabs", { query: "jira", visual: "none" }, { operation: "tabs", query: "jira", visual: "none" }],
-    ["chrome_act", { tabTag: "C1", actions: [{ action: "type", text: "" }, { action: "wait" }] }, { operation: "act", tabTag: "C1", actions: [{ action: "type", text: "" }, { action: "wait" }] }],
-    ["chrome_run", { tabTag: "C1", task: "t", steps: [{ action: "click", target: "Submit", expectedText: "ok" }] }, { operation: "run", tabTag: "C1", plan: { task: "t", steps: [{ action: "click", target: "Submit", expectedText: "ok" }] } }],
-    ["chrome_downloads", { since: 0 }, { operation: "downloads", since: 0 }],
-    ["chrome_act", { tabTag: "C1", actions: [{ action: "hover", ref: "e1" }, { action: "hover", ref: "e2", frame: 1 }] }, { operation: "act", tabTag: "C1", actions: [{ action: "hover", ref: "e1" }, { action: "hover", ref: "e2", frame: 1 }] }],
-    // Summary budgets on every tool that returns an observation, as the old single tool allowed; null = omitted.
-    ["chrome_act", { tabTag: "C1", maxItems: 5, maxTextChars: 200, actions: [{ action: "wait" }] }, { operation: "act", tabTag: "C1", maxItems: 5, maxTextChars: 200, actions: [{ action: "wait" }] }],
-    ["chrome_act", { tabTag: "C1", maxItems: null, actions: [{ action: "wait" }] }, { operation: "act", tabTag: "C1", actions: [{ action: "wait" }] }],
-    ["chrome_screenshot", { tabTag: "C1", maxItems: 1, capture: { kind: "viewport" } }, { operation: "screenshot", tabTag: "C1", maxItems: 1 }],
-    ["chrome_navigate", { url: "https://a.test", target: { kind: "new_tab" }, maxTextChars: 100 }, { operation: "open", url: "https://a.test", maxTextChars: 100 }],
-    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, maxTextChars: 0 }, { operation: "screenshot", tabTag: "C1", maxTextChars: 0 }],
-    ["chrome_tab_control", { tabTag: "C1", command: "reload", maxItems: 2 }, { operation: "reload", tabTag: "C1", maxItems: 2 }],
-    ["chrome_evaluate", { tabTag: "C1", expression: "1", maxItems: 3 }, { operation: "evaluate", tabTag: "C1", expression: "1", maxItems: 3 }],
-    ["chrome_tabs", { query: "jira", maxItems: 4 }, { operation: "tabs", query: "jira", maxItems: 4 }],
-    ["chrome_inspect", { tabTag: "C1", scope: "viewport", visual: "none" }, { operation: "inspect", tabTag: "C1", scope: "viewport", visual: "none" }],
-    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" } }, { operation: "screenshot", tabTag: "C1" }],
-    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, visual: "none", maxItems: 3, maxTextChars: 60 }, { operation: "screenshot", tabTag: "C1", visual: "none", maxItems: 3, maxTextChars: 60 }],
-    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, visual: "auto" }, { operation: "screenshot", tabTag: "C1", visual: "auto" }],
-    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, visual: null }, { operation: "screenshot", tabTag: "C1" }],
-    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "page", tileOffset: 2 } }, { operation: "screenshot", tabTag: "C1", fullPage: true, tileOffset: 2 }],
-    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "element", ref: "e3", frame: 1 } }, { operation: "screenshot", tabTag: "C1", ref: "e3", frame: 1 }],
-    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "region", region: { x: 0, y: 0, width: 10, height: 20 } } }, { operation: "screenshot", tabTag: "C1", region: { x: 0, y: 0, width: 10, height: 20 } }],
-    ["chrome_screenshot", { tabTag: "C1", capture: { kind: "scroll_area" } }, { operation: "screenshot", tabTag: "C1", expandScroll: true }],
-    ["chrome_act", { tabTag: "C1", actions: [
-      { action: "click", ref: "e1", clickCount: 2 }, { action: "fill", ref: "e2", value: "" }, { action: "type", text: "hi" }, { action: "press", key: "Enter" },
-      { action: "scroll", deltaY: 0, deltaX: 40 }, { action: "wait", milliseconds: 0 }, { action: "upload", selector: "#f", files: ["a.png"] },
-      { action: "click_at", x: 0, y: 0 }, { action: "move", x: 1, y: 2 }, { action: "drag", fromX: 1, fromY: 2, toX: 3, toY: 4, durationMs: 100 }, { action: "pointer", phase: "down", x: 7, y: 8 }, { action: "pointer", phase: "move", x: 9, y: 10, durationMs: 100 }, { action: "pointer", phase: "up" }, { action: "scroll_at", x: 5, y: 6, deltaY: -100 },
-    ], settleMs: 0 }, { operation: "act", tabTag: "C1", settleMs: 0, actions: [
-      { action: "click", ref: "e1", click_count: 2 }, { action: "fill", ref: "e2", text: "" }, { action: "type", text: "hi" }, { action: "press", key: "Enter" },
-      { action: "scroll", delta: 0, delta_x: 40 }, { action: "wait", ms: 0 }, { action: "upload", selector: "#f", files: ["a.png"] },
-      { action: "click_at", x: 0, y: 0 }, { action: "move", x: 1, y: 2 }, { action: "drag", x: 1, y: 2, to_x: 3, to_y: 4, duration_ms: 100 }, { action: "pointer", phase: "down", x: 7, y: 8 }, { action: "pointer", phase: "move", x: 9, y: 10, duration_ms: 100 }, { action: "pointer", phase: "up" }, { action: "scroll_at", x: 5, y: 6, delta: -100 },
-    ] }],
-    ["chrome_evaluate", { tabTag: "C1", expression: "1", observe: false }, { operation: "evaluate", tabTag: "C1", expression: "1", feedback: "none" }],
-    ["chrome_evaluate", { tabTag: "C1", expression: "1" }, { operation: "evaluate", tabTag: "C1", expression: "1" }],
-    ["chrome_connection", { command: "status" }, { operation: "status" }],
-    ["chrome_connection", { command: "cancel_operation" }, { operation: "stop" }],
-    ["chrome_downloads", { downloadId: "42" }, { operation: "downloads", downloadId: "42" }],
-    ["chrome_devtools", { tabTag: "C1", kind: "network", requestId: "r1" }, { operation: "devtools", tabTag: "C1", devtools: { kind: "network", requestId: "r1" } }],
+    ["browser_tabs", { action: "list", query: "jira" }, { operation: "browser_tabs", action: "list", query: "jira" }],
+    ["browser_tabs", { action: "list", incognito: false }, { operation: "browser_tabs", action: "list", incognito: false }],
+    ["browser_tabs", { action: "open", url: "https://a.test" }, { operation: "browser_tabs", action: "open", url: "https://a.test" }],
+    ["browser_tabs", { action: "open", url: "https://a.test", incognito: true }, { operation: "browser_tabs", action: "open", url: "https://a.test", incognito: true }],
+    ["browser_tabs", { action: "goto", tab: "C1", url: "https://a.test" }, { operation: "browser_tabs", action: "goto", tab: "C1", url: "https://a.test" }],
+    ["browser_tabs", { action: "switch", tab: "C1" }, { operation: "browser_tabs", action: "switch", tab: "C1" }],
+    ["browser_tabs", { action: "close", tab: "C1" }, { operation: "browser_tabs", action: "close", tab: "C1" }],
+    ["browser_tabs", { action: "reload", tab: "C1" }, { operation: "browser_tabs", action: "reload", tab: "C1" }],
+    ["browser_tabs", { action: "back", tab: "C1", view: false }, { operation: "browser_tabs", action: "back", tab: "C1", view: false }],
+    ["browser_view", { tab: "C1", scope: "viewport", screenshot: false, maxItems: 3, maxTextChars: 60 },
+      { operation: "browser_view", tab: "C1", scope: "viewport", screenshot: false, maxItems: 3, maxTextChars: 60 }],
+    ["browser_view", { tab: "C1", zoom: { id: 2 } }, { operation: "browser_view", tab: "C1", zoom: { id: 2 } }],
+    ["browser_view", { tab: "C1", zoom: { x: 0, y: 0, width: 100, height: 80 } }, { operation: "browser_view", tab: "C1", zoom: { x: 0, y: 0, width: 100, height: 80 } }],
+    ["browser_act", { tab: "C1", screenshot: false, notes: "test", steps: [
+      { op: "click", id: 1, clicks: 2 },
+      { op: "type", id: 2, text: "hi", clear: true, submit: true },
+      { op: "hover", x: 10, y: 20 },
+      { op: "drag", x1: 1, y1: 2, x2: 30, y2: 40, durationMs: 240 },
+      { op: "scroll", dy: 300, dx: 0 },
+      { op: "press", key: "Enter" },
+      { op: "dismiss" },
+      { op: "wait", ms: 0 },
+      { op: "upload", selector: "#f", files: ["a.png"] },
+    ] }, {
+      operation: "browser_act", tab: "C1", screenshot: false, notes: "test", steps: [
+        { op: "click", id: 1, clicks: 2 },
+        { op: "type", id: 2, text: "hi", clear: true, submit: true },
+        { op: "hover", x: 10, y: 20 },
+        { op: "drag", x1: 1, y1: 2, x2: 30, y2: 40, durationMs: 240 },
+        { op: "scroll", dy: 300, dx: 0 },
+        { op: "press", key: "Enter" },
+        { op: "dismiss" },
+        { op: "wait", ms: 0 },
+        { op: "upload", selector: "#f", files: ["a.png"] },
+      ],
+    }],
+    ["browser_eval", { tab: "C1", code: "1", view: false }, { operation: "browser_eval", tab: "C1", code: "1", view: false }],
+    ["browser_eval", { tab: "C1", code: "document.title" }, { operation: "browser_eval", tab: "C1", code: "document.title" }],
+    ["browser_debug", { kind: "console", tab: "C1", level: "error", limit: 50 }, { operation: "browser_debug", kind: "console", tab: "C1", level: "error", limit: 50 }],
+    ["browser_debug", { kind: "network", tab: "C1", requestId: "r1" }, { operation: "browser_debug", kind: "network", tab: "C1", requestId: "r1" }],
+    ["browser_debug", { kind: "downloads", since: 0 }, { operation: "browser_debug", kind: "downloads", since: 0 }],
+    ["browser_experience", { action: "search", scope: "https://example.com", task: "*" }, { operation: "browser_experience", action: "search", scope: "https://example.com", task: "*" }],
     ["employee_status", {}, { action: "list" }],
     ["employee_status", { memoryQuery: "部署" }, { action: "list", query: "部署" }],
     ["employee_status", { taskId: "t1" }, { action: "list", id: "t1" }],
@@ -117,14 +110,12 @@ test("memory source is decided by the server and memory_manage requires an expli
   assert.throws(() => map("memory_manage", { request: { memoryId: "a" } }, chat), ArgumentError);
 });
 
-test("branch errors name the field and the chosen branch's structure", () => {
-  assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab" } }), /tabTag.*kind="existing_tab" 的结构：必填 kind、tabTag/s);
-  assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab", tabTag: "C1" }, tabTag: "C1" }), /不接受字段 tabTag/);
-  assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "elsewhere" } }), /target\.kind 只能是 "new_tab" \/ "existing_tab"/);
-  assert.throws(() => map("chrome_act", { tabTag: "C1", actions: [{ action: "click", ref: "e1", x: 1 }] }), /不接受字段 x.*必填 action、ref/s);
-  assert.throws(() => map("chrome_screenshot", { tabTag: "C1", capture: { kind: "region", region: { x: 0, y: 0, width: 0, height: 0 } } }), /width 必须大于 0/);
-  assert.throws(() => map("chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, visual: "invalid" }), /参数\.visual 只能是/);
-  assert.throws(() => map("chrome_screenshot", { tabTag: "C1", capture: { kind: "viewport" }, unknown: true }), /不接受字段 unknown/);
+test("schema errors catch invalid browser arguments before any browser work", () => {
+  assert.throws(() => map("browser_tabs", { action: "elsewhere" }), /参数\.action 只能是/);
+  assert.throws(() => map("browser_act", { tab: "C1", steps: [{ op: "click", x: -1, y: 0 }] }), /x/);
+  assert.throws(() => map("browser_view", { tab: "C1", zoom: { x: 0, y: 0, width: 0, height: 10 } }), /width 必须大于 0/);
+  assert.throws(() => map("browser_view", { tab: "C1", scope: "invalid" }), /参数\.scope 只能是/);
+  assert.throws(() => map("browser_view", { tab: "C1", unknown: true }), /不接受字段 unknown/);
   assert.throws(() => map("task_wait", { checkpoint: "x" }, task), /resumeAt 和 参数\.delayMinutes 必须恰好填一个/);
   assert.throws(() => map("task_wait", { checkpoint: "x", delayMinutes: 5, resumeAt: "2030-01-01 09:00" }, task), /恰好填一个/);
   assert.throws(() => map("employee_task_create", { instructions: "x", runAt: "tomorrow 9am" }), /runAt 至少 16 个字符|runAt 格式不对/);
@@ -141,14 +132,13 @@ test("branch errors name the field and the chosen branch's structure", () => {
 });
 
 test("narrow fallback: only null or an empty value its own bound rejects counts as omitted; legal '' and 0 are kept", () => {
-  assert.deepEqual(map("chrome_downloads", { downloadId: "", since: 0 }).args, { operation: "downloads", since: 0 });
-  assert.deepEqual(map("chrome_inspect", { tabTag: "C1", query: null, maxItems: 0 }).args, { operation: "inspect", tabTag: "C1" });
+  assert.deepEqual(map("browser_debug", { kind: "downloads", downloadId: "", since: 0 }).args, { operation: "browser_debug", kind: "downloads", downloadId: "", since: 0 });
+  assert.deepEqual(map("browser_view", { tab: "C1", query: null, maxItems: 0 }).args, { operation: "browser_view", tab: "C1" });
   assert.deepEqual(map("memory_propose", { claim: "c", evidence: "" }, chat).args.evidence, "");
-  const act = map("chrome_act", { tabTag: "C1", actions: [{ action: "scroll_at", x: 0, y: 0, deltaY: 0 }], settleMs: 0 }).args;
-  assert.deepEqual(act.actions, [{ action: "scroll_at", x: 0, y: 0, delta: 0 }]);
-  assert.equal(act.settleMs, 0);
-  assert.deepEqual(map("chrome_tabs", { incognito: false }).args, { operation: "tabs", incognito: false }, "false is a real filter, never dropped");
-  assert.throws(() => map("chrome_navigate", { url: "https://a.test", target: { kind: "existing_tab", tabTag: "" } }), /tabTag/, "an empty tabTag never silently means new tab");
+  const act = map("browser_act", { tab: "C1", steps: [{ op: "scroll", x: 0, y: 0, dy: 0 }] }).args;
+  assert.deepEqual(act.steps, [{ op: "scroll", x: 0, y: 0, dy: 0 }]);
+  assert.deepEqual(map("browser_tabs", { action: "list", incognito: false }).args, { operation: "browser_tabs", action: "list", incognito: false }, "false is a real filter, never dropped");
+  assert.throws(() => map("browser_eval", { code: "" }), /code/, "an empty required minLength string is rejected");
 });
 
 test("a whole-schema default fill is rejected before any browser or employee side effect", async (t) => {
@@ -162,9 +152,9 @@ test("a whole-schema default fill is rejected before any browser or employee sid
     employeeFor: () => { employee++; throw Error("must not reach the employee"); },
   } as any;
   const tools = await Tools.create(engine, session, { model: "", provider: {} } as any, new AbortController().signal, () => {});
-  const filled = { tabTag: "C1", actions: [{ action: "click", ref: "e1", frame: 0, button: "", clickCount: 0, value: "", text: "", key: "", x: 0, y: 0 }], imageId: "", visual: "", settleMs: 0 };
-  await assert.rejects(tools.execute({ id: "a", name: "chrome_act", arguments: filled }, {} as any), ArgumentError);
-  await assert.rejects(tools.execute({ id: "b", name: "chrome_navigate", arguments: { url: "https://a.test", target: { kind: "new_tab", tabTag: "", incognito: false } } }, {} as any), /不接受字段 tabTag/);
+  const filled = { tab: "C1", steps: [{ op: "click", id: 1, button: "", unexpected: 1 }] };
+  await assert.rejects(tools.execute({ id: "a", name: "browser_act", arguments: filled }, {} as any), ArgumentError);
+  await assert.rejects(tools.execute({ id: "b", name: "browser_tabs", arguments: { action: "open", url: "https://a.test", extra: true } }, {} as any), /不接受字段 extra/);
   await assert.rejects(tools.execute({ id: "c", name: "employee_task_manage", arguments: { taskId: "t1", request: { command: "reschedule", runAt: "", instructions: "" } } }, {} as any), ArgumentError);
   assert.equal(browser, 0);
   assert.equal(employee, 0);
@@ -189,28 +179,28 @@ test("visible tools and branches follow session, scene and permission like the o
   for (const name of ["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete"]) assert(STANDALONE_TOOLS.has(name));
 });
 
-test("chrome definitions are a leading block only in eligible computer scenes; ineligible sessions get none", async (t) => {
+test("browser definitions are a leading block of 6 tools only in eligible computer scenes; ineligible sessions get none", async (t) => {
   const store = await Store.open(":memory:");
   t.after(async () => await store.close());
   const engine = { store, vault: new Vault(store), mcpFor: () => ({}), employeeFor: async () => { throw new Error("no employee"); } } as any;
   const config = { model: "", provider: {}, scenes: { lightweight: ["p/l"], coding: ["p/c"], computer: ["p/x"] } } as any;
   const defs = async (session: any) => (await Tools.create(engine, session, config, new AbortController().signal, () => {})).definitions();
-  const chrome = (list: any[]) => list.filter((d) => d.name.startsWith("chrome_"));
+  const chrome = (list: any[]) => list.filter((d) => BROWSER_TOOLS.has(d.name));
   const expected = JSON.stringify(chrome(await defs(await store.newSession({ scene: "computer" }))));
-  assert.equal(JSON.parse(expected).length, CHROME_TOOL_DEFINITIONS.length);
+  assert.equal(JSON.parse(expected).length, 6);
   assert.deepEqual(JSON.parse(expected).map((d: any) => d.name), CHROME_TOOL_DEFINITIONS.map((d) => d.name));
   for (const extra of [{}, { employeeId: "e", taskId: "task" }])
     for (const scene of ["lightweight", "coding", "computer"]) {
       const list = await defs(await store.newSession({ scene, ...extra }));
       if (scene !== "computer") { assert.deepEqual(chrome(list), []); continue; }
       assert.equal(JSON.stringify(chrome(list)), expected);
-      assert.equal(JSON.stringify(list.slice(0, CHROME_TOOL_DEFINITIONS.length)), expected, "chrome block leads the list");
+      assert.equal(JSON.stringify(list.slice(0, CHROME_TOOL_DEFINITIONS.length)), expected, "browser block leads the list");
     }
-  assert.equal(chrome(await defs(await store.newSession({ scene: "computer", readOnly: true }))).length, 0, "read-only sessions stay without chrome");
-  assert.equal(chrome(await defs(await store.newSession({ scene: "lightweight", employeeId: "e" }))).length, 0, "employee chat stays without chrome");
+  assert.equal(chrome(await defs(await store.newSession({ scene: "computer", readOnly: true }))).length, 0, "read-only sessions stay without browser tools");
+  assert.equal(chrome(await defs(await store.newSession({ scene: "lightweight", employeeId: "e" }))).length, 0, "employee chat stays without browser tools");
 });
 
-test("chrome invocations outside the computer scene are rejected before any browser connection; computer scene runs", async (t) => {
+test("browser invocations outside the computer scene are rejected before any browser connection; computer scene runs", async (t) => {
   const store = await Store.open(":memory:");
   t.after(async () => await store.close());
   let driver = 0;
@@ -221,19 +211,19 @@ test("chrome invocations outside the computer scene are rejected before any brow
     const outside = await tools(scene);
     for (const { name } of CHROME_TOOL_DEFINITIONS)
       await assert.rejects(outside.execute({ id: name, name, arguments: {} } as any, {} as any), /只能在 computer 场景执行.*browser_agent.*不是浏览器扩展故障/s, `${name} in ${scene}`);
-    await assert.rejects((outside as any).chrome({ operation: "status" }), /只能在 computer 场景执行/, "internal driver entry is gated too");
+    await assert.rejects((outside as any).chrome({ operation: "browser_debug", kind: "downloads" }), /只能在 computer 场景执行/, "internal driver entry is gated too");
   }
   assert.equal(driver, 0, "no browser was started, connected or driven");
   const unconfigured = await tools("coding", { ...config, scenes: { ...config.scenes, computer: [] } });
-  await assert.rejects(unconfigured.execute({ id: "c", name: "chrome_connection", arguments: {} } as any, {} as any), /computer 场景未配置模型/);
+  await assert.rejects(unconfigured.execute({ id: "c", name: "browser_tabs", arguments: { action: "list" } } as any, {} as any), /computer 场景未配置模型/);
   assert.equal(driver, 0);
   const inside = await tools("computer");
-  const result = await inside.execute({ id: "c", name: "chrome_connection", arguments: { command: "status" } } as any, {} as any);
+  const result = await inside.execute({ id: "c", name: "browser_debug", arguments: { kind: "downloads" } } as any, {} as any);
   assert.deepEqual(result.value, { connected: true });
   assert.equal(driver, 1, "computer scene reaches the driver");
 });
 
-test("screenshot visual=none passes the actual tool boundary and returns the image", async (t) => {
+test("browser_view passes the actual tool boundary and returns JPEG/image results", async (t) => {
   const store = await Store.open(":memory:");
   t.after(async () => await store.close());
   let received: any;
@@ -241,14 +231,15 @@ test("screenshot visual=none passes the actual tool boundary and returns the ima
     store, vault: new Vault(store), mcpFor: () => ({}), taskTabs: { used() {}, opened() {} },
     chromeFor: async () => ({ execute: async (_owner: string, _cwd: string, args: any) => {
       received = args;
-      return { tabTag: args.tabTag, snapshotId: "snap", images: [{ path: "fixture.webp", url: "/fixture" }] };
+      return { tab: args.tab, snapshotId: "snap", images: [{ path: "fixture.jpg", mime: "image/jpeg", url: "/fixture.jpg" }] };
     } }),
   } as any;
   const session = await store.newSession({ scene: "computer" });
   const tools = await Tools.create(engine, session, { provider: {}, scenes: { computer: ["p/x"] } } as any, new AbortController().signal, () => {});
-  const result = await tools.execute({ id: "shot", name: "chrome_screenshot", arguments: { tabTag: "C1", capture: { kind: "viewport" }, visual: "none", maxItems: 3, maxTextChars: 60 } }, {} as any);
-  assert.deepEqual(received, { operation: "screenshot", tabTag: "C1", visual: "none", maxItems: 3, maxTextChars: 60 });
+  const result = await tools.execute({ id: "shot", name: "browser_view", arguments: { tab: "C1", screenshot: true, maxItems: 3, maxTextChars: 60 } }, {} as any);
+  assert.deepEqual(received, { operation: "browser_view", tab: "C1", screenshot: true, maxItems: 3, maxTextChars: 60 });
   assert.equal(result.images?.length, 1);
+  assert.equal(result.images?.[0].mime, "image/jpeg");
 });
 
 test("dispatch and status descriptions steer away from copied tool names and redundant dedupe checks", () => {

@@ -83,7 +83,7 @@ test("a direct follow-up long after delivery continues the original task and kee
         return call("browser-again", "browser_agent", { task: "在同一结果页点击第一条自然结果" });
       }
       if (model.selection === "p/vision") {
-        assert(definitions.some(tool => tool.name === "chrome_navigate"));
+        assert(definitions.some(tool => tool.name === "browser_tabs"));
         assert(!definitions.some(tool => tool.name === "bash" || tool.name === "task_complete"));
         return { role: "assistant", text: "已点击首条结果，打开百度百科词条页" };
       }

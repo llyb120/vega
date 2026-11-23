@@ -1,28 +1,21 @@
 package main
 
-// 剑形指针：与 Nova 的 jianlai::sword / paint_pointer 同一套几何和像素算法。
-// 32 单位指针坐标系里剑尖朝左上且剑尖即热点，沿对角线依次是剑身、护手、剑柄、剑首；
-// 每个像素 4×4 超采样，带描边和剑尖天蓝墨点光晕。系统指针与截图里的落点标记共用这份绘制，
-// 只是光晕浓度不同（CURSOR_GLOW 浓、MARKER_GLOW 淡）。
+// Obsidian Cyber-Blade 剑形指针：与 Nova `jianlai::sword / paint_pointer` 同一套几何和 4×4 超采样绘制。
+// 32 单位坐标系里剑尖即热点 (5.5, 5.5)，白描边 + 柔和投影 + 深玄黑剑身 + 电光青剑脊 + 剑尖青光晕。
+// 系统指针（appuseCursorGlow=0.58）与反馈截图标记（appuseMarkerGlow=0.18）共用这份算法。
 
 import "math"
 
 const (
-	// appusePointerTip 是剑尖（热点）在 32 单位指针坐标里的位置。
-	appusePointerTip = 10.0
-	// appuseTipGlow 是以剑尖为圆心的墨点光晕半径。
-	appuseTipGlow = 9.5
-	// appuseSwordScale 让剑与剑尖光晕同时放得下。
-	appuseSwordScale = 0.82
-	// appuseCursorGlow 是真实系统指针上的光晕浓度：一滴天蓝墨点，用户平时就能找到指针。
-	appuseCursorGlow = 0.72
-	// appuseMarkerGlow 是反馈截图里的光晕浓度：只做淡提示，不遮挡模型要读的内容。
-	appuseMarkerGlow = 0.2
+	appusePointerTip = 5.5
+	appuseTipGlow    = 5.2
+	appuseSwordScale = 0.88
+	appuseCursorGlow = 0.58
+	appuseMarkerGlow = 0.18
 )
 
 type appuseRGBA struct{ R, G, B, A float64 }
 
-// appusePolygonSD 是有符号距离场：多边形内部为负，外部为到最近边的距离。
 func appusePolygonSD(poly [][2]float64, x, y float64) float64 {
 	inside := false
 	distance := math.MaxFloat64
@@ -46,31 +39,33 @@ func appusePolygonSD(poly [][2]float64, x, y float64) float64 {
 	return distance
 }
 
-// appuseSword 给出某点的有符号距离与部位颜色（剑身/护手/剑柄/剑首）。
 func appuseSword(x, y float64) (float64, appuseRGBA) {
 	dx, dy := x-appusePointerTip, y-appusePointerTip
 	k := (1 / math.Sqrt2) / appuseSwordScale
 	s, w := (dx+dy)*k, (dx-dy)*k
-	// 细长的双刃剑身：剑脊一线高光，两侧一亮一暗。
-	blade := appuseRGBA{147, 197, 253, 1}
-	if math.Abs(w) < 0.3 {
-		blade = appuseRGBA{255, 255, 255, 1}
+	// 玄黑棱面双刃剑身 + 中心电光青剑脊。
+	blade := appuseRGBA{15, 23, 42, 1}
+	if math.Abs(w) < 0.48 {
+		blade = appuseRGBA{56, 189, 248, 1}
+		if s < 5.5 {
+			blade = appuseRGBA{224, 242, 254, 1}
+		}
 	} else if w < 0 {
-		blade = appuseRGBA{224, 242, 254, 1}
+		blade = appuseRGBA{30, 41, 59, 1}
 	}
-	// 剑柄缠绳。
-	grip := appuseRGBA{23, 37, 84, 1}
-	if math.Mod(s*1.6, 1) < 0.5 {
-		grip = appuseRGBA{30, 64, 175, 1}
+	// 深靛缠绳剑柄。
+	grip := appuseRGBA{15, 23, 42, 1}
+	if math.Mod(math.Abs(s)*1.6, 1) < 0.5 {
+		grip = appuseRGBA{30, 58, 138, 1}
 	}
 	parts := []struct {
 		distance float64
 		color    appuseRGBA
 	}{
-		{appusePolygonSD([][2]float64{{0, 0}, {5.5, -1.5}, {17, -1.85}, {17, 1.85}, {5.5, 1.5}}, s, w), blade},
-		{appusePolygonSD([][2]float64{{16.8, -3.9}, {17.8, -4.9}, {18.9, -3.9}, {18.9, 3.9}, {17.8, 4.9}, {16.8, 3.9}}, s, w), appuseRGBA{2, 132, 199, 1}},
-		{appusePolygonSD([][2]float64{{18.9, -1.15}, {24, -1.15}, {24, 1.15}, {18.9, 1.15}}, s, w), grip},
-		{appusePolygonSD([][2]float64{{23.8, 0}, {25.2, -1.6}, {26.6, 0}, {25.2, 1.6}}, s, w), appuseRGBA{14, 165, 233, 1}},
+		{appusePolygonSD([][2]float64{{0, 0}, {5.2, -1.65}, {17.2, -1.95}, {17.2, 1.95}, {5.2, 1.65}}, s, w), blade},
+		{appusePolygonSD([][2]float64{{16.8, -4.1}, {17.8, -5.0}, {19.0, -4.1}, {19.0, 4.1}, {17.8, 5.0}, {16.8, 4.1}}, s, w), appuseRGBA{14, 165, 233, 1}},
+		{appusePolygonSD([][2]float64{{18.9, -1.2}, {24.2, -1.2}, {24.2, 1.2}, {18.9, 1.2}}, s, w), grip},
+		{appusePolygonSD([][2]float64{{24.0, 0}, {25.4, -1.65}, {26.8, 0}, {25.4, 1.65}}, s, w), appuseRGBA{56, 189, 248, 1}},
 	}
 	best := parts[0]
 	for _, part := range parts[1:] {
@@ -81,14 +76,13 @@ func appuseSword(x, y float64) (float64, appuseRGBA) {
 	return best.distance * appuseSwordScale, best.color
 }
 
-// appusePaintPointer 把 shape 画成 size×size 的直通 alpha 0xAARRGGBB 像素表（与 Nova 同一次序）。
-func appusePaintPointer(size int, shape func(float64, float64) (float64, appuseRGBA), outline appuseRGBA, glow appuseRGBA) []uint32 {
+func appusePaintPointer(size int, shape func(float64, float64) (float64, appuseRGBA), rim appuseRGBA, glow appuseRGBA) []uint32 {
 	const ss = 4
 	unit := 32 / float64(size)
 	pixels := make([]uint32, size*size)
 	for py := 0; py < size; py++ {
 		for px := 0; px < size; px++ {
-			var acc [4]float64 // 预乘 r,g,b,a
+			var acc [4]float64
 			for sy := 0; sy < ss; sy++ {
 				for sx := 0; sx < ss; sx++ {
 					x := (float64(px) + (float64(sx)+0.5)/ss) * unit
@@ -98,13 +92,22 @@ func appusePaintPointer(size int, shape func(float64, float64) (float64, appuseR
 					switch {
 					case d <= 0:
 						r, g, b, a = color.R, color.G, color.B, 1
-					case d < 0.6:
-						r, g, b, a = outline.R, outline.G, outline.B, 1
+					case d < 1.25:
+						r, g, b, a = rim.R, rim.G, rim.B, 1
 					default:
-						// 以尖端为圆心的墨点，中心浓、向外平滑淡出。
+						// Soft drop shadow near blade + cyan ink glow at tip.
+						shadowA := 0.0
+						if d < 2.2 {
+							shadowA = 0.28 * (1 - (d-1.25)/0.95)
+						}
 						r2 := (math.Pow(x-appusePointerTip, 2) + math.Pow(y-appusePointerTip, 2)) / (appuseTipGlow * appuseTipGlow)
 						falloff := math.Max(0, 1-r2)
-						r, g, b, a = glow.R, glow.G, glow.B, glow.A*math.Pow(falloff, 1.5)
+						glowA := glow.A * math.Pow(falloff, 1.5)
+						if shadowA >= glowA && shadowA > 0 {
+							r, g, b, a = 10, 15, 28, shadowA
+						} else if glowA > 0 {
+							r, g, b, a = glow.R, glow.G, glow.B, glowA
+						}
 					}
 					acc[0] += r * a
 					acc[1] += g * a
@@ -117,7 +120,7 @@ func appusePaintPointer(size int, shape func(float64, float64) (float64, appuseR
 				continue
 			}
 			channel := func(v float64) uint32 {
-				value := math.Round(v/acc[3]) * 1
+				value := math.Round(v / acc[3])
 				if value < 0 {
 					value = 0
 				} else if value > 255 {
@@ -131,12 +134,10 @@ func appusePaintPointer(size int, shape func(float64, float64) (float64, appuseR
 	return pixels
 }
 
-// appusePointerPixels 是剑形指针（系统指针用浓光晕，截图标记用淡光晕）。
 func appusePointerPixels(size int, glow float64) []uint32 {
-	return appusePaintPointer(size, appuseSword, appuseRGBA{12, 30, 64, 1}, appuseRGBA{56, 189, 248, glow})
+	return appusePaintPointer(size, appuseSword, appuseRGBA{255, 255, 255, 1}, appuseRGBA{56, 189, 248, glow})
 }
 
-// appuseBlendPointer 把指针像贴到图上：热点落在 (x,y)，超出画布的部分直接丢弃。
 func appuseBlendPointer(img *appuseImage, size, hotspot int, pixels []uint32, x, y int) {
 	for index, c := range pixels {
 		a := float64(c>>24) / 255

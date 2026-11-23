@@ -688,8 +688,8 @@ func readWebSocketFrame(r *bufio.Reader) (byte, []byte, error) {
 		}
 		size = binary.BigEndian.Uint64(extended)
 	}
-	if size > 8<<20 {
-		return 0, nil, errors.New("CDP 响应过大")
+	if size > 32<<20 {
+		return 0, nil, errors.New("WS 消息过大")
 	}
 	var mask []byte
 	if head[1]&0x80 != 0 {

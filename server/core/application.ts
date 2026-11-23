@@ -27,13 +27,13 @@ export function app() {
   if (!application) throw Error("Vega is not initialized");
   return application;
 }
-export async function initialize(pageScript: string) {
+export async function initialize(pageScript: string, livePageScript?: string) {
   if (application) return application;
   const store = await Store.open(),
     subscriptions = new Subscriptions(store),
     catalog = new Catalog(store, subscriptions),
-    bridge = new ChromeBridge(),
-    chrome = new Chrome(store, bridge, pageScript),
+    bridge = new ChromeBridge(false, pageScript),
+    chrome = new Chrome(store, bridge, pageScript, "experience", livePageScript),
     engine = await Engine.create(store, catalog, chrome);
   catalog.refreshPrices = true;
   void catalog.modelMetadata(true);

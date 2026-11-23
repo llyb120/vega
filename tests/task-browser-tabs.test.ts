@@ -39,6 +39,11 @@ class BrowserFixture extends ChromeBridge {
       this.tabs = this.tabs.filter((tab) => tab.tag !== args.tabTag);
       return { tabTag: args.tabTag };
     }
+    if (operation === "act") {
+      const popup = { tag: "popup", openerTag: args.tabTag, url: "https://task.test/", active: true, controllable: true };
+      this.tabs.push(popup);
+      return { ok: true, completed: (args.steps || []).length || 1, openedTabs: [popup] };
+    }
     throw Error("unexpected operation " + operation);
   }
 }
@@ -67,7 +72,7 @@ async function fixture(t: TestContext) {
   }
   const open = async (tools: Tools) => {
     const result = await tools.execute({ id: "open", ...chromeCall({ operation: "open", url: "https://task.test/", observe: "none" }) }, {} as any);
-    return result.value.tabTag as string;
+    return (result.value.tab || result.value.tabTag) as string;
   };
   t.after(async () => { await engine.close(); await store.close(); });
   return { store, engine, employee, bridge, chrome, job, open };
@@ -181,14 +186,7 @@ test("resuming a completed task cannot race an in-progress cleanup", async (t) =
 
 test("task-created popup tabs are tracked even when the source tab was pre-existing", async (t) => {
   const f = await fixture(t), work = await f.job();
-  f.chrome.observations.set(work.session.id + ":user-tab", { id: "observation", tabTag: "user-tab", frames: [], pages: [{ url: "https://existing.test/" }], images: [], coverageGaps: [], captured: Date.now(), fullPage: false, screenshot: false });
-  (f.chrome as any).preflight = async () => {};
-  f.chrome.action = async (_observation, _action, _args, _cwd, progress) => {
-    progress.attempted = true;
-    f.bridge.tabs.push({ tag: "popup", openerTag: "user-tab", url: "https://task.test/", active: true, controllable: true });
-  };
-  f.chrome.feedback = async () => ({ pages: [] }) as any;
-  const result = await work.tools.execute({ id: "click", ...chromeCall({ operation: "act", tabTag: "user-tab", action: { action: "press", key: "Enter" }, settleMs: 0 }) }, {} as any);
+  const result = await work.tools.execute({ id: "click", ...chromeCall({ operation: "act", tabTag: "user-tab", action: { action: "press", key: "Enter" } }) }, {} as any);
   assert.equal(result.value.openedTabs[0].tag, "popup");
   await f.employee.update((state) => { f.employee.task(state, work.id).status = "done"; });
   await until(async () => f.bridge.closed.includes("popup"));

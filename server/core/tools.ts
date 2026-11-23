@@ -34,7 +34,7 @@ import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, che
 import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
 import { APPUSE_RULES, CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
-import { appuseTools, appuseArguments, APPUSE_TOOLS, normalizeDesktopAction } from "./appuse-tools";
+import { appuseTools, appuseArguments, appuseResult, APPUSE_TOOLS, normalizeDesktopAction } from "./appuse-tools";
 import { DesktopExperiences } from "./experiences";
 import { Context } from "./context";
 import { MCP, MCPFailure } from "./mcp";
@@ -330,7 +330,7 @@ export class Tools {
         ),
         schema(
           "bash",
-          "Use absolute paths for all filesystem targets, or cd to an absolute directory within the same command and stop on cd failure. Never rely on an implicit working directory. Windows uses PowerShell. Default timeout 120s, max 600s. Runs synchronously for up to 60 seconds so normal scripts/builds/tests return directly; a command still running after 60 seconds moves to the background and returns jobId. **Backgrounded commands are auto-delivered via completion events when you stop issuing new tool calls (waiting in memory while idle, yielding the slot only under task contention); do NOT poll bash_poll in a loop or run shell sleep to wait for external events (use task_wait).** detach=true returns immediately for a long-running service without automatic wait or delivery. Background jobs still honor the total timeout and are killed if the session is cancelled. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; chrome_* run only in the computer scene: the lightweight coordinator delegates webpage work to browser_agent. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
+          "Use absolute paths for all filesystem targets, or cd to an absolute directory within the same command and stop on cd failure. Never rely on an implicit working directory. Windows uses PowerShell. Default timeout 120s, max 600s. Runs synchronously for up to 60 seconds so normal scripts/builds/tests return directly; a command still running after 60 seconds moves to the background and returns jobId. **Backgrounded commands are auto-delivered via completion events when you stop issuing new tool calls (waiting in memory while idle, yielding the slot only under task contention); do NOT poll bash_poll in a loop or run shell sleep to wait for external events (use task_wait).** detach=true returns immediately for a long-running service without automatic wait or delivery. Background jobs still honor the total timeout and are killed if the session is cancelled. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with browser_debug(action=\"status\"). All webpage interaction MUST use the browser_* tools through the authorized extension. Web-field fill/type and press Enter via browser_act are permitted; browser_* run only in the computer scene: the lightweight coordinator delegates webpage work to browser_agent. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
           {
             command: string,
             timeout: positive,
@@ -586,7 +586,12 @@ export class Tools {
     const browser = this.session.localBrowser ? this.engine.localBrowsers.peek(this.session.id) : this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud) ? this.engine.browsers.peek(this.engine.browserProfileKey(this.session.ownerId)) : this.engine.chrome;
     const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
     const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
-    const pages = (observation?.pages || []).filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
+    const snapshots = [...(browser?.snapshots?.values() || [])].filter((snap) => browser!.snapshots.get(this.session.id + ":" + snap.tabTag) === snap);
+    const snapshot = this.browserTab ? snapshots.find((item) => item.tabTag === this.browserTab) : snapshots.length === 1 ? snapshots[0] : undefined;
+    const sourcePages = snapshot && (!observation || snapshot.captured >= (observation as any).captured || !observation.pages?.length)
+      ? [{ url: snapshot.url, title: snapshot.title || "", text: snapshot.text || "", items: snapshot.items || [] }]
+      : observation?.pages || [];
+    const pages = sourcePages.filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
       url: vaultSite(page.url) + new URL(page.url).pathname, title: page.title || "", text: String(page.visibleText || page.text || "").slice(0, 2000),
       fields: (page.items || []).filter((item: Obj) => item.editable && item.inView !== false).slice(0, 12).map((item: Obj) => ({ name: item.name, context: item.fieldContext })),
     }));
@@ -672,18 +677,21 @@ export class Tools {
       }
       const result = await localAppuse(this.engine.localAgents, agent, args, this.signal);
       this.engine.desktopObservations.record(this.session.id, agent.clientId, result);
-      // 客户端在 images[].data 里回传 PNG；落到会话文件后删掉 base64，只留路径和地址。
+      // 客户端在 images[].data 里回传 PNG/JPEG；落到会话文件后删掉 base64，只留路径和地址。
       const images: Outcome["images"] = [];
       for (const image of result.images || []) {
         if (typeof image.data !== "string") continue;
         const data = Buffer.from(image.data, "base64");
         delete image.data;
-        const name = `appuse-${result.snapshotId || "shot"}-${String(image.imageId || "image").replace(/[^\w.-]/g, "_")}.png`;
+        const mime = image.mime === "image/jpeg" ? "image/jpeg" : "image/png";
+        const ext = mime === "image/jpeg" ? "jpg" : "png";
+        const name = `appuse-${result.snapshotId || "shot"}-${String(image.imageId || "image").replace(/[^\w.-]/g, "_")}.${ext}`;
         const path = await this.engine.store.files.write(this.session, name, data);
+        image.mime = mime;
         image.path = path; image.url = this.engine.store.files.url(path);
-        images.push({ mime: image.mime || "image/png", path, url: image.url });
+        images.push({ mime, path, url: image.url });
       }
-      return { value: result, images };
+      return { value: appuseResult(result, rest), images };
     }
     if (call.name === "read")
       return this.read(a);
@@ -979,8 +987,8 @@ export class Tools {
     return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? await taskLink(result.value.id, false, result.value.exists === true) : undefined };
   }
   /** Guard the driver as well as the tool list; never connect on behalf of another scene. */
-  private assertBrowserScene(tool = "chrome_*") {
-    if (this.session.agentChild) throw new Error("分身不能占用浏览器，也不能抢占父会话的 Chrome 会话；不要调用 chrome_*。");
+  private assertBrowserScene(tool = "browser_*") {
+    if (this.session.agentChild) throw new Error("分身不能占用浏览器，也不能抢占父会话的 Chrome 会话；不要调用 browser_*。");
     if (this.session.scene === "computer") return;
     const configured = sceneModels(this.config, "computer").length > 0;
     throw new Error(configured
@@ -999,8 +1007,10 @@ export class Tools {
     let browser: Awaited<ReturnType<Engine["chromeFor"]>>;
     try { browser = await this.engine.chromeFor(this.session, this.signal); }
     catch (error) {
-      // chrome_connection reports why the private browser cannot start instead of failing opaquely.
-      const failure = profileKey && a.operation === "status" ? this.engine.browsers.failure(profileKey) : undefined;
+      // browser_debug / initial browser probes surface why the private browser cannot start instead of failing opaquely.
+      const failure = profileKey && (a.operation === "status" || a.operation === "browser_debug" || a.operation === "browser_tabs")
+        ? this.engine.browsers.failure(profileKey)
+        : undefined;
       if (!failure) throw error;
       return { value: { connected: false, privateBrowser: "start_failed", ...failure } };
     }
@@ -1014,12 +1024,15 @@ export class Tools {
       {
         used: (tag) => this.engine.taskTabs.used(this.session.taskId, tag),
         opened: (tag) => this.engine.taskTabs.opened(this.session, tag),
-        exclusive: this.engine.active.has(this.session.id),
+        exclusive: !!this.engine.active?.has(this.session.id),
       },
     );
-    this.browserTab = result.tabTag || a.tabTag || this.browserTab;
+    this.browserTab = result.tab || result.tabTag || a.tabTag || a.tab || this.browserTab;
     const images: Outcome["images"] = [];
-    for (const im of result.images || []) images.push({ mime: "image/webp", path: im.path, url: im.url });
+    for (const im of result.images || []) {
+      const mime = im.mime || (/\.jpe?g$/i.test(String(im.path || "")) ? "image/jpeg" : "image/webp");
+      images.push({ mime, path: im.path, url: im.url });
+    }
     // not_executed/needs_review is a structured resumable state, not a tool
     // failure: the model must read status/reason/next and re-observe, not stop.
     // errors_first: on any non-executed act/evaluate, lift decision fields to

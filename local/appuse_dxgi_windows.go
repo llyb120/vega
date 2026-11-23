@@ -81,7 +81,7 @@ const (
 // comCall 调某个接口的第 index 个 vtable 槽。
 func comCall(pointer unsafe.Pointer, index int, args ...uintptr) uintptr {
 	vtable := *(*unsafe.Pointer)(pointer)
-	slot := (*[64]uintptr)(vtable)[index]
+	slot := (*[128]uintptr)(vtable)[index]
 	call := append([]uintptr{uintptr(pointer)}, args...)
 	result, _, _ := syscall.SyscallN(slot, call...)
 	return result

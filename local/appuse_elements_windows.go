@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"runtime"
-	"strings"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -95,93 +94,29 @@ func appuseUIARole(kind int32) string {
 	return fmt.Sprintf("control-%d", kind)
 }
 func appuseQueryElements(windowID uint32, depth, limit int, filter string) (appuseControlTree, error) {
-	return appuseWithUIA(func(automation unsafe.Pointer) (appuseControlTree, error) {
-		tree := appuseControlTree{Elements: []appuseControl{}}
-		var root, walker unsafe.Pointer
-		if err := uiaFailed(comCall(automation, slotUIAElementFromHandle, uintptr(windowID), uintptr(unsafe.Pointer(&root)))); err != nil {
-			return tree, err
-		}
-		if root == nil {
-			return tree, fmt.Errorf("窗口没有 UIA 根节点")
-		}
-		defer comRelease(root)
-		if err := uiaFailed(comCall(automation, slotUIAControlViewWalker, uintptr(unsafe.Pointer(&walker)))); err != nil {
-			return tree, err
-		}
-		if walker == nil {
-			return tree, fmt.Errorf("系统没有控件树遍历器")
-		}
-		defer comRelease(walker)
-		started := time.Now()
-		filter = strings.ToLower(filter)
-		truncate := func(reason string) {
-			tree.Truncated = true
-			if tree.TruncatedBy == "" {
-				tree.TruncatedBy = reason
-			}
-		}
-		var walk func(unsafe.Pointer, int) bool
-		walk = func(element unsafe.Pointer, level int) bool {
-			if tree.Visited >= 1200 {
-				truncate("nodeLimit")
-				return false
-			}
-			if time.Since(started) >= uiaBudget {
-				truncate("timeBudget")
-				return false
-			}
-			tree.Visited++
-			offscreen, err := uiaBool(element, slotUIACurrentOffscreen)
-			if err != nil {
-				truncate("providerError")
-				return true
-			}
-			if offscreen {
-				return true
-			}
-			control, err := appuseUIAControl(element)
-			if err != nil {
-				truncate("providerError")
-				return true
-			}
-			if control.Rect.Width > 0 && control.Rect.Height > 0 && (control.Name != "" || control.AutomationID != "") && strings.Contains(strings.ToLower(control.Name+" "+control.AutomationID+" "+control.Role), filter) {
-				if len(tree.Elements) >= limit {
-					truncate("itemLimit")
-					return false
-				}
-				tree.Elements = append(tree.Elements, control)
-			}
-			child, err := uiaRelative(walker, element, true)
-			if err != nil {
-				truncate("providerError")
-				return true
-			}
-			if level >= depth {
-				if child != nil {
-					truncate("depth")
-					comRelease(child)
-				}
-				return true
-			}
-			for child != nil {
-				more := walk(child, level+1)
-				if !more {
-					comRelease(child)
-					return false
-				}
-				next, err := uiaRelative(walker, child, false)
-				comRelease(child)
-				if err != nil {
-					truncate("providerError")
-					return true
-				}
-				child = next
-			}
-			return true
-		}
-		walk(root, 0)
-		return tree, nil
-	})
+	extract, err := appuseCollectFullUIA(windowID, depth, limit, filter)
+	tree := appuseControlTree{
+		Elements:      make([]appuseControl, 0, len(extract.Nodes)),
+		Visited:       extract.Visited,
+		Truncated:     extract.Truncated,
+		TruncatedBy:   extract.TruncatedBy,
+		Overlay:       extract.Overlay,
+		PrimaryScroll: extract.PrimaryScroll,
+	}
+	for _, node := range extract.Nodes {
+		tree.Elements = append(tree.Elements, appuseControl{
+			ID:           node.ID,
+			Name:         node.Name,
+			Role:         node.Role,
+			AutomationID: node.AutomationID,
+			Value:        node.Value,
+			State:        node.State,
+			Interactive:  node.Interactive,
+			Enabled:      node.Enabled,
+			Rect:         node.Rect,
+		})
+	}
+	return tree, err
 }
 func appusePointArgs(point appusePoint) []uintptr {
 	if unsafe.Sizeof(uintptr(0)) == 4 {
@@ -228,7 +163,9 @@ func appuseCheckElement(windowID uint32, point appusePoint, expected appuseContr
 		defer comRelease(walker)
 		for level := 0; element != nil && level <= 20; level++ {
 			control, readErr := appuseUIAControl(element)
-			if readErr == nil && control == expected && control.Enabled {
+			if readErr == nil && control.Enabled &&
+				control.Name == expected.Name && control.Role == expected.Role &&
+				control.AutomationID == expected.AutomationID && control.Rect == expected.Rect {
 				comRelease(element)
 				return appuseControlTree{}, nil
 			}

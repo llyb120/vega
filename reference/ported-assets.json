@@ -4,12 +4,24 @@
     "sha256": "DEF93560B9B756D2EF0F25F695CD7F3ECD749A04CBEB01B41C47A3E770C85A4B"
   },
   {
+    "path": "server/assets/browser/page_runtime.js",
+    "sha256": "BC750170CE66F0697206A8EDB62A5300E8C605AAF01006EEC39D40911D60F90C"
+  },
+  {
+    "path": "local/page_runtime.js",
+    "sha256": "BC750170CE66F0697206A8EDB62A5300E8C605AAF01006EEC39D40911D60F90C"
+  },
+  {
+    "path": "shared/browser-tools.json",
+    "sha256": "7E18DC5BA46D659BF2043E6897B7E40254201C0A7986DF39DF4BF5C2614F059E"
+  },
+  {
     "path": "shared/agent-tools.json",
     "sha256": "B6C0F9BB331A870EFF7263DDDE4D3C0B522BB8C489DD204E59700D74A680C8CF"
   },
   {
     "path": "local/extension/vega-chrome/worker.js",
-    "sha256": "7AC0261FE2241CD071E353D1C4DD84F3EF118FDCC9D8826AC17B027C06B53914"
+    "sha256": "F4E8A92ECD785064AB763C4BFEF4F3788B91FB8A909173C6B0D33D7B0D691605"
   },
   {
     "path": "local/extension/vega-chrome/content.js",
@@ -17,7 +29,7 @@
   },
   {
     "path": "local/extension/vega-chrome/manifest.json",
-    "sha256": "521D9EDA8C45F170B1366C78771A55295938F87619FC230AB9C2B6F986F71EE5"
+    "sha256": "257FF1067022C62380F88ED1BA1AA4521454BADC5654401A7C64F9E11F1C90F4"
   },
   {
     "path": "local/extension/vega-chrome/popup.js",

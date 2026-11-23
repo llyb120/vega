@@ -36,7 +36,7 @@ test("coding → computer → coding preserves the caller checkpoint, without re
     const n = requests.length, calls = [
       ["read", { path: "package.json" }],
       ["switch_scene", { scene: "computer", message: "check title only", resume: "finish in coding" }],
-      ["chrome_inspect", { tabTag: "tab" }],
+      ["browser_view", { tab: "tab", screenshot: false }],
       ["workspace_probe", {}], // Another browser turn: the previous screenshot must not even be loaded again.
     ] as const;
     const event = n <= calls.length ? { type: "response.output_item.done", output_index: 0, item: {

@@ -43,38 +43,39 @@ export function employeeCall(a: Obj, target: "task" | "self" = "task"): { name: 
 
 const action = (v: Obj): Obj => {
   switch (v.action) {
-    case "click": return defined({ action: "click", ref: v.ref, frame: v.frame, button: v.button, clickCount: v.click_count });
-    case "fill": return defined({ action: "fill", ref: v.ref, value: v.text, frame: v.frame });
-    case "scroll": return defined({ action: "scroll", deltaY: v.delta, deltaX: v.delta_x, ref: v.ref, frame: v.frame });
-    case "wait": return defined({ action: "wait", milliseconds: v.ms });
-    case "click_at": return defined({ action: "click_at", x: v.x, y: v.y, button: v.button, clickCount: v.click_count });
-    case "drag": return defined({ action: "drag", fromX: v.x, fromY: v.y, toX: v.to_x, toY: v.to_y, durationMs: v.duration_ms });
-    case "pointer": return defined({ action: "pointer", phase: v.phase, x: v.x, y: v.y, durationMs: v.duration_ms });
-    case "scroll_at": return defined({ action: "scroll_at", x: v.x, y: v.y, deltaY: v.delta, deltaX: v.delta_x });
-    default: return v;
+    case "click": return defined({ op: "click", x: v.x, y: v.y, button: v.button, clicks: v.click_count, id: v.id });
+    case "fill": return defined({ op: "type", text: v.text, id: v.id, clear: v.clear, submit: v.submit });
+    case "scroll": return defined({ op: "scroll", dy: v.delta, dx: v.delta_x, id: v.id });
+    case "wait": return defined({ op: "wait", ms: v.ms });
+    case "click_at": return defined({ op: "click", x: v.x, y: v.y, button: v.button, clicks: v.click_count });
+    case "drag": return defined({ op: "drag", x1: v.x, y1: v.y, x2: v.to_x, y2: v.to_y, durationMs: v.duration_ms });
+    case "scroll_at": return defined({ op: "scroll", x: v.x, y: v.y, dy: v.delta, dx: v.delta_x });
+    default: return v.op ? v : defined({ op: v.action, x: v.x, y: v.y, text: v.text, key: v.key, id: v.id });
   }
 };
 
 export function chromeCall(a: Obj): { name: string; arguments: Obj } {
   const call = (name: string, args: Obj = {}) => ({ name, arguments: defined(args) });
   switch (a.operation) {
-    case "tabs": return call("chrome_tabs", { query: a.query, incognito: a.incognito, visual: a.visual });
-    case "open": return call("chrome_navigate", { url: a.url, target: defined({ kind: "new_tab", incognito: a.incognito }), observe: a.observe, settleMs: a.settleMs, visual: a.visual });
-    case "goto": return call("chrome_navigate", { url: a.url, target: { kind: "existing_tab", tabTag: a.tabTag }, observe: a.observe, settleMs: a.settleMs, visual: a.visual });
+    case "tabs": case "browser_tabs": return call("browser_tabs", { action: a.action || "list", query: a.query, incognito: a.incognito, view: a.observe === "none" ? false : undefined });
+    case "open": return call("browser_tabs", { action: "open", url: a.url, incognito: a.incognito, view: a.observe === "none" ? false : undefined });
+    case "goto": return call("browser_tabs", { action: "goto", tab: a.tabTag || a.tab, url: a.url, view: a.observe === "none" ? false : undefined });
     case "select_tab": case "close_tab": case "back": case "forward": case "reload":
-      return call("chrome_tab_control", { tabTag: a.tabTag, command: ({ select_tab: "select", close_tab: "close" } as Obj)[a.operation] || a.operation, observe: a.observe, settleMs: a.settleMs, visual: a.visual });
-    case "inspect": return call("chrome_inspect", { tabTag: a.tabTag, query: a.query, scope: a.scope, visual: a.visual, maxItems: a.maxItems, maxTextChars: a.maxTextChars });
+      return call("browser_tabs", { tab: a.tabTag || a.tab, action: ({ select_tab: "switch", close_tab: "close" } as Obj)[a.operation] || a.operation, view: a.observe === "none" ? false : undefined });
+    case "inspect": case "browser_view":
+      return call("browser_view", { tab: a.tabTag || a.tab, query: a.query, scope: a.scope, screenshot: a.screenshot ?? false, maxItems: a.maxItems, maxTextChars: a.maxTextChars });
     case "screenshot": {
-      const capture = a.region ? { kind: "region", region: a.region } : a.expandScroll ? defined({ kind: "scroll_area", ref: a.ref }) : a.ref ? defined({ kind: "element", ref: a.ref, frame: a.frame }) : a.fullPage ? defined({ kind: "page", tileOffset: a.tileOffset }) : { kind: "viewport" };
-      return call("chrome_screenshot", { tabTag: a.tabTag, capture: defined({ ...capture, maxEdge: a.maxEdge }), visual: a.visual });
+      const zoom = a.region ? { x: a.region.x, y: a.region.y, width: a.region.width, height: a.region.height } : undefined;
+      return call("browser_view", { tab: a.tabTag || a.tab, screenshot: true, zoom, maxItems: a.maxItems, maxTextChars: a.maxTextChars });
     }
-    case "act": return call("chrome_act", { tabTag: a.tabTag, actions: (a.actions || [a.action]).map(action), imageId: a.imageId, visual: a.visual, settleMs: a.settleMs });
-    case "evaluate": return call("chrome_evaluate", { tabTag: a.tabTag, expression: a.expression, frame: a.frame, visual: a.visual, observe: a.feedback === "none" ? false : undefined });
-    case "run": return call("chrome_run", { tabTag: a.tabTag, ...a.plan });
-    case "status": case "connect": return call("chrome_connection", { command: "status" });
-    case "stop": return call("chrome_connection", { command: "cancel_operation" });
-    case "downloads": return call("chrome_downloads", { downloadId: a.downloadId, since: a.since });
-    case "devtools": return call("chrome_devtools", { tabTag: a.tabTag, ...a.devtools });
+    case "act": case "browser_act":
+      return call("browser_act", { tab: a.tabTag || a.tab, steps: (a.steps || a.actions || [a.action]).map(action), screenshot: a.screenshot, notes: a.notes });
+    case "evaluate": case "browser_eval":
+      return call("browser_eval", { tab: a.tabTag || a.tab, code: a.code || a.expression, view: a.feedback === "none" ? false : a.view });
+    case "downloads": return call("browser_debug", { kind: "downloads", downloadId: a.downloadId, since: a.since });
+    case "status": case "connect": case "stop": return call("browser_debug", { kind: "downloads" });
+    case "devtools": case "browser_debug":
+      return call("browser_debug", { kind: a.kind || a.devtools?.kind || "console", tab: a.tabTag || a.tab, ...a.devtools });
   }
   throw Error("chromeCall: unmapped operation " + a.operation);
 }

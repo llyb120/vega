@@ -15,8 +15,8 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 
-const raw = '{"tabTag":"C1","visual": none}';
-const tool: Tool = { name: "chrome_inspect", description: "inspect", parameters: { type: "object", properties: { tabTag: { type: "string" }, visual: { type: "string" } }, required: ["tabTag"] } };
+const raw = '{"tab":"C1","screenshot": false';
+const tool: Tool = { name: "browser_view", description: "view", parameters: { type: "object", properties: { tab: { type: "string" }, screenshot: { type: "boolean" } }, required: [] } };
 type Packet = { body: string | Buffer; type: string };
 const sse = (frames: any[]): Packet => ({ type: "text/event-stream", body: frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n" });
 const json = (body: any): Packet => ({ type: "application/json", body: JSON.stringify(body) });
@@ -83,16 +83,16 @@ test("invalid model JSON is preserved verbatim only when a conversation can retu
 });
 
 test("streaming, JSON and native providers defer bad arguments for sessions but keep one-shot calls strict", async t => {
-  const c = call("bad", "chrome_inspect", raw);
+  const c = call("bad", "browser_view", raw);
   const cases: [string, Packet, string][] = [
     ["openai-completions", completion([c]), raw],
     ["openai-completions", json({ choices: [{ message: { tool_calls: [c] }, finish_reason: "tool_calls" }] }), raw],
-    ["openai-completions", json({ choices: [{ message: { tool_calls: [call("bad", "chrome_inspect", "42")] }, finish_reason: "tool_calls" }] }), "42"],
-    ["openai-responses", sse([{ type: "response.completed", response: { id: "r-bad", status: "completed", output: [{ type: "function_call", id: "item-bad", call_id: "bad", name: "chrome_inspect", arguments: raw }] } }]), raw],
-    ["openai-responses", json({ status: "completed", output: [{ type: "function_call", call_id: "bad", name: "chrome_inspect", arguments: raw }] }), raw],
-    ["anthropic-messages", sse([{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "bad", name: "chrome_inspect", input: {} } }, { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: raw } }, { type: "message_delta", delta: { stop_reason: "tool_use" } }, { type: "message_stop" }]), raw],
-    ["anthropic-messages", json({ stop_reason: "tool_use", content: [{ type: "tool_use", id: "bad", name: "chrome_inspect", input: null }] }), "null"],
-    ["devin", { type: "application/connect+proto", body: Buffer.concat([envelope(Buffer.concat([fieldNumber(5, 10), fieldBytes(6, Buffer.concat([fieldBytes(1, "bad"), fieldBytes(2, "chrome_inspect"), fieldBytes(3, raw)]))])), envelope(Buffer.from("{}"), 2)]) }, raw],
+    ["openai-completions", json({ choices: [{ message: { tool_calls: [call("bad", "browser_view", "42")] }, finish_reason: "tool_calls" }] }), "42"],
+    ["openai-responses", sse([{ type: "response.completed", response: { id: "r-bad", status: "completed", output: [{ type: "function_call", id: "item-bad", call_id: "bad", name: "browser_view", arguments: raw }] } }]), raw],
+    ["openai-responses", json({ status: "completed", output: [{ type: "function_call", call_id: "bad", name: "browser_view", arguments: raw }] }), raw],
+    ["anthropic-messages", sse([{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "bad", name: "browser_view", input: {} } }, { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: raw } }, { type: "message_delta", delta: { stop_reason: "tool_use" } }, { type: "message_stop" }]), raw],
+    ["anthropic-messages", json({ stop_reason: "tool_use", content: [{ type: "tool_use", id: "bad", name: "browser_view", input: null }] }), "null"],
+    ["devin", { type: "application/connect+proto", body: Buffer.concat([envelope(Buffer.concat([fieldNumber(5, 10), fieldBytes(6, Buffer.concat([fieldBytes(1, "bad"), fieldBytes(2, "browser_view"), fieldBytes(3, raw)]))])), envelope(Buffer.from("{}"), 2)]) }, raw],
   ];
   for (const [api, packet, expected] of cases) {
     const { url } = await http(t, [packet, packet]);
@@ -122,8 +122,8 @@ test("sessions still reject unfinished streams before dispatching any tool", asy
   }
 });
 
-const first = (cwd: string) => completion([call("once", "bash", { command: `cd '${cwd}'; node -e "require('node:fs').appendFileSync('once.txt','x')"`, timeout: 5 }), call("bad", "chrome_inspect", raw)]);
-const inspect = call("fixed", "chrome_inspect", { tabTag: "C1", visual: "none" });
+const first = (cwd: string) => completion([call("once", "bash", { command: `cd '${cwd}'; node -e "require('node:fs').appendFileSync('once.txt','x')"`, timeout: 5 }), call("bad", "browser_view", raw)]);
+const inspect = call("fixed", "browser_view", { tab: "C1", screenshot: false });
 
 for (const taskMode of [false, true]) test(`bad arguments are corrected in the same ${taskMode ? "employee run" : "conversation"} without replaying successful work`, { timeout: 30000 }, async t => {
   const packets = [completion([]), completion([inspect])];
@@ -149,7 +149,7 @@ for (const taskMode of [false, true]) test(`bad arguments are corrected in the s
   assert.equal(await readFile(join(cwd, "once.txt"), "utf8"), "x", "the successful command is never replayed");
   assert.equal(browser.mock.callCount(), 1, "bad arguments never reach browser acquisition");
   assert.equal(execute.mock.callCount(), 1, "only the corrected call reaches the browser");
-  assert.equal(execute.mock.calls[0].arguments[2]!.visual, "none");
+  assert.equal(execute.mock.calls[0].arguments[2]!.screenshot, false);
   const rows = await store.messages(sessionId);
   const bad = rows.find(message => message.role === "tool" && message.callId === "bad")!;
   assert.equal(bad.error, true);

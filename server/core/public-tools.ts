@@ -1,4 +1,4 @@
-import chromeTools from "../../shared/chrome-tools.json";
+import browserTools from "../../shared/browser-tools.json";
 import type { Tool } from "./provider";
 import type { Obj } from "./util";
 import { omittable } from "./tool-args";
@@ -183,7 +183,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       "请用户审批一项需要先确认或尚未授权的不可逆操作（支付、删除、对外发送、提交审批等）：request 写清是什么操作。任务挂起并立即结束本轮；批准后在原会话继续获批事项，驳回则任务取消。常规开发分支的提交和普通推送不需要审批；缺信息用 task_ask_user。必须单独调用。",
       { request: str("要审批的具体操作，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["request"]));
     out.push(tool("task_ask_user",
-      "向交代人要只有他能提供的信息，或必须他处理的阻碍（短信/邮箱验证码、访问码、2FA/OTP 等）：question 写清需要什么。滑块/拼图/旋转等视觉验证码先用 chrome_act pointer 自行拖，连续失败后再问，不要一上来就让用户代拖。任务挂起并立即结束本轮，回答后在原会话继续。能自己查到的不要问，低风险细节自行决定；要批准操作用 task_request_approval。必须单独调用。",
+      "向交代人要只有他能提供的信息，或必须他处理的阻碍（短信/邮箱验证码、访问码、2FA/OTP 等）：question 写清需要什么。滑块/拼图/旋转等视觉验证码先用 browser_act 拖拽，连续失败后再问，不要一上来就让用户代拖。任务挂起并立即结束本轮，回答后在原会话继续。能自己查到的不要问，低风险细节自行决定；要批准操作用 task_request_approval。必须单独调用。",
       { question: str("要对方补充或处理的内容，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["question"]));
     out.push(tool("task_wait",
       "已提交的外部作业（构建、发布、导出等）或已发出的澄清请求需要等待结果时挂起当前任务：checkpoint 写作业编号或请求链接、已做的操作与回执、当前状态、检查方式和必要的升级处理（不含凭据）；resumeAt 和 delayMinutes 二选一，结合对方预计回复、工作时间及业务截止时间安排下次，不把等待时长当作任务完成期限。立即结束本轮并释放执行名额，到时在原会话续做，只检查原作业或回复，同一请求不要重发；无回复时按实际情况再次挂起，有部分回复先判断可独立继续的工作。确认真实送达和通知生效，未触达或不确定时如实告知，必要时请用户处理。有新疑点可发新一轮澄清并保存新回执。没有外部结果、只是把本任务改到以后做用 task_reschedule。必须单独调用。",
@@ -247,8 +247,16 @@ export function vaultTools(ctx: ToolContext): Tool[] {
   ];
 }
 
-export const CHROME_TOOL_DEFINITIONS = chromeTools as Tool[];
-export const CHROME_TOOLS = new Set(CHROME_TOOL_DEFINITIONS.map((t) => t.name));
+export const BROWSER_TOOL_DEFINITIONS = browserTools as Tool[];
+export const BROWSER_TOOLS = new Set(BROWSER_TOOL_DEFINITIONS.map((t) => t.name));
+export const CHROME_TOOL_DEFINITIONS = BROWSER_TOOL_DEFINITIONS;
+export const CHROME_TOOLS = BROWSER_TOOLS;
+export const LEGACY_CHROME_TOOLS = new Set([
+  "chrome_tabs", "chrome_navigate", "chrome_tab_control", "chrome_inspect",
+  "chrome_screenshot", "chrome_act", "chrome_evaluate", "chrome_run",
+  "chrome_connection", "chrome_downloads", "chrome_devtools",
+  "chrome_experience_search", "chrome_experience_save", "chrome_experience_feedback",
+]);
 export const EMPLOYEE_TOOLS = new Set([
   "employee_status", "employee_task_create", "employee_task_manage",
   "task_progress", "task_reschedule", "task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete",
@@ -272,46 +280,10 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
   const chrome = (args: Obj): Internal => ({ tool: "chrome", args });
   const employee = (args: Obj, target?: Internal["target"]): Internal => ({ tool: "employee", args, ...(target ? { target } : {}) });
   const defined = (o: Obj) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
-  // Observation summary budgets, shared by every tool that returns an observation (as the old single tool allowed).
-  const budget = defined({ maxItems: a.maxItems, maxTextChars: a.maxTextChars });
+  if (BROWSER_TOOLS.has(name)) {
+    return chrome({ operation: name, ...a });
+  }
   switch (name) {
-    case "chrome_tabs": return chrome(defined({ operation: "tabs", query: a.query, incognito: a.incognito, visual: a.visual, ...budget }));
-    case "chrome_navigate": {
-      const observe = { observe: a.observe, settleMs: a.settleMs, visual: a.visual, ...budget };
-      return a.target.kind === "existing_tab"
-        ? chrome(defined({ operation: "goto", tabTag: a.target.tabTag, url: a.url, ...observe }))
-        : chrome(defined({ operation: "open", url: a.url, incognito: a.target.incognito, ...observe }));
-    }
-    case "chrome_tab_control":
-      return chrome(defined({ operation: ({ select: "select_tab", close: "close_tab" } as Obj)[a.command] || a.command, tabTag: a.tabTag, observe: a.observe, settleMs: a.settleMs, visual: a.visual, ...budget }));
-    case "chrome_inspect":
-      return chrome(defined({ operation: "inspect", tabTag: a.tabTag, query: a.query, scope: a.scope, visual: a.visual, maxItems: a.maxItems, maxTextChars: a.maxTextChars }));
-    case "chrome_screenshot": {
-      const c = a.capture;
-      return chrome(defined({
-        operation: "screenshot", tabTag: a.tabTag, maxEdge: c.maxEdge, visual: a.visual, ...budget,
-        ...(c.kind === "page" ? { fullPage: true, tileOffset: c.tileOffset } : {}),
-        ...(c.kind === "element" ? { ref: c.ref, frame: c.frame } : {}),
-        ...(c.kind === "region" ? { region: c.region } : {}),
-        ...(c.kind === "scroll_area" ? { expandScroll: true, ref: c.ref } : {}),
-      }));
-    }
-    case "chrome_act":
-      return chrome(defined({ operation: "act", tabTag: a.tabTag, notes: a.notes, imageId: a.imageId, visual: a.visual, settleMs: a.settleMs, ...budget, actions: a.actions.map(chromeAction) }));
-    case "chrome_evaluate":
-      return chrome(defined({ operation: "evaluate", tabTag: a.tabTag, expression: a.expression, frame: a.frame, visual: a.visual, ...budget, ...(a.observe === false ? { feedback: "none" } : {}) }));
-    case "chrome_run":
-      return chrome({ operation: "run", tabTag: a.tabTag, plan: defined({ task: a.task, steps: a.steps, authorization: a.authorization, expectedText: a.expectedText, inputs: a.inputs, maxActions: a.maxActions }) });
-    case "chrome_connection": return chrome({ operation: a.command === "cancel_operation" ? "stop" : "status" });
-    case "chrome_downloads": return chrome(defined({ operation: "downloads", downloadId: a.downloadId, since: a.since }));
-    case "chrome_devtools":
-      return chrome({ operation: "devtools", tabTag: a.tabTag, devtools: defined({ kind: a.kind, query: a.query, level: a.level, limit: a.limit, requestId: a.requestId, clear: a.clear }) });
-    case "chrome_experience_search":
-      return chrome({ operation: "experience_search", experience: defined({ scope: a.scope, task: a.task, prefix: a.prefix }) });
-    case "chrome_experience_save":
-      return chrome({ operation: "experience_save", tabTag: a.tabTag, snapshotId: a.snapshotId, experience: defined({ scope: a.scope, task: a.task, conditions: a.conditions, steps: a.steps, checks: a.checks, pitfalls: a.pitfalls, alternatives: a.alternatives, evidence: a.evidence, redacted: a.redacted, outcome: "success" }) });
-    case "chrome_experience_feedback":
-      return chrome({ operation: "experience_feedback", tabTag: a.tabTag, snapshotId: a.snapshotId, experience: { scope: a.scope, task: a.task, id: a.routeId, outcome: a.outcome, reason: a.reason, redacted: a.redacted } });
 
     case "employee_status": return employee(defined({ action: "list", id: a.taskId, key: a.dedupeKey, status: a.status === "all" ? undefined : a.status, query: a.memoryQuery }));
     case "employee_task_create":
@@ -362,23 +334,4 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
     case "vault_get": return employee(defined({ action: "vault_get", id: a.credentialId, text: a.purpose, url: a.url }));
   }
   throw new ArgumentError("Unknown tool " + name);
-}
-
-function chromeAction(v: Obj): Obj {
-  const defined = (o: Obj) => Object.fromEntries(Object.entries(o).filter(([, x]) => x !== undefined));
-  switch (v.action) {
-    case "click": return defined({ action: "click", ref: v.ref, frame: v.frame, button: v.button, click_count: v.clickCount });
-    case "hover": return defined({ action: "hover", ref: v.ref, frame: v.frame });
-    case "fill": return defined({ action: "fill", ref: v.ref, text: v.value, frame: v.frame });
-    case "type": return { action: "type", text: v.text };
-    case "press": return { action: "press", key: v.key };
-    case "scroll": return defined({ action: "scroll", delta: v.deltaY, delta_x: v.deltaX, ref: v.ref, frame: v.frame });
-    case "wait": return defined({ action: "wait", ms: v.milliseconds });
-    case "upload": return defined({ action: "upload", selector: v.selector, files: v.files, frame: v.frame });
-    case "click_at": return defined({ action: "click_at", x: v.x, y: v.y, button: v.button, click_count: v.clickCount });
-    case "move": return { action: "move", x: v.x, y: v.y };
-    case "drag": return defined({ action: "drag", x: v.fromX, y: v.fromY, to_x: v.toX, to_y: v.toY, duration_ms: v.durationMs });
-    case "pointer": return defined({ action: "pointer", phase: v.phase, x: v.x, y: v.y, duration_ms: v.durationMs });
-    default: return defined({ action: "scroll_at", x: v.x, y: v.y, delta: v.deltaY, delta_x: v.deltaX });
-  }
 }

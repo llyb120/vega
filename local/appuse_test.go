@@ -60,7 +60,9 @@ func TestAppuseBatchSemanticsNeverClaimUntouchedInput(t *testing.T) {
 	// 弱模型的等价格式仍然被接受。
 	for _, action := range []appuseAction{
 		{Action: "click", X: intPtr(1), Y: intPtr(2), Glide: boolPtr(false)},
-		{Action: "wait", MS: intPtr(2000)},
+		{Action: "wait", MS: intPtr(10000)},
+		{Action: "dismiss", Glide: boolPtr(true)},
+		{Action: "type", X: intPtr(10), Y: intPtr(20), Text: stringPtr("hi"), Clear: boolPtr(true), Submit: boolPtr(true)},
 		{Action: "press", Key: stringPtr("ctrl+s")},
 	} {
 		if err := action.validate(shot); err != nil {
@@ -122,10 +124,10 @@ func TestAppuseRejectsUnknownFieldsBeforeDesktopWork(t *testing.T) {
 	if _, ok := appuseExecute(raw)["windows"]; !ok {
 		t.Fatal("windows 应忽略无关字段并返回窗口列表")
 	}
-	raw, _ = json.Marshal(map[string]any{"operation": "act", "actions": []any{map[string]any{"action": "wait", "ms": 2001}}})
+	raw, _ = json.Marshal(map[string]any{"operation": "act", "actions": []any{map[string]any{"action": "wait", "ms": 10001}}})
 	result := appuseExecute(raw)
 	if result["error"] == nil {
-		t.Fatalf("ms=2001 必须在执行前被拒：%v", result)
+		t.Fatalf("ms=10001 必须在执行前被拒：%v", result)
 	}
 	raw, _ = json.Marshal(map[string]any{"operation": "act", "actions": []any{}})
 	if appuseExecute(raw)["error"] == nil {
@@ -180,6 +182,46 @@ func TestAppuseDelayKeepsExplicitWaitsAndReactions(t *testing.T) {
 	}
 	if got := appuseActionDelay([]appuseAction{{Action: "click"}, {Action: "type"}, {Action: "press"}}, 0); got != 300*time.Millisecond {
 		t.Fatalf("点击后要留反应时间：%v", got)
+	}
+}
+
+func TestAppuseResolveActionsSupportsIDAndDismissAndGlide(t *testing.T) {
+	shot := appuseTestShot()
+	shot.Controls = []appuseControlItem{
+		{ID: 1, Role: "button", Name: "Submit", ImageX: 120, ImageY: 240, SourceRect: appuseRegion{X: 200, Y: 440, Width: 80, Height: 40}},
+	}
+	shot.OverlayOutside = &appusePoint{X: 30, Y: 40}
+	req := &appuseRequest{
+		Actions: []appuseAction{
+			{Action: "click", ID: intPtr(1)},
+			{Action: "dismiss"},
+		},
+	}
+	if err := appuseResolveActions(req, shot); err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if req.Actions[0].X == nil || *req.Actions[0].X != 120 || *req.Actions[0].Y != 240 {
+		t.Fatalf("id 1 should resolve to (120,240), got (%v,%v)", req.Actions[0].X, req.Actions[0].Y)
+	}
+	if req.Actions[1].X == nil || *req.Actions[1].X != 30 || *req.Actions[1].Y != 40 {
+		t.Fatalf("dismiss should resolve to outsidePoint (30,40), got (%v,%v)", req.Actions[1].X, req.Actions[1].Y)
+	}
+	bad := &appuseRequest{Actions: []appuseAction{{Action: "click", ID: intPtr(99)}}}
+	if err := appuseResolveActions(bad, shot); err == nil {
+		t.Fatal("unknown control id must fail")
+	}
+
+	from, to := appusePoint{X: 10, Y: 20}, appusePoint{X: 610, Y: 420}
+	if got := appuseGlideAt(from, to, 0.1, 0.03, 0); got != from {
+		t.Fatalf("t=0 mismatch: %+v", got)
+	}
+	if got := appuseGlideAt(from, to, 0.1, 0.03, 1); got != to {
+		t.Fatalf("t=1 mismatch: %+v", got)
+	}
+	// Overshoot near u ~ 0.825 slightly goes past to along travel axis or settles smoothly.
+	mid := appuseGlideAt(from, to, 0, 0.04, 0.85)
+	if mid.X <= from.X || mid.Y <= from.Y {
+		t.Fatalf("mid-trajectory should advance smoothly: %+v", mid)
 	}
 }
 

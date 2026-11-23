@@ -19,7 +19,7 @@ export function browserExtensionPrompt(path: string, client?: { name?: string })
     "1. 切到 Chrome，在地址栏打开 chrome://extensions。",
     "2. 打开右上角「开发者模式」。",
     "3. 列表里已有 Vega Chrome：点它的「重新加载」；没有：点「加载已解压的扩展程序」，在系统文件选择框里用 appuse 的 type 输入上面的目录再确认。",
-    "4. 在 Chrome 扩展页核对 Vega Chrome 已启用；只有 chrome_connection 连接的是用户自己的 Chrome 时才用它核对连接（本机回环端口 47753–47762），不能把无头浏览器的连接当作安装成功。",
+    "4. 在 Chrome 扩展页核对 Vega Chrome 已启用；只有 browser_debug(action=\"status\") 连接的是用户自己的 Chrome 时才用它核对连接（本机回环端口 47753–47762），不能把无头浏览器的连接当作安装成功。",
     "",
     "约束：只能用 appuse 操作桌面和原生对话框；不要用 bash、PowerShell、UIAutomation 或任何脚本安装扩展，不要从商店或网络下载插件，不要用文件或命令改 Chrome 的 Profile、偏好设置或登录态。遇到拿不准的原生对话框或权限提示就停下来问用户，不要猜。",
     "如果这台电脑当前不在线，不要换成别的机器或云端装：停下来让用户先让这台电脑的客户端上线。",

@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha1"
+	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"regexp"
@@ -18,7 +22,10 @@ import (
 )
 
 const extensionOrigin = "chrome-extension://bhiemmbmefifaloapbcopihahhckolce"
-const extensionVersion = "0.2.0"
+const extensionVersion = "0.2.5"
+
+//go:embed page_runtime.js
+var embeddedPageRuntime string
 
 var extensionClientID = regexp.MustCompile(`(?i)^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 var localChrome = newBrowserBridge()
@@ -50,15 +57,69 @@ var browserPickupWait = 30 * time.Second
 type browserPeer struct {
 	lastAt  time.Time
 	browser string
-	// headless 只是 headlessClient() 在轮询时的缓存（登录态借用的 headedPeers 直接读它）：
+	// headless 只是 headlessClient() 在轮询/WS 握手时的缓存（登录态借用的 headedPeers 直接读它）：
 	// 判据是本次启动写进扩展副本的 clientID，不是 UA，也不是「启动前后新出现的客户端」。
 	headless bool
 }
+
+type browserWSConn struct {
+	clientID string
+	conn     net.Conn
+	writeMu  sync.Mutex
+	closed   chan struct{}
+}
+
+func (c *browserWSConn) sendJSON(v any) error {
+	payload, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return writeWebSocketServerFrame(c.conn, 0x1, payload)
+}
+
+func (c *browserWSConn) sendPong(payload []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return writeWebSocketServerFrame(c.conn, 0xA, payload)
+}
+
+func (c *browserWSConn) closeConn() {
+	c.writeMu.Lock()
+	_ = writeWebSocketServerFrame(c.conn, 0x8, nil)
+	c.writeMu.Unlock()
+	_ = c.conn.Close()
+}
+
+// writeWebSocketServerFrame 写入服务端 RFC6455 帧（服务端发给客户端的帧不带掩码）。
+func writeWebSocketServerFrame(w io.Writer, opcode byte, payload []byte) error {
+	header := []byte{0x80 | (opcode & 0x0f)}
+	n := len(payload)
+	switch {
+	case n < 126:
+		header = append(header, byte(n))
+	case n < 65536:
+		header = append(header, 126, byte(n>>8), byte(n))
+	default:
+		header = append(header, 127, 0, 0, 0, 0, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+	}
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
+	if n > 0 {
+		_, err := w.Write(payload)
+		return err
+	}
+	return nil
+}
+
 type browserBridge struct {
 	mu                   sync.Mutex
 	token                string
 	port                 int
 	clients              map[string]browserPeer
+	wsConns              map[string]*browserWSConn
 	primaryID            string
 	connection           context.Context
 	session, leaseClient string
@@ -72,8 +133,15 @@ func newBrowserBridge() *browserBridge {
 	if _, err := rand.Read(token); err != nil {
 		panic(err)
 	}
-	return &browserBridge{token: hex.EncodeToString(token), clients: make(map[string]browserPeer), queues: make(map[string]chan *browserCommand), pending: make(map[string]*browserCommand)}
+	return &browserBridge{
+		token:   hex.EncodeToString(token),
+		clients: make(map[string]browserPeer),
+		wsConns: make(map[string]*browserWSConn),
+		queues:  make(map[string]chan *browserCommand),
+		pending: make(map[string]*browserCommand),
+	}
 }
+
 func (b *browserBridge) start() (*http.Server, error) {
 	for port := 47753; port <= 47762; port++ {
 		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
@@ -90,11 +158,11 @@ func (b *browserBridge) start() (*http.Server, error) {
 	return nil, fmt.Errorf("Chrome extension loopback ports 47753–47762 are occupied")
 }
 
-// liveLocked 清掉已停止轮询的扩展实例，返回按 ID 排序的存活列表。调用方持有 b.mu。
+// liveLocked 清掉已停止轮询/断线的扩展实例，返回按 ID 排序的存活列表。调用方持有 b.mu。
 func (b *browserBridge) liveLocked() []string {
 	live := []string{}
 	for client, peer := range b.clients {
-		if time.Since(peer.lastAt) >= 45*time.Second {
+		if time.Since(peer.lastAt) >= 45*time.Second && b.wsConns[client] == nil {
 			delete(b.clients, client)
 			delete(b.queues, client)
 		} else {
@@ -114,7 +182,6 @@ func headlessClientID() string {
 }
 
 // headlessClientLocked 调用方持有 b.mu 且已用 liveLocked 清过过期实例。
-// 只认本次启动的那个 clientID：用户自己的 Chrome 永远不是无头实例，哪怕它的 UA 也写着 HeadlessChrome。
 func (b *browserBridge) headlessClientLocked(live []string) string {
 	if id := headlessClientID(); id != "" {
 		for _, client := range live {
@@ -124,7 +191,6 @@ func (b *browserBridge) headlessClientLocked(live []string) string {
 		}
 		return ""
 	}
-	// 还没记下 clientID 的实例（旧配置 / 单测里的桩）：退回扩展自报的 UA 标记。
 	for _, client := range live {
 		if b.clients[client].headless {
 			return client
@@ -140,26 +206,27 @@ func (b *browserBridge) headlessClient() string {
 	return b.headlessClientLocked(b.liveLocked())
 }
 
-// forget 立刻把一个实例从桥接里摘掉：它的进程已经被我们杀掉，不会再轮询。
-// 不摘的话它会一直留到 45 秒过期：status() 报已连接、ensure() 以为还活着，下一次操作要卡到取命令超时。
+// forget 立刻把一个实例从桥接里摘掉：它的进程已经被我们杀掉，不会再通信。
 func (b *browserBridge) forget(client string) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	ws := b.wsConns[client]
+	delete(b.wsConns, client)
 	delete(b.clients, client)
 	delete(b.queues, client)
 	if b.primaryID == client {
 		b.primaryID = ""
+	}
+	b.mu.Unlock()
+	if ws != nil {
+		ws.closeConn()
 	}
 }
 
 // The caller holds b.mu for status and queue selection.
 func (b *browserBridge) status() map[string]any {
 	live := b.liveLocked()
-	// 无头模式只认客户端自己拉起的那个实例（clientID），有头模式只认用户自己的浏览器；
-	// 无头实例的 UA 同样是 Chrome，必须显式区分。
 	headless := b.headlessClientLocked(live)
 	headlessMode := headlessBrowser.Load() != nil
-	// 无头模式只认本次启动的那个实例；有头模式只用你自己连上来的 Chrome（我们自己拉起的无头实例一律排除）。
 	want := func(client string) bool {
 		if headlessMode {
 			return client != "" && client == headless
@@ -186,7 +253,6 @@ func (b *browserBridge) status() map[string]any {
 		b.primaryID = primary()
 	}
 	client := b.primaryID
-	// A turn stays bound to its acquired browser even when another profile connects.
 	if b.leaseClient != "" {
 		client = b.leaseClient
 	}
@@ -204,10 +270,19 @@ func (b *browserBridge) status() map[string]any {
 	if h := headlessBrowser.Load(); h != nil {
 		mode, notice = "headless", h.currentNotice()
 	}
-	return map[string]any{"connected": connected, "browser": peer.browser, "headless": client != "" && client == headless, "browsers": browsers, "mode": mode, "notice": notice, "origin": fmt.Sprintf("http://127.0.0.1:%d", b.port), "extensionId": strings.TrimPrefix(extensionOrigin, "chrome-extension://"), "extensionVersion": extensionVersion}
+	return map[string]any{
+		"connected":        connected,
+		"browser":          peer.browser,
+		"headless":         client != "" && client == headless,
+		"browsers":         browsers,
+		"mode":             mode,
+		"notice":           notice,
+		"origin":           fmt.Sprintf("http://127.0.0.1:%d", b.port),
+		"extensionId":      strings.TrimPrefix(extensionOrigin, "chrome-extension://"),
+		"extensionVersion": extensionVersion,
+	}
 }
 
-// ensureHeadless 无头模式下先保证浏览器起来了，再去碰桥接（启动可能要十几秒，不能拿着 b.mu）。
 func (b *browserBridge) ensureHeadless(ctx context.Context) error {
 	h := headlessBrowser.Load()
 	if h == nil {
@@ -218,25 +293,22 @@ func (b *browserBridge) ensureHeadless(ctx context.Context) error {
 	} else if err := h.ensure(b, ctx); err != nil {
 		return err
 	}
-	// 第一次命令前就把你自己 Chrome 里的登录态搬过来，不让首屏落在空 profile 上；
-	// 内部有节流，也不会打扰正在用的页签。
 	b.borrowLogin(h)
 	return nil
 }
 
-// leased 有会话正占着浏览器（这一回合还没结束）。
 func (b *browserBridge) leased() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.connection != nil
 }
 
-// leasedByOther 本会话有没有被另一个会话的浏览器租约挡住（挡住就不用白拉起一个浏览器）。
 func (b *browserBridge) leasedByOther(connection context.Context, session string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.connection != nil && (b.connection != connection || b.session != session)
 }
+
 func (b *browserBridge) queue(client string) chan *browserCommand {
 	if b.queues[client] == nil {
 		b.queues[client] = make(chan *browserCommand, 128)
@@ -244,8 +316,42 @@ func (b *browserBridge) queue(client string) chan *browserCommand {
 	return b.queues[client]
 }
 
-// internal 是客户端自己发的命令（借登录态）：不占会话租约，也不改 primary，
-// 只借扩展的队列跑一条命令。超了或扩展没取走就当成没执行，不重放。
+// pushCommandViaWS attempts instant push to an active WebSocket peer; returns true if pushed.
+// Caller must NOT hold b.mu.
+func (b *browserBridge) pushCommandViaWS(command *browserCommand) bool {
+	b.mu.Lock()
+	ws := b.wsConns[command.client]
+	if ws == nil || b.pending[command.ID] != command {
+		b.mu.Unlock()
+		return false
+	}
+	command.ExpiresAt = time.Now().Add(command.budget).UnixMilli()
+	close(command.picked)
+	b.mu.Unlock()
+
+	var rawArgs any = map[string]any{}
+	if len(command.Args) > 0 {
+		rawArgs = json.RawMessage(command.Args)
+	}
+	msg := map[string]any{
+		"type":      "cmd",
+		"id":        command.ID,
+		"op":        command.Operation,
+		"args":      rawArgs,
+		"expiresAt": command.ExpiresAt,
+	}
+	if err := ws.sendJSON(msg); err != nil {
+		b.mu.Lock()
+		if b.wsConns[command.client] == ws {
+			delete(b.wsConns, command.client)
+		}
+		b.mu.Unlock()
+		_ = ws.conn.Close()
+		return true // picked & attempted on the wire; caller handles reply/timeout
+	}
+	return true
+}
+
 func (b *browserBridge) internal(client, operation string, args map[string]any, timeout time.Duration) (any, error) {
 	payload, err := json.Marshal(args)
 	if err != nil {
@@ -258,21 +364,32 @@ func (b *browserBridge) internal(client, operation string, args map[string]any, 
 		return nil, errors.New("浏览器已断开")
 	}
 	pickup := 20 * time.Second
-	command := &browserCommand{ID: id, Operation: operation, Args: payload, client: client, generation: b.generation, internal: true,
-		reply: make(chan browserReply, 1), budget: timeout, pickupBy: time.Now().Add(pickup), picked: make(chan struct{})}
+	command := &browserCommand{
+		ID: id, Operation: operation, Args: payload, client: client, generation: b.generation, internal: true,
+		reply: make(chan browserReply, 1), budget: timeout, pickupBy: time.Now().Add(pickup), picked: make(chan struct{}),
+	}
 	b.pending[id] = command
-	queue := b.queue(client)
+	hasWS := b.wsConns[client] != nil
+	var queue chan *browserCommand
+	if !hasWS {
+		queue = b.queue(client)
+	}
 	b.mu.Unlock()
 	defer func() { b.mu.Lock(); delete(b.pending, id); b.mu.Unlock() }()
-	select {
-	case queue <- command:
-	default:
-		return nil, errors.New("浏览器命令队列已满")
-	}
-	select {
-	case <-command.picked:
-	case <-time.After(pickup):
-		return nil, errors.New("扩展没有取走命令（后台可能被 Chrome 挂起）")
+
+	if hasWS {
+		b.pushCommandViaWS(command)
+	} else {
+		select {
+		case queue <- command:
+		default:
+			return nil, errors.New("浏览器命令队列已满")
+		}
+		select {
+		case <-command.picked:
+		case <-time.After(pickup):
+			return nil, errors.New("扩展没有取走命令（后台可能被 Chrome 挂起）")
+		}
 	}
 	select {
 	case reply := <-command.reply:
@@ -284,19 +401,55 @@ func (b *browserBridge) internal(client, operation string, args map[string]any, 
 		return nil, errors.New("扩展响应超时")
 	}
 }
+
+func (b *browserBridge) hideCursorAsync(client string) {
+	if client == "" {
+		return
+	}
+	b.mu.Lock()
+	ws := b.wsConns[client]
+	b.mu.Unlock()
+	if ws != nil {
+		_ = ws.sendJSON(map[string]any{
+			"type": "cmd",
+			"id":   "cursor-hide-" + strconv.FormatInt(time.Now().UnixNano(), 36),
+			"op":   "cursor_hide",
+			"args": map[string]any{"immediate": false},
+		})
+	}
+}
+
 func (b *browserBridge) releaseConnection(connection context.Context, retained ...string) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	for _, session := range retained {
 		if b.session == session {
+			b.mu.Unlock()
 			return
 		}
 	}
+	var oldClient string
 	if b.connection == connection {
+		oldClient = b.leaseClient
 		b.generation++
 		b.connection, b.session, b.leaseClient = nil, "", ""
 	}
+	b.mu.Unlock()
+	if oldClient != "" {
+		go b.hideCursorAsync(oldClient)
+	}
 }
+
+func browserOperationTimeout(op string) time.Duration {
+	switch op {
+	case "view", "act", "open", "new_tab", "goto", "reload", "eval", "cookies_export", "cookies_import", "apply_storage":
+		return 25 * time.Second
+	case "cdp", "devtools", "debug", "select_tab", "close_tab", "back", "forward", "stop", "downloads", "cursor_hide", "reload_ext", "set_proxy":
+		return 10 * time.Second
+	default:
+		return 3 * time.Second
+	}
+}
+
 func (b *browserBridge) execute(connection, ctx context.Context, j job) map[string]any {
 	var req struct {
 		Session   string          `json:"session"`
@@ -316,7 +469,6 @@ func (b *browserBridge) execute(connection, ctx context.Context, j job) map[stri
 	}
 	b.mu.Unlock()
 	if req.Operation != "release" && req.Operation != "status" && !b.leasedByOther(connection, req.Session) {
-		// 无头模式下这一步才真正拉起隐藏 Chrome；起不来就直接报错，不静默改用别的浏览器。
 		if err := b.ensureHeadless(ctx); err != nil {
 			return map[string]any{"status": "unavailable", "error": err.Error()}
 		}
@@ -324,13 +476,15 @@ func (b *browserBridge) execute(connection, ctx context.Context, j job) map[stri
 	b.mu.Lock()
 	if req.Operation == "release" {
 		released := b.connection == connection && b.session == req.Session
+		var oldClient string
 		if released {
+			oldClient = b.leaseClient
 			b.generation++
 			b.connection, b.session, b.leaseClient = nil, "", ""
 		}
 		b.mu.Unlock()
 		if released {
-			// 一轮操作结束：无头浏览器里刚登录的站点马上同步回你自己的 Chrome。
+			go b.hideCursorAsync(oldClient)
 			b.syncLoginAfterTurn()
 		}
 		return map[string]any{"result": map[string]any{"ok": true}}
@@ -378,48 +532,62 @@ func (b *browserBridge) execute(connection, ctx context.Context, j job) map[stri
 		return map[string]any{"result": r}
 	}
 	switch req.Operation {
-	case "tabs", "downloads", "open", "new_tab", "select_tab", "close_tab", "goto", "back", "forward", "reload", "stop", "devtools", "cdp":
+	case "tabs", "downloads", "open", "new_tab", "select_tab", "close_tab",
+		"goto", "back", "forward", "reload", "reload_ext", "stop",
+		"view", "act", "eval", "debug", "devtools", "cursor_hide",
+		"set_proxy", "cookies_export", "cookies_import", "apply_storage", "cdp":
 	default:
 		b.mu.Unlock()
 		return failure("Unknown browser operation")
 	}
-	timeout := 3 * time.Second
-	if req.Operation == "cdp" || req.Operation == "devtools" {
-		timeout = 10 * time.Second
+	timeout := browserOperationTimeout(req.Operation)
+	command := &browserCommand{
+		ID: j.ID, Operation: req.Operation, Args: req.Args,
+		ExpiresAt: time.Now().Add(browserPickupWait + timeout).UnixMilli(),
+		client:    b.leaseClient, generation: b.generation,
+		reply: make(chan browserReply, 1), budget: timeout,
+		pickupBy: time.Now().Add(browserPickupWait), picked: make(chan struct{}),
 	}
-	command := &browserCommand{ID: j.ID, Operation: req.Operation, Args: req.Args, ExpiresAt: time.Now().Add(browserPickupWait + timeout).UnixMilli(), client: b.leaseClient, generation: b.generation, reply: make(chan browserReply, 1), budget: timeout, pickupBy: time.Now().Add(browserPickupWait), picked: make(chan struct{})}
 	b.pending[j.ID] = command
-	queue := b.queue(command.client)
+	hasWS := b.wsConns[command.client] != nil
+	var queue chan *browserCommand
+	if !hasWS {
+		queue = b.queue(command.client)
+	}
 	b.mu.Unlock()
 	defer func() { b.mu.Lock(); delete(b.pending, j.ID); b.mu.Unlock() }()
-	select {
-	case queue <- command:
-	default:
-		return failure("Local browser queue is full; input not sent")
-	}
-	pickup := time.NewTimer(browserPickupWait)
-	defer pickup.Stop()
-	// Withdraw an untaken command under the lock so a poll cannot hand it out after we report "not executed".
-	withdraw := func() bool {
-		b.mu.Lock()
-		defer b.mu.Unlock()
+
+	if hasWS {
+		b.pushCommandViaWS(command)
+	} else {
+		select {
+		case queue <- command:
+		default:
+			return failure("Local browser queue is full; input not sent")
+		}
+		pickup := time.NewTimer(browserPickupWait)
+		defer pickup.Stop()
+		withdraw := func() bool {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			select {
+			case <-command.picked:
+				return false
+			default:
+				delete(b.pending, j.ID)
+				return true
+			}
+		}
 		select {
 		case <-command.picked:
-			return false
-		default:
-			delete(b.pending, j.ID)
-			return true
-		}
-	}
-	select {
-	case <-command.picked:
-	case <-ctx.Done():
-		if withdraw() {
-			return failure("Browser operation cancelled before Chrome took it; not executed")
-		}
-	case <-pickup.C:
-		if withdraw() {
-			return map[string]any{"status": "unavailable", "error": "本地 Chrome 扩展未取走命令（Vega 扩展后台可能被 Chrome 挂起或已断开），本步未执行，可以直接重试；持续出现请在 chrome://extensions 确认 Vega Chrome 已启用"}
+		case <-ctx.Done():
+			if withdraw() {
+				return failure("Browser operation cancelled before Chrome took it; not executed")
+			}
+		case <-pickup.C:
+			if withdraw() {
+				return map[string]any{"status": "unavailable", "error": "本地 Chrome 扩展未取走命令（Vega 扩展后台可能被 Chrome 挂起或已断开），本步未执行，可以直接重试；持续出现请在 chrome://extensions 确认 Vega Chrome 已启用"}
+			}
 		}
 	}
 	timer := time.NewTimer(timeout + time.Second)
@@ -436,6 +604,164 @@ func (b *browserBridge) execute(connection, ctx context.Context, j job) map[stri
 		return failure("Local browser response timeout; it may have executed, do not replay")
 	}
 }
+
+func detectBrowserFromUA(ua string) string {
+	switch {
+	case strings.Contains(ua, "Edg/"):
+		return "Microsoft Edge"
+	case strings.Contains(ua, "OPR/"):
+		return "Opera"
+	case strings.Contains(ua, "Chrome/"):
+		return "Google Chrome"
+	default:
+		return "unknown"
+	}
+}
+
+func (b *browserBridge) recordPeerLocked(clientID, ua string) {
+	browser := detectBrowserFromUA(ua)
+	peer := b.clients[clientID]
+	peer.lastAt, peer.browser = time.Now(), browser
+	id := headlessClientID()
+	peer.headless = peer.headless || clientID == id || id == "" && strings.Contains(ua, "HeadlessChrome")
+	b.clients[clientID] = peer
+}
+
+func (b *browserBridge) serveWS(w http.ResponseWriter, r *http.Request) {
+	clientID := r.URL.Query().Get("clientId")
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	if !extensionClientID.MatchString(clientID) {
+		http.Error(w, "Invalid clientId", 400)
+		return
+	}
+	if token != b.token {
+		http.Error(w, "Unauthorized", 403)
+		return
+	}
+	wsKey := r.Header.Get("Sec-WebSocket-Key")
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || wsKey == "" {
+		http.Error(w, "WebSocket Upgrade required", 426)
+		return
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "WebSocket hijack unsupported", 500)
+		return
+	}
+	conn, rw, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	sum := sha1.Sum([]byte(wsKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	accept := base64.StdEncoding.EncodeToString(sum[:])
+	handshake := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n"
+	if _, err := rw.WriteString(handshake); err != nil {
+		_ = conn.Close()
+		return
+	}
+	if err := rw.Flush(); err != nil {
+		_ = conn.Close()
+		return
+	}
+	_ = conn.SetDeadline(time.Time{})
+
+	ws := &browserWSConn{clientID: clientID, conn: conn, closed: make(chan struct{})}
+	b.mu.Lock()
+	old := b.wsConns[clientID]
+	b.wsConns[clientID] = ws
+	b.recordPeerLocked(clientID, r.Header.Get("User-Agent"))
+	b.mu.Unlock()
+	if old != nil {
+		old.closeConn()
+	}
+
+	defer func() {
+		b.mu.Lock()
+		if b.wsConns[clientID] == ws {
+			delete(b.wsConns, clientID)
+		}
+		b.mu.Unlock()
+		close(ws.closed)
+		_ = conn.Close()
+	}()
+
+	_ = ws.sendJSON(map[string]any{
+		"type":    "hello",
+		"version": extensionVersion,
+		"runtime": embeddedPageRuntime,
+	})
+
+	for {
+		opcode, data, err := readWebSocketFrame(rw.Reader)
+		if err != nil {
+			return
+		}
+		switch opcode {
+		case 0x8:
+			return
+		case 0x9:
+			_ = ws.sendPong(data)
+			b.mu.Lock()
+			if peer, exists := b.clients[clientID]; exists {
+				peer.lastAt = time.Now()
+				b.clients[clientID] = peer
+			}
+			b.mu.Unlock()
+			continue
+		case 0xA:
+			continue
+		case 0x1:
+		default:
+			continue
+		}
+		var msg struct {
+			Type   string          `json:"type"`
+			ID     string          `json:"id"`
+			Result any             `json:"result"`
+			Error  string          `json:"error"`
+			Raw    json.RawMessage `json:"raw"`
+		}
+		if json.Unmarshal(data, &msg) != nil {
+			continue
+		}
+		switch msg.Type {
+		case "ping":
+			b.mu.Lock()
+			if peer, exists := b.clients[clientID]; exists {
+				peer.lastAt = time.Now()
+				b.clients[clientID] = peer
+			}
+			b.mu.Unlock()
+			_ = ws.sendJSON(map[string]any{"type": "pong"})
+		case "reply":
+			b.mu.Lock()
+			command := b.pending[msg.ID]
+			if command != nil && command.client == clientID {
+				select {
+				case command.reply <- browserReply{Result: msg.Result, Error: msg.Error}:
+				default:
+				}
+			}
+			b.mu.Unlock()
+		case "miniapp_triggers":
+			_ = ws.sendJSON(map[string]any{
+				"type":   "host_reply",
+				"id":     msg.ID,
+				"result": map[string]any{"triggers": []any{}},
+			})
+		case "miniapp_launch":
+			_ = ws.sendJSON(map[string]any{
+				"type":  "host_reply",
+				"id":    msg.ID,
+				"error": "No published miniapp launcher configured",
+			})
+		}
+	}
+}
+
 func (b *browserBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != extensionOrigin {
 		http.Error(w, "Invalid extension origin", 403)
@@ -443,11 +769,19 @@ func (b *browserBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Access-Control-Allow-Origin", extensionOrigin)
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	if r.Method == http.MethodGet && r.URL.Path == "/ws" {
+		b.serveWS(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Connection", "close")
 	if r.Method == http.MethodOptions {
 		_, _ = w.Write([]byte("{}"))
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/health" {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "app": "vega", "version": extensionVersion})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -474,24 +808,7 @@ func (b *browserBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/poll":
 		b.mu.Lock()
-		browser := "unknown"
-		ua := r.Header.Get("User-Agent")
-		switch {
-		case strings.Contains(ua, "Edg/"):
-			browser = "Microsoft Edge"
-		case strings.Contains(ua, "OPR/"):
-			browser = "Opera"
-		case strings.Contains(ua, "Chrome/"):
-			browser = "Google Chrome"
-		}
-		peer := b.clients[body.ClientID]
-		peer.lastAt, peer.browser = time.Now(), browser
-		// 无头判据只有一个：本次启动写进扩展副本的 clientID。标记只升不降：一旦认出是我们自己拉起的实例，
-		// 切回「我自己的 Chrome」后它也不会被当成你的浏览器；用户的 Chrome 永远匹配不上这个 UUID。
-		// 只有还没记下 clientID 的旧实例才看扩展自报的 UA（--headless=new 的 UA 并不保证带标记）。
-		id := headlessClientID()
-		peer.headless = peer.headless || body.ClientID == id || id == "" && strings.Contains(ua, "HeadlessChrome")
-		b.clients[body.ClientID] = peer
+		b.recordPeerLocked(body.ClientID, r.Header.Get("User-Agent"))
 		queue := b.queue(body.ClientID)
 		b.mu.Unlock()
 		timer := time.NewTimer(20 * time.Second)

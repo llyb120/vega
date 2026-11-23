@@ -1,6 +1,6 @@
 # Vega Chrome 扩展
 
-Vega 自己的 Chrome 扩展。它只与 Vega 客户端配对：扩展身份（manifest `key` 决定扩展 ID）和本机回环端口段都独立于 Nova，两边同时安装也不会互相连接或抢占同一个浏览器。
+Vega 自己的 Chrome 扩展（v0.2.5）。它只与 Vega 客户端/服务端配对：扩展身份（manifest `key` 决定扩展 ID）和本机回环端口段都独立于 Nova，两边同时安装也不会互相连接或抢占同一个浏览器。
 
 ## 加载
 
@@ -15,19 +15,17 @@ Vega 自己的 Chrome 扩展。它只与 Vega 客户端配对：扩展身份（m
 
 - 扩展 ID 由 `manifest.json` 的 `key` 决定，当前为 `bhiemmbmefifaloapbcopihahhckolce`。客户端（`local/browser.go`）和服务端桥接（`server/core/chrome-bridge.ts`）只接受这个 Origin；换 key 必须同步这两处。
 - 客户端监听 `127.0.0.1:47753–47762` 里第一个空闲端口。Nova 的扩展只发现 `47653–47662`，Vega 的扩展只发现 `47753–47762`，因此扩展不会连到对方客户端。
-- 配对时桥接必须返回 `{"app":"vega"}`；没声明的端口（例如别的本机程序）一律忽略：不轮询、不发命令。
+- 扩展先轻量探测 `GET /health`（要求 `ok === true && app === "vega"`），再通过 `POST /pair` 获取一次性会话令牌，随后升级持久 WebSocket `/ws?clientId=...&token=...` 并从宿主下发单一真相 `page_runtime.js`；若仅配对 HTTP 测试桥接，自动回退 `/poll` + `/reply`。
 - `VEGA_CHROME_PORT` 可指定单一回环端口（0 表示系统分配，仅供测试）；扩展只自动发现上面这段默认范围。
-- 断线、新启动的实例每 30 秒重试一次；打开扩展弹窗也会触发发现。命令结果只回传给发起它的实例，单条命令串行执行。
-- `version` 随扩展升级递增：客户端读到更高的版本会把扩展自身重载一次。
+- 断线后指数退避重连，打开扩展弹窗也会触发发现。单条命令串行执行且永不自动重放。
+- `version` 随扩展升级递增：宿主在 `hello` 消息携带更高版本号时，扩展自动重载一次。
 
 ## 能力
 
-整页 DOM、iframe、滚动区域、整页分片截图、点击、填写、键盘、滚动、拖动、等待、多标签与导航、下载查询、DevTools 记录。`chrome_act` 等工具返回最新观察供验证并继续。没有辅助模型，不使用 Playwright，不依赖 `9222` 远程调试端口（CDP 走 `chrome.debugger`）。
+通过 1-RTT 复合浏览器原语提供统一指针驱动的页面观察（视口 DOM、SVG/图标语义、iframe 与浮层提升、主滚动容器识别、JPEG 截图）、拟人化平滑光标动画、`browser_act` 多步原子动作、轻量页面脚本执行、`browser_debug` DevTools 控制台与网络抓包，以及保留的原始 `cdp` / `set_proxy` 与 miniapp 启动器支持。
 
 ## 测试
 
 ```sh
 node --test local/extension/vega-chrome/worker.test.mjs
 ```
-
-测试用模拟 `chrome` 命名空间覆盖轮询、断线重连、不重放、截图缩放、DevTools 与无痕窗口；真实 Chrome 的端到端验证需另装扩展。

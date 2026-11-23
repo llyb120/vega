@@ -1,14 +1,22 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { normalizeAction } from "./browser-actions";
+import { processScreenshot, ShotMapping, type SomBox } from "./browser-annotate";
 import { validatePlan, literalMet, runCandidates, bindStep, chains, runState, type Candidate } from "./browser-run";
 import { assertCredentialInput, credentialOrigins, vaultSite, type CredentialBinding } from "./credentials";
 import sharp from "sharp";
 import type { Store } from "./store";
 import { ChromeBridge } from "./chrome-bridge";
 import { Experiences } from "./experiences";
+
+function sanitizedStepName(s: string) {
+  return s.replace(/\s+/g, " ").trim().replace(/\b\d{4,}\b/g, "#").slice(0, 48);
+}
 import { restoreGlobalExperiences } from "./experience-access";
 import {
   assert,
   clip,
+  httpURL,
   id,
   sleep,
   workspaceFile,
@@ -51,6 +59,82 @@ export const CONTEXT_RETRIES = 4;
 export const contextLost = (message?: string) =>
   /Cannot find context with specified id|Execution context was destroyed|No frame for given id|Cannot find default execution context|Inspected target navigated or closed/i.test(String(message || ""));
 
+type TabSnapshot = {
+  id: string;
+  tabTag: string;
+  url: string;
+  title?: string;
+  text?: string;
+  captured: number;
+  mapping?: ShotMapping;
+  items: Obj[];
+};
+
+const BROWSER_NAMED_KEYS = new Set([
+  "Enter", "Return", "Tab", "Escape", "Esc", "Backspace", "Delete", "Del",
+  "Home", "End", "PageUp", "PageDown", "ArrowLeft", "Left", "ArrowUp", "Up",
+  "ArrowRight", "Right", "ArrowDown", "Down", "Space", " ",
+]);
+
+function validKeySpec(name: string): boolean {
+  const parts = String(name || "").split("+").map((s) => s.trim());
+  const base = parts.pop();
+  if (!base) return false;
+  let modifiers = 0;
+  for (const m of parts) {
+    if (m === "Alt" || m === "Option") modifiers |= 1;
+    else if (m === "Control" || m === "Ctrl") modifiers |= 2;
+    else if (m === "Meta" || m === "Cmd" || m === "Command") modifiers |= 4;
+    else if (m === "Shift") modifiers |= 8;
+    else return false;
+  }
+  if (BROWSER_NAMED_KEYS.has(base)) return true;
+  if (/^F([1-9]|1[0-2])$/.test(base)) return true;
+  if (base.length === 1 && /^[a-zA-Z0-9]$/.test(base) && (modifiers & 7) !== 0) return true;
+  return false;
+}
+
+function compactBrowserTabs(tabs: Obj[] = []) {
+  return tabs.map((t) => {
+    const rawUrl = String(t.url || "");
+    const chars = [...rawUrl];
+    const url = chars.length > 120 ? chars.slice(0, 120).join("") + "…" : rawUrl;
+    const obj: Obj = { tag: t.tag, title: t.title || "", url };
+    if (t.active) obj.active = true;
+    if (t.incognito) obj.incognito = true;
+    if (t.loading) obj.loading = true;
+    if (t.controllable === false) obj.controllable = false;
+    return obj;
+  });
+}
+
+function mapBrowserPoint(mapping: ShotMapping | undefined, px: number, py: number): [number, number] {
+  if (mapping) return mapping.imageToCss(px, py);
+  if (Number.isFinite(px) && Number.isFinite(py) && px >= 0 && py >= 0) return [px, py];
+  throw Error("坐标无效");
+}
+
+function browserTrailStep(items: Obj[], step: Obj): string | undefined {
+  const find = (idNum: number) => {
+    const item = items.find((i) => Number(i.id) === idNum);
+    if (!item) return undefined;
+    const name = sanitizedStepName(String(item.name || ""));
+    const role = String(item.role || "元素");
+    return name ? `${role}「${name}」` : role;
+  };
+  if (step.op === "click" && step.id !== undefined) {
+    const label = find(Number(step.id));
+    return label ? `点击 ${label}` : undefined;
+  }
+  if (step.op === "type" && step.id !== undefined) {
+    const label = find(Number(step.id));
+    return label ? `填写 ${label}` : undefined;
+  }
+  if (step.op === "press" && step.key) return `按 ${step.key}`;
+  if (step.op === "dismiss") return "点击空白处收起弹层";
+  return undefined;
+}
+
 export class Chrome {
   gate = new Mutex();
   /** Short mutex serializing viewport-activating operations (capture, tab open, select_tab) across concurrent tabs. */
@@ -58,6 +142,8 @@ export class Chrome {
   tabGates = new Map<string, Mutex>();
   /** Runtime tab ownership: maps tabTag → active owning session id so concurrent sessions never collide on tabs. */
   tabOwners = new Map<string, string>();
+  activeTabs = new Map<string, string>();
+  snapshots = new Map<string, TabSnapshot>();
   tabGate(tag: string) {
     let gate = this.tabGates.get(tag);
     if (!gate) this.tabGates.set(tag, (gate = new Mutex()));
@@ -71,13 +157,18 @@ export class Chrome {
     const holder = this.tabOwners.get(tag);
     assert(
       !holder || holder === owner,
-      `标签 ${tag} 正由另一个并行会话占用，不能跨会话操作；请用 chrome_navigate(target={kind:"new_tab"}) 新开你自己的独立标签，或只操作你已打开的标签。`,
+      `标签 ${tag} 正由另一个并行会话占用，不能跨会话操作；请用 browser_tabs(action="open") 新开你自己的独立标签，或只操作你已打开的标签。`,
     );
     if (exclusive) this.tabOwners.set(tag, owner);
   }
   releaseTabs(owner: string) {
     for (const [tag, holder] of this.tabOwners) {
       if (holder === owner) this.tabOwners.delete(tag);
+    }
+  }
+  releaseTurn(hasOtherActiveBrowserSession = false) {
+    if (!hasOtherActiveBrowserSession) {
+      this.bridge.hideCursor();
     }
   }
   private visibleTabs(owner: string, tabs: Obj[] | undefined) {
@@ -101,8 +192,12 @@ export class Chrome {
     public bridge: ChromeBridge,
     public pageScript: string,
     experienceKind = "experience",
+    public livePageScript?: string,
   ) {
     this.experiences = new Experiences(store, experienceKind);
+    if (!this.bridge.runtime && this.pageScript?.includes("__novaBrowser")) {
+      this.bridge.setRuntime(this.pageScript);
+    }
   }
   async experiencesFor(owner: string) {
     if (this.experiences.kind !== "experience") return this.experiences;
@@ -252,10 +347,14 @@ export class Chrome {
           signal,
         );
         frame.context = world.executionContextId;
+        let liveScript = this.livePageScript || this.pageScript;
+        if (!liveScript.includes("__novaWebview.observe")) {
+          try { liveScript = readFileSync(join(process.cwd(), "server/assets/browser/browser-page.js"), "utf8"); } catch {}
+        }
         const page = await this.evaluate(
           tag,
           frame,
-          `${this.pageScript};__novaWebview.observe(${JSON.stringify(id())},20000,${JSON.stringify(scope)})`,
+          `${liveScript};__novaWebview.observe(${JSON.stringify(id())},20000,${JSON.stringify(scope)})`,
           signal,
         );
         page.frame = ready.length;
@@ -1266,6 +1365,492 @@ export class Chrome {
     }
     throw Error("Unknown Chrome action " + kind);
   }
+  private resolveBoundTab(owner: string, explicit?: string): string {
+    const trimmed = typeof explicit === "string" ? explicit.trim() : "";
+    if (trimmed) return trimmed;
+    const bound = this.activeTabs.get(owner);
+    if (bound) return bound;
+    const legacy = [...this.observations].filter(([key]) => key.startsWith(owner + ":"));
+    if (legacy.length === 1) return legacy[0][1].tabTag;
+    throw Error("尚未绑定标签页；请先调用 browser_tabs(action=\"list\") 查找或 browser_tabs(action=\"open\", url=...) 打开网页");
+  }
+
+  private async checkTabCredentialUrl(owner: string, tag: string, text: string, credentials: CredentialBinding[], signal: AbortSignal) {
+    const origins = credentialOrigins(text, credentials);
+    if (!origins.length) return;
+    let url = this.snapshots.get(`${owner}:${tag}`)?.url || "";
+    if (!url) {
+      const res = await this.bridge.request("tabs", {}, signal);
+      url = (res.tabs || []).find((t: Obj) => t.tag === tag)?.url || "";
+    }
+    const site = url ? vaultSite(url) : "";
+    assert(site && origins.every((allowed) => allowed.has(site)), "凭据尚未针对当前页面核对或已切换认证页面，已阻止这次凭据写入；请先观察实际页面（含 SSO / 子框架）再重新 vault_get 核对使用条件，无需补网站配置，不要跨系统试用账号。");
+  }
+
+  async formatView(owner: string, tag: string, raw: Obj, drawSom = true): Promise<Obj> {
+    const snapId = id();
+    const cssW = Math.max(1, Number(raw?.viewport?.[0]) || 1280);
+    const cssH = Math.max(1, Number(raw?.viewport?.[1]) || 800);
+    const items: Obj[] = Array.isArray(raw?.items) ? raw.items : [];
+    const boxes: SomBox[] = [];
+    for (const it of items) {
+      if (typeof it?.id === "number" && Array.isArray(it.rect) && it.rect.length === 4) {
+        boxes.push({
+          id: it.id,
+          rect: [Number(it.rect[0]) || 0, Number(it.rect[1]) || 0, Number(it.rect[2]) || 0, Number(it.rect[3]) || 0],
+        });
+      }
+    }
+    const cropCss: [number, number, number, number] | null =
+      Array.isArray(raw?.zoomCss) && raw.zoomCss.length === 4
+        ? [Number(raw.zoomCss[0]), Number(raw.zoomCss[1]), Number(raw.zoomCss[2]), Number(raw.zoomCss[3])]
+        : null;
+
+    let mapping: ShotMapping | undefined;
+    let shotError: string | undefined = raw?.screenshotError || undefined;
+    const imagesVal: Obj[] = [];
+
+    const rawShotB64 = typeof raw?.screenshotB64 === "string" ? raw.screenshotB64 : typeof raw?.screenshotBase64 === "string" ? raw.screenshotBase64 : "";
+    if (rawShotB64.length > 0) {
+      try {
+        const processed = await processScreenshot({
+          jpegBase64: rawShotB64,
+          cssViewport: [cssW, cssH],
+          cropCss,
+          boxes,
+          drawSom,
+        });
+        mapping = processed.mapping;
+        const ownerDir = await this.fileOwner(owner);
+        const filePath = await this.store.files.write(ownerDir, `${snapId}.jpg`, processed.buffer);
+        const frameStream = cropCss ? undefined : `${tag}:viewport`;
+        imagesVal.push({
+          imageId: `${snapId}-0`,
+          snapshotId: snapId,
+          path: filePath,
+          url: this.store.files.url(filePath),
+          mime: processed.mime,
+          pixelWidth: mapping.pixelWidth,
+          pixelHeight: mapping.pixelHeight,
+          x: mapping.cssX,
+          y: mapping.cssY,
+          width: mapping.cssWidth,
+          height: mapping.cssHeight,
+          ...(frameStream ? { frameStream } : {}),
+        });
+      } catch (err: any) {
+        shotError = String(err?.message || err);
+      }
+    }
+
+    const lines: string[] = [];
+    for (const it of items) {
+      const elId = Number(it.id) || 0;
+      const role = String(it.role || "el");
+      const name = String(it.name || "");
+      const cx = Number(it.x) || 0;
+      const cy = Number(it.y) || 0;
+      const [px, py] = mapping ? mapping.cssToImage(cx, cy) : [Math.round(cx), Math.round(cy)];
+      let line = `[${elId}] ${role} ${JSON.stringify(name)}`;
+      if (typeof it.val === "string" && it.val) line += ` val=${JSON.stringify(it.val)}`;
+      if (typeof it.checked === "boolean") line += ` checked=${it.checked}`;
+      if (typeof it.expanded === "boolean") line += ` expanded=${it.expanded}`;
+      if (typeof it.href === "string" && it.href) line += ` href=${JSON.stringify(it.href)}`;
+      if (Array.isArray(it.canvas) && it.canvas.length >= 2) line += ` canvas=${it.canvas[0]}x${it.canvas[1]}`;
+      if (it.editable === true) line += " editable";
+      if (it.disabled === true) line += " disabled";
+      if (it.scroll === true) {
+        if (Array.isArray(it.scrollY) && it.scrollY.length === 2) {
+          const top = Number(it.scrollY[0]) || 0;
+          const max = Number(it.scrollY[1]) || 0;
+          line += max > top + 20 ? ` scroll=${top}/${max}(↓more)` : ` scroll=${top}/${max}`;
+        } else {
+          line += " scroll";
+        }
+      }
+      if (it.inOverlay === true) line += " [overlay]";
+      if (it.inView === false) line += " offscreen";
+      line += ` @(${px},${py})`;
+      lines.push(line);
+    }
+
+    let overlayOut: Obj | undefined = raw?.overlay ? structuredClone(raw.overlay) : undefined;
+    if (overlayOut) {
+      if (mapping) {
+        if (Array.isArray(overlayOut.outsidePoint) && overlayOut.outsidePoint.length === 2) {
+          overlayOut.outsidePoint = mapping.cssToImage(Number(overlayOut.outsidePoint[0]) || 0, Number(overlayOut.outsidePoint[1]) || 0);
+        }
+        if (Array.isArray(overlayOut.rect) && overlayOut.rect.length === 4) {
+          const r = overlayOut.rect;
+          const [x0, y0] = mapping.cssToImage(Number(r[0]) || 0, Number(r[1]) || 0);
+          const [x1, y1] = mapping.cssToImage((Number(r[0]) || 0) + (Number(r[2]) || 0), (Number(r[1]) || 0) + (Number(r[3]) || 0));
+          overlayOut.rect = [x0, y0, Math.max(0, x1 - x0), Math.max(0, y1 - y0)];
+        }
+      }
+      if (overlayOut.hasConfirm === false) {
+        overlayOut.hint = Array.isArray(overlayOut.outsidePoint) && overlayOut.outsidePoint.length === 2
+          ? `当前弹层内无确认按钮；选完后可用 op="dismiss" 或点击空白处 @(${overlayOut.outsidePoint[0]},${overlayOut.outsidePoint[1]}) 收起弹层使选择生效（切勿误点已选标签内的 ×）`
+          : "当前弹层内无确认按钮；选完后可用 op=\"dismiss\" 收起弹层（切勿误点已选标签内的 ×）";
+      }
+    }
+
+    const cursorImg = Array.isArray(raw?.cursor) && raw.cursor.length === 2
+      ? (mapping ? mapping.cssToImage(Number(raw.cursor[0]) || 0, Number(raw.cursor[1]) || 0) : [Math.round(raw.cursor[0]), Math.round(raw.cursor[1])])
+      : undefined;
+    const vpOut = mapping ? [mapping.pixelWidth, mapping.pixelHeight] : [Math.round(cssW), Math.round(cssH)];
+
+    const pageUrl = String(raw?.url || "");
+    const pageTitle = String(raw?.title || "");
+    const pageText = String(raw?.text || "");
+    this.snapshots.set(`${owner}:${tag}`, {
+      id: snapId,
+      tabTag: tag,
+      url: pageUrl,
+      title: pageTitle,
+      text: pageText,
+      captured: Date.now(),
+      mapping,
+      items,
+    });
+
+    const scrollArr = Array.isArray(raw?.scroll) ? raw.scroll : [0, 0, cssW, cssH];
+    let scrollYOut = Math.round(Number(scrollArr[1]) || 0);
+    let scrollTotalOut = Math.round(Number(scrollArr[3]) || cssH);
+    let scrollHint: string | undefined;
+    const si = raw?.scrollInfo;
+    if (si && typeof si === "object") {
+      scrollYOut = si.y !== undefined ? Math.round(Number(si.y) || 0) : scrollYOut;
+      const maxY = Math.round(Number(si.maxY) || 0);
+      const viewH = Math.max(1, Math.round(Number(si.viewH) || cssH));
+      scrollTotalOut = si.totalH !== undefined ? Math.round(Number(si.totalH) || scrollTotalOut) : scrollTotalOut;
+      const more = si.moreBelow !== undefined ? Math.round(Number(si.moreBelow)) : Math.max(0, maxY - scrollYOut);
+      if (more > 80) {
+        const screens = Math.max(0.2, more / viewH);
+        scrollHint = si.containerId !== undefined && si.containerId !== null
+          ? `下方还有约 ${screens.toFixed(1)} 屏未显示（主滚动区 [${si.containerId}]，y=${scrollYOut}/${maxY}，可用 op="scroll" dy=600 向下查看完整表格/明细）`
+          : `下方还有约 ${screens.toFixed(1)} 屏未显示（y=${scrollYOut}/${maxY}，可用 op="scroll" dy=600 向下查看完整内容）`;
+      }
+    }
+
+    let experienceHint: any;
+    try {
+      const origin = new URL(pageUrl).origin;
+      experienceHint = await (await this.experiencesFor(owner)).hint(owner, origin);
+    } catch {}
+
+    const out: Obj = {
+      tab: tag,
+      snapshotId: snapId,
+      url: pageUrl,
+      title: String(raw?.title || ""),
+      viewport: vpOut,
+      scroll: [scrollYOut, scrollTotalOut],
+      elements: lines.join("\n"),
+      text: String(raw?.text || ""),
+      observeMs: Number(raw?.observeMs) || 0,
+    };
+    if (scrollHint) out.scrollHint = scrollHint;
+    if (cursorImg) out.cursor = cursorImg;
+    if (raw?.focused !== undefined && raw.focused !== null) out.focused = raw.focused;
+    if (overlayOut) out.overlay = overlayOut;
+    if (imagesVal.length) out.images = imagesVal;
+    if (shotError) out.screenshotError = shotError;
+    if (experienceHint) out.experienceHint = experienceHint;
+    return out;
+  }
+
+  private async execBrowserTool(
+    owner: string,
+    cwd: string,
+    args: Obj,
+    parent: AbortSignal | undefined,
+    credentials: CredentialBinding[],
+    hooks: TabHooks | undefined,
+  ): Promise<any> {
+    const toolName = args.operation;
+    const control = new AbortController();
+    this.cancelled.set(owner, control);
+    const signal = AbortSignal.any([control.signal, ...(parent ? [parent] : [])]);
+    try {
+      if (toolName === "browser_experience") {
+        const action = args.action;
+        const op = action === "search" ? "experience_search" : action === "save" ? "experience_save" : "experience_feedback";
+        const { action: _a, tab: tabArg, snapshotId: snapArg, routeId, ...rest } = args;
+        const exp: Obj = { ...rest };
+        if (routeId !== undefined) exp.id = routeId;
+        if (op === "experience_save") exp.outcome = "success";
+        let context: { id: string; origin: string } | undefined;
+        let snapId = snapArg;
+        if (op !== "experience_search") {
+          const tag = this.resolveBoundTab(owner, tabArg);
+          const snap = this.snapshots.get(`${owner}:${tag}`);
+          assert(snap && Date.now() - snap.captured <= 180000, "保存或反馈经验前需先查看该标签页（180秒内）");
+          snapId ||= snap.id;
+          context = { id: snapId, origin: new URL(snap.url).origin };
+        }
+        return await (await this.experiencesFor(owner)).execute(
+          owner,
+          { operation: op, snapshotId: snapId, experience: exp },
+          context,
+        );
+      }
+
+      if (toolName === "browser_tabs") {
+        const action = args.action || "list";
+        const withView = args.view !== false;
+        const viewOpts = { screenshot: withView };
+        if (action === "list") {
+          const res = await this.bridge.request("tabs", { incognito: args.incognito }, signal);
+          let tabs = this.visibleTabs(owner, res.tabs) || [];
+          const q = typeof args.query === "string" ? args.query.trim().toLowerCase() : "";
+          if (q) tabs = tabs.filter((t) => String(t.title || "").toLowerCase().includes(q) || String(t.url || "").toLowerCase().includes(q));
+          if (q && tabs.length === 1 && tabs[0].controllable !== false) {
+            const tag = String(tabs[0].tag);
+            this.claimTab(owner, tag, !!hooks?.exclusive);
+            if (hooks) await hooks.used(tag);
+            this.activeTabs.set(owner, tag);
+            const out: Obj = { tab: tag, tabs: compactBrowserTabs(tabs) };
+            if (withView) {
+              try {
+                const raw = await this.tabGate(tag).run(() => this.bridge.request("view", { tabTag: tag, viewOpts }, signal));
+                Object.assign(out, await this.formatView(owner, tag, raw, true));
+              } catch {}
+            }
+            return out;
+          }
+          return { tabs: compactBrowserTabs(tabs), incognitoAllowed: res.incognitoAllowed };
+        }
+        if (action === "open") {
+          const url = args.url ? httpURL(args.url).href : undefined;
+          let openedTag = "";
+          const res = await this.gate.run(() =>
+            this.visualGate.run(async () => {
+              const r = await this.bridge.request("open", {
+                url,
+                incognito: args.incognito,
+                ...(withView && url ? { viewOpts } : {}),
+              }, signal);
+              openedTag = String(r.tabTag || r.tab || "");
+              if (openedTag) {
+                this.claimTab(owner, openedTag, !!hooks?.exclusive);
+                await recordOpened(hooks, openedTag);
+                this.activeTabs.set(owner, openedTag);
+              }
+              return r;
+            }),
+          );
+          const tabs = this.visibleTabs(owner, res.tabs) || [];
+          const out: Obj = { tab: openedTag, tabs: compactBrowserTabs(tabs) };
+          if (res.view) Object.assign(out, await this.formatView(owner, openedTag, res.view, true));
+          return out;
+        }
+        const tag = this.resolveBoundTab(owner, args.tab);
+        this.claimTab(owner, tag, !!hooks?.exclusive);
+        if (hooks) await hooks.used(tag);
+        return await this.tabGate(tag).run(async () => {
+          const op = action === "switch" ? "select_tab" : action === "close" ? "close_tab" : action;
+          const payload: Obj = { tabTag: tag };
+          if (action === "goto") {
+            assert(typeof args.url === "string" && args.url, "goto 需要 url");
+            payload.url = httpURL(args.url).href;
+          }
+          if (action !== "close" && withView) payload.viewOpts = viewOpts;
+          const runCmd = () => this.bridge.request(op, payload, signal);
+          const res = op === "select_tab" ? await this.visualGate.run(runCmd) : await runCmd();
+          const tabs = this.visibleTabs(owner, res.tabs) || [];
+          if (action === "close") {
+            if (this.activeTabs.get(owner) === tag) this.activeTabs.delete(owner);
+            this.snapshots.delete(`${owner}:${tag}`);
+            for (const [key, obs] of this.observations) if (obs.tabTag === tag) this.observations.delete(key);
+            if (this.tabOwners.get(tag) === owner) this.tabOwners.delete(tag);
+            return { closed: tag, tabs: compactBrowserTabs(tabs) };
+          }
+          this.activeTabs.set(owner, tag);
+          const out: Obj = { tab: tag, tabs: compactBrowserTabs(tabs) };
+          if (res.view) Object.assign(out, await this.formatView(owner, tag, res.view, true));
+          return out;
+        });
+      }
+
+      if (toolName === "browser_view") {
+        const tag = this.resolveBoundTab(owner, args.tab);
+        this.claimTab(owner, tag, !!hooks?.exclusive);
+        if (hooks) await hooks.used(tag);
+        this.activeTabs.set(owner, tag);
+        const snap = this.snapshots.get(`${owner}:${tag}`);
+        const viewOpts: Obj = {
+          scope: args.scope,
+          query: args.query,
+          maxItems: args.maxItems,
+          maxTextChars: args.maxTextChars,
+          screenshot: args.screenshot !== false,
+        };
+        if (args.zoom) {
+          if (args.zoom.id !== undefined) viewOpts.zoomId = args.zoom.id;
+          else if (args.zoom.x !== undefined && args.zoom.y !== undefined && args.zoom.width !== undefined && args.zoom.height !== undefined) {
+            const m = snap?.mapping;
+            if (m) {
+              const [cx0, cy0] = m.imageToCss(args.zoom.x, args.zoom.y);
+              const [cx1, cy1] = m.imageToCss(
+                Math.min(m.pixelWidth, args.zoom.x + args.zoom.width),
+                Math.min(m.pixelHeight, args.zoom.y + args.zoom.height),
+              );
+              viewOpts.zoomRect = [cx0, cy0, Math.max(1, cx1 - cx0), Math.max(1, cy1 - cy0)];
+            } else {
+              viewOpts.zoomRect = [args.zoom.x, args.zoom.y, args.zoom.width, args.zoom.height];
+            }
+          }
+        }
+        return await this.tabGate(tag).run(async () => {
+          const raw = await this.bridge.request("view", { tabTag: tag, viewOpts }, signal);
+          return this.formatView(owner, tag, raw, true);
+        });
+      }
+
+      if (toolName === "browser_act") {
+        const tag = this.resolveBoundTab(owner, args.tab);
+        this.claimTab(owner, tag, !!hooks?.exclusive);
+        if (hooks) await hooks.used(tag);
+        this.activeTabs.set(owner, tag);
+        const prevSnap = this.snapshots.get(`${owner}:${tag}`);
+        const mapping = prevSnap?.mapping;
+        const mappedSteps: Obj[] = [];
+        for (const rawStep of args.steps || []) {
+          const step: Obj = { ...rawStep };
+          if (step.op === "click" || step.op === "hover") {
+            if (step.id === undefined) {
+              assert(typeof step.x === "number" && typeof step.y === "number", "缺少 id 或 x/y 坐标");
+              const [cx, cy] = mapBrowserPoint(mapping, step.x, step.y);
+              step.x = cx; step.y = cy;
+            }
+          } else if (step.op === "type") {
+            assertCredentialInput(step.text);
+            await this.checkTabCredentialUrl(owner, tag, String(step.text || ""), credentials, signal);
+            if (step.id === undefined && (step.x !== undefined || step.y !== undefined)) {
+              assert(typeof step.x === "number" && typeof step.y === "number", "type 坐标需同时提供 x 和 y");
+              const [cx, cy] = mapBrowserPoint(mapping, step.x, step.y);
+              step.x = cx; step.y = cy;
+            }
+          } else if (step.op === "drag") {
+            const [cx1, cy1] = mapBrowserPoint(mapping, step.x1, step.y1);
+            const [cx2, cy2] = mapBrowserPoint(mapping, step.x2, step.y2);
+            step.x1 = cx1; step.y1 = cy1; step.x2 = cx2; step.y2 = cy2;
+          } else if (step.op === "scroll") {
+            if (step.id === undefined && (step.x !== undefined || step.y !== undefined)) {
+              const [cx, cy] = mapBrowserPoint(mapping, step.x ?? 640, step.y ?? 400);
+              step.x = cx; step.y = cy;
+            }
+          } else if (step.op === "press") {
+            assert(validKeySpec(step.key), `不支持的按键：${step.key}`);
+          } else if (step.op === "upload") {
+            assert(typeof step.selector === "string" && step.selector.trim(), "upload 需要非空 selector");
+            assert(Array.isArray(step.files) && step.files.length >= 1 && step.files.length <= 16, "upload 需要 1–16 个文件");
+            step.files = await Promise.all(step.files.map((p: string) => this.workspaceFile(cwd, p)));
+          }
+          mappedSteps.push(step);
+        }
+
+        return await this.tabGate(tag).run(async () => {
+          const viewOpts = { screenshot: args.screenshot !== false };
+          const res = await this.bridge.request("act", { tabTag: tag, steps: mappedSteps, viewOpts }, signal);
+          const openedVisible = this.visibleTabs(owner, res.openedTabs || []) || [];
+          for (const ot of openedVisible) {
+            if (ot.tag) {
+              this.claimTab(owner, ot.tag, !!hooks?.exclusive);
+              await recordOpened(hooks, ot.tag);
+            }
+          }
+          const finalTag = openedVisible.length === 1 && openedVisible[0].controllable !== false
+            ? String(openedVisible[0].tag)
+            : tag;
+          this.activeTabs.set(owner, finalTag);
+
+          const out: Obj = {
+            ok: Boolean(res.ok),
+            tab: finalTag,
+            completed: Number(res.completed) || 0,
+            actions: Array.isArray(res.actions) ? res.actions : [],
+            actionMs: Number(res.actionMs) || 0,
+          };
+          if (res.error) out.error = res.error;
+          if (args.notes !== undefined) out.notes = args.notes;
+          if (openedVisible.length) out.openedTabs = compactBrowserTabs(openedVisible);
+          if (res.ok && mappedSteps.some((s) => s.op === "press" && /^(Ctrl|Control|Meta|Cmd)\+C$/i.test(String(s.key || "")))) {
+            try {
+              const clipRes = await this.bridge.request("eval", { tabTag: finalTag, code: "navigator.clipboard.readText()", withView: false }, AbortSignal.timeout(1500));
+              if (clipRes?.ok && typeof clipRes.value === "string") out.clipboard = { text: clipRes.value };
+            } catch {}
+          }
+
+          const trail = mappedSteps
+            .slice(0, out.completed)
+            .map((st) => browserTrailStep(prevSnap?.items || [], st))
+            .filter(Boolean) as string[];
+          if (res.view) {
+            const formatted = await this.formatView(owner, finalTag, res.view, true);
+            Object.assign(out, formatted);
+            if (trail.length) {
+              (await this.experiencesFor(owner)).record(owner, prevSnap?.url || "", String(res.view.url || ""), String(res.view.title || ""), trail);
+            }
+          }
+          return out;
+        });
+      }
+
+      if (toolName === "browser_eval") {
+        const tag = this.resolveBoundTab(owner, args.tab);
+        this.claimTab(owner, tag, !!hooks?.exclusive);
+        if (hooks) await hooks.used(tag);
+        this.activeTabs.set(owner, tag);
+        await this.checkTabCredentialUrl(owner, tag, String(args.code || ""), credentials, signal);
+        return await this.tabGate(tag).run(async () => {
+          const withView = Boolean(args.view);
+          const res = await this.bridge.request("eval", {
+            tabTag: tag,
+            code: args.code,
+            withView,
+            viewOpts: { screenshot: withView },
+          }, signal);
+          const out: Obj = { tab: tag, ...res };
+          if (res?.view) {
+            const viewRaw = res.view;
+            delete out.view;
+            Object.assign(out, await this.formatView(owner, tag, viewRaw, true));
+          }
+          return out;
+        });
+      }
+
+      if (toolName === "browser_debug") {
+        if (args.kind === "downloads") {
+          return await this.bridge.request("downloads", {
+            downloadId: args.downloadId,
+            since: args.since,
+          }, signal);
+        }
+        const tag = this.resolveBoundTab(owner, args.tab);
+        this.claimTab(owner, tag, !!hooks?.exclusive);
+        if (hooks) await hooks.used(tag);
+        this.activeTabs.set(owner, tag);
+        return await this.tabGate(tag).run(() =>
+          this.bridge.request("debug", {
+            tabTag: tag,
+            kind: args.kind,
+            query: args.query,
+            level: args.level,
+            limit: args.limit,
+            requestId: args.requestId,
+            clear: args.clear,
+          }, signal),
+        );
+      }
+
+      throw Error("Unknown browser tool " + toolName);
+    } finally {
+      if (this.cancelled.get(owner) === control) this.cancelled.delete(owner);
+    }
+  }
+
   async execute(
     owner: string,
     cwd: string,
@@ -1276,7 +1861,11 @@ export class Chrome {
   ): Promise<any> {
     if (args.operation === "stop") {
       this.cancelled.get(owner)?.abort();
+      this.bridge.hideCursor();
       return { stopped: true };
+    }
+    if (["browser_tabs", "browser_view", "browser_act", "browser_eval", "browser_debug", "browser_experience"].includes(String(args.operation || ""))) {
+      return this.execBrowserTool(owner, cwd, args, parent, credentials, hooks);
     }
     const { notes, ...input } = args;
     if (notes !== undefined) assert(args.operation === "act" && typeof notes === "string" && [...notes].length <= 12000, "notes 仅用于 act，须为最多 12000 字符的意图备注");
@@ -1518,7 +2107,7 @@ export class Chrome {
       if (tabs?.some((tab: Obj) => tab.tag === tag && tab.loading)) return {
         status: "not_executed", inputAttempted: false, completedActions: 0, loading: true, tabTag: tag,
         reason: "页面仍在加载，本次操作未执行",
-        next: "请先用 chrome_inspect 观察当前页面，或用仅含 wait 的 chrome_act 等待后观察；不要盲目重放输入或反复刷新页面。",
+        next: "请先用 browser_view 观察当前页面，或用仅含 wait 的 browser_act 等待后观察；不要盲目重放输入或反复刷新页面。",
       };
       o = await this.observe(tag, "all", signal);
     }
