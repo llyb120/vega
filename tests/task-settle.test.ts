@@ -190,3 +190,68 @@ test("same-turn [task_progress, task_complete] closes out with body text while k
     assert.match(done.result || "", /已核对官方页面原文与价格/);
   } finally { await engine.close(); await store.close(); }
 });
+
+test("simple fresh task completes directly with real evidence without a ceremonial plan, while revised tasks still require a settled plan", async () => {
+  const { store, engine, employee } = await fixture();
+  try {
+    const simple = await employee.execute("", { action: "add", kind: "todo", text: "确认首页标题" });
+    employee.busy.set(simple.value.id, { computer: false, session: "" });
+    await employee.update(state => { state.tasks[0].status = "running"; });
+    // Empty evidence is ALWAYS rejected even for simple tasks
+    await assert.rejects(
+      employee.execute(simple.value.id, { action: "complete", deliverableRef: [], text: " ", summary: "已确认。" }),
+      /evidence=空/,
+    );
+    // Real evidence succeeds directly without a ceremonial 1-step plan
+    const ok = await employee.execute(simple.value.id, {
+      action: "complete",
+      deliverableRef: [],
+      text: "已访问 https://example.com，标题 Example Domain。",
+      summary: "首页标题已确认。",
+    });
+    assert.equal(ok.stop, true);
+    assert.match((await employee.state()).tasks[0].completion, /Example Domain/);
+
+    // Once a task is revised (revision > 0), plan verification stays strictly enforced
+    const revised = await employee.execute("", { action: "add", kind: "todo", text: "检查配置" });
+    employee.busy.set(revised.value.id, { computer: false, session: "" });
+    await employee.update(state => {
+      const t = state.tasks.find((x: any) => x.id === revised.value.id)!;
+      Object.assign(t, { status: "running", revision: 1, planRevision: 0, plan: [] });
+    });
+    await assert.rejects(
+      employee.execute(revised.value.id, { action: "complete", deliverableRef: [], text: "已检查。", summary: "已完成。" }),
+      /plan=0步/,
+    );
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("closeout batch allows [task_progress, memory_propose, task_complete] in order while rejecting execution tools with task_complete", async () => {
+  const { store, engine, employee } = await fixture();
+  try {
+    const created = await employee.execute("", { action: "add", kind: "todo", text: "记录环境并交付" });
+    let turn = 0;
+    engine.providers.chat = async () => {
+      turn++;
+      if (turn === 1) {
+        return {
+          role: "assistant",
+          model: "fixture/model",
+          calls: [
+            { id: "p1", name: "task_progress", arguments: { message: "核对完毕", plan: [{ content: "核对环境", status: "completed" }] } },
+            { id: "m1", name: "memory_propose", arguments: { claim: "测试环境端口固定为 8080", memoryKind: "environment" } },
+            { id: "c1", name: "task_complete", arguments: { deliverableRefs: [], evidence: "已实测端口 8080 监听正常。", summary: "核对完成并记录稳定环境事实。" } },
+          ],
+        };
+      }
+      throw Error("unexpected turn " + turn);
+    };
+    await employee.update(state => { state.tasks[0].status = "running"; });
+    employee.busy.set(created.value.id, { computer: false, session: "" });
+    await employee.run((await employee.state()).tasks[0]);
+    const st = await employee.state();
+    assert.equal(st.tasks[0].status, "done");
+    assert.equal(turn, 1, "progress + memory_propose + task_complete finishes in a single turn");
+    assert(st.memories.some((m: any) => m.claim.includes("8080")));
+  } finally { await engine.close(); await store.close(); }
+});

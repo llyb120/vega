@@ -229,9 +229,9 @@ export class Tools {
     if (ctx.kind !== "chat" && !this.session.readOnly && !this.session.agentChild && this.session.scene === "lightweight" && !sceneModels(this.config, "computer").length)
       parts.push("[电脑场景未配置] 设置里没有为 computer 场景选择模型，所以本会话无法进入电脑场景，不能派发浏览器阶段。需要网页/浏览器操作时如实说明“computer 场景未配置模型（需选择支持图片的模型，可与其他场景共用同一个）”，请用户到设置里补上（任务中用 task_ask_user）；这不是浏览器扩展连接问题，不要让用户重连扩展，也不要用 bash 或脚本绕行。");
     if (names.has("code_agent") || names.has("browser_agent")) {
-      parts.push("[阶段委派] 按实际收益选路：1–2 次命令/脚本能干净拿结果的静态页、公开接口或轻量查询可由主控直接完成；编写/修改代码、源码排错、构建测试，或超出 2–3 步轻量尝试的多轮脚本抓取/解析整块委派给 code_agent；真实网页渲染/交互/登录/截图，或脚本试拉发现为 JS 动态壳/反爬页时委派给 browser_agent。互相独立的阶段（code_agent / browser_agent）可与互不冲突的主控普通工具（如 task_progress、只读查询或独立抓取）同批并发发出，运行时动态分配并发度并等待全部结束后统一返回 evidence（同网站相关页面尽量合并到一次 browser_agent；挂着未完成后台 bash 时不新启 code_agent）。主控以 evidence 为据推进，绝不重复写多份报告。");
+      parts.push("[阶段委派] 阶段专家隔离执行并返回宿主核验的 evidence；可与其他独立阶段及互不冲突的主控工具同批并发发出，主控以 evidence 为据推进。");
       const cli = externalCoding(this.config);
-      if (cli && names.has("code_agent")) parts.push(`[编码执行器] code_agent 交由 ${cli} CLI。task 写明编码目标、约束、分支与验收条件；不传秘密或全部历史；完成后先检查编码回执与 evidence，再按授权单独调用 browser_agent 验收，失败不自动重试或改用模型开发。`);
+      if (cli && names.has("code_agent")) parts.push(`[编码执行器] code_agent 交由 ${cli} CLI。task 写明编码目标、约束、分支与验收条件；不传秘密或全部历史；完成后先核对 evidence，再按需调用 browser_agent 验收，失败不自动重试或改用模型开发。`);
     }
     if (this.specialist) parts.push(`[${this.specialist}] 只做本次工具委托的阶段，直接回复结果、证据和未完成项即交回。需要另一阶段时报告定位与待办，由轻量主控决定是否调用；不要切换场景或交付整项任务。`);
     if (names.has("switch_scene")) {
@@ -462,8 +462,8 @@ export class Tools {
     if (this.offersPhaseTools) {
       let offeredPhase = false;
       for (const [scene, name, desc] of [
-        ["coding", "code_agent", "委派隔离的编码专家完成代码修改、深入排错、代码审查、构建测试，或需要多轮编写调试的复杂抓取/数据分析脚本。可与其他独立阶段或主控工具（如 task_progress、只读查询）同批并发调用（运行时动态分配并发度并等待全部完成）。task 写清目标、相关路径、约束与验收标准（不含凭据）。按分析→处理→验证整块委派；1–2 步简单只读查询仍可由主控直接处理。完成后自动返回结论与真实文件/命令证据。"],
-        ["computer", "browser_agent", "委派隔离的浏览器专家通过已授权 Chrome 完成真实网页渲染观察、点击/切换面板/填表、登录操作与截图取证（含脚本试拉后发现需 JS 渲染或反爬的页面）。可与 code_agent 及独立主控工具（如 task_progress、文档抓取 bash）同批并发调用；同网站多个标签/面板尽量合并在一次调用中连贯完成。task 写清目标 URL/tabTag、具体操作与要核实的事实（不含凭据）。无通用 bash；遇代理/网络/验证码/审批阻塞会快速交回主控决策。"],
+        ["coding", "code_agent", "委派隔离的编码专家完成代码修改、排错、审查、构建测试或多轮数据抓取/解析脚本。task 写清目标、路径、约束与验收标准（不含凭据）；完成后返回结论与宿主核验的文件/命令 evidence。"],
+        ["computer", "browser_agent", "委派隔离的浏览器专家通过授权 Chrome 完成真实网页渲染观察、点击/切面板/填表、登录与截图取证。task 写清目标 URL/tabTag、具体操作与要核实的事实（不含凭据）；无通用 bash，返回结论与宿主核验的 URL/截图 evidence。"],
       ] as const) {
         if (!sceneAvailable(this.config, scene)) continue;
         if (this.session.readOnly && (scene === "computer" || externalCoding(this.config))) continue;

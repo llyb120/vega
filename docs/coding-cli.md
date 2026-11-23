@@ -5,7 +5,7 @@
 - **`code_agent({task})`**：整块委派编码、源码审查、深入排错与构建测试（模型模式或 `codex` / `antigravity` CLI 统一为隔离执行）。子阶段仅具备编码相关工具，不包含 `task_*`、`browser_agent`、`switch_scene` 或 `spawn_agent`。
 - **`browser_agent({task})`**：委派真实浏览器渲染、交互、登录与截图取证（隔离执行）。子阶段仅具备 `chrome_*`、`read`（读存档）与密码本工具，**不提供通用 `bash`**；遇代理/网络超时（连续 2 次触发宿主硬熔断）、扩展不可用、短信验证码/2FA 或需用户审批时快速失败并以 `[BLOCKED]` 交回主控。
 
-两个阶段不能互相调用，但**主控可以在同一拍并发派出多个独立阶段以及互不冲突的主控普通工具**（例如同时调用 `task_progress`、`bash` 抓取与 `browser_agent`，或同时调用 `code_agent` 与 `browser_agent`）。运行时根据当前系统调度余量动态分配并发度（同一浏览器的多个 `browser_agent` 自动串行避免焦点冲突；与 `code_agent` 存在工作区冲突的写入/壳命令或 `vault_get` 会先于阶段执行），并以 **Fork-Join 屏障**等待整批全部完成后，将各自的结构化硬证据按原顺序交回主控；仅挂着未完成的后台 `bash` 时不新启 `code_agent`。阶段子会话不设人为轮次上限，保证简单任务高效、复杂任务充分执行。
+两个阶段不能互相调用，且与其他主控工具共用统一批调度（`Engine.batch`）：**主控可在同一拍自由并发派出多个独立阶段及互不冲突的主控普通工具**（如 `task_progress`、只读查询、文档抓取 `bash` 与 `browser_agent` / `code_agent`）。共享资源冲突由统一 `conflicts()` 自动保序（同一浏览器的多个 `browser_agent` 串行；`code_agent` 与工作区写入/壳命令或 `vault_get` 串行），挂着未完成后台 `bash` 时不新启 `code_agent`。阶段子会话不设人为轮次上限；简单一步任务无需形式计划，带齐 `evidence` 即可直接 `task_complete`（也支持跟在 `task_progress` / `memory_propose` 后同拍收尾），复杂任务仍完整执行计划与大纲核对。
 
 在设置的场景页，选择 **编码 → 执行方式**，然后保存场景。`model`（默认）使用配置的编码模型；`codex`、`antigravity` 分别要求执行端账号的 PATH 中已有且已登录的 `codex`、`agy`。旧版桌面 IDE 的启动命令不能代替支持 `--print` 的 agy。轻量和浏览器仍使用各自配置的模型。
 

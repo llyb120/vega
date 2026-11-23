@@ -25,7 +25,6 @@ import { cloudFor } from "./cloud";
 import {
   explicitScheduleEvent,
   nextDue,
-  parseExplicitSchedule,
   planIntake,
   wakeFrom,
   workKey,
@@ -740,11 +739,15 @@ export class Employee {
     t.nextCheckAt = recovery.attempts <= 1 ? now : now + 30000 * 2 ** (recovery.attempts - 2);
     t.checkpoint ||= "恢复原任务：检查错误与外部状态，诊断、最小修复并验证；不重复发送/提交，不扩大授权。";
   }
+  /** Simple fresh tasks (no plan, no prior revision/recovery) may deliver directly with real evidence. */
+  private planOptional(t: Task) {
+    return !t.plan?.length && !t.baselinePlan?.length && !t.outlineReviewRequired && !(t.revision || 0) && !t.recovery?.attempts;
+  }
   /** Soft nudge instead of recover: model wrote a delivery-looking reply but forgot task_complete. */
   private canSettleNudge(t: Task, result: string) {
     if ((t.settleNudges || 0) >= 2) return false;
     if ([...String(result || "")].length < 80) return false;
-    if (!t.plan?.length) return false;
+    if (!t.plan?.length) return this.planOptional(t);
     return !planUnresolved(t.plan).length;
   }
   /** The employee record with its tasks and runs (rows, see employee-rows.ts). Pass runs:false for a tasks-only probe that must not be saved. */
@@ -1085,11 +1088,6 @@ export class Employee {
                 !a.key || (typeof a.key === "string" && [...a.key].length <= 200),
                 "key exceeds 200",
               );
-              // 用户话里明确点了时刻或周期（且调用方未另行显式指定 runAt/delayMinutes）：并进同一条定时，不另开。
-              if (!a.nextAt && !a.nextCheckInMinutes && parseExplicitSchedule(content, now)) {
-                const outcome = this.applyEvent(s, explicitScheduleEvent(content, now)!, now);
-                return { id: outcome.taskId, exists: outcome.action !== "start", scheduled: true, status: outcome.status, next: outcome.reason };
-              }
               const old = a.key ? s.tasks.find((t) => t.key === a.key) : undefined;
               if (old) return { id: old.id, exists: true, status: old.status, next: "这是已有任务，本次创建没有自动续做；先核对原目标和用户意图，需要继续时按状态使用 employee_task_manage 的 resume，不要绕过审批或用户停止。" };
               assert(
@@ -1206,8 +1204,9 @@ export class Employee {
               const settleHint = pending.length
                 ? "若用户已要求按现有结果收尾/交付，用task_progress将不再需要的步骤标为cancelled（并在evidence/summary写明未覆盖项）后再task_complete；不要把未验证步骤假标completed。"
                 : "不要仅为通过校验把步骤标completed，也不要原样重试。";
+              const planOk = this.planOptional(t) || (!!t.plan?.length && !pending.length && (t.planRevision || 0) === (t.revision || 0));
               assert(
-                evidence && t.plan?.length && !pending.length && (t.planRevision || 0) === (t.revision || 0),
+                evidence && planOk,
                 `task_complete requires a settled plan for the latest requirements and result evidence. 尚未交付：evidence=${evidence ? "非空" : "空"}，plan=${t.plan?.length || 0}步，未验证步骤=${pending.join("、") || "无"}，planRevision=${t.planRevision || 0}，revision=${t.revision || 0}。请在evidence补齐实际结果与验证证据；未完成步骤继续执行，真实验证后再用task_progress提交对应最新要求的完整plan。${settleHint}${bodySavedHint}`,
               );
               const length = typeof summary === "string" ? [...summary].length : 0;
@@ -2353,10 +2352,13 @@ export class Employee {
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。每完成一步用task_progress记下做了什么与回执（这就是下一轮用的还原点，换了执行位置靠它接着做）；新现场缺必要文件或无法核验时同样 task_ask_user，不凭空补写。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
       let prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery;
-      // Only attach initial execution rules on the first turn of a session; resumes already have them in history + dynamic prompt.
+      // Only attach concise launch guidance on the first turn of a session; full rules live in system prompt.
       if (!continuing) {
-        prompt += `\n首次执行用task_progress登记计划（可与首拍的只读查询或阶段专家同批发出，不必单独浪费一轮），并在首条步骤里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；计划须覆盖原始任务、工作原则与用户最新明确要求，推进时保持已有步骤文案不变、只改 status，真实验证成功才标 completed，受阻标 blocked；不要把 task_complete 列入计划。仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user；短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user；滑块/拼图/旋转等视觉验证码先由 browser_agent 用 pointer 自行尝试，连续失败≥2 次再 task_ask_user。${computer ? "你在独立的电脑/Chrome会话，只做交接内容，完成后报告实际结果，不调用task_complete。" : "轻量主控用 code_agent 委派编码/测试、browser_agent 委派真实网页操作与截图取证；轻量查询与汇总由主控直接完成。产出物正文只写一次（直接写在回复正文里），可直接在写完正文（或核验完结）的同一拍按序发出 task_progress(标 completed) 与 task_complete 一次性交付，或更新完计划后单独调用 task_complete（evidence 写真实核验证据，summary ≤400 字建议 150 字内，deliverableRefs 省略自动选最新正文或传正文编号，不要在有正文时传 []）。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
-        if (!computer) prompt += "\nGit 并发开发：建分支前将任务指定的基线解析为完整提交号（git rev-parse --verify），用 task_progress 记录仓库、基线引用、SHA 和目标分支；直接 git switch -c <新分支> <基线SHA> 或 git worktree add -b <新分支> <目录> <基线SHA>；命令一律使用绝对路径。";
+        prompt += computer
+          ? "\n你在独立的电脑/Chrome会话，只做交接内容，完成后报告实际结果，不调用 task_complete。"
+          : "\n简单一步任务可直接执行并带真实 evidence 调用 task_complete 交付（无需为形式建计划）；多步骤、复杂或涉及多方验证的任务先用 task_progress 登记覆盖原始任务与工作原则的计划（可与首拍查询或阶段专家同批发出，不把 task_complete 列入计划）。产出物正文直接写在回复里，可同拍按序调用 task_progress/memory_propose + task_complete 一次交付；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user。";
+        prompt += "\n用户明确要求 worktree 时按要求创建或复用，未要求时不得自建；强推、共享分支历史改写、删分支、生产发布须单独授权。";
+        if (!computer) prompt += "\nGit 并发开发：建分支前先 git rev-parse --verify 解析基线完整 SHA，用 task_progress 记录仓库、基线引用、SHA 和目标分支；直接 git switch -c <新分支> <基线SHA> 或 git worktree add -b <新分支> <目录> <基线SHA>；命令一律使用绝对路径。";
       } else if (task.checkpoint) {
         prompt += "\n提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。";
       }

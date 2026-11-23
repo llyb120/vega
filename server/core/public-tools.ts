@@ -162,7 +162,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
   }
   if (task) {
     out.push(tool("task_progress",
-      "保存当前任务的进度：message 是一句进度（≤400 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；同一步骤推进时保持 content 原文不变、只改 status，执行细节写 message（改写已有步骤 content 会触发交付前全量 outlineReview）。计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、工作原则和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。stepOutput 仅用于独立交付，不能代替进度记录；正文和文件不混入对话消息。不新建任务或会话、不结束本轮，最终仍需 task_complete。回执 outlineReviewRequired=true 时，首次交付就逐项复核 changedSteps，不要空提等驳回。",
+      "保存当前任务进度与计划（message ≤400 字；plan 1–50 步，总计 ≤8000 字，整体替换旧计划）。简单一步任务可不建计划直接交付；多步骤或复杂任务用 plan 追踪，推进时保持已有步骤 content 不变、只改 status，真实验证成功才标 completed，受阻标 blocked，不把 task_complete 列入计划。stepOutput 仅用于需要单独导出的成果。不结束本轮；回执 outlineReviewRequired=true 时交付前逐项复核 changedSteps。",
       { message: str("当前进度，1–400 字", { minLength: 1, maxLength: 400 }),
         plan: { type: "array", minItems: 1, maxItems: 50, description: "完整计划，包括未来步骤", items: obj({
           content: str("步骤描述，1–500 字", { minLength: 1, maxLength: 500 }),
@@ -192,7 +192,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
     if (!ctx.computer) {
       // Browser work uses same-session switch_scene(scene=computer); isolated task_relay_computer is retired.
       out.push(tool("task_complete",
-        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求，in_progress 不能自动收尾。可直接在写完最终正文（或验证完结）的同一拍按序与 task_progress(标 completed) 一起收尾交付，或更新完计划后单独调用（不可与其他业务工具混批）。计划重写或存在 cancelled 时必须填 outlineReview，逐项对照原始任务、工作原则与用户最新要求，说明实际证据或不适用依据；不要把旧计划的中间步骤当成必须完成的大纲。仍有未满足的用户要求时先按授权继续、澄清或等待；确需部分交付须经交代人明确接受。首次提交 evidence 写实际结果与验证证据；summary 只写结论、重要变化、限制或需用户处理的事项（建议 100–150 字，上限 400）。outline_review_incomplete 回执带 outlineReviewRetry 时只补缺项，不重发原内容。deliverableRefs 可省略（系统选用尚未作为步骤产物交出的最新较长正文，包含本条同发的正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。已交出的步骤产物不会自动算作最终正文，也不要重复放进正文；仅当用户明确要求时可显式引用其文本。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接；仅当确实没有单独的最终正文时传 []（本次交付期内已写出未交出的正文却传 [] 会被退回一次，并给出该正文编号）。成功后立即结束本轮。",
+        "交付并结束当前任务：未建计划的简单一步任务可直接凭真实 evidence 交付；已建计划或有补充/恢复的任务须全部步骤 completed 或 cancelled 且对应最新要求（in_progress 不能自动收尾）。可单独调用，或跟在 task_progress / memory_propose 后同拍按序收尾（不可与执行工具混批），正文可直接写在同一回复里。计划重写或有 cancelled 时必填 outlineReview；outline_review_incomplete 带 outlineReviewRetry 时只补缺项。evidence 写实际结果与验证证据；summary 写核心结论/限制（建议 100–150 字，上限 400）。步骤产物不会自动算作最终正文；deliverableRefs 可省略（自动选用尚未作为步骤产物交出的最新较长正文，含本条正文），或填正文 assistant seq（工具回执取 textRef 值）；确实无单独正文时传 []（若已有未交出正文会退回确认一次）。成功后立即结束本轮。",
         { evidence: str("完整提交必填：实际结果与验证证据，1–8000 字。补交缺项时省略", { minLength: 1, maxLength: 8000 }),
           outlineReview: { type: "array", minItems: 1, maxItems: 100, description: "计划重写或有 cancelled 步骤时必填：逐项对照原始任务、工作原则和最新要求，并复核 task_progress/回执中的 changedSteps（可直接用 changedStep 序号或填 requirement 原文）。带 outlineReviewRetry 补交时只填该回执缺项。", items: obj({
             requirement: str("一项用户要求、工作原则或 changedSteps 原文；用 changedStep 引用序号时省略", { minLength: 1, maxLength: 500 }),
