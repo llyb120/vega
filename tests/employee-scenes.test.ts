@@ -896,6 +896,58 @@ test("browser_agent host circuit breaker halts after 2 consecutive ERR_SOCKS err
   } finally { await engine.close(); await store.close(); }
 });
 
+test("same-batch duplicate browser_agent calls short-circuit immediately after the first triggers host circuit breaker", async () => {
+  const { store, engine, add, segment } = await fixture();
+  let navCalls = 0;
+  (engine as any).chromeFor = async () => ({
+    execute: async () => {
+      navCalls++;
+      return {
+        tabTag: "C9-net",
+        tabs: [{ tag: "C9-net", url: "chrome-error://chromewebdata/", title: "docs.cursor.com", active: true }],
+        pages: [{ url: "chrome-error://chromewebdata/", headings: [{ level: "H1", text: "This site can’t be reached" }], visibleText: "ERR_CONNECTION_TIMED_OUT" }],
+      };
+    },
+  });
+  let coordTurn = 0, browserTurn = 0;
+  engine.providers.chat = async (model, _system, messages, definitions) => {
+    if (model.selection === "p/light") {
+      coordTurn++;
+      if (coordTurn === 1) {
+        return { role: "assistant", calls: [
+          { id: "b-1", name: "browser_agent", arguments: { task: "打开首页" } },
+          { id: "b-2", name: "browser_agent", arguments: { task: "打开文档页" } },
+        ] };
+      }
+      if (coordTurn === 2) {
+        const r1 = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-1")!.text!);
+        const r2 = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-2")!.text!);
+        assert.equal(r1.status, "blocked");
+        assert.equal(r1.circuitBroken, true);
+        assert.equal(r2.status, "blocked");
+        assert.equal(r2.circuitBroken, true);
+        assert.equal(r2.executor, "host/circuit_breaker");
+        assert.match(r2.result, /短路跳过/);
+        return verified();
+      }
+      return completed();
+    }
+    browserTurn++;
+    if (browserTurn <= 2) {
+      return { role: "assistant", calls: [{ id: "nav-" + browserTurn, name: "chrome_navigate", arguments: { url: `https://docs.cursor.com/x${browserTurn}`, target: { kind: "new_tab" } } }] };
+    }
+    assert.deepEqual(definitions, []);
+    return { role: "assistant", text: "[BLOCKED] 网络连接连续失败，已停止。" };
+  };
+  try {
+    const job = await segment(await add("核实多个页面"));
+    assert.equal(job.status, "done");
+    assert.equal(navCalls, 2, "second queued browser_agent must short-circuit with zero extra Chrome calls");
+    assert.equal(browserTurn, 3, "second queued browser_agent must not launch a second child LLM session");
+    assert.equal((await store.sessions()).filter(s => s.phaseRole === "browser_agent").length, 1);
+  } finally { await engine.close(); await store.close(); }
+});
+
 test("phase graceful wrap-up turn preserves collected work at maxTurns instead of picking an opening filler", async () => {
   const { store, engine, add, segment } = await fixture();
   (engine as any).chromeFor = async () => ({

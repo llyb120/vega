@@ -229,7 +229,7 @@ export class Tools {
     if (ctx.kind !== "chat" && !this.session.readOnly && !this.session.agentChild && this.session.scene === "lightweight" && !sceneModels(this.config, "computer").length)
       parts.push("[电脑场景未配置] 设置里没有为 computer 场景选择模型，所以本会话无法进入电脑场景，不能派发浏览器阶段。需要网页/浏览器操作时如实说明“computer 场景未配置模型（需选择支持图片的模型，可与其他场景共用同一个）”，请用户到设置里补上（任务中用 task_ask_user）；这不是浏览器扩展连接问题，不要让用户重连扩展，也不要用 bash 或脚本绕行。");
     if (names.has("code_agent") || names.has("browser_agent")) {
-      parts.push("[阶段委派] 编码/排错/构建测试整块委派给 code_agent；真实网页渲染/交互/登录/截图委派给 browser_agent；轻量查询、计划与最终报告由主控自己完成。互相独立的阶段（如 code_agent + browser_agent，或多个独立 code_agent）可在同一拍并发发出，运行时动态分配并发度并等待全部阶段结束后统一返回 evidence；禁止把阶段工具与主控普通工具混在同一拍，也不要挂着未完成后台 bash 启动阶段专家。主控以 evidence 为据推进，绝不重复写多份报告。");
+      parts.push("[阶段委派] 编码/排错/构建测试整块委派给 code_agent；真实网页渲染/交互/登录/截图委派给 browser_agent；轻量查询、计划与最终报告由主控自己完成。互相独立的阶段（如 code_agent + 1 个 browser_agent，或多个独立 code_agent）可在同一拍并发发出，运行时动态分配并发度并等待全部阶段结束后统一返回 evidence；同一拍只发 1 个 browser_agent（相关页面合并到一次调用），禁止把阶段工具与主控普通工具混在同一拍，也不要挂着未完成后台 bash 启动阶段专家。主控以 evidence 为据推进，绝不重复写多份报告。");
       const cli = externalCoding(this.config);
       if (cli && names.has("code_agent")) parts.push(`[编码执行器] code_agent 交由 ${cli} CLI。task 写明编码目标、约束、分支与验收条件；不传秘密或全部历史；完成后先检查编码回执与 evidence，再按授权单独调用 browser_agent 验收，失败不自动重试或改用模型开发。`);
     }
@@ -463,7 +463,7 @@ export class Tools {
       let offeredPhase = false;
       for (const [scene, name, desc] of [
         ["coding", "code_agent", "委派隔离的编码专家完成代码修改、深入排错、代码审查或构建测试。可与其他独立的 code_agent 或 browser_agent 同批并发调用（运行时动态分配并发度并等待全部完成，不可与主控普通工具混批）。task 写清目标、相关路径、约束与验收标准（不含凭据）。按分析→修改→验证整块委派，只读简单查询请主控直接处理。完成后自动返回结论与真实文件/命令证据。"],
-        ["computer", "browser_agent", "委派隔离的浏览器专家通过已授权 Chrome 完成真实网页交互、登录操作、页面观察与截图取证。可与 code_agent 同批并发调用（运行时等待全部完成，不可与主控普通工具混批）；同网站多个标签/面板尽量合并在一次调用中完成。task 写清目标 URL/tabTag、具体操作与要核实的事实（不含凭据）。无通用 bash；遇代理/网络/验证码/审批阻塞会快速交回主控决策。"],
+        ["computer", "browser_agent", "委派隔离的浏览器专家通过已授权 Chrome 完成真实网页交互、登录操作、页面观察与截图取证。可与 code_agent 同批并发调用（运行时等待全部完成，不可与主控普通工具混批）；同一拍只发 1 个 browser_agent，同网站多个标签/面板合并在一次调用中完成。task 写清目标 URL/tabTag、具体操作与要核实的事实（不含凭据）。无通用 bash；遇代理/网络/验证码/审批阻塞会快速交回主控决策。"],
       ] as const) {
         if (!sceneAvailable(this.config, scene)) continue;
         if (this.session.readOnly && (scene === "computer" || externalCoding(this.config))) continue;

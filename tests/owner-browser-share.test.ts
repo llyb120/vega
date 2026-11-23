@@ -49,3 +49,57 @@ test("same owner employees share one private Chromium profile; different owners 
 
   void cloudAlice;
 });
+
+test("engine dynamically binds per-owner SOCKS proxy only when that same account has an online client, never affected by another account", async (t) => {
+  const store = await Store.open(":memory:");
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  t.after(async () => { await engine.close(); await store.close(); });
+
+  const makeMockEntry = (ownerKey: string) => {
+    const bridge = new ChromeBridge(true);
+    const chrome = new Chrome(store, bridge, "");
+    const browser = { child: undefined as any, start: async () => { browser.child = { pid: 1 }; bridge.clients.set("c1", { at: Date.now(), browser: "Google Chrome" }); }, close: async () => { browser.child = undefined; } } as any;
+    const proxyEvents: any[] = [];
+    t.mock.method(bridge, "start", async () => {});
+    t.mock.method(bridge, "request", async (op: string, args: any) => {
+      if (op === "status") return { version: bridge.version };
+      if (op === "set_proxy") { proxyEvents.push(args.proxy); return { supported: true }; }
+      throw Error("unexpected op " + op);
+    });
+    engine.browsers.entries.set(ownerKey, { chrome, browser });
+    return { chrome, browser, proxyEvents };
+  };
+
+  const alice = makeMockEntry("user_alice");
+  const bob = makeMockEntry("user_bob");
+
+  // 1. Bob connects an online client with relay configured; Alice has NO client.
+  const bobGrant = { userId: "bob", clientId: "b".repeat(32), hash: "bob-hash" };
+  engine.localAgents.connect("bob", { clientId: bobGrant.clientId, instance: "b".repeat(32), platform: "windows", cwd: "C:\\bob" }, { send() {}, close() {} });
+  await engine.relay.configure(bobGrant, [], true);
+
+  // 2. Starting Alice's browser stays strictly direct (null proxy), untouched by Bob's online client!
+  await engine.browsers.get("user_alice");
+  assert.deepEqual([...alice.proxyEvents], [null], "Bob's online client must NEVER attach a SOCKS proxy to Alice's Chrome");
+
+  // 3. Starting Bob's browser attaches Bob's own SOCKS proxy.
+  await engine.browsers.get("user_bob");
+  assert.equal(bob.proxyEvents.length, 1);
+  assert.equal(bob.proxyEvents[0]?.scheme, "socks5");
+
+  // 4. Alice connects her own client -> Engine live-pushes Alice's own SOCKS proxy to Alice's running Chrome (different port from Bob!).
+  const aliceGrant = { userId: "alice", clientId: "a".repeat(32), hash: "alice-hash" };
+  engine.localAgents.connect("alice", { clientId: aliceGrant.clientId, instance: "a".repeat(32), platform: "darwin", cwd: "/Users/alice" }, { send() {}, close() {} });
+  await engine.relay.configure(aliceGrant, [], true);
+  await new Promise((r) => setTimeout(r, 20));
+  const aliceLast: any = alice.proxyEvents.at(-1);
+  assert.equal(aliceLast?.scheme, "socks5");
+  assert.notEqual(aliceLast?.port, bob.proxyEvents[0]?.port, "each account uses its own isolated SOCKS port");
+
+  // 5. Alice's client suspends -> Engine live-switches Alice's Chrome back to direct (null) without touching Bob!
+  const bobCountBefore = bob.proxyEvents.length;
+  engine.localAgents.suspend("alice", "a".repeat(32));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(alice.proxyEvents.at(-1), null, "suspending Alice's client switches Alice's Chrome back to direct");
+  assert.equal(bob.proxyEvents.length, bobCountBefore, "Alice's client changes never touch Bob's Chrome");
+});

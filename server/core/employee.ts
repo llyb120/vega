@@ -1196,23 +1196,23 @@ export class Employee {
               const summary = draft ? draft.summary : a.summary;
               const deliverableRef = draft ? draft.deliverableRef : a.deliverableRef;
               const pending = planUnresolved(t.plan);
-              const settleHint = pending.length
-                ? "若用户已要求按现有结果收尾/交付，用task_progress将不再需要的步骤标为cancelled（并在evidence/summary写明未覆盖项）后再task_complete；不要把未验证步骤假标completed。"
-                : "不要仅为通过校验把步骤标completed，也不要原样重试。";
-              assert(
-                evidence && t.plan?.length && !pending.length && (t.planRevision || 0) === (t.revision || 0),
-                `task_complete requires a settled plan for the latest requirements and result evidence. 尚未交付：evidence=${evidence ? "非空" : "空"}，plan=${t.plan?.length || 0}步，未验证步骤=${pending.join("、") || "无"}，planRevision=${t.planRevision || 0}，revision=${t.revision || 0}。请在evidence补齐实际结果与验证证据；未完成步骤继续执行，真实验证后再用task_progress提交对应最新要求的完整plan。${settleHint}`,
-              );
-              const length = typeof summary === "string" ? [...summary].length : 0;
-              const summaryError = summary !== undefined && !(typeof summary === "string" && summary.trim() && length <= 400)
-                ? `Delivery summary requires 1–400 characters; received ${length} (type: ${typeof summary}). 尚未交付：summary须为非空、非全空白的字符串，中英文、标点、空格与换行均计数。请先填写或精简summary（建议100–150字符），只保留结果、重要限制与需用户处理事项；完整证据放evidence，不要原样重试或直接截断。`
-                : "";
               const sessionRows = t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [];
               const stepOutputs = (t.stepOutputs || []).filter((output: Obj) => output.session === t.workSession);
               const excludeAuto = stepOutputs.map((output: Obj) => output.ref);
               const latestSavedBody = latestBody(candidateList(sessionRows, since).candidates, BODY_CHARS);
               const bodySavedHint = latestSavedBody
                 ? `\n提示：你写出的正文（#${latestSavedBody.seq}，${bodyLength(latestSavedBody)}字）已原样保存，修正参数重试时请直接传 deliverableRefs:[${latestSavedBody.seq}]（或省略），严禁重写正文。`
+                : "";
+              const settleHint = pending.length
+                ? "若用户已要求按现有结果收尾/交付，用task_progress将不再需要的步骤标为cancelled（并在evidence/summary写明未覆盖项）后再task_complete；不要把未验证步骤假标completed。"
+                : "不要仅为通过校验把步骤标completed，也不要原样重试。";
+              assert(
+                evidence && t.plan?.length && !pending.length && (t.planRevision || 0) === (t.revision || 0),
+                `task_complete requires a settled plan for the latest requirements and result evidence. 尚未交付：evidence=${evidence ? "非空" : "空"}，plan=${t.plan?.length || 0}步，未验证步骤=${pending.join("、") || "无"}，planRevision=${t.planRevision || 0}，revision=${t.revision || 0}。请在evidence补齐实际结果与验证证据；未完成步骤继续执行，真实验证后再用task_progress提交对应最新要求的完整plan。${settleHint}${bodySavedHint}`,
+              );
+              const length = typeof summary === "string" ? [...summary].length : 0;
+              const summaryError = summary !== undefined && !(typeof summary === "string" && summary.trim() && length <= 400)
+                ? `Delivery summary requires 1–400 characters; received ${length} (type: ${typeof summary}). 尚未交付：summary须为非空、非全空白的字符串，中英文、标点、空格与换行均计数。请先填写或精简summary（建议100–150字符），只保留结果、重要限制与需用户处理事项；完整证据放evidence，不要原样重试或直接截断。`
                 : "";
               const cited = resolveDeliverable(sessionRows, deliverableRef, { since, confirmEmpty: t.deliverableNeeded?.emptyGuard, excludeAuto, stepOutputs });
               if (cited.error) {

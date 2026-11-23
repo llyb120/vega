@@ -429,6 +429,27 @@ test("删去步骤末尾 task_complete 动作字样不触发假 outlineReview；
 
     // Simulate a substantial report already written in workSession
     const report = await store.append(work.id, { role: "assistant", model: "p/light", text: "正文".repeat(220) });
+
+    // Even when rejected on the initial unresolved-step guard (in_progress), bodySavedHint must be included so the model does not rewrite the report!
+    await employee.execute(id, { action: "progress", text: "步骤2进行中", plan: [
+      { content: "抓取官方定价页", status: "completed" },
+      { content: "汇总中文报告", status: "in_progress" },
+    ] });
+    await assert.rejects(
+      employee.execute(id, { action: "complete", text: "证据", summary: "摘要" }),
+      (e: any) => {
+        assert.match(e.message, /未验证步骤=2:in_progress/);
+        assert.match(e.message, new RegExp(`deliverableRefs:\\[${report.seq}\\]`));
+        assert.match(e.message, /严禁重写正文/);
+        return true;
+      },
+    );
+
+    // After marking step completed, summary rejection also retains bodySavedHint
+    await employee.execute(id, { action: "progress", text: "全部完成", plan: [
+      { content: "抓取官方定价页", status: "completed" },
+      { content: "汇总中文报告", status: "completed" },
+    ] });
     await assert.rejects(
       employee.execute(id, { action: "complete", text: "证据", summary: "字".repeat(410) }),
       (e: any) => {

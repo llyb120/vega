@@ -213,6 +213,10 @@ export class HeadlessBrowser {
       const worker = `employee-${randomUUID()}.js`;
       const manifest = JSON.parse(await readFile(join(source, "manifest.json"), "utf8"));
       manifest.background.service_worker = worker;
+      // Only server-private browsers get dynamic chrome.proxy.settings control (local user extensions remain untouched).
+      const permissions = Array.isArray(manifest.permissions) ? manifest.permissions : [];
+      if (!permissions.includes("proxy")) permissions.push("proxy");
+      manifest.permissions = permissions;
       await writeFile(join(extension, "manifest.json"), JSON.stringify(manifest));
       // A fresh script URL prevents Chromium's service-worker cache from retaining an old bridge address.
       await writeFile(join(extension, worker), privateWorker(await readFile(join(source, "worker.js"), "utf8"), instance), { mode: 0o600 });

@@ -256,6 +256,7 @@ export class LocalAgents {
     agent.heartbeat.unref();
     for (const pending of agent.pending.values()) pending.suspend();
     if (!keepSocket) try { previous?.close(); } catch {}
+    this.emit({ type: "client_suspended", targetUser: userId });
   }
   disconnect(userId: string, instance?: string, transport?: Agent["transport"]) {
     let changed = false;

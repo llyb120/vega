@@ -153,7 +153,7 @@ test("a reloaded private worker immediately replaces a stale peer without replay
 
 
 test("bridge request timeouts give navigation and probes at least 10s headroom", async (t) => {
-  for (const op of ["tabs", "goto", "open", "new_tab", "status", "close_tab", "back", "forward", "reload", "cdp", "devtools"])
+  for (const op of ["tabs", "goto", "open", "new_tab", "status", "set_proxy", "close_tab", "back", "forward", "reload", "cdp", "devtools"])
     assert.equal(requestTimeout(op), 10000, op);
   assert.equal(requestTimeout("act"), 8000);
   assert.equal(requestTimeout("evaluate"), 8000);
@@ -169,4 +169,63 @@ test("bridge request timeouts give navigation and probes at least 10s headroom",
   const id = queued.id;
   bridge.pending.get(id)!.resolve({ tabs: [] });
   await pending;
+});
+
+test("dynamic proxy live-switches a running private browser between direct and same-account SOCKS without restart", async (t) => {
+  const store = await Store.open(":memory:");
+  let desiredProxy: string | undefined = undefined;
+  const browsers = new EmployeeBrowsers(store, "", undefined, undefined, undefined, async () => desiredProxy);
+  const bridge = new ChromeBridge(true), chrome = new Chrome(store, bridge, ""), browser = new HeadlessBrowser();
+  const client = crypto.randomUUID();
+  const start = t.mock.method(browser, "start", async () => {
+    browser.child = { pid: start.mock.callCount() } as typeof browser.child;
+    bridge.clients.set(client, { at: Date.now(), browser: "Google Chrome" });
+  });
+  t.mock.method(browser, "close", async () => { browser.child = undefined; });
+  t.mock.method(bridge, "start", async () => {});
+  const proxyCommands: any[] = [];
+  t.mock.method(bridge, "request", async (operation: string, args: any) => {
+    if (operation === "status") return { version: bridge.version };
+    if (operation === "set_proxy") { proxyCommands.push(args); return { supported: true, mode: args.proxy ? "fixed_servers" : "direct" }; }
+    throw Error("unexpected bridge op: " + operation);
+  });
+  browsers.entries.set("user_alice", { chrome, browser });
+  t.after(async () => { await browsers.close(); await store.close(); });
+
+  // 1. Initial launch with no client online -> launches WITHOUT static --proxy-server and configures direct mode.
+  await browsers.get("user_alice");
+  assert.equal((start.mock.calls[0].arguments as any[])[1].proxy, undefined, "dynamic mode launches Chromium without static --proxy-server");
+  assert.deepEqual(proxyCommands, [{ proxy: null }]);
+
+  // 2. Repeated get within TTL does not re-send set_proxy.
+  await browsers.get("user_alice");
+  assert.equal(proxyCommands.length, 1);
+
+  // 3. Same-account client comes online -> live-switches to SOCKS5 without restarting Chrome!
+  desiredProxy = "socks5://127.0.0.1:41234";
+  await browsers.syncProxy("user_alice");
+  assert.equal(start.mock.callCount(), 1, "syncProxy must not restart Chromium or drop tabs");
+  assert.deepEqual(proxyCommands.at(-1), {
+    proxy: { scheme: "socks5", host: "127.0.0.1", port: 41234, bypassList: ["127.0.0.1", "localhost", "[::1]"] },
+  });
+
+  // 4. Client goes offline -> live-switches back to direct without restarting Chrome!
+  desiredProxy = undefined;
+  await browsers.syncProxy("user_alice");
+  assert.equal(start.mock.callCount(), 1);
+  assert.deepEqual(proxyCommands.at(-1), { proxy: null });
+
+  // 5. If Chromium exits and restarts, fresh process re-applies current dynamic proxy state.
+  desiredProxy = "socks5://127.0.0.1:45555";
+  browser.child = undefined;
+  await browsers.get("user_alice");
+  assert.equal(start.mock.callCount(), 2);
+  assert.deepEqual(proxyCommands.at(-1), {
+    proxy: { scheme: "socks5", host: "127.0.0.1", port: 45555, bypassList: ["127.0.0.1", "localhost", "[::1]"] },
+  });
+
+  // 6. Bundled user-facing manifest must remain free of the 'proxy' permission (only injected for server-private copies).
+  const { readFileSync } = await import("node:fs");
+  const bundledManifest = JSON.parse(readFileSync(resolve("local/extension/vega-chrome/manifest.json"), "utf8"));
+  assert.equal(bundledManifest.permissions.includes("proxy"), false);
 });

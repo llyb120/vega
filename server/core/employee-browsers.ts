@@ -8,16 +8,45 @@ import { assert, sleep, workspaceFile } from "./util";
 import type { CloudRuntime } from "./cloud";
 
 type StartFailure = { count: number; error: string; at: number; retryAt: number };
+type BrowserEntry = {
+  chrome: Chrome;
+  browser: HeadlessBrowser;
+  cloud?: CloudRuntime;
+  profile?: string;
+  starting?: Promise<Chrome>;
+  stopping?: boolean;
+  probedAt?: number;
+  failure?: StartFailure;
+  proxyTarget?: string;
+  proxySynced?: boolean;
+  proxyGen?: number;
+  proxySync?: Promise<void>;
+};
+
+function parseSocksProxy(proxy?: string) {
+  if (!proxy) return null;
+  const parsed = new URL(proxy);
+  const port = Number(parsed.port);
+  assert(parsed.protocol === "socks5:" && parsed.hostname && Number.isInteger(port) && port > 0 && port <= 65535, "Invalid SOCKS5 proxy URL");
+  return { scheme: "socks5", host: parsed.hostname, port, bypassList: ["127.0.0.1", "localhost", "[::1]"] };
+}
 
 // One persistent Chromium + profile per owner (user_*). An owner's employees share it so tabs/logins stay in that user's profile only.
 export class EmployeeBrowsers {
-  entries = new Map<string, { chrome: Chrome; browser: HeadlessBrowser; cloud?: CloudRuntime; profile?: string; starting?: Promise<Chrome>; stopping?: boolean; probedAt?: number; failure?: StartFailure }>();
+  entries = new Map<string, BrowserEntry>();
   static PROBE_TTL_MS = 3000;
   // After the 2nd consecutive failed launch, wait before respawning so each chrome_* call does not relaunch a dying Chromium.
   static BACKOFF_MS = [5000, 15000, 60000];
   closed = false;
   removed = new Set<string>();
-  constructor(public store: Store, public pageScript: string, private networkProxy?: (id: string) => Promise<string | undefined>, private isolation?: (id: string) => Promise<CloudRuntime | undefined>, private onPoll?: () => void) {}
+  constructor(
+    public store: Store,
+    public pageScript: string,
+    private networkProxy?: (id: string) => Promise<string | undefined>,
+    private isolation?: (id: string) => Promise<CloudRuntime | undefined>,
+    private onPoll?: () => void,
+    private dynamicProxy?: (id: string) => Promise<string | undefined>,
+  ) {}
   profile(id: string) {
     assert(/^(default|e[a-zA-Z0-9_-]+|user_[a-zA-Z0-9_-]+)$/.test(id), "Invalid browser profile ID");
     return join(dirname(resolve(process.env.VEGA_DB || "vega.db")), "employee-browsers", id);
@@ -27,6 +56,35 @@ export class EmployeeBrowsers {
   failure(id: string) {
     const failure = this.entries.get(id)?.failure;
     return failure && { error: failure.error, failures: failure.count, at: new Date(failure.at).toISOString(), retryAfterSeconds: Math.max(0, Math.ceil((failure.retryAt - Date.now()) / 1000)) };
+  }
+  /** Live-sync this owner's private browser between direct mode and its own account SOCKS5 gateway without restarting Chromium. */
+  async syncProxy(id: string): Promise<void> {
+    if (!this.dynamicProxy || this.closed) return;
+    const entry = this.entries.get(id);
+    if (!entry || entry.stopping) return;
+    entry.proxySynced = false;
+    entry.proxyGen = (entry.proxyGen || 0) + 1;
+    if (!entry.browser.child || !entry.chrome.bridge.status().connected) return;
+    await this.applyDynamicProxy(id, entry);
+  }
+  private applyDynamicProxy(id: string, entry: BrowserEntry): Promise<void> {
+    if (!this.dynamicProxy) return Promise.resolve();
+    const run = async () => {
+      if (this.closed || entry.stopping || !entry.browser.child || !entry.chrome.bridge.status().connected) return;
+      const gen = (entry.proxyGen = (entry.proxyGen || 0) + 1);
+      const desired = await this.dynamicProxy!(id);
+      if (this.closed || entry.stopping || !entry.browser.child || gen !== entry.proxyGen) return;
+      if (entry.proxySynced && entry.proxyTarget === desired) return;
+      const proxy = parseSocksProxy(desired);
+      await entry.chrome.bridge.request("set_proxy", { proxy });
+      if (gen === entry.proxyGen) {
+        entry.proxyTarget = desired;
+        entry.proxySynced = true;
+      }
+    };
+    const next = (entry.proxySync || Promise.resolve()).then(run, run);
+    entry.proxySync = next.catch(() => {});
+    return next;
   }
   async get(id: string): Promise<Chrome> {
     assert(!this.closed && !this.removed.has(id), "Browser manager stopped or employee deleted");
@@ -44,6 +102,7 @@ export class EmployeeBrowsers {
       entry.chrome.bridge.status().connected &&
       entry.probedAt &&
       Date.now() - entry.probedAt < EmployeeBrowsers.PROBE_TTL_MS &&
+      (!this.dynamicProxy || entry.proxySynced) &&
       !entry.starting
     ) {
       return entry.chrome;
@@ -58,6 +117,8 @@ export class EmployeeBrowsers {
         current.chrome.observations.clear();
         current.chrome.bridge.close();
         current.probedAt = undefined;
+        current.proxySynced = false;
+        current.proxyTarget = undefined;
         assert(!this.closed && !current.stopping, "Browser manager stopped");
         try {
           current.cloud = await this.isolation?.(id);
@@ -87,6 +148,10 @@ export class EmployeeBrowsers {
             // A cached heartbeat is not readiness; only this read-only probe may be retried.
             await current.chrome.bridge.request("status", {});
             assert(!this.closed && !current.stopping && current.browser.child, "Employee browser stopped while connecting");
+            if (this.dynamicProxy && !current.proxySynced) {
+              await this.applyDynamicProxy(id, current);
+              assert(!this.closed && !current.stopping && current.browser.child, "Employee browser stopped while syncing proxy");
+            }
             current.probedAt = Date.now();
             return current.chrome;
           } catch (error) {
@@ -105,10 +170,13 @@ export class EmployeeBrowsers {
     if (!entry) return;
     entry.stopping = true;
     await entry.starting?.catch(() => {});
+    await entry.proxySync?.catch(() => {});
     await entry.browser.close();
     entry.chrome.bridge.close();
     entry.chrome.observations.clear();
     entry.probedAt = undefined;
+    entry.proxySynced = false;
+    entry.proxyTarget = undefined;
     entry.failure = undefined;
     entry.stopping = false;
   }

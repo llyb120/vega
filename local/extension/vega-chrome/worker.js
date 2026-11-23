@@ -178,6 +178,27 @@ async function execute(command) {
     })),notice:'Chrome 下载记录为浏览器范围，不能按 tabTag 归属；按时间、URL、文件名确认目标。空列表不代表导出失败，网页可能尚在生成文件。只有 state=complete 才表示下载完成。'};
   }
   if (operation === 'status') return {incognitoAllowed:await chrome.extension.isAllowedIncognitoAccess(),version:chrome.runtime.getManifest?.().version};
+  if (operation === 'set_proxy') {
+    if (!chrome.proxy?.settings) return {supported:false,mode:'direct'};
+    let value = {mode:'direct'};
+    if (args.proxy) {
+      if (typeof args.proxy.host !== 'string' || !args.proxy.host || !Number.isInteger(args.proxy.port) || args.proxy.port < 1 || args.proxy.port > 65535)
+        throw Error('Invalid proxy configuration');
+      value = {
+        mode: 'fixed_servers',
+        rules: {
+          singleProxy: {scheme:args.proxy.scheme || 'socks5',host:args.proxy.host,port:args.proxy.port},
+          bypassList: Array.isArray(args.proxy.bypassList) && args.proxy.bypassList.length ? args.proxy.bypassList : ['127.0.0.1','localhost','[::1]'],
+        },
+      };
+    }
+    await new Promise((resolve, reject) => chrome.proxy.settings.set({value,scope:'regular'}, () => {
+      const error = chrome.runtime.lastError;
+      if (error) reject(Error(error.message));
+      else resolve();
+    }));
+    return {supported:true,mode:value.mode,...(args.proxy ? {host:args.proxy.host,port:args.proxy.port} : {})};
+  }
   // Vega 已把新文件写入加载目录；先回传结果再重载，重载后以新 clientId 自动重连。
   if (operation === 'reload' && args.extension === true) { setTimeout(()=>chrome.runtime.reload(),300); return {reloading:true}; }
   if (operation === 'tabs') return {tabs:(await inventory()).filter(tab=>args.incognito === undefined || tab.incognito === args.incognito),incognitoAllowed:await chrome.extension.isAllowedIncognitoAccess()};

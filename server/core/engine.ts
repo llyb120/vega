@@ -169,11 +169,20 @@ export class Engine {
   groups: Groups;
   fire: Fire;
   localAgents = new LocalAgents((value) => {
+    const eventType = (value as Obj)?.type;
+    if (eventType === "client_suspended") {
+      const owner = String((value as Obj).targetUser || "");
+      if (owner) void this.browsers?.syncProxy(this.browserProfileKey(owner)).catch(() => {});
+      return;
+    }
     this.emit(value as AgentEvent);
     // 客户端离线/回连由调度器统一处理：自动接管与增量回传不依赖界面点击。
-    if ((value as Obj)?.type === "clients_changed") {
+    if (eventType === "clients_changed") {
       const owner = String((value as Obj).targetUser || "");
-      if (owner) this.runtimePush?.(owner);
+      if (owner) {
+        this.runtimePush?.(owner);
+        void this.browsers?.syncProxy(this.browserProfileKey(owner)).catch(() => {});
+      }
       this.taskTabs?.retry();
       void this.handoffs?.clients(value as Obj).catch(() => {});
       // 回连的可能正是某个任务在等的设备：交回调度器，由它核对 waitClient 后继续。
@@ -405,11 +414,23 @@ export class Engine {
     this.employee = new Employee(store, this.vault, runtime);
     this.relay = new NetworkRelay(store, this.localAgents);
     const browserOwner = async (id: string) => id.startsWith("user_") ? id.slice(5) : (await (await this.employee.for(id)).state()).ownerId;
-    this.browsers = new EmployeeBrowsers(store, chrome.pageScript, async (id) => {
-      const ownerId = await browserOwner(id);
-      if (!ownerId) return;
-      return this.relay.proxy(ownerId);
-    }, async (id) => cloudEnabled() ? cloudFor({ ownerId: await browserOwner(id) }) : undefined, () => this.taskTabs?.retry());
+    // Server-private Chromium launches in native direct mode (no static --proxy-server) and live-switches via chrome.proxy.settings
+    // ONLY when that same ownerId has an online borrowable client or explicit relay rules.
+    this.browsers = new EmployeeBrowsers(
+      store,
+      chrome.pageScript,
+      undefined,
+      async (id) => cloudEnabled() ? cloudFor({ ownerId: await browserOwner(id) }) : undefined,
+      () => this.taskTabs?.retry(),
+      async (id) => {
+        const ownerId = await browserOwner(id);
+        return ownerId ? this.relay.browserProxy(ownerId) : undefined;
+      },
+    );
+    this.relay.onChange = (userId) => {
+      if (!userId) return;
+      queueMicrotask(() => { void this.browsers.syncProxy(this.browserProfileKey(userId)).catch(() => {}); });
+    };
     this.localBrowsers = new LocalBrowsers(store, this.localAgents, chrome.pageScript);
     this.taskTabs = new TaskBrowserTabs(store,
       async (session) => session.localBrowser
@@ -1974,16 +1995,38 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       ...(calls.length > 1 ? { callId: call.id } : {}),
     }));
 
-    type SingleResult = { outcome: Outcome; stop: boolean; pause?: string; checkReturnModel?: boolean; stageId?: string; isCode?: boolean };
+    type SingleResult = { outcome: Outcome; stop: boolean; pause?: string; checkReturnModel?: boolean; stageId?: string; isCode?: boolean; circuitBroken?: boolean; circuitBreakReason?: string };
+    let browserCircuitBreakReason = "";
     let results: SingleResult[];
     try {
       results = await Promise.all(
         calls.map(async (call, i) => {
           const specialist = call.name as PhaseRole;
           const runOne = async (): Promise<SingleResult> => {
+            if (specialist === "browser_agent" && browserCircuitBreakReason) {
+              return {
+                outcome: {
+                  value: {
+                    status: "blocked",
+                    executor: "host/circuit_breaker",
+                    circuitBroken: true,
+                    result: `[BLOCKED] 同批前序 browser_agent 已因网络/代理连续加载失败触发熔断（${browserCircuitBreakReason}），本项已短路跳过，不再重复探测。`,
+                    evidence: { visitedUrls: [], tabs: [], screenshots: [], documentPaths: [], errors: [browserCircuitBreakReason] },
+                    next: phaseReceiptNext("browser_agent", "blocked"),
+                  },
+                },
+                stop: false,
+                circuitBroken: true,
+                circuitBreakReason: browserCircuitBreakReason,
+              };
+            }
             await acquireSlot();
             try {
-              return await this.executeSinglePhase(session, call, phases[i], latestConfig, tools, emit, redact, control, groupControl, () => steered);
+              const res = await this.executeSinglePhase(session, call, phases[i], latestConfig, tools, emit, redact, control, groupControl, () => steered);
+              if (specialist === "browser_agent" && res.circuitBroken) {
+                browserCircuitBreakReason = res.circuitBreakReason || "连续网络/页面加载失败";
+              }
+              return res;
             } finally {
               releaseSlot();
             }
@@ -2029,7 +2072,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     control: AbortController,
     groupControl: AbortController,
     isSteered: () => boolean,
-  ): Promise<{ outcome: Outcome; stop: boolean; pause?: string; checkReturnModel?: boolean; stageId?: string; isCode?: boolean }> {
+  ): Promise<{ outcome: Outcome; stop: boolean; pause?: string; checkReturnModel?: boolean; stageId?: string; isCode?: boolean; circuitBroken?: boolean; circuitBreakReason?: string }> {
     const specialist = phase.name;
     const targetScene = specialist === "code_agent" ? "coding" : "computer";
     const task = call.arguments?.task;
@@ -2071,7 +2114,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       // Model-mode code_agent claims workspace locks per-directory inside Tools.execute (write/edit/bash)
       // so read-only code probes and sibling Git worktrees run in parallel; CLI mode claims upfront inside runCodingCLI.
       const stage = await this.store.phaseStage(session, specialist, targetScene, target.selection, phase.seq);
-      let phasePause: string | undefined, maxTurnsReached = false, circuitBroken = false, runError: any;
+      let phasePause: string | undefined, maxTurnsReached = false, circuitBroken = false, circuitBreakReason = "", runError: any;
 
       emit("scene", { scene: targetScene, model: target.selection, phase: specialist, phaseSession: stage.id, callId: call.id });
       try {
@@ -2086,7 +2129,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             maxTurns: specialist === "browser_agent" ? 18 : 40,
             onPause: (reason) => { phasePause = reason; },
             onMaxTurns: () => { maxTurnsReached = true; },
-            onCircuitBreak: () => { circuitBroken = true; },
+            onCircuitBreak: (reason) => { circuitBroken = true; circuitBreakReason = reason; },
           },
         );
       } catch (e: any) {
@@ -2169,6 +2212,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         checkReturnModel: !outcome.stop && !!session.taskId && !session.relayComputer,
         stageId: stage.id,
         isCode: specialist === "code_agent",
+        ...(circuitBroken ? { circuitBroken: true, circuitBreakReason } : {}),
       };
     } catch (e: any) {
       if (control.signal.aborted && !isSteered()) throw e;

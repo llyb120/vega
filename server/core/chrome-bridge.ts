@@ -5,7 +5,7 @@ import { assert, id, type Obj } from "./util";
 const EXTENSION_ID = "bhiemmbmefifaloapbcopihahhckolce";
 
 /** Navigation / readiness probes need headroom for extension reconnect gaps; CDP stays aligned. */
-const BRIDGE_NAV = new Set(["tabs", "goto", "open", "new_tab", "status", "close_tab", "back", "forward", "reload", "downloads", "connect"]);
+const BRIDGE_NAV = new Set(["tabs", "goto", "open", "new_tab", "status", "set_proxy", "close_tab", "back", "forward", "reload", "downloads", "connect"]);
 export function requestTimeout(operation: string) {
   if (["cdp", "devtools"].includes(operation) || BRIDGE_NAV.has(operation)) return 10000;
   // act / evaluate / inspect / screenshot / run: slightly above the old 3s default

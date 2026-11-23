@@ -320,3 +320,101 @@ test("matched domain rules still send the client a relay job with the hostname",
   assert.equal((await read(socket, 10))[1], 0);
   assert.deepEqual(command.args, { host: "databrain-test.intlgame.com", port: 443 });
 });
+
+test("browserProxy strictly isolates accounts and stays direct (undefined) unless this account has an online client or explicit rules", async (t) => {
+  const f = await fixture(t);
+  const changed: string[] = [];
+  f.relay.onChange = (userId) => changed.push(userId);
+  // Before Alice configures relay, neither Alice nor Bob should trigger a browser proxy.
+  assert.equal(await f.relay.browserProxy("alice"), undefined);
+  assert.equal(await f.relay.browserProxy("bob"), undefined);
+  // Bob connects an online relay client -> ONLY Bob gets a browser proxy; Alice stays pure direct!
+  const bobGrant = { userId: "bob", clientId: "b".repeat(32), hash: "bob-hash" };
+  const bobDetails = { clientId: bobGrant.clientId, instance: "b".repeat(32), platform: "windows", cwd: "C:\\bob" };
+  f.hub.connect("bob", bobDetails, { send() {}, close() {} });
+  await f.relay.configure(bobGrant, [], true);
+  assert.equal(await f.relay.browserProxy("alice"), undefined, "another account's online client must NEVER enable SOCKS for alice");
+  const bobProxy = await f.relay.browserProxy("bob");
+  assert(bobProxy && bobProxy.startsWith("socks5://127.0.0.1:"), "bob's own online client enables bob's SOCKS gateway");
+  // Alice registers her own online client with empty rules -> Alice gets her own distinct proxy.
+  await f.relay.configure(grant, [], true);
+  assert(changed.includes("alice"));
+  const aliceProxy = await f.relay.browserProxy("alice");
+  assert(aliceProxy && aliceProxy.startsWith("socks5://127.0.0.1:") && aliceProxy !== bobProxy);
+  // Alice goes offline with no explicit rules -> Alice returns to pure direct (undefined).
+  f.offline();
+  assert.equal(await f.relay.browserProxy("alice"), undefined, "offline account without explicit rules returns to direct mode");
+  // Alice configures an explicit protected domain rule while offline -> proxy stays active to block silent public fallback.
+  await f.relay.configure(grant, ["git.internal:443"], true);
+  assert.equal(await f.relay.browserProxy("alice"), aliceProxy, "explicit offline rules keep proxy active to prevent leakage");
+});
+
+test("direct multi-IP Happy Eyeballs skips a refused first address and connects cleanly to a healthy second address", async (t) => {
+  const f = await fixture(t);
+  const server = createServer((s) => s.pipe(s));
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const port = (server.address() as any).port;
+  // First resolved address fails (::1 has no listener on this IPv4-only port), second address (127.0.0.1) succeeds.
+  let lookups = 0;
+  f.relay.resolveHost = async (host) => {
+    assert.equal(host, "multi-ip.example");
+    lookups++;
+    return [
+      { address: "::1", family: 6 },
+      { address: "127.0.0.1", family: 4 },
+    ];
+  };
+  const socket = await socks(await f.relay.proxy("alice"), "multi-ip.example", port, t);
+  assert.equal((await read(socket, 10))[1], 0, "multi-IP failover must succeed instead of failing on the first dead IP");
+  socket.write("happy-eyeballs");
+  assert.equal((await read(socket, 14)).toString(), "happy-eyeballs");
+  assert.equal(lookups, 1);
+});
+
+test("same-account multiple online clients fall back to the newest same-account device and never cross accounts", async (t) => {
+  const f = await fixture(t);
+  await f.relay.configure(grant, [], true);
+  const aliceSecond = { userId: "alice", clientId: "d".repeat(32), hash: "alice-hash-2" };
+  f.hub.connect("alice", { clientId: aliceSecond.clientId, instance: "d".repeat(32), platform: "darwin", cwd: "/Users/alice" }, { send() {}, close() {} });
+  await f.relay.configure(aliceSecond, [], true);
+  const bobGrant = { userId: "bob", clientId: "e".repeat(32), hash: "bob-hash" };
+  f.hub.connect("bob", { clientId: bobGrant.clientId, instance: "e".repeat(32), platform: "linux", cwd: "/home/bob" }, { send() {}, close() {} });
+  await f.relay.configure(bobGrant, [], true);
+  const pickedAlice = await f.relay.fallback("alice");
+  assert.equal(pickedAlice?.record.userId, "alice");
+  assert.equal(pickedAlice?.record.clientId, aliceSecond.clientId, "picks newest online client of the same account");
+  const pickedBob = await f.relay.fallback("bob");
+  assert.equal(pickedBob?.record.userId, "bob");
+  assert.equal(pickedBob?.record.clientId, bobGrant.clientId);
+  assert.equal(await f.relay.fallback("charlie"), undefined, "never borrows another account's client");
+});
+
+test("deterministic ENOTFOUND direct dial falls back to same-account client, caches route, and returns code 4 when offline", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const f = await fixture(t);
+  f.relay.resolveHost = async () => { throw Object.assign(Error("ENOTFOUND"), { code: "ENOTFOUND" }); };
+  await f.relay.configure(grant, [], true);
+  let jobs = 0, lastArgs: any;
+  f.onCommand((job) => {
+    jobs++;
+    lastArgs = job.args;
+    const peer = tunnel(job.id);
+    f.relay.open(peer, grant, job.id);
+    f.relay.incoming(job.id, grant, upstream([2]));
+  });
+  const proxy = await f.relay.proxy("alice");
+  const s1 = await socks(proxy, "intranet.local.test", 443, t);
+  assert.equal((await read(s1, 10))[1], 0);
+  assert.deepEqual(lastArgs, { host: "intranet.local.test", port: 443, fallback: true });
+  s1.destroy();
+  const s2 = await socks(proxy, "intranet.local.test", 443, t);
+  assert.equal((await read(s2, 10))[1], 0);
+  assert.equal(jobs, 2);
+  s2.destroy();
+  f.offline();
+  const s3 = await socks(proxy, "intranet.local.test", 443, t);
+  assert.equal((await read(s3, 10))[1], 4);
+  assert.equal(jobs, 2);
+});

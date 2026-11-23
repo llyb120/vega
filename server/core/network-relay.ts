@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { createServer, connect, isIP, type Server, type Socket } from "node:net";
 import type { Store } from "./store";
 import type { Agent, LocalAgents } from "./local-agent";
@@ -72,6 +73,14 @@ export class NetworkRelay {
   // 同一个地址最近从客户端走通过就不用再探：否则每个连接都要先直连失败或超时一次。
   private routes = new Map<string, number>();
   static ROUTE_TTL_MS = 10 * 60_000;
+  static DIRECT_FALLBACK_TIMEOUT_MS = 5000;
+  static DIRECT_ONLY_TIMEOUT_MS = 12000;
+  static DIRECT_STAGGER_MS = 300;
+  /** 某账号的中继规则或在线状态变化时触发，用于动态刷新该账号私有浏览器的代理模式。 */
+  onChange?: (userId: string) => void;
+  /** DNS 多地址解析（可被单测覆盖以确定性验证多 IP 故障切换）。 */
+  resolveHost: (host: string) => Promise<{ address: string; family: number }[]> = (host) =>
+    lookup(host, { all: true, verbatim: false });
   /** 服务端可借客户端网络中继出网，按账号隔离；客户端永不借服务端。 */
   constructor(private store: Store, private hub: LocalAgents) {}
   private routeKey(userId: string, host: string, port: number) { return `${userId}:${host}:${port}`; }
@@ -87,6 +96,7 @@ export class NetworkRelay {
     if (previous?.hash === grant.hash && previous.on === enabled && JSON.stringify(previous.rules) === JSON.stringify(rules)) return;
     const changed = previous ? previous.hash !== grant.hash || previous.on !== enabled || JSON.stringify(previous.rules) !== JSON.stringify(rules) : rules.length > 0;
     await this.store.save("client-relay", key, { ...grant, rules, on: enabled });
+    if (!previous || changed) this.onChange?.(grant.userId);
     if (!changed) return;
     for (const key of this.routes.keys()) if (key.startsWith(grant.userId + ":")) this.routes.delete(key);
     for (const flow of this.flows.values()) if (flow.grant.userId === grant.userId) flow.finish();
@@ -95,6 +105,7 @@ export class NetworkRelay {
     if (proxy) for (const socket of (await proxy).sockets) socket.destroy();
   }
   async route(userId: string, host: string, port: number) {
+    if (!userId) return;
     const records = (await this.store.objects<Record>("client-relay")).filter((r) => r.userId === userId && r.rules.some((rule) => rule.split(":")[0] === host));
     if (!records.length) return;
     assert(records.length === 1, "多个客户端配置了同一中继域名，请在客户端消除冲突");
@@ -102,31 +113,50 @@ export class NetworkRelay {
     assert(allowed(record), "客户端已关闭该账户的流量中继，不会回退直连");
     assert(record.rules.includes(`${host}:${port}`), "客户端未授权该域名端口");
     const agent = this.hub.active(userId, record.clientId);
-    assert(agent?.transport && !agent.reconnecting, "中继客户端离线，不会回退直连");
+    assert(agent && agent.userId === userId && agent.transport && !agent.reconnecting, "中继客户端离线，不会回退直连");
     return { record, agent };
   }
   /**
-   * 没有规则命中的目标也会在服务端直连失败后走这台在线客户端：它是否有规则不影响兜底，
-   * 只要该账号的中继开关没关。
+   * 没有规则命中的目标也会在服务端直连失败后走同账号的在线客户端：它是否有规则不影响兜底。
+   * 严格按 userId 隔离，绝不跨账号借用其他用户的客户端。
    */
   async fallback(userId: string) {
+    if (!userId) return;
     const records = (await this.store.objects<Record>("client-relay")).filter((item) => item.userId === userId && allowed(item));
     const candidates = records.map((record) => {
       const agent = this.hub.active(userId, record.clientId);
-      return agent?.transport && !agent.reconnecting ? { record, agent } : undefined;
+      return agent && agent.userId === userId && agent.transport && !agent.reconnecting ? { record, agent } : undefined;
     }).filter(Boolean) as { record: Record; agent: Agent }[];
-    if (candidates.length !== 1) return;
+    if (!candidates.length) return;
+    if (candidates.length === 1) return candidates[0];
+    candidates.sort((a, b) => b.agent.order - a.agent.order);
     return candidates[0];
   }
-  /** 服务端命令要不要带上中继代理：该账号有在线且开启中继的客户端。 */
+  /** 该账号是否配置了显式域名中继规则（即使客户端离线也要拦截保护这些域名，防止静默直连泄漏）。 */
+  async hasRules(userId: string) {
+    if (!userId) return false;
+    return (await this.store.objects<Record>("client-relay")).some((item) => item.userId === userId && item.rules.length > 0);
+  }
+  /** 服务端命令要不要带上中继代理：该账号有在线且可借用的同账号客户端。 */
   async enabled(userId: string) {
     return !!(await this.fallback(userId));
+  }
+  /**
+   * 服务端私有浏览器要不要启用 SOCKS5 代理：
+   * 只有在该账号自己有可借用的在线客户端、或配置了显式域名中继规则时才开启；
+   * 否则返回 undefined，让浏览器直接走原生直连，不受其他账号在线客户端影响。
+   */
+  async browserProxy(userId: string): Promise<string | undefined> {
+    if (!userId || this.closed) return undefined;
+    if (await this.enabled(userId) || await this.hasRules(userId)) return await this.proxy(userId);
+    return undefined;
   }
   inUse(clientId: string) { return [...this.flows.values()].some((flow) => flow.grant.clientId === clientId); }
   disconnect(userId: string, clientId: string, transport?: Agent["transport"]) {
     for (const flow of this.flows.values())
       if (flow.grant.userId === userId && flow.grant.clientId === clientId && (!transport || flow.transport === transport)) flow.finish();
     // Keep rules when offline/revoked, including across restarts, to prevent accidental public fallback.
+    if (userId) this.onChange?.(userId);
   }
   async proxy(userId: string) {
     assert(!this.closed && userId, "Relay stopped or missing owner");
@@ -161,39 +191,130 @@ export class NetworkRelay {
     });
     if (socket.destroyed || this.closed) return;
     if (selected) return this.tunnel(socket, selected.record, selected.agent, host, port);
+    const fallback = validRelayHost(host) ? await this.fallback(userId) : undefined;
+    if (socket.destroyed || this.closed) return;
     if (this.viaClient(userId, host, port)) {
-      const fallback = await this.fallback(userId);
-      if (socket.destroyed || this.closed) return;
       if (fallback) return this.tunnel(socket, fallback.record, fallback.agent, host, port, true);
       this.routes.delete(this.routeKey(userId, host, port));
     }
-    this.direct(userId, socket, host, port);
+    await this.direct(userId, socket, host, port, !!fallback);
   }
   /**
-   * 没有规则命中时先由服务端直连：失败或 5 秒没连上，再让该账号的在线客户端试一次（反向永不发生）。
+   * 没有规则命中时先由服务端多 IP 并发探测直连（Happy Eyeballs）：
+   * 单个死 IP 不会拖垮连接；全部失败或超时后，仅在该账号有在线客户端时交由同账号客户端试一次（反向永不发生）。
    * 域名为准：IP 字面量和 localhost 客户端不接受，直接失败。
    */
-  private direct(userId: string, socket: Socket, host: string, port: number) {
+  private async direct(userId: string, socket: Socket, host: string, port: number, hasFallback: boolean) {
+    const timeoutMs = hasFallback ? NetworkRelay.DIRECT_FALLBACK_TIMEOUT_MS : NetworkRelay.DIRECT_ONLY_TIMEOUT_MS;
+    let targets: { address: string; family: number }[];
+    const ipFamily = isIP(host);
+    if (ipFamily) {
+      targets = [{ address: host, family: ipFamily }];
+    } else {
+      let lookupTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const resolved = await Promise.race([
+          this.resolveHost(host),
+          new Promise<never>((_, reject) => {
+            lookupTimer = setTimeout(() => reject(Object.assign(Error("DNS 解析超时"), { code: "ETIMEDOUT" })), timeoutMs);
+          }),
+        ]);
+        const seen = new Set<string>();
+        targets = [];
+        for (const item of resolved || []) {
+          if (!item?.address || seen.has(item.address)) continue;
+          seen.add(item.address);
+          targets.push({ address: item.address, family: item.family || isIP(item.address) || 4 });
+          if (targets.length >= 6) break;
+        }
+        if (!targets.length) throw Object.assign(Error("No address found"), { code: "ENOTFOUND" });
+      } catch (error: any) {
+        clearTimeout(lookupTimer);
+        if (socket.destroyed || this.closed) return;
+        this.retry(userId, socket, host, port, error?.code || error?.message || "DNS 解析失败");
+        return;
+      } finally {
+        clearTimeout(lookupTimer);
+      }
+    }
+    if (socket.destroyed || this.closed) return;
+
     let settled = false;
-    const remote = connect({ host, port });
-    const stop = () => (settled ? true : (settled = true, false));
-    socket.once("close", () => remote.destroy());
-    const timer = setTimeout(() => { if (!stop()) { remote.destroy(); this.retry(userId, socket, host, port, "连接超时"); } }, 5000);
-    remote.once("error", (error: NodeJS.ErrnoException) => {
-      if (stop()) return;
-      clearTimeout(timer);
-      remote.destroy();
-      this.retry(userId, socket, host, port, error.code || error.message);
-    });
-    remote.once("connect", () => {
-      if (settled) { remote.destroy(); return; }
-      stop();
-      clearTimeout(timer);
-      remote.once("close", () => socket.destroy());
-      reply(socket);
-      socket.setTimeout(300000);
-      socket.pipe(remote).pipe(socket);
-    });
+    let nextIdx = 0;
+    let lastError = "连接超时";
+    let staggerTimer: ReturnType<typeof setTimeout> | undefined;
+    const active = new Set<Socket>();
+
+    const cleanup = (keep?: Socket) => {
+      clearTimeout(overallTimer);
+      clearTimeout(staggerTimer);
+      staggerTimer = undefined;
+      for (const candidate of active) {
+        if (candidate !== keep) candidate.destroy();
+      }
+      active.clear();
+    };
+    const onClientClose = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+    };
+    socket.once("close", onClientClose);
+
+    const overallTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.off("close", onClientClose);
+      cleanup();
+      this.retry(userId, socket, host, port, lastError);
+    }, timeoutMs);
+
+    const tryNext = () => {
+      if (settled || nextIdx >= targets.length) return;
+      const target = targets[nextIdx++];
+      const remote = connect({ host: target.address, port, family: target.family });
+      active.add(remote);
+      if (nextIdx < targets.length) {
+        clearTimeout(staggerTimer);
+        staggerTimer = setTimeout(tryNext, NetworkRelay.DIRECT_STAGGER_MS);
+      }
+      const onError = (error: NodeJS.ErrnoException) => {
+        active.delete(remote);
+        remote.destroy();
+        if (settled) return;
+        lastError = error.code || error.message;
+        if (nextIdx < targets.length) {
+          clearTimeout(staggerTimer);
+          staggerTimer = undefined;
+          tryNext();
+        } else if (active.size === 0) {
+          settled = true;
+          socket.off("close", onClientClose);
+          cleanup();
+          this.retry(userId, socket, host, port, lastError);
+        }
+      };
+      remote.once("error", onError);
+      remote.once("connect", () => {
+        if (settled || socket.destroyed) {
+          active.delete(remote);
+          remote.destroy();
+          return;
+        }
+        settled = true;
+        socket.off("close", onClientClose);
+        remote.off("error", onError);
+        remote.on("error", () => socket.destroy());
+        cleanup(remote);
+        socket.once("close", () => remote.destroy());
+        remote.once("close", () => socket.destroy());
+        reply(socket);
+        socket.setTimeout(300000);
+        socket.pipe(remote).pipe(socket);
+      });
+    };
+
+    tryNext();
   }
   private retry(userId: string, socket: Socket, host: string, port: number, reason: string) {
     const fail = (tip: string) => {
@@ -204,7 +325,7 @@ export class NetworkRelay {
     if (!validRelayHost(host)) return fail("目标是 IP 或 localhost，域名中继无法匹配；请用域名访问，并确认反代转发 /api/local-agent/relay 与 X-Vega-Relay。");
     void this.fallback(userId).then((selected) => {
       if (socket.destroyed || this.closed) return;
-      if (!selected) return fail("该账号没有在线且开启流量中继的客户端；请在客户端「连接授权 → 流量中继」打开开关后重试。");
+      if (!selected) return fail("该账号当前没有可借用的在线客户端，且服务端直连失败。");
       console.warn("[Vega relay] Direct dial failed; retrying through the account client", { userId, clientId: selected.record.clientId, host, port, reason });
       this.routes.set(this.routeKey(userId, host, port), Date.now());
       this.tunnel(socket, selected.record, selected.agent, host, port, true);
