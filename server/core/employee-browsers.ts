@@ -47,6 +47,7 @@ export class EmployeeBrowsers {
     private isolation?: (id: string) => Promise<CloudRuntime | undefined>,
     private onPoll?: () => void,
     private dynamicProxy?: (id: string) => Promise<string | undefined>,
+    private livePageScript?: string,
   ) {}
   profile(id: string) {
     assert(/^(default|e[a-zA-Z0-9_-]+|user_[a-zA-Z0-9_-]+)$/.test(id), "Invalid browser profile ID");
@@ -94,7 +95,7 @@ export class EmployeeBrowsers {
       this.profile(id);
       const bridge = new ChromeBridge(true, this.pageScript);
       bridge.onPoll = this.onPoll;
-      entry = { chrome: new Chrome(this.store, bridge, this.pageScript, "experience:" + id), browser: new HeadlessBrowser() };
+      entry = { chrome: new Chrome(this.store, bridge, this.pageScript, "experience:" + id, this.livePageScript), browser: new HeadlessBrowser() };
       this.entries.set(id, entry);
     }
     assert(!entry.stopping, "Employee browser is stopping");

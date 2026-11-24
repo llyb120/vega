@@ -425,12 +425,13 @@ export class Engine {
         const ownerId = await browserOwner(id);
         return ownerId ? this.relay.browserProxy(ownerId) : undefined;
       },
+      chrome.livePageScript,
     );
     this.relay.onChange = (userId) => {
       if (!userId) return;
       queueMicrotask(() => { void this.browsers.syncProxy(this.browserProfileKey(userId)).catch(() => {}); });
     };
-    this.localBrowsers = new LocalBrowsers(store, this.localAgents, chrome.pageScript);
+    this.localBrowsers = new LocalBrowsers(store, this.localAgents, chrome.pageScript, chrome.livePageScript);
     this.taskTabs = new TaskBrowserTabs(store,
       async (session) => session.localBrowser
         ? this.localBrowsers.get(session, AbortSignal.timeout(6000))

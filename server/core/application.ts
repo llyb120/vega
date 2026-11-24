@@ -27,7 +27,7 @@ export function app() {
   if (!application) throw Error("Vega is not initialized");
   return application;
 }
-export async function initialize(pageScript: string, livePageScript?: string) {
+export async function initialize(pageScript: string, livePageScript: string) {
   if (application) return application;
   const store = await Store.open(),
     subscriptions = new Subscriptions(store),

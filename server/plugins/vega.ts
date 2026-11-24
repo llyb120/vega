@@ -4,8 +4,8 @@ export default defineNitroPlugin(async (nitro) => {
   const page =
     await useStorage("assets:browser").getItem<string>("page_runtime.js");
   if (!page) throw Error("Bundled browser asset missing");
-  const livePage =
-    (await useStorage("assets:browser").getItem<string>("browser-page.js")) || undefined;
+  const livePage = await useStorage("assets:browser").getItem<string>("browser-page.js");
+  if (!livePage) throw Error("Bundled live browser asset missing: browser-page.js");
   const { store, engine, browserLive, employeeLives, eventsSocket, clientSockets, headless } =
     await initialize(page, livePage);
   nitro.hooks.hook("close", async () => {

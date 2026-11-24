@@ -30,7 +30,7 @@ class LocalBridge extends ChromeBridge {
 
 export class LocalBrowsers {
   private sessions = new Map<string, { agent: Agent; chrome: Chrome; held: boolean; restored: Promise<void> }>();
-  constructor(private store: Store, private hub: LocalAgents, private pageScript: string) {}
+  constructor(private store: Store, private hub: LocalAgents, private pageScript: string, private livePageScript?: string) {}
   async get(session: Session, signal?: AbortSignal) {
     const clientId = session.browserClientId || session.clientId;
     if (!clientId) throw new LocalAgentUnavailable("此会话尚未绑定本机浏览器客户端；不会自动选择设备或使用服务端浏览器。");
@@ -40,7 +40,7 @@ export class LocalBrowsers {
     if (!entry || entry.agent !== agent) {
       if (entry) await this.release(session.id, true);
       const bridge = new LocalBridge(this.hub, agent);
-      const chrome = new Chrome(this.store, bridge, this.pageScript, clientExperienceKind(agent.userId, agent.clientId));
+      const chrome = new Chrome(this.store, bridge, this.pageScript, clientExperienceKind(agent.userId, agent.clientId), this.livePageScript);
       const shared = [...this.sessions.values()].find(value => value.agent === agent);
       // Navigation affects every session on this browser; observation keys still isolate input ownership.
       if (shared) {

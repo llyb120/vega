@@ -1,11 +1,16 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { runInNewContext } from "node:vm";
 import { Store } from "../server/core/store";
+import { Catalog } from "../server/core/catalog";
+import { Subscriptions } from "../server/core/subscriptions";
+import { Engine } from "../server/core/engine";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge, requestTimeout } from "../server/core/chrome-bridge";
 import { EmployeeBrowsers } from "../server/core/employee-browsers";
 import { HeadlessBrowser, headlessArguments } from "../server/core/headless";
 import type { CloudRuntime } from "../server/core/cloud";
+import type { Obj } from "../server/core/util";
 import { join, resolve } from "node:path";
 
 async function fixture(t: TestContext, networkProxy?: (id: string) => Promise<string | undefined>, isolation?: (id: string) => Promise<CloudRuntime | undefined>) {
@@ -27,6 +32,34 @@ async function fixture(t: TestContext, networkProxy?: (id: string) => Promise<st
   t.after(async () => { await browsers.close(); await store.close(); });
   return { browsers, chrome, bridge, browser, start, close, probe, connect };
 }
+
+test("employee preview uses the bundled live runtime for about:blank", async (t) => {
+  const pageScript = "globalThis.__novaBrowser = {};";
+  const livePageScript = 'globalThis.__novaWebview = { observe: () => ({ url: "about:blank" }) };';
+  const store = await Store.open(":memory:");
+  const root = new Chrome(store, new ChromeBridge(), pageScript, "experience", livePageScript);
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), root);
+  t.after(async () => { await engine.close(); await store.close(); });
+  t.mock.method(HeadlessBrowser.prototype, "start", async function (this: HeadlessBrowser) {
+    this.child = {} as NonNullable<HeadlessBrowser["child"]>;
+  });
+  t.mock.method(HeadlessBrowser.prototype, "close", async () => {});
+  t.mock.method(ChromeBridge.prototype, "start", async function (this: ChromeBridge) {
+    this.clients.set(crypto.randomUUID(), { at: Date.now(), browser: "Google Chrome" });
+  });
+  t.mock.method(ChromeBridge.prototype, "request", async (operation: string, { method, params }: Obj) => {
+    if (operation === "status" || operation === "set_proxy") return {};
+    assert.equal(operation, "cdp");
+    if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
+    if (method === "Target.getTargets") return { targetInfos: [] };
+    if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+    assert.equal(method, "Runtime.evaluate");
+    assert(params.expression.startsWith(livePageScript), "CDP should receive the live asset supplied at startup");
+    return { result: { value: runInNewContext(params.expression) } };
+  });
+  const chrome = await engine.browsers.get("user_alice");
+  assert.equal((await chrome.observe("C1", "viewport")).pages[0].url, "about:blank");
+});
 
 test("employee browsers automatically receive the owner's stable network proxy", async (t) => {
   const proxy = "socks5://127.0.0.1:12345", requests: string[] = [];

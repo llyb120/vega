@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { normalizeAction } from "./browser-actions";
 import { processScreenshot, ShotMapping, type SomBox } from "./browser-annotate";
 import { validatePlan, literalMet, runCandidates, bindStep, chains, runState, type Candidate } from "./browser-run";
@@ -197,7 +195,7 @@ export class Chrome {
     public bridge: ChromeBridge,
     public pageScript: string,
     experienceKind = "experience",
-    public livePageScript?: string,
+    public livePageScript = pageScript,
   ) {
     this.experiences = new Experiences(store, experienceKind);
     if (!this.bridge.runtime && this.pageScript?.includes("__novaBrowser")) {
@@ -352,14 +350,10 @@ export class Chrome {
           signal,
         );
         frame.context = world.executionContextId;
-        let liveScript = this.livePageScript || this.pageScript;
-        if (!liveScript.includes("__novaWebview.observe")) {
-          try { liveScript = readFileSync(join(process.cwd(), "server/assets/browser/browser-page.js"), "utf8"); } catch {}
-        }
         const page = await this.evaluate(
           tag,
           frame,
-          `${liveScript};__novaWebview.observe(${JSON.stringify(id())},20000,${JSON.stringify(scope)})`,
+          `${this.livePageScript};__novaWebview.observe(${JSON.stringify(id())},20000,${JSON.stringify(scope)})`,
           signal,
         );
         page.frame = ready.length;
