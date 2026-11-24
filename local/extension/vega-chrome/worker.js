@@ -1126,17 +1126,17 @@ async function maybeReloadForVersion(version) {
   }
 }
 
-async function probeHealth(origin) {
+async function probeHealth(origin, method) {
   if (typeof fetch !== 'function') return 'legacy';
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), 1200) : null;
   try {
-    const res = await fetch(`${origin}/health`, {
-      method: 'GET',
-      cache: 'no-store',
-      signal: controller?.signal,
-    });
-    if (res.status === 404 || res.status === 405) return 'legacy';
+    const probe = verb => fetch(`${origin}/health`, { method: verb, cache: 'no-store', signal: controller?.signal });
+    let res = await probe(method);
+    if (method === 'GET' && res.status === 403) {
+      // Chromium may omit Origin on GET. Pair only if the POST positively identifies a Vega bridge.
+      res = await probe('POST');
+    } else if (res.status === 404 || res.status === 405) return 'legacy';
     if (!res.ok) return 'foreign';
     const data = await res.json().catch(() => null);
     return data?.ok === true && data?.app === 'vega' ? 'vega' : 'foreign';
@@ -1256,7 +1256,7 @@ function loop() {
 }
 const discover = loop;
 
-async function connect(origin, attempt = 0) {
+async function connect(origin, attempt = 0, healthMethod = 'GET') {
   if (loops.has(origin) || sockets.has(origin)) return;
   clearTimeout(reconnects.get(origin));
   reconnects.delete(origin);
@@ -1265,7 +1265,7 @@ async function connect(origin, attempt = 0) {
   try {
     await ready();
     await inventory();
-    const health = await probeHealth(origin);
+    const health = await probeHealth(origin, healthMethod);
     if (health === 'offline' || health === 'foreign') return;
     const paired=await fetch(`${origin}/pair`,{method:'POST',signal:AbortSignal.timeout(3000)});
     if(!paired.ok)throw Error(`Vega 连接失败 HTTP ${paired.status}`);
@@ -1319,7 +1319,7 @@ async function connect(origin, attempt = 0) {
     loops.delete(origin);
     if (!sockets.has(origin)) {
       reconnects.set(origin, setTimeout(
-        () => void connect(origin, attempt + 1),
+        () => void connect(origin, attempt + 1, healthMethod),
         conflict ? 5000 : Math.min(500 * Math.pow(2, Math.min(attempt, 4)), 5000),
       ));
     }

@@ -173,11 +173,9 @@ test("Docker image builds Linux-native artifacts, uses a restricted identity lau
     !/COPY \. /m.test(docker),
     "Do not copy host credentials or native .output artifacts",
   );
-  assert.equal(
-    JSON.parse(readFileSync("docker/chromium-policy.json", "utf8"))
-      .DownloadDirectory,
-    "${user_home}/Downloads",
-  );
+  const policy = JSON.parse(readFileSync("docker/chromium-policy.json", "utf8"));
+  assert.equal(policy.PromptForDownloadLocation, false);
+  assert.equal(policy.DownloadDirectory, undefined, "a machine-wide directory would override per-profile private paths");
 });
 
 test("Docker runtime provides target-platform Go and Python 3 on the isolated task PATH", () => {

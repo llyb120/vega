@@ -55,9 +55,14 @@ docker inspect --format '{{.State.Health.Status}}' vega
 | `/data/vega.db` | 会话、任务、配置与技能资源的 SQLite 权威存储 |
 | `/data/.vega-identities/users.sqlite` | 受信启动器独占的用户ID→UID/GID映射，SQLite/MySQL部署都必须保留 |
 | `/workspace/.vega-users/<用户ID>/workspace` | 该用户的默认云端工作区，权限0700 |
-| `/workspace/.vega-users/<用户ID>/home` | 私有 HOME，包含技能缓存、浏览器 Profile 和下载 |
+| `/workspace/.vega-users/<用户ID>/home` | 私有 HOME，包含技能缓存、浏览器 Profile；原 `Downloads` 中的文件不迁移 |
+| `/workspace/.vega-users/<用户ID>/workspace/downloads` | 服务端私有浏览器的新下载；以该账号身份写入，不共享目录 |
 | `/workspace/.vega-users/<用户ID>/tmp` | 私有临时目录，SSH 临时私钥正常结束/重启时清理 |
 | `/data/chromium`、`/data/downloads`、`/data/skill-cache`、旧 `/workspace` 内容 | 旧数据原位保留，不自动迁移给某个用户 |
+
+`browser_debug(kind="downloads")` 可查询下载记录；根据时间和文件名确定 ID 后，用 `downloadId` 查询实际保存路径。空列表不代表可以重试导出。更新镜像并重启服务后，新启动的浏览器使用新的保存目录。
+
+如果已确认某站点使用 `showSaveFilePicker()` **只导出新副本**，管理员可以为服务设置 `VEGA_HEADLESS_EXPORT_ORIGINS=https://export.example.com`（多个精确来源用逗号分隔，默认关闭）。私有无头浏览器会在这些站点的顶层页面把新文件写入临时站点存储，关闭写入流时转成普通下载。以下载记录为准；不支持编辑已有文件、持久文件句柄、目录选择或嵌入页。不要给不明确的站点启用；页面在写入期间退出可能留下该站点的临时数据。
 
 重建或删除容器不会删除命名卷。不要用多个运行中的容器同时共享同一个 Chromium profile。浏览器登录态**不会自动导入宿主机**，在容器浏览器中登录后由 profile 卷保留；订阅 CLI 凭据同样不会从宿主机自动复制。
 

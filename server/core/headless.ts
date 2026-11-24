@@ -9,6 +9,7 @@ import type { Duplex } from "node:stream";
 import { assert, sleep } from "./util";
 import * as filesystem from "node:fs/promises";
 import type { CloudRuntime } from "./cloud";
+import { prepareHeadlessDownloads } from "../../shared/headless-downloads.mjs";
 
 export function extensionDirectory(moduleUrl = import.meta.url, entry = process.argv[1]) {
   const candidates = [
@@ -25,9 +26,10 @@ type PrivateBrowser = { profile: string; port: number; token: string; proxy?: st
 export function privateWorker(source: string, instance: Pick<PrivateBrowser, "port" | "token">) {
   const loop = 'for (let port=47753; port<=47762; port++) void connect(`http://127.0.0.1:${port}`);';
   const pair = "{method:'POST',signal:AbortSignal.timeout(3000)}";
-  assert(source.includes(loop) && source.includes(pair), "Bundled browser bridge protocol changed");
+  assert(source.includes(loop) && source.includes(pair) && source.includes("probeHealth(origin, healthMethod)"), "Bundled browser bridge protocol changed：服务端与内置扩展版本不匹配，请从同一构建完整部署 .output 或镜像");
   // Keep vendored extension intact; only this employee's generated copy can pair with its private bridge.
-  return source.replace(loop, `void connect(${JSON.stringify(`http://127.0.0.1:${instance.port}`)});`)
+  // Chrome can omit Origin on extension GETs. POST the private probe rather than weakening the origin check.
+  return source.replace(loop, `void connect(${JSON.stringify(`http://127.0.0.1:${instance.port}`)}, 0, 'POST');`)
     .replace(pair, `{method:'POST',headers:{Authorization:${JSON.stringify("Bearer " + instance.token)}},signal:AbortSignal.timeout(3000)}`);
 }
 
@@ -54,6 +56,19 @@ export function headlessArguments(profile: string, extension: string, network?: 
     "--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
   );
   return args;
+}
+
+// Match patterns omit ports; the additional URL globs narrow activation to the exact origins.
+export function exportCopyScript(setting = "") {
+  const origins = [...new Set(setting.split(",").map(s => s.trim()).filter(Boolean).map(s => {
+    const u = new URL(s);
+    assert((u.protocol === "https:" || (u.protocol === "http:" && ["localhost", "127.0.0.1"].includes(u.hostname))) &&
+      /^[a-z0-9.-]+$/.test(u.hostname) && (s === u.origin || s === u.origin + "/"), "VEGA_HEADLESS_EXPORT_ORIGINS 只接受逗号分隔的精确 HTTPS 来源（本机测试可用 HTTP），不支持通配符或路径");
+    return u.origin;
+  }))];
+  if (!origins.length) return;
+  return { matches: [...new Set(origins.map(s => { const u = new URL(s); return `${u.protocol}//${u.hostname}/*`; }))],
+    include_globs: origins.map(s => s + "/*"), js: ["export-copy.js"], world: "MAIN", run_at: "document_start" };
 }
 
 const EXTENSION_STARTUP_MS = 10000;
@@ -186,6 +201,7 @@ function chromeBinary(): string | undefined {
 export class HeadlessBrowser {
   child?: ChildProcess;
   dir?: string;
+  downloadDirectory?: string;
   async start(dbPath: string, instance?: PrivateBrowser, cloud?: CloudRuntime) {
     const { mkdir, rm, cp, readFile, writeFile } = cloud?.fs || filesystem;
     if (!instance && (
@@ -204,6 +220,7 @@ export class HeadlessBrowser {
     }
     this.dir = instance?.profile || join(dirname(resolve(dbPath)), "chromium");
     await mkdir(this.dir, { recursive: true });
+    if (instance && await reclaimProfile(this.dir, cloud) === "foreign") throw Error("浏览器配置目录正在使用，未修改下载设置");
     let extension = extensionDirectory();
     if (instance) {
       const source = extension;
@@ -213,6 +230,8 @@ export class HeadlessBrowser {
       const worker = `employee-${randomUUID()}.js`;
       const manifest = JSON.parse(await readFile(join(source, "manifest.json"), "utf8"));
       manifest.background.service_worker = worker;
+      const copy = exportCopyScript(process.env.VEGA_HEADLESS_EXPORT_ORIGINS);
+      if (copy) manifest.content_scripts.push(copy);
       // Only server-private browsers get dynamic chrome.proxy.settings control (local user extensions remain untouched).
       const permissions = Array.isArray(manifest.permissions) ? manifest.permissions : [];
       if (!permissions.includes("proxy")) permissions.push("proxy");
@@ -229,9 +248,11 @@ export class HeadlessBrowser {
     }
     if (process.env.VEGA_CHROMIUM_NO_SANDBOX === "1" || platform() === "win32")
       args.unshift("--no-sandbox");
-    if (instance) await reclaimProfile(this.dir, cloud);
+    const identity = await cloud?.identity();
+    this.downloadDirectory = identity ? join(identity.cwd, "downloads") : join(this.dir, "Downloads");
+    await prepareHeadlessDownloads(this.dir, this.downloadDirectory, cloud?.fs);
     // Detached = own process group, so close/exit can kill the whole Chromium tree at once.
-    const launch = cloud?.launch(binary, args, (await cloud.identity()).cwd, {}, !!instance);
+    const launch = cloud?.launch(binary, args, identity!.cwd, {}, !!instance);
     this.child = spawn(launch?.command || binary, launch?.args || args, {
       ...(launch ? { cwd: launch.cwd, env: launch.env } : {}),
       stdio: instance ? ["ignore", "ignore", "pipe", "pipe", "pipe"] : "ignore",

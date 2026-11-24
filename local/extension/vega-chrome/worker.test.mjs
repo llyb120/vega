@@ -275,15 +275,17 @@ test('worker probes /health then /pair and only opens authenticated WebSocket to
   }
   const { scope } = createHarness({
     WebSocket: RecordingWS,
-    fetch: async url => {
+    fetch: async (url, opts) => {
       if (url.endsWith('/health')) {
-        probed.push(url);
+        probed.push([url, opts.method]);
         if (url === 'http://127.0.0.1:47753/health') {
+          if (opts.method === 'GET') return { ok: false, status: 403 };
           return { ok: true, json: async () => ({ ok: true, app: 'vega', version: '0.2.5' }) };
         }
         if (url === 'http://127.0.0.1:47754/health') {
           return { ok: true, json: async () => ({ ok: true, app: 'other-service' }) };
         }
+        if (url === 'http://127.0.0.1:47755/health') return { ok: false, status: opts.method === 'GET' ? 403 : 405 };
         throw new TypeError('Failed to fetch');
       }
       if (url.endsWith('/pair')) {
@@ -298,7 +300,8 @@ test('worker probes /health then /pair and only opens authenticated WebSocket to
   scope.__loop();
   await new Promise(resolve => globalThis.setTimeout(resolve, 40));
 
-  assert.equal(probed.length, 10, 'each port in 47753-47762 probed once while in flight');
+  assert.equal(probed.filter(([, method]) => method === 'GET').length, 10);
+  assert.deepEqual(probed.filter(([, method]) => method === 'POST').map(([url]) => url).sort(), ['http://127.0.0.1:47753/health', 'http://127.0.0.1:47755/health']);
   assert.deepEqual(paired, ['http://127.0.0.1:47753/pair'], 'only live Vega port pairs');
   assert.equal(wsUrls.length, 1, 'only live Vega port opens a WebSocket');
   assert.ok(wsUrls[0].startsWith('ws://127.0.0.1:47753/ws?clientId='));

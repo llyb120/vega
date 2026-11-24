@@ -187,6 +187,11 @@ export class Chrome {
   /** A person using a task-created page takes it out of automatic cleanup. */
   protectTab?: (tag: string) => Promise<void>;
   workspaceFile = workspaceFile;
+  downloadReceipt?: (result: Obj, id: unknown) => Promise<Obj>;
+  private async downloads(args: Obj, signal: AbortSignal) {
+    const result = await this.bridge.request("downloads", args, signal);
+    return this.downloadReceipt ? this.downloadReceipt(result, args.downloadId) : result;
+  }
   constructor(
     public store: Store,
     public bridge: ChromeBridge,
@@ -1823,7 +1828,7 @@ export class Chrome {
 
       if (toolName === "browser_debug") {
         if (args.kind === "downloads") {
-          return await this.bridge.request("downloads", {
+          return await this.downloads({
             downloadId: args.downloadId,
             since: args.since,
           }, signal);
@@ -1988,7 +1993,7 @@ export class Chrome {
       await this.bridge.start();
       return this.bridge.status();
     }
-    if (op === "downloads") return this.bridge.request(op, a, signal);
+    if (op === "downloads") return this.downloads(a, signal);
     if (op === "tabs") {
       const result = await this.bridge.request("tabs", a, signal);
       const visible = this.visibleTabs(owner, result.tabs) || [];

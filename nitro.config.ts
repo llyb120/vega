@@ -12,7 +12,7 @@ export default defineNitroConfig({
     { baseName: "browser", dir: "assets/browser" },
   ],
   // shared/*.mjs 在 dev 下会被外部化，相对路径按 .nitro 目录解析就会找不到模块（Windows dev 必崩）。
-  externals: { external: ["node:sqlite", "sharp"], inline: [/\/(cloud-wire|workspace-sync)\.mjs$/] },
+  externals: { external: ["node:sqlite", "sharp"], inline: [/\/(cloud-wire|workspace-sync|headless-downloads)\.mjs$/] },
   routeRules: {
     "/clients/**": {
       headers: { "Content-Disposition": "attachment", "Cache-Control": "no-cache" },

@@ -732,10 +732,11 @@ test("workspace leases distinguish execution devices and release transient comma
 test("employee browser copies bind only their authenticated private bridge; profile path ids stay isolated at the store layer", async () => {
   const source = await readFile("local/extension/vega-chrome/worker.js", "utf8");
   const worker = privateWorker(source, { port: 54321, token: "private-token" });
-  assert.match(worker, /connect\("http:\/\/127\.0\.0\.1:54321"\)/);
+  assert(worker.includes(`connect("http://127.0.0.1:54321", 0, 'POST')`));
   assert(!worker.includes("for (let port=47753"));
   assert.match(worker, /Bearer private-token/);
   assert.throws(() => privateWorker("changed protocol", { port: 1, token: "x" }), /protocol changed/);
+  assert.throws(() => privateWorker(source.replace('probeHealth(origin, healthMethod)', 'probeHealth(origin)'), { port: 1, token: 'x' }), /版本不匹配/);
   const bridge = new ChromeBridge(true);
   await bridge.start();
   try {

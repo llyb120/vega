@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
+import { prepareHeadlessDownloads } from "../shared/headless-downloads.mjs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -122,6 +123,7 @@ export async function supervise() {
       const result = await Promise.race([stopped, ...children.map((child) => child.done)]);
       return stop.signal.aborted ? 0 : result || 1;
     }
+    await prepareHeadlessDownloads(profile, "/data/downloads");
     launch("Chromium", "/usr/bin/chromium", args);
     let paired = false;
     for (const deadline = Date.now() + 50000; Date.now() < deadline; ) {

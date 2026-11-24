@@ -62,7 +62,7 @@ ENV NODE_ENV=production \
 COPY --from=build /app/.output /app/.output
 COPY --from=build /app/local/extension/vega-chrome /app/extension
 COPY docker /app/docker
-COPY shared/cloud-wire.mjs /app/shared/cloud-wire.mjs
+COPY shared/cloud-wire.mjs shared/headless-downloads.mjs /app/shared/
 COPY docker/chromium-policy.json /etc/chromium/policies/managed/vega.json
 COPY docker/fonts.conf /etc/fonts/local.conf
 RUN fc-cache -f

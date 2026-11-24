@@ -4,6 +4,7 @@ import type { Store } from "./store";
 import { Chrome } from "./chrome";
 import { ChromeBridge } from "./chrome-bridge";
 import { HeadlessBrowser } from "./headless";
+import { privateDownloadReceipt } from "./private-downloads";
 import { assert, sleep, workspaceFile } from "./util";
 import type { CloudRuntime } from "./cloud";
 
@@ -129,6 +130,8 @@ export class EmployeeBrowsers {
           await current.browser.start(process.env.VEGA_DB || "vega.db", {
             profile: current.profile, port: current.chrome.bridge.port, token: current.chrome.bridge.token, proxy: await this.networkProxy?.(id),
           }, current.cloud);
+          const directory = current.browser.downloadDirectory;
+          if (directory) current.chrome.downloadReceipt = (result, id) => privateDownloadReceipt(result, id, directory, current.cloud?.fs);
         } catch (error) {
           if (this.closed || current.stopping) throw error;
           const message = error instanceof Error ? error.message : String(error);

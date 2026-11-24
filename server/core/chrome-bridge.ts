@@ -317,7 +317,7 @@ export class ChromeBridge {
       send({});
       return;
     }
-    if (req.method === "GET" && path === "/health") {
+    if (path === "/health" && (req.method === "GET" || req.method === "POST")) {
       send({ ok: true, app: "vega", version: this.version });
       return;
     }
