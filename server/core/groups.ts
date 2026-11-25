@@ -460,6 +460,7 @@ export class Groups {
     const group = await this.get(task.groupId);
     if (!group || !group.employees.some((e) => e.id === employeeId)) return false;
     const saved = await this.store.transaction(async () => {
+      for (const file of message.files || []) await this.store.grantBlob(file.blobId, group.session);
       if (typeof message.stepOutput === "object")
         for (const file of message.stepOutput.files || []) await this.store.grantBlob(file.blobId, group.session);
       const topicTaskId = message.topicTaskId ?? (message.tasks?.length === 1 ? message.tasks[0].id : undefined);
@@ -475,7 +476,7 @@ export class Groups {
       (task.group?.requester.kind === "user" && task.group.requester.id === viewer.id));
   }
   private taskView(task: Task, mine: boolean, canControl: boolean): Obj & { canControl: boolean } {
-    const shared = ["id", "text", "status", "createdAt", "finishedAt", "queueReason", "approval", "waiting", "partialDelivery", "progress", "plan", "result", "completion", "summary", "checkpoint", "error"];
+    const shared = ["id", "text", "status", "createdAt", "finishedAt", "queueReason", "approval", "waiting", "partialDelivery", "progress", "plan", "result", "completion", "summary", "checkpoint", "error", "deliverableFiles"];
     return {
       ...(mine ? task : Object.fromEntries(shared.filter((key) => key in task).map((key) => [key, task[key]]))),
       ...(!mine && task.stepOutputs ? { stepOutputs: task.stepOutputs.map(({ step, label, text, files, at }: Obj) => ({ step, label, text, files, at })) } : {}),

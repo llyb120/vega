@@ -120,6 +120,9 @@ async function runExport(format) {
         <MessageText v-else-if="message.text" :text="bodyText" :streaming="message.streaming" :archive-base="archiveBase" />
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
         <FileCard v-for="(file, index) in message.files || []" :key="'f' + index" :file="file" />
+        <template v-if="showStepLink && stepOutput">
+          <FileCard v-for="(file, index) in stepOutput.files || []" :key="'sf' + (file.blobId || index)" :file="file" />
+        </template>
         <div v-if="hasBubbleLinks" class="chat-bubble-links">
           <button v-if="showStepLink" type="button" class="chat-bubble-link chat-step-output" :aria-label="'查看步骤产物：' + (stepOutput.label || '任务详情')" :disabled="!canOpenStep && (!loadStepOutput || stepLoading)" @click="openStep">
             <Icon name="file" :size="13" />

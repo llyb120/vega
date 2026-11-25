@@ -172,3 +172,70 @@ test("群成员只取得本群产物文件；原生客户端下载同样校验 b
   assert(!await f.auth.canBlob(guest, file.blobId), "退出群聊后不能继续下载群产物");
   await assert.rejects(clientChat("file", { blobId: file.blobId }, guest.id), /File not found/);
 });
+
+test("云端隔离允许上传用户 home/tmp 内交付文件，task_complete.files 直接生成可下载附件并随交付推送（含 outlineReviewRetry）", async (t) => {
+  const f = await fixture(t);
+  const home = await mkdtemp(join(tmpdir(), "vega-cloud-home-"));
+  const tmp = await mkdtemp(join(tmpdir(), "vega-cloud-tmp-"));
+  const foreign = await mkdtemp(join(tmpdir(), "vega-cloud-other-"));
+  t.after(async () => {
+    await rm(home, { recursive: true, force: true });
+    await rm(tmp, { recursive: true, force: true });
+    await rm(foreign, { recursive: true, force: true });
+  });
+  const fs = await import("node:fs/promises");
+  (f.tools as any).cloud = {
+    identity: async () => ({ cwd: f.cwd, home, tmp }),
+    fs: { realpath: fs.realpath, stat: fs.stat, readFile: fs.readFile, readdir: fs.readdir },
+  };
+  await mkdir(join(home, "projects", "quiz"), { recursive: true });
+  const zipPath = join(home, "projects", "quiz", "finance-quiz.zip");
+  const zipBytes = Buffer.from([80, 75, 3, 4, 10, 20]);
+  await writeFile(zipPath, zipBytes);
+  const tmpNote = join(tmp, "notes.txt");
+  await writeFile(tmpNote, "release note");
+  const outsideFile = join(foreign, "secret.zip");
+  await writeFile(outsideFile, "nope");
+
+  await assert.rejects(f.invoke({ step: 1, paths: [outsideFile] }), /within the working directory/);
+
+  await f.employee.update((state) => {
+    const task = f.employee.task(state, f.job);
+    task.plan = [{ content: "构建网页", status: "completed" }, { content: "打包交付", status: "completed" }];
+    task.outlineReviewRequired = true;
+    task.outlineReferences = ["构建网页", "打包交付"];
+  });
+
+  const completeCall = {
+    id: "complete-files-1",
+    name: "task_complete",
+    arguments: {
+      evidence: "已完成打包",
+      summary: "交付压缩包",
+      deliverableRefs: [],
+      files: [zipPath, tmpNote],
+      outlineReview: [{ requirement: "构建网页", status: "met", evidence: "ok" }],
+    },
+  };
+  const first = await f.tools.execute(completeCall, {} as any);
+  assert.equal(first.value.code, "outline_review_incomplete");
+  const retryToken = first.value.outlineReviewRetry;
+  assert(retryToken);
+
+  const retried = await f.tools.execute({
+    id: "complete-files-2",
+    name: "task_complete",
+    arguments: {
+      outlineReviewRetry: retryToken,
+      outlineReview: [{ changedStep: 1, status: "met", evidence: "ok" }],
+    },
+  }, {} as any);
+  assert.equal(retried.value.ok, true);
+
+  const task = (await f.employee.findTask(f.job))!;
+  assert.equal(task.deliverableFiles.length, 2);
+  assert.deepEqual(task.deliverableFiles.map((x: any) => x.name), ["finance-quiz.zip", "notes.txt"]);
+  assert.deepEqual(Buffer.from((await f.store.blobData(task.deliverableFiles[0].blobId))!.data), zipBytes);
+  assert(await f.auth.canBlob(owner, task.deliverableFiles[0].blobId));
+  assert(!await f.auth.canBlob(outsider, task.deliverableFiles[0].blobId));
+});

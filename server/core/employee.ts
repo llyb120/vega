@@ -172,6 +172,7 @@ const stripCompleteActionSuffix = (step: string) =>
   step.trim().replace(/[，,、；;\s]*(?:并|然后|最后)?(?:单独)?(?:调用|使用)?\s*task_complete(?:\s*交付)?\s*$/i, "").trim();
 type OutlineDraft = {
   token: string; scope: string; evidence: string; summary?: string; deliverableRef?: number | number[];
+  files?: { name: string; data: Buffer }[];
   review: Obj[]; missing: string[];
 };
 /** Model-authored reply text in a task session that complete() may cite as the deliverable body. */
@@ -1183,6 +1184,7 @@ export class Employee {
                   return { ok: false, code: "outline_review_retry_expired", changedSteps: outlineSteps(t), next: "复核草稿已失效；按当前任务和计划，用 evidence 和完整 outlineReview 重新交付，不传 outlineReviewRetry。" };
                 }
                 assert(a.text === undefined && a.summary === undefined && a.deliverableRef === undefined &&
+                  a.files === undefined &&
                   Array.isArray(a.outlineReview) && a.outlineReview.length,
                 "复核补交只传 outlineReviewRetry 和缺项 outlineReview；如需修改原交付内容，请完整提交。");
               } else if (run) {
@@ -1193,6 +1195,7 @@ export class Employee {
               const evidence = draft?.evidence ?? content;
               const summary = draft ? draft.summary : a.summary;
               const deliverableRef = draft ? draft.deliverableRef : a.deliverableRef;
+              const files = draft ? draft.files : (stepFiles.length ? stepFiles : undefined);
               const pending = planUnresolved(t.plan);
               const sessionRows = t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [];
               const stepOutputs = (t.stepOutputs || []).filter((output: Obj) => output.session === t.workSession);
@@ -1277,7 +1280,7 @@ export class Employee {
               if (unchecked.length) {
                 // A draft lives only in this run; no rejected delivery is saved or published as a result.
                 const token = run && review ? id("r") : undefined;
-                if (run && token && review) run.outlineDraft = { token, scope: scope(), evidence, summary, deliverableRef, review, missing: unchecked };
+                if (run && token && review) run.outlineDraft = { token, scope: scope(), evidence, summary, deliverableRef, files, review, missing: unchecked };
                 return {
                   ok: false, code: "outline_review_incomplete", changedSteps: unchecked,
                   ...(token ? { outlineReviewRetry: token } : {}),
@@ -1338,6 +1341,18 @@ export class Employee {
               }
               t.memorySuggestions = suggestions;
               pruneMemories(s.memories as MemoryRecord[], now);
+              if (files?.length) {
+                const refs: FileRef[] = [];
+                for (const file of files) {
+                  const blobId = await this.store.blob("application/octet-stream", file.data);
+                  await this.store.grantBlob(blobId, t.workSession || caller);
+                  if (s.chatSession) await this.store.grantBlob(blobId, s.chatSession);
+                  refs.push({ name: file.name, mime: "application/octet-stream", size: file.data.length, blobId });
+                }
+                t.deliverableFiles = refs;
+              } else {
+                delete t.deliverableFiles;
+              }
               stop = true;
               return {
                 ok: true,
@@ -2556,7 +2571,14 @@ export class Employee {
         const chars = [...String(full)];
         const body = (delivered && chars.length > 400 ? chars.slice(0, 400).join("") + "…" : String(full)) + (delivered && task.deliverable ? "\n\n完整交付物见任务详情。" : "");
         const quote = !task.group && task.chatSource?.session === state.chatSession && await this.store.message(state.chatSession!, task.chatSource.seq) ? await this.store.quote(state.chatSession!, task.chatSource.seq) : undefined;
-        const message: Message = { role: "assistant", text: "**" + heading + "**\n\n" + body, quote, delivery: true, tasks: [{ id: task.id, title: task.text.slice(0, 80), status: task.status }] };
+        const message: Message = {
+          role: "assistant",
+          text: "**" + heading + "**\n\n" + body,
+          quote,
+          delivery: true,
+          ...(delivered && task.deliverableFiles?.length ? { files: task.deliverableFiles } : {}),
+          tasks: [{ id: task.id, title: task.text.slice(0, 80), status: task.status }],
+        };
         // In a group, a result or a question goes back to whoever asked (see Groups.post).
         await this.toChat(state.chatSession, task.group, message, true);
       }

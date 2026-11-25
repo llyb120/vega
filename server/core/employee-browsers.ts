@@ -125,8 +125,9 @@ export class EmployeeBrowsers {
         assert(!this.closed && !current.stopping, "Browser manager stopped");
         try {
           current.cloud = await this.isolation?.(id);
-          current.profile = current.cloud ? join((await current.cloud.identity()).home, "browsers", id) : this.profile(id);
-          if (current.cloud) current.chrome.workspaceFile = (cwd, file) => workspaceFile(cwd, file, current.cloud!.fs);
+          const ident = current.cloud ? await current.cloud.identity() : undefined;
+          current.profile = ident ? join(ident.home, "browsers", id) : this.profile(id);
+          if (current.cloud) current.chrome.workspaceFile = (cwd, file) => workspaceFile(cwd, file, current.cloud!.fs, [ident!.cwd, ident!.home, ident!.tmp]);
           await current.chrome.bridge.start();
           await current.browser.start(process.env.VEGA_DB || "vega.db", {
             profile: current.profile, port: current.chrome.bridge.port, token: current.chrome.bridge.token, proxy: await this.networkProxy?.(id),

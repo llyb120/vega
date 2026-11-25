@@ -173,7 +173,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
           step: int("当前完整计划中的步骤序号，从 1 开始，不是数组下标或消息编号", { minimum: 1, maximum: 50 }),
           text: str("可选：产物的完整 Markdown 内容，不写进对话正文", { minLength: 1, maxLength: 64000 }),
           ref: int("可选：已写出的产物正文消息编号，或包含 textRef 的工具回执编号；与 text 二选一", { minimum: 1 }),
-          paths: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区内的产物文件路径", { minLength: 1, maxLength: 4096 }), description: "可选：本步骤生成的文件，系统读取并保存快照供用户下载；只接受当前执行端工作区内的普通文件，单个不超过 25MiB、合计不超过 64MiB。不要包含凭据。" },
+          paths: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区或云端个人目录内的产物文件绝对路径", { minLength: 1, maxLength: 4096 }), description: "可选：本步骤生成的文件（如 .zip、.xlsx、.pdf、构建包等），系统读取并保存快照供用户下载；接受当前执行端工作区或云端用户 home/tmp 内的普通文件，单个不超过 25MiB、合计不超过 64MiB。不要包含凭据。" },
         }, ["step"], `${STEP_OUTPUT_RULE} 明确填写 text、paths 或正文 ref；系统单独展示并允许导出。已交付的产物不重复发送，已有最终报告覆盖的内容除非明确要求单独导出，否则省略。每任务最多 50 条。草稿、未执行或未验证项须如实说明。`) },
       ["message"]));
     out.push(tool("task_reschedule",
@@ -202,7 +202,8 @@ export function employeeTools(ctx: ToolContext): Tool[] {
           }, ["status", "evidence"]) },
           outlineReviewRetry: str("仅补交缺项时复制最近一次 outline_review_incomplete 的同名字段；只传此字段及缺项 outlineReview，不传 evidence、summary 或 deliverableRefs", { minLength: 1, maxLength: 100 }),
           summary: str("交付摘要，1–400 字（务必控制在 150 字以内）；只写核心结论、重要限制或需用户处理事项，勿超 400 字、勿写小标题清单", { minLength: 1, maxLength: 400 }),
-          deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则选用尚未作为步骤产物交出的最新较长正文；仅无单独最终正文时传 []" } }));
+          deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则选用尚未作为步骤产物交出的最新较长正文；仅无单独最终正文时传 []" },
+          files: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区或云端个人目录内的交付文件绝对路径", { minLength: 1, maxLength: 4096 }), description: "可选：最终交付给用户下载的文件列表（如 .zip、.xlsx、.pdf、.docx 等非文本报告产物），系统保存快照并在聊天和任务详情提供下载；接受工作区或云端个人目录内普通文件，单个 ≤25MiB、合计 ≤64MiB，勿含凭据" } }));
     }
   }
   if (!ctx.member) {
@@ -319,7 +320,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
     case "task_relay_computer": return employee({ action: "relay", scene: "computer", text: a.handoff });
     case "task_complete": {
       if (a.evidence === undefined && a.outlineReviewRetry === undefined) throw new ArgumentError("参数 缺少必填字段 evidence（仅补交复核缺项时可省略）");
-      return employee(defined({ action: "complete", text: a.evidence, summary: a.summary, deliverableRef: a.deliverableRefs, outlineReview: a.outlineReview, outlineReviewRetry: a.outlineReviewRetry }));
+      return employee(defined({ action: "complete", text: a.evidence, summary: a.summary, deliverableRef: a.deliverableRefs, outlineReview: a.outlineReview, outlineReviewRetry: a.outlineReviewRetry, files: a.files }));
     }
     case "memory_search": return employee(defined({ action: "memory_search", query: a.query, status: a.status, memoryScene: a.memoryScene }));
     case "memory_propose": return employee(defined({ action: "memory_propose", claim: a.claim, memoryKind: a.memoryKind, scope: a.scope, tags: a.tags, memoryScene: a.memoryScene, evidence: a.evidence, id: a.memoryId, pinned: a.pinned }));

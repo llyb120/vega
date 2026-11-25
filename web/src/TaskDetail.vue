@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import MessageText from "./MessageText.vue";
 import StepOutput from "./StepOutput.vue";
+import FileCard from "./FileCard.vue";
 import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
 import { exportResult, exportTitleOf } from "./export-result.js";
@@ -129,6 +130,13 @@ async function run(action) {
       <StepOutput v-for="{ key, output } in mergedStepOutputs" :key="key" :output="output" :archive-base="archiveBase" />
     </section>
 
+    <section v-if="task.deliverableFiles?.length" class="detail-section deliverable-artifacts">
+      <h3>交付产物</h3>
+      <div class="deliverable-cards">
+        <FileCard v-for="file in task.deliverableFiles || []" :key="file.blobId" :file="file" />
+      </div>
+    </section>
+
     <section v-if="task.result" class="detail-section">
       <div class="result-head">
         <h3>{{ task.status === 'failed' ? '失败原因' : '结果' }}</h3>
@@ -165,7 +173,7 @@ async function run(action) {
       <p v-if="task.recovery?.attempts"><Icon name="refresh" :size="14" />自动恢复 {{ task.recovery.attempts }} 次 · {{ task.recovery.reason }}</p>
       <p v-if="task.checkpoint"><Icon name="clock" :size="14" />恢复点：{{ task.checkpoint }}</p>
     </section>
-    <p v-if="!task.result && !task.plan?.length && !task.checkpoint && !task.progress?.length && !['approval', 'waiting'].includes(task.status)" class="detail-note">任务开始后，进度会显示在这里。</p>
+    <p v-if="!task.result && !task.plan?.length && !task.checkpoint && !task.progress?.length && !task.deliverableFiles?.length && !['approval', 'waiting'].includes(task.status)" class="detail-note">任务开始后，进度会显示在这里。</p>
 
     <footer class="detail-foot">
       <button v-if="task.workSession" type="button" @click="emit('inspect', task.workSession)"><Icon name="code" :size="15" />执行记录</button>
@@ -218,6 +226,8 @@ async function run(action) {
 .result-export-menu { display: flex; flex-wrap: wrap; gap: 4px; }
 .result-export-menu button { min-height: 28px; padding: 0 10px; border-color: var(--border); background: var(--surface); font-size: 12px; }
 .export-error { margin: 0; color: var(--danger); font-size: 12px; }
+.deliverable-cards { display: flex; flex-direction: column; gap: 6px; }
+.deliverable-cards :deep(.file-card) { margin-top: 0; }
 .result-box { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); overflow-x: auto; }
 .result-box.failed { border-color: var(--danger-border); background: var(--danger-soft); }
 .result-box :deep(.markdown-table) { max-width: 100%; }
