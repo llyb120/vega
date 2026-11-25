@@ -12,21 +12,20 @@ const desktopAutomation = new RegExp([
   String.raw`-(?:enc|encodedcommand|encodedarguments)\b`,
 ].join("|"), "i");
 
-// This is a call-shape check, not a shell sandbox. Complex scripts should start with a literal cd.
+// Extracts an explicit leading target directory for workspace locking and rejects relative/wrong-platform
+// directory changes (`cd` / `Set-Location` / `git -C`). Pathless, piped, and compound commands return null
+// and fall back to device-scoped locking.
 export function explicitShellDirectory(command: string, windows: boolean): string | null {
-  const script = command.trim().replace(/^set -[eu]+[ \t]*(?:;|\r?\n)\s*/, "");
+  const script = command.trim().replace(/^set(?:[ \t]+(?:-[a-z]+(?:[ \t]+[a-z]+)?))+[ \t]*(?:&&|;|\r?\n)\s*/, "");
   const absolute = windows ? /^(?:[a-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/i : /^\//;
-  const error = "命令必须显式指定执行端的绝对路径；复杂命令先 cd 到绝对路径再执行。本步未执行";
-  const prefix = /^(?:cd\s+(?:--\s+)?|Set-Location\s+(?:-LiteralPath\s+|-Path\s+)?|git\s+-C\s+)/i.exec(script);
+  const error = "切换目录（cd / Set-Location / git -C）必须使用执行端的绝对路径，不依赖隐式当前目录。本步未执行";
+  const prefix = /^(?:cd[ \t]+(?:-[LP][ \t]+)?(?:--[ \t]+)?|Set-Location[ \t]+(?:-LiteralPath[ \t]+|-Path[ \t]+)?|git[ \t]+-C[ \t]+)/i.exec(script);
   if (prefix) {
     const arg = /^(?:'([^']+)'|"([^"$`]+)"|([^\s;&|"'$`]+))(?=$|[\s;&|])/.exec(script.slice(prefix[0].length));
     const path = arg && (arg[1] || arg[2] || arg[3]);
     assert(path && absolute.test(path), error);
     return path;
   }
-  // A path in one statement doesn't scope the next one: complex scripts need a leading cd.
-  assert(!/[;|&\r\n]/.test(script) && (script.match(/(?:^|\s)(?:'[^']*'|"[^"]*"|[^\s]+)/g) || [])
-    .some(word => absolute.test(word.trim().replace(/^["']/, ""))), error);
   return null;
 }
 

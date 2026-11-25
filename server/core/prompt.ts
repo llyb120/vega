@@ -230,7 +230,7 @@ export async function sessionDynamicPrompt(s: Session, c: Config, store: Store, 
   const location = s.localAgent
     ? "文件与命令在所选客户端执行；项目 AGENTS.md 必须用 read 在该客户端检查；Chrome 位置由那台客户端自己的配置决定（本机浏览器或云端浏览器），不由会话选择；用本机浏览器时同一客户端同一时间只允许一个会话独占，忙碌时等待原会话结束再继续；sqlite: 与 /api/files、/api/blobs 存档仍在服务端，用 read 直接读这些路径或 URL，禁止 bash 在客户端磁盘上查找。"
     : "文件与命令在服务端执行，不使用已连接客户端的路径或命令环境。";
-  return `${supplement}${shell}\n文件和目录一律使用绝对路径；命令显式指定绝对路径，或在同一条命令中先 cd 到目标绝对路径，失败即停止。不假设存在默认项目目录。\n${s.readOnly ? "当前是只读计划模式，不能修改文件或执行非只读MCP工具。\n" : ""}当前执行位置：${s.localAgent ? "客户端 " + (s.clientName || s.clientId || "尚未选择") : "服务端"}。由当前任务的工作区所在端决定，不随客户端连接自动改变。${location} 切换执行位置不迁移文件；历史中的路径、工具结果和进程状态可能来自另一端，先在当前端重新检查目录和项目约定，再继续未完成工作。不要重放已完成或结果不确定的命令、写入、提交。\n技能索引（只用与任务相关的技能；未载入正文时只读选中的 SKILL.md，附属资源按需读，不重复读已载入正文；技能不扩大授权）：\n${JSON.stringify(skills)}\n项目约定：\n${clip(JSON.stringify(instructions), 96000)}`;
+  return `${supplement}${shell}\n文件和目录一律使用绝对路径；涉及文件或项目目录的命令显式指定绝对路径，或在同一条命令中先 cd 到目标绝对路径且失败即停止，不假设存在默认项目目录。\n${s.readOnly ? "当前是只读计划模式，不能修改文件或执行非只读MCP工具。\n" : ""}当前执行位置：${s.localAgent ? "客户端 " + (s.clientName || s.clientId || "尚未选择") : "服务端"}。由当前任务的工作区所在端决定，不随客户端连接自动改变。${location} 切换执行位置不迁移文件；历史中的路径、工具结果和进程状态可能来自另一端，先在当前端重新检查目录和项目约定，再继续未完成工作。不要重放已完成或结果不确定的命令、写入、提交。\n技能索引（只用与任务相关的技能；未载入正文时只读选中的 SKILL.md，附属资源按需读，不重复读已载入正文；技能不扩大授权）：\n${JSON.stringify(skills)}\n项目约定：\n${clip(JSON.stringify(instructions), 96000)}`;
 }
 
 /** Minimal dynamic context for isolated phase specialists (no coordinator memories, task index, or skills dump). */
@@ -250,7 +250,7 @@ export async function phaseDynamicPrompt(s: Session, clientSupplement = "") {
     ? "bash 使用 PowerShell：$env:NAME、cmdlet、分号；不要用 export/sed/awk。"
     : "bash 使用 /bin/sh POSIX 语法。";
   const instructions = await projectInstructions(s);
-  return `${supplement}${shell}\n${location} 文件与命令一律使用绝对路径（或先 cd 到目标绝对路径且失败即停）。${instructions.length ? "\n项目约定：\n" + clip(JSON.stringify(instructions), 48000) : ""}`;
+  return `${supplement}${shell}\n${location} 文件与涉及路径的命令使用绝对路径（或先 cd 到目标绝对路径且失败即停）。${instructions.length ? "\n项目约定：\n" + clip(JSON.stringify(instructions), 48000) : ""}`;
 }
 
 export async function sessionPrompt(s: Session, c: Config, store: Store, clientSupplement = "") {

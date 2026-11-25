@@ -1,5 +1,7 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { shell, Tools } from "../server/core/tools";
 import { assertShellCommand, explicitShellDirectory, SHELL_POLICY_ERROR } from "../server/core/shell-policy";
@@ -11,11 +13,23 @@ import commandCases from "../local/testdata/shell-policy.json";
 
 test("model commands explicitly address a checkout on the execution platform", () => {
   assert.equal(explicitShellDirectory("set -eu\ncd '/repo a' && git status", false), "/repo a");
+  assert.equal(explicitShellDirectory("set -euo pipefail\ncd /repo && npm test", false), "/repo");
   assert.equal(explicitShellDirectory('git -C "D:/repo a" status', true), 'D:/repo a');
-  assert.equal(explicitShellDirectory('cat /repo/file', false), null);
-  for (const command of ['git status', 'cd ../repo; git status', 'cat /repo/file; git status'])
-    assert.throws(() => explicitShellDirectory(command, false), /绝对路径/);
-  assert.throws(() => explicitShellDirectory('cd D:repo; git status', true), /绝对路径/);
+  assert.equal(explicitShellDirectory("Set-Location -LiteralPath 'C:\\repo a'; npm test", true), 'C:\\repo a');
+  for (const command of [
+    'node --version',
+    'pwd',
+    'which node; node --version',
+    'node --version; echo "---"; ls -la /workspace/home',
+    'cat /repo/file',
+    'ls -la /repo | head -n 10',
+    'mkdir -p /repo/a && ls /repo/a',
+  ])
+    assert.equal(explicitShellDirectory(command, false), null, command);
+  for (const command of ['cd ../repo; git status', 'cd subdir && ls', 'git -C ../repo status', 'cd C:\\repo && ls'])
+    assert.throws(() => explicitShellDirectory(command, false), /绝对路径/, command);
+  for (const command of ['cd D:repo; git status', 'Set-Location .\\repo; git status', 'cd /repo && ls'])
+    assert.throws(() => explicitShellDirectory(command, true), /绝对路径/, command);
 });
 const cleanup: (() => any)[] = [];
 afterEach(async () => {
@@ -132,4 +146,20 @@ test("computer and coding scenes retain shell without allowing desktop automatio
   assert.match(await tools.rules(), /网页填框和回车用 browser_act/);
   session.scene = "coding";
   assert((await tools.definitions()).some((tool) => tool.name === "bash"));
+});
+test("bash executes pathless commands and runs leading cd fallbacks inside the shell", async (t) => {
+  const store = await Store.open(":memory:");
+  t.after(async () => await store.close());
+  const session = await store.newSession({ cwd: process.cwd(), scene: "coding" });
+  const tools = await Tools.create({ store, vault: new Vault(store), mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, new AbortController().signal, () => {});
+  const version = await tools.execute({ id: "node-ver", name: "bash", arguments: { command: "node --version" } }, {} as any);
+  assert.equal(version.error, false, JSON.stringify(version.value));
+  assert.match(version.value.output, /^v\d+\./);
+  const missing = join(tmpdir(), `vega-missing-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const command = process.platform === "win32"
+    ? `cd '${missing.replaceAll("'", "''")}' 2>$null; if (-not $?) { Write-Output fallback }`
+    : `cd '${missing.replaceAll("'", "'\\''")}' 2>/dev/null || echo fallback`;
+  const fallback = await tools.execute({ id: "cd-fallback", name: "bash", arguments: { command } }, {} as any);
+  assert.equal(fallback.error, false, JSON.stringify(fallback.value));
+  assert.match(fallback.value.output, /fallback/);
 });

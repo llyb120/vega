@@ -194,7 +194,7 @@ export class Tools {
     if (this.session.phaseRole) {
       if ([...names].some((n) => CHROME_TOOLS.has(n))) parts.push(CHROME_RULES);
       if (names.has("vault_get")) parts.push("[密码本] " + VAULT_USAGE);
-      if (names.has("workspace_probe")) parts.push("[工作区] workspace_probe 核对执行端平台和绝对路径是否为目录，不占写锁。命令使用绝对路径，或在同一条命令中先 cd 到绝对路径且失败即停止；切目录不会延续到下一次调用。");
+      if (names.has("workspace_probe")) parts.push("[工作区] workspace_probe 核对执行端平台和绝对路径是否为目录，不占写锁。涉及文件或项目目录的命令使用绝对路径，或在同一条命令中先 cd 到绝对路径且失败即停止；切目录不会延续到下一次调用。");
       if (names.has("mcp") && (this.session.employeeId || this.session.taskId)) {
         this.mcp = await this.engine.mcpFor(this.session, this.config);
         const servers = this.mcp.serviceNames();
@@ -227,7 +227,7 @@ export class Tools {
       else if (servers.length) parts.push("[MCP] 当前热心市民已配置外部 MCP，但电脑场景不提供 mcp。任务明确需要 MCP 时，先完成当前浏览器步骤，再回主任务的轻量或编码场景；不在壳命令里绕过场景限制。");
     }
     if (this.yieldBackground && names.has("bash")) parts.push("[后台结果] bash 默认前台同步等待 60s（常规命令直接返回，detach=true 立即转长驻后台）。超时转后台的命令若无其他独立工作，直接结束本拍即可由运行时按事件自动等待并交付（无其他任务抢槽时原地等待、有竞争才让出名额），不要循环 bash_poll；卡死可用 bash_poll(kill=true) 终止。无运行时句柄的外部等待用 task_wait，禁止在 bash 里用 sleep 轮询。");
-    if (names.has("workspace_probe")) parts.push("[工作区] workspace_probe 核对执行端平台和绝对路径是否为目录，不占写锁。命令使用绝对路径，或在同一条命令中先 cd 到绝对路径且失败即停止；切目录不会延续到下一次调用。");
+    if (names.has("workspace_probe")) parts.push("[工作区] workspace_probe 核对执行端平台和绝对路径是否为目录，不占写锁。涉及文件或项目目录的命令使用绝对路径，或在同一条命令中先 cd 到绝对路径且失败即停止；切目录不会延续到下一次调用。");
     if (ctx.kind !== "chat" && !this.session.readOnly && !this.session.agentChild && this.session.scene === "lightweight" && !sceneModels(this.config, "computer").length)
       parts.push("[电脑场景未配置] 设置里没有为 computer 场景选择模型，所以本会话无法进入电脑场景，不能派发浏览器阶段。需要网页/浏览器操作时如实说明“computer 场景未配置模型（需选择支持图片的模型，可与其他场景共用同一个）”，请用户到设置里补上（任务中用 task_ask_user）；这不是浏览器扩展连接问题，不要让用户重连扩展，也不要用 bash 或脚本绕行。");
     if (names.has("code_agent") || names.has("browser_agent")) {
@@ -776,10 +776,9 @@ export class Tools {
     }
     if (call.name === "bash") {
       const agent = this.agent();
-      const cwd = shellDirectory ?? this.session.cwd;
       const outcome = agent
-        ? await localShell(this.engine.localAgents, agent, cwd, a, this.signal, this.session.id, this.emit)
-        : await shell(cwd, a, this.signal, this.emit, this.cloud, await this.sshEnvironment(String(a.command)), this.session.id);
+        ? await localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal, this.session.id, this.emit)
+        : await shell(this.session.cwd, a, this.signal, this.emit, this.cloud, await this.sshEnvironment(String(a.command)), this.session.id);
       if (outcome.value?.running) {
         const redact = this.engine.redactors.get(this.session.id);
         if (redact) redactBashJob(this.session.id, outcome.value.jobId, text => redact.text(text));
