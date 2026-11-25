@@ -44,7 +44,7 @@ test("flattenChainTree, chainAncestors and groupTasksByChain handle linear, bran
   assert.equal(childOfMissing?.depth, 1);
 });
 
-test("group topics include the entire task chain and expose chain metadata", async () => {
+test("groups route single-employee #taskRefs directly without narrator and aggregate chain messages in topicRows", async () => {
   const store = await Store.open(":memory:");
   const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
@@ -77,6 +77,22 @@ test("group topics include the entire task chain and expose chain metadata", asy
     assert.equal(detail.chainId, created2.value.chainId);
     assert.equal(detail.parentId, created1.value.id);
     assert.equal(detail.chainSeq, 2);
+
+    let routedTo = "";
+    engine.providers.chat = async (_model, _sys, msgs) => {
+      routedTo = msgs.findLast((m) => m.role === "user")?.text || "";
+      return { role: "assistant", text: "收到引用" };
+    };
+    const sent = await engine.groups.send(owner, group.id, {
+      text: "请帮我改一下这个交付",
+      taskRefs: [{ id: created1.value.id, intent: "follow_up" }, { id: "non-existent" }],
+    });
+    for (let i = 0; i < 40 && !routedTo; i++) await new Promise((r) => setTimeout(r, 15));
+    const saved = await store.message(liveGroup.session, sent.seq!);
+    assert.equal(saved?.taskRefs?.length, 1);
+    assert.equal(saved?.taskRefs?.[0].id, created1.value.id);
+    assert.equal(saved?.taskRefs?.[0].intent, "follow_up");
+    assert.match(routedTo, /本次 # 显式引用任务/);
   } finally {
     await engine.close();
     await store.close();

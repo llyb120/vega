@@ -11,7 +11,7 @@ import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
 const props = defineProps({ task: Object, chainTasks: { type: Array, default: () => [] }, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function, employeeId: String, clients: Array, handoff: Function });
-const emit = defineEmits(["inspect", "back", "select-task"]);
+const emit = defineEmits(["inspect", "back", "select-task", "quote-task"]);
 const busy = ref(false), answer = ref(""), exportOpen = ref(false), exportError = ref(""), settleSelected = ref([]), settling = ref(false), clientId = ref("");
 const suggestions = computed(() => props.task.memorySuggestions || []);
 watch(() => props.task.id, () => { answer.value = ""; exportOpen.value = false; exportError.value = ""; clientId.value = ""; });
@@ -188,6 +188,9 @@ async function run(action) {
       <template v-if="!readonly">
         <button v-if="!ended" type="button" :disabled="busy" @click="run('stop')"><Icon name="stop" :size="14" />停止任务</button>
         <button v-if="resumable" type="button" class="primary" :disabled="busy" @click="run('resume')"><Icon name="play" :size="14" />继续任务</button>
+        <button v-if="task.status === 'done'" type="button" class="primary" :disabled="busy" @click="emit('quote-task', { task, intent: 'follow_up' })"><Icon name="reply" :size="14" />基于此交付继续</button>
+        <button v-if="task.status === 'cancelled' || resumable" type="button" :class="{ primary: task.status === 'cancelled' }" :disabled="busy" @click="emit('quote-task', { task, intent: 'retry' })"><Icon name="refresh" :size="14" />分支重做</button>
+        <button v-if="!ended" type="button" :disabled="busy" @click="emit('quote-task', { task })"><Icon name="reply" :size="14" />引用</button>
         <button v-if="ended && task.status !== 'sealed'" type="button" :disabled="busy" @click="run('redispatch')"><Icon name="refresh" :size="14" />重新派发</button>
         <button v-if="task.status !== 'sealed' && task.status !== 'running'" type="button" :disabled="busy" title="封存后禁止恢复、续做或重新派发" @click="run('seal')"><Icon name="lock" :size="14" />封存</button>
         <button v-if="ended" type="button" class="danger-text" :disabled="busy" @click="run('remove')"><Icon name="trash" :size="14" />删除记录</button>

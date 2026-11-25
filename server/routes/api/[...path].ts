@@ -38,6 +38,7 @@ import { assert, filterAsync, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
 import type { Session } from "../../core/store";
+import type { ChatTaskRef } from "../../../shared/chat-quote";
 import presets from "../../../shared/provider-presets.json";
 async function inputMessage(
   a: Obj,
@@ -377,11 +378,38 @@ export default defineEventHandler(async (event) => {
             .filter((m) => !m.delivery && !m.progress && !m.stepOutput).at(-1);
           if (last?.notice && last?.newTask && (!last.actorId || last.actorId === user.id)) newTask = true;
         }
+        let taskRefs: ChatTaskRef[] | undefined;
+        if (Array.isArray(a.taskRefs) && a.taskRefs.length) {
+          const tasks = (await employee.state({ runs: false })).tasks;
+          const byId = new Map(tasks.map((item) => [item.id, item]));
+          const seen = new Set<string>();
+          const hydrated: ChatTaskRef[] = [];
+          for (const item of a.taskRefs) {
+            const refId = typeof item === "string" ? item : typeof item?.id === "string" ? item.id : "";
+            if (!refId || seen.has(refId)) continue;
+            const task = byId.get(refId);
+            if (!task) continue;
+            seen.add(refId);
+            const intent = item?.intent && ["follow_up", "retry", "fork"].includes(item.intent) ? item.intent : undefined;
+            hydrated.push({
+              id: task.id,
+              title: String(task.text || "").replace(/\s+/g, " ").trim().slice(0, 80),
+              status: task.status,
+              ...(task.chainId ? { chainId: task.chainId } : {}),
+              ...(typeof task.chainSeq === "number" ? { chainSeq: task.chainSeq } : {}),
+              employeeId: employee.employeeId,
+              ...(intent ? { intent } : {}),
+            });
+            if (hydrated.length >= 5) break;
+          }
+          if (hydrated.length) taskRefs = hydrated;
+        }
         const message = {
           ...await inputMessage(a, store, session.id), actorId: user.id,
           ...(newTask ? { newTask: true } : {}),
+          ...(taskRefs ? { taskRefs } : {}),
           clientMessageId: a.clientMessageId,
-          clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.files || [], a.quoteSeq ?? null])).digest("hex") : undefined,
+          clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.files || [], a.quoteSeq ?? null, taskRefs?.map((r) => [r.id, r.intent || ""]) || []])).digest("hex") : undefined,
         };
         check(!employee.deleting && !employee.resetting, 409, "正在删除或重置这位热心市民，请稍候");
         await engine.submitChat(session.id, message);
@@ -936,7 +964,7 @@ async function groupRoute(path: string[], method: string, a: Obj, user: { id: st
     }
     if (method === "POST") {
       const input = await inputMessage({ text: typeof a.text === "string" ? a.text : "", images: a.images, files: a.files, quoteSeq: a.quoteSeq }, store, group.session);
-      return await groups.send(user, id, { ...input, clientMessageId: a.clientMessageId, topicTaskId: a.topicTaskId });
+      return await groups.send(user, id, { ...input, clientMessageId: a.clientMessageId, topicTaskId: a.topicTaskId, taskRefs: a.taskRefs });
     }
   }
   if (path[2] === "users") {

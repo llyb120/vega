@@ -7,7 +7,7 @@ import { Files } from "./files";
 import type { FileRef } from "./attachments";
 import type { PreviewRef } from "./previews";
 import { assert, id, type Obj } from "./util";
-import { quoteOf, type ChatAuthor, type ChatQuote } from "../../shared/chat-quote";
+import { quoteOf, type ChatAuthor, type ChatQuote, type ChatTaskRef } from "../../shared/chat-quote";
 import type { RequestUsage, UsageCounts, UsageScope } from "./request-usage";
 
 type UsageRow = UsageScope & UsageCounts & { at?: number; model?: string };
@@ -40,6 +40,7 @@ export type Message = {
   chatClientId?: string;
   taskInput?: { answer?: string; handoff?: string; handoffRevision?: number; quoteSeq?: number };
   quote?: ChatQuote;
+  taskRefs?: ChatTaskRef[];
   tasks?: { id: string; title: string; status: string }[];
   delivery?: boolean;
   /** Group chat (groups.ts): who said it, in the group's own session. */

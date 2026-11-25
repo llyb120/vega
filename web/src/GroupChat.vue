@@ -13,6 +13,7 @@ import { CHAT_PAGE_SIZE, loadStepOutput, mergeMessages } from "./chat-history.js
 import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments, useAttachmentInput } from "./attachments.js";
 import ComposerQuote from "./ComposerQuote.vue";
+import ComposerTaskRefs from "./ComposerTaskRefs.vue";
 import { markSeen, seenSeq } from "./seen.js";
 import PressMention from "./PressMention.vue";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
@@ -39,12 +40,35 @@ function chooseView(mode) {
   if (viewMode.value !== mode) viewMode.value = mode;
   else if (switching.value && !historyLoading.value) void run(load);
 }
-const emptyComposer = () => reactive({ text: "", attachments: [], quote: undefined });
+const emptyComposer = () => reactive({ text: "", attachments: [], quote: undefined, taskRefs: [] });
 const mainComposer = emptyComposer(), topicDrafts = new Map();
 const composer = computed(() => activeTopic.value ? topicDrafts.get(activeTopic.value.taskId) : mainComposer);
 const draft = computed({ get: () => composer.value.text, set: (text) => { composer.value.text = text; } });
 const files = computed(() => composer.value.attachments);
 const quoted = computed({ get: () => composer.value.quote, set: (quote) => { composer.value.quote = quote; } });
+const taskRefs = computed({ get: () => composer.value.taskRefs || [], set: (items) => { composer.value.taskRefs = items; } });
+const groupTasks = computed(() => {
+  const names = new Map((group.value?.employees || []).map((e) => [e.id, e.name]));
+  return (workMembers.value || []).flatMap((member) =>
+    (member.tasks || []).map((task) => ({ ...task, employeeId: member.id, employeeName: member.name || names.get(member.id) || "" })),
+  );
+});
+function addTaskRef(task, intent) {
+  if (!task?.id) return;
+  const list = [...taskRefs.value.filter((item) => item.id !== task.id), { id: task.id, title: task.text || task.title || task.id, status: task.status, chainId: task.chainId, chainSeq: task.chainSeq, ...(intent ? { intent } : {}) }];
+  taskRefs.value = list.slice(-5);
+}
+function removeTaskRef(id) {
+  taskRefs.value = taskRefs.value.filter((item) => item.id !== id);
+}
+function quoteTask({ task, intent, memberId }) {
+  addTaskRef({ ...task, employeeId: memberId || task.employeeId }, intent);
+  void nextTick(() => input.value?.focus());
+}
+function openRefTask(taskId) {
+  const found = groupTasks.value.find((t) => t.id === taskId);
+  if (found) selectTopic({ employeeId: found.employeeId, taskId: found.id, title: found.text });
+}
 const directory = ref([]), form = ref({ name: "", bulletin: "", users: [], employees: [] }), edit = ref({ name: "", bulletin: "" }), invite = ref(""), bring = ref("");
 const readonly = computed(() => props.user?.role === "viewer");
 const members = computed(() => groupMembers(group.value, props.user?.id));
@@ -260,17 +284,21 @@ const { uploading, upload, paste } = useAttachmentInput(async (picked) => {
 });
 async function send() {
   const target = composer.value, id = props.groupId, topicTaskId = activeTopic.value?.taskId;
-  const original = target.text, text = original.trim(), items = [...target.attachments], quote = target.quote;
+  const original = target.text, text = original.trim(), items = [...target.attachments], quote = target.quote, refs = [...(target.taskRefs || [])];
   if ((!text && !items.length) || readonly.value || sending.value || uploading.value || switching.value) return;
   sending.value = true;
   await run(async () => {
     // getRandomValues also works over LAN HTTP, where randomUUID is unavailable.
     const clientMessageId = [...crypto.getRandomValues(new Uint8Array(16))].map((n) => n.toString(16).padStart(2, "0")).join("");
-    await props.api(`/groups/${id}/messages`, "POST", { text, ...attachmentPayload(items), quoteSeq: quote?.seq, topicTaskId, clientMessageId });
+    await props.api(`/groups/${id}/messages`, "POST", {
+      text, ...attachmentPayload(items), quoteSeq: quote?.seq, topicTaskId, clientMessageId,
+      ...(refs.length ? { taskRefs: refs.map(({ id, intent }) => ({ id, ...(intent ? { intent } : {}) })) } : {}),
+    });
     if (props.groupId !== id) return;
     if (target.text === original) target.text = "";
     target.attachments = target.attachments.filter((file) => !items.includes(file));
     if (target.quote === quote) target.quote = undefined;
+    if (refs.length) target.taskRefs = target.taskRefs.filter((item) => !refs.includes(item));
     if (!switching.value && composer.value === target) await load(true);
   });
   sending.value = false;
@@ -336,7 +364,7 @@ function openTask(message, taskId) {
 }
 // 工作面板: the group's tasks by member, reloaded with the group (task status changes bump the revision too).
 async function loadWork() {
-  if (!work.value || !props.groupId) return;
+  if (!props.groupId) return;
   const id = props.groupId;
   workLoading.value = true;
   try { const result = await props.api(`/groups/${id}/tasks?stepSummaries=1`); if (props.groupId === id) workMembers.value = result.members; }
@@ -350,12 +378,12 @@ watch([() => props.groupId, historyKey], ([id], [previousId]) => {
     historyRequest++; historyLoading.value = false; history.value = mainHistory = topicHistory = null;
     readSeq = 0; settled = false; baseSeq = 0; newFrom.value = seenSeq(props.user?.id, id); markGone.value = false;
     group.value = null; panel.value = false; work.value = roomy(); workMembers.value = []; topicDrafts.clear(); showTask(topic.value);
-    mainComposer.text = ""; mainComposer.attachments = []; mainComposer.quote = undefined;
+    mainComposer.text = ""; mainComposer.attachments = []; mainComposer.quote = undefined; mainComposer.taskRefs = [];
   }
   if (id) void run(load);
 });
 watch(work, (open) => { if (!open) exitTask(); });
-watch([work, () => props.groupId], () => { if (work.value) void run(loadWork); }, { immediate: true });
+watch([work, () => props.groupId], () => { if (props.groupId) void run(loadWork); }, { immediate: true });
 watch(() => props.revision, () => { void run(load); void run(loadWork); });
 watch(panel, (open) => { if (open && !directory.value.length) void loadDirectory(); });
 onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); });
@@ -412,18 +440,19 @@ onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); 
           </div>
           <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />只读账号只能查看群聊。</p>
           <form v-else class="chat-composer" @paste="paste" @submit.prevent="send">
+            <ComposerTaskRefs :refs="taskRefs" @open="openRefTask" @remove="removeTaskRef" />
             <ComposerQuote v-if="quoted" :quote="quoted" @jump="jumpTo" @remove="quoted = undefined" />
             <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon :name="isImage(file) ? 'image' : 'file'" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
             <div class="composer-row">
               <input ref="fileInput" type="file" hidden multiple @change="upload" />
               <button type="button" class="icon attach" aria-label="添加附件" title="附件（可粘贴图片）" :disabled="uploading" @click="fileInput.click()"><Icon name="paperclip" /></button>
-              <MentionTextarea ref="input" v-model="draft" class="composer-input" :members="members" rows="1" maxlength="20000" :placeholder="activeTopic ? '回复当前任务话题…' : '输入消息，可 @ 热心市民…'" @keydown="keydown" />
+              <MentionTextarea ref="input" v-model="draft" class="composer-input" :members="members" :tasks="groupTasks" :auto-grow="true" rows="1" maxlength="20000" :placeholder="activeTopic ? '回复当前任务话题，输入 # 可引用任务…' : '输入消息，可 @ 热心市民或 # 引用任务…'" @keydown="keydown" @pick-task="addTaskRef" />
               <button class="primary send" :disabled="(!draft.trim() && !files.length) || sending || uploading || switching" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
             </div>
-            <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天 · /new 用新任务执行' : '回复消息或 @ 对应的热心市民即可请对方回应 · /new 用新任务执行' }} · Enter 发送 · Shift + Enter 换行</p>
+            <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天 · # 引用任务 · /new 用新任务执行' : '回复消息、@ 热心市民或 # 引用任务 · /new 用新任务执行' }} · Enter 发送 · Shift + Enter 换行</p>
           </form>
         </section>
-        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @exit="exitTask" @title="topicTitle = $event" @open="emit('open-task', $event)" @inspect="emit('inspect', $event)" @changed="run(loadWork)" @close="work = false" />
+        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @exit="exitTask" @title="topicTitle = $event" @open="emit('open-task', $event)" @inspect="emit('inspect', $event)" @changed="run(loadWork)" @quote-task="quoteTask" @close="work = false" />
         <aside v-if="panel && group" class="group-panel" aria-label="群成员与公告">
           <section>
             <h3>群公告</h3>

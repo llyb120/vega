@@ -1,5 +1,14 @@
 export type ChatAuthor = { kind: "user" | "employee"; id: string; name: string };
 export type ChatQuote = { seq: number; role: string; text: string; author?: ChatAuthor; taskId?: string };
+export type ChatTaskRef = {
+  id: string;
+  title: string;
+  status?: string;
+  chainId?: string;
+  chainSeq?: number;
+  employeeId?: string;
+  intent?: "follow_up" | "retry" | "fork";
+};
 
 type QuoteSource = {
   seq?: number;

@@ -40,6 +40,51 @@ export function moveActive(count, current, step) {
   return count ? (((current + step) % count) + count) % count : -1;
 }
 
+/** The "#query" being typed right before the caret, or null. "#" right after ASCII word/URL chars does not count. */
+export function taskHashQuery(text, caret) {
+  const before = String(text).slice(0, caret);
+  const hash = before.lastIndexOf("#");
+  if (hash < 0) return null;
+  if (hash > 0 && /[A-Za-z0-9_/:&.=+-]/.test(before[hash - 1])) return null;
+  const query = before.slice(hash + 1);
+  if (/[\n#]/.test(query) || [...query].length > 40) return null;
+  return { start: hash, query };
+}
+
+const ENDED_SET = new Set(["done", "failed", "cancelled", "stopped", "sealed"]);
+
+/** Tasks matching the #query: exact id/#seq first, then prefix/substring on text, id, branchLabel, employeeName. */
+export function filterTasks(tasks, query, limit = 8) {
+  const raw = key(query), seqQuery = raw.replace(/^#/, "");
+  const rank = (t) => {
+    const id = key(t.id);
+    const title = key(t.text);
+    const label = key(t.branchLabel);
+    const emp = key(t.employeeName);
+    const seq = t.chainSeq != null ? String(t.chainSeq) : "";
+    if (!raw) return ENDED_SET.has(t.status) ? 2 : 1;
+    if (id === raw || (seq && seq === seqQuery)) return 0;
+    if (id.startsWith(raw) || title.startsWith(raw) || label.startsWith(raw)) return 1;
+    if (title.includes(raw) || id.includes(raw) || label.includes(raw) || emp.includes(raw) || key(t.status).includes(raw)) return 2;
+    return -1;
+  };
+  return (tasks || [])
+    .map((t, index) => ({ t, r: rank(t), index }))
+    .filter((x) => x.r >= 0)
+    .sort((a, b) => a.r - b.r || ((b.t.finishedAt || b.t.createdAt || 0) - (a.t.finishedAt || a.t.createdAt || 0)) || a.index - b.index)
+    .slice(0, limit)
+    .map((x) => x.t);
+}
+
+/** Remove "[start, caret)" (e.g. a picked #query) from text and return the adjusted text and caret. */
+export function removeRange(text, start, caret) {
+  const value = String(text);
+  const before = value.slice(0, start);
+  const after = value.slice(caret);
+  const trimmedAfter = before.endsWith(" ") && after.startsWith(" ") ? after.slice(1) : after;
+  return { text: before + trimmedAfter, caret: start };
+}
+
 /** Caret position inside a textarea, in pixels relative to the textarea's top-left (mirror-div technique). */
 export function caretOffset(textarea, position) {
   const style = getComputedStyle(textarea), mirror = document.createElement("div");

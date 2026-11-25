@@ -285,19 +285,18 @@ test("the communication session lists recent frozen done tasks and guides parent
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
-test("quoted tasks focus the right task and guide follow_up creation for done tasks", async () => {
+test("explicit # taskRefs and quoted tasks focus the right task and guide follow_up creation for done tasks", async () => {
   const f = await fixture();
   try {
     const target = await delivered(f);
     const other = await f.add("另一条相似的任务");
-    const delivery = (await f.deliveries())[0];
-    const quote = await f.store.quote(f.chat.id, delivery.seq!);
     let calls = 0;
     f.engine.providers.chat = async (_model, _system, messages) => {
       const input = messages.findLast(m => m.role === "user")!.text!;
-      const focus = JSON.parse(input.split("[本次引用关联任务] ")[1].split("\n")[0]);
+      const focus = JSON.parse(input.split("[本次 # 显式引用任务] ")[1].split("\n")[0]);
       assert.equal(focus.id, target.id);
       assert.equal(focus.status, "done");
+      assert.equal(focus.intent, "follow_up");
       assert.match(input, /严禁调用 resume/);
       assert(!input.includes(other.id));
       if (calls++ === 0) return call("chain-next", "employee", { action: "add", kind: "todo", text: "改到 dev 分支", parentTaskId: target.id, relation: "follow_up" });
@@ -306,7 +305,7 @@ test("quoted tasks focus the right task and guide follow_up creation for done ta
     await f.engine.run(f.chat.id, {
       role: "user",
       text: "后端改到 dev，我写错了",
-      quote,
+      taskRefs: [{ id: target.id, title: target.text, status: "done", intent: "follow_up" }],
     });
     const state = await f.employee.state();
     assert.equal(f.employee.task(state, target.id).status, "done");

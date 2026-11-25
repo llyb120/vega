@@ -112,6 +112,13 @@ async function runExport(format) {
         <button v-if="rememberable && !mine && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
       </div>
       <button v-if="message.quote" type="button" class="chat-quote" :aria-label="'跳转到 ' + quoteName + ' 的消息：' + message.quote.text" @click="emit('jump', message.quote.seq)"><Icon name="reply" :size="12" /><strong>{{ quoteName }}</strong><span>{{ message.quote.text }}</span></button>
+      <div v-if="message.taskRefs?.length" class="chat-task-refs">
+        <button v-for="ref in message.taskRefs" :key="ref.id" type="button" class="chat-task-ref" @click="emit('task', ref.id)">
+          <Icon name="tasks" :size="12" />
+          <span v-if="ref.chainSeq" class="ref-seq">#{{ ref.chainSeq }}</span>
+          <span class="ref-title">{{ cleanTaskTitle(ref.title) || ref.id }}</span>
+        </button>
+      </div>
       <div class="chat-bubble" :class="{ failed: message.error, tinted: !!tint, 'has-topic': !!topicContext?.color && !message.error }" :style="bubbleStyle" :role="message.error ? 'alert' : undefined">
         <button v-if="showTopicHeader" type="button" class="chat-topic-header" :class="{ 'chat-task-link': promotedTopicTask }" :data-task-id="promotedTopicTask ? topicContext.id : undefined" :disabled="topicDeleted" :title="topicContext.title || topicTitle" :aria-label="(topicDeleted ? '任务已删除：' : '查看任务话题：') + topicTitle" @click="emit('task', topicContext.id)">
           <i class="topic-dot" :style="{ background: topicContext.color }" aria-hidden="true"></i>
@@ -238,6 +245,12 @@ async function runExport(format) {
 .chat-quote:hover:not(:disabled) { background: var(--surface-2); color: var(--text-2); }
 .chat-quote strong { max-width: 40%; }
 .chat-quote strong, .chat-quote span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chat-task-refs { display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%; }
+.user .chat-task-refs { justify-content: flex-end; }
+.chat-task-ref { display: inline-flex; align-items: center; gap: 4px; max-width: min(100%, 22rem); height: auto; min-height: 22px; padding: 2px 7px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text-2); font-size: 11.5px; font-weight: 400; }
+.chat-task-ref:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-text); }
+.chat-task-ref .ref-seq { flex: none; color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }
+.chat-task-ref .ref-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-chain-tag { flex: none; padding: 0 4px; border-radius: 4px; background: var(--surface-3); color: var(--text-2); font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .chat-bubble-links { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
 .chat-bubble-links:not(:first-child) { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--border); }

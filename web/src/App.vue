@@ -1122,7 +1122,7 @@ let employeeLoadVersion = 0;
 function prepareEmployee(id) {
   const entry = employees.value.find((item) => item.id === id);
   if (!entry) return;
-  employeeComposers.value[id] ||= { text: "", attachments: [] };
+  employeeComposers.value[id] ||= { text: "", attachments: [], taskRefs: [], focusTick: 0 };
   if (employee.value.id !== id)
     employee.value = { ...entry, canManage: false, tasks: undefined, memories: [], runs: [] };
 }
@@ -1240,6 +1240,19 @@ async function handoffTask(task, clientId) {
     if (selectedEmployee.value === owner) { await loadEmployee(); toast("任务已交到所选客户端；已停止的任务需要手动继续"); }
     return true;
   });
+}
+function quoteTaskInChat({ task, intent }) {
+  const id = selectedEmployee.value;
+  if (!id || !task?.id) return;
+  prepareEmployee(id);
+  const composer = employeeComposers.value[id];
+  const current = composer.taskRefs || [];
+  composer.taskRefs = [
+    ...current.filter((item) => item.id !== task.id),
+    { id: task.id, title: task.text || task.id, status: task.status, chainId: task.chainId, chainSeq: task.chainSeq, ...(intent ? { intent } : {}) },
+  ].slice(-5);
+  composer.focusTick = (composer.focusTick || 0) + 1;
+  employeeTab.value = "chat";
 }
 async function openEmployeeTask(id) {
   const owner = selectedEmployee.value, fromView = view.value, fromTab = employeeTab.value, fromFocus = employeeTaskFocus.value;
@@ -1594,6 +1607,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             @select="employeeTaskFocus = $event"
             @inspect="openEmployee($event)"
             @chat="employeeTab = 'chat'"
+            @quote-task="quoteTaskInChat"
           />
           <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" :search="memorySearch" /></div>
           <EmployeeCapabilities v-if="employeeTab === 'capabilities'" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />

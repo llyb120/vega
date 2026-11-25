@@ -5,6 +5,8 @@ import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { attachmentPayload, isImage, readAttachments, useAttachmentInput } from "./attachments.js";
 import ComposerQuote from "./ComposerQuote.vue";
+import ComposerTaskRefs from "./ComposerTaskRefs.vue";
+import MentionTextarea from "./MentionTextarea.vue";
 import { employeeChatMessages, continuesPrevious, chatCardVisibility } from "./conversation";
 import { createChatHistory, loadStepOutput } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
@@ -17,6 +19,16 @@ const artifactSession = ref("");
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
 const files = computed({ get: () => props.composer.attachments, set: (items) => props.composer.attachments = items });
 const quoted = computed({ get: () => props.composer.quote, set: (quote) => props.composer.quote = quote });
+const taskRefs = computed({ get: () => props.composer.taskRefs || [], set: (items) => { props.composer.taskRefs = items; } });
+watch(() => props.composer?.focusTick, (v) => { if (v) void nextTick(() => input.value?.focus()); });
+function addTaskRef(task) {
+  if (!task?.id) return;
+  const list = [...taskRefs.value.filter((item) => item.id !== task.id), { id: task.id, title: task.text || task.title || task.id, status: task.status, chainId: task.chainId, chainSeq: task.chainSeq }];
+  taskRefs.value = list.slice(-5);
+}
+function removeTaskRef(id) {
+  taskRefs.value = taskRefs.value.filter((item) => item.id !== id);
+}
 // shortcut: unsent messages live with this page; use durable storage if reload recovery is required.
 const outbox = computed(() => props.composer.outbox ||= []);
 watch([messages, running], ([rows, active]) => {
@@ -168,9 +180,10 @@ async function send() {
   error.value = "";
   // getRandomValues also works over LAN HTTP, where randomUUID is unavailable.
   const clientMessageId = [...crypto.getRandomValues(new Uint8Array(16))].map((n) => n.toString(16).padStart(2, "0")).join("");
-  outbox.value.push({ role: "user", text: draft.value, ...attachmentPayload(files.value), quote: quoted.value, clientMessageId, afterSeq: history.lastSeq(), at: Date.now(), sendStatus: "pending" });
+  const refs = [...taskRefs.value];
+  outbox.value.push({ role: "user", text: draft.value, ...attachmentPayload(files.value), quote: quoted.value, ...(refs.length ? { taskRefs: refs } : {}), clientMessageId, afterSeq: history.lastSeq(), at: Date.now(), sendStatus: "pending" });
   const message = outbox.value.at(-1);
-  draft.value = ""; files.value = []; quoted.value = undefined;
+  draft.value = ""; files.value = []; quoted.value = undefined; taskRefs.value = [];
   void scroll();
   return retry(message);
 }
@@ -186,6 +199,7 @@ function retry(message) {
       await props.api(`/employees/${employeeId}/messages`, "POST", {
         text: message.text, images: message.images, files: message.files, clientMessageId: message.clientMessageId,
         ...(message.quote ? { quoteSeq: message.quote.seq } : {}),
+        ...(message.taskRefs?.length ? { taskRefs: message.taskRefs.map(({ id, intent }) => ({ id, ...(intent ? { intent } : {}) })) } : {}),
       });
       message.sendStatus = "sent";
       return true;
@@ -204,13 +218,6 @@ async function stop() {
   try { await props.api(`/employees/${props.employeeId}/cancel`, "POST", {}); }
   catch (e) { error.value = e.message; }
 }
-function grow() {
-  const el = input.value;
-  if (!el) return;
-  el.style.height = "auto";
-  el.style.height = Math.min(el.scrollHeight, 200) + "px";
-}
-watch(draft, () => nextTick(grow));
 function keydown(event) {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !matchMedia("(pointer: coarse)").matches) { event.preventDefault(); void send(); }
 }
@@ -283,16 +290,17 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
     </div>
     <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号只能查看这位热心市民的对话和任务。</p>
     <form v-else class="chat-composer" @paste="paste" @submit.prevent="send">
+      <ComposerTaskRefs :refs="taskRefs" @open="emit('task', $event)" @remove="removeTaskRef" />
       <ComposerQuote v-if="quoted" :quote="quoted" :name="name" @jump="jumpTo" @remove="quoted = undefined" />
       <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon :name="isImage(file) ? 'image' : 'file'" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
       <div class="composer-row">
         <input ref="fileInput" type="file" hidden multiple @change="upload" />
         <button type="button" class="icon attach" aria-label="添加附件" title="附件（可粘贴图片）" :disabled="uploading" @click="fileInput.click()"><Icon name="paperclip" /></button>
-        <textarea ref="input" v-model="draft" class="chat-draft" aria-label="发给热心市民的消息" placeholder="告诉我目标，剩下的交给我…" rows="1" @keydown="keydown"></textarea>
+        <MentionTextarea ref="input" v-model="draft" class="composer-input" :tasks="tasks || []" :auto-grow="true" rows="1" aria-label="发给热心市民的消息" placeholder="告诉我目标，输入 # 可引用任务…" @keydown="keydown" @pick-task="addTaskRef" />
         <button v-if="running" type="button" class="stop" title="停止本轮" @click="stop"><Icon name="stop" :size="14" /><span>停止本轮</span></button>
         <button class="primary send" :disabled="uploading || (!draft.trim() && !files.length)" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
       </div>
-      <p class="composer-hint">/new 用新任务执行（保留当前对话上下文） · Enter 发送 · Shift + Enter 换行</p>
+      <p class="composer-hint"># 引用任务 · /new 用新任务执行（保留当前对话上下文） · Enter 发送 · Shift + Enter 换行</p>
     </form>
   </section>
 </template>
@@ -327,8 +335,9 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
 .chat-composer { flex: none; width: calc(100% - 48px); max-width: 772px; margin: 0 auto 12px; padding: 6px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--sh-sm); }
 .chat-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 .composer-row { display: flex; align-items: flex-end; gap: 4px; }
-.composer-row textarea { flex: 1; min-height: 36px; padding: 8px 4px; border: 0; box-shadow: none; resize: none; font-size: 14px; line-height: 1.45; }
-.composer-row textarea:focus, .composer-row textarea:focus-visible { box-shadow: none; outline: none; }
+.composer-input { flex: 1; min-width: 0; }
+.composer-row :deep(textarea) { flex: 1; min-height: 36px; padding: 8px 4px; border: 0; box-shadow: none; resize: none; font-size: 14px; line-height: 1.45; }
+.composer-row :deep(textarea:focus), .composer-row :deep(textarea:focus-visible) { box-shadow: none; outline: none; }
 .attach { width: 36px; min-height: 36px; color: var(--muted); }
 .send { width: 36px; min-height: 36px; padding: 0; border-radius: 10px; }
 .stop { min-height: 36px; padding: 0 10px; border-color: var(--border); color: var(--danger); font-size: 12px; }
