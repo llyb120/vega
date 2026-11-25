@@ -977,6 +977,14 @@ export class Tools {
     // In a group, anyone but the owner delegates work: tasks (and the employee's own vault), never memories.
     const guest = source?.group && !source.group.byOwner ? source.group.from : undefined;
     if (guest) assert(memberOnly(a.action, a.kind), `这条群聊消息来自${guest.kind === "user" ? "用户" : "热心市民"}「${guest.name}」，不是你的归属用户：对方只能派单、查询、补充、续做和停止任务；长期记忆仅归属用户可用`);
+    if (a.action === "add" && a.kind === "todo" && a.parentTaskId) {
+      if (source?.newTask) assert(false, "用户本轮使用了 /new，明确要求开启全新独立任务，不要传 parentTaskId 挂入旧任务链。");
+      const parent = await employee.findTask(a.parentTaskId);
+      assert(parent, "parentTaskId 不属于当前热心市民");
+      if (source?.group && !source.group.byOwner) {
+        assert(parent.group?.groupId === source.group.groupId, "前置任务不属于本群，不能跨群建链");
+      }
+    }
     const chatClientId = !this.session.groupId && source?.actorId === this.session.ownerId ? source?.chatClientId : undefined;
     if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
       if (a.action === "resume" && source?.newTask)

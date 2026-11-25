@@ -5,12 +5,13 @@ import MessageText from "./MessageText.vue";
 import StepOutput from "./StepOutput.vue";
 import FileCard from "./FileCard.vue";
 import PreviewCard from "./PreviewCard.vue";
+import TaskChainTree from "./TaskChainTree.vue";
 import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
-const props = defineProps({ task: Object, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function, employeeId: String, clients: Array, handoff: Function });
-const emit = defineEmits(["inspect", "back"]);
+const props = defineProps({ task: Object, chainTasks: { type: Array, default: () => [] }, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function, employeeId: String, clients: Array, handoff: Function });
+const emit = defineEmits(["inspect", "back", "select-task"]);
 const busy = ref(false), answer = ref(""), exportOpen = ref(false), exportError = ref(""), settleSelected = ref([]), settling = ref(false), clientId = ref("");
 const suggestions = computed(() => props.task.memorySuggestions || []);
 watch(() => props.task.id, () => { answer.value = ""; exportOpen.value = false; exportError.value = ""; clientId.value = ""; });
@@ -33,7 +34,7 @@ async function settleMemories() {
   } finally { settling.value = false; }
 }
 const ended = computed(() => isEnded(props.task.status));
-const resumable = computed(() => ["failed", "stopped", "cancelled"].includes(props.task.status));
+const resumable = computed(() => ["failed", "stopped"].includes(props.task.status));
 const progress = computed(() => planProgress(props.task.plan));
 const mergedStepOutputs = computed(() => {
   const groups = new Map();
@@ -98,9 +99,10 @@ async function run(action) {
       <div v-if="!readonly && handoff && !task.execution?.localAgent && !['running', 'done', 'sealed'].includes(task.status) && clients?.length" class="handoff">
         <label>交到本机 <select v-model="clientId" aria-label="选择执行客户端"><option value="">选择在线客户端</option><option v-for="client in clients" :key="client.id" :value="client.id">{{ (client.name || '客户端') + ' · ' + String(client.id).slice(0, 8) }}</option></select></label>
         <button type="button" class="sm" :disabled="busy || !clientId" @click="moveToClient">交接</button>
-        <span class="detail-note">已开始的任务会复制云端工作区；同名冲突保留两份。暂停的任务需手动继续。</span>
+        <span class="detail-note">已开始的任务会复制云端工作区；同名冲突保留两份。已停止的任务需手动继续。</span>
       </div>
     </header>
+    <TaskChainTree v-if="chainTasks.length > 1" :tasks="chainTasks" :current-id="task.id" @select="emit('select-task', $event)" />
 
     <section v-if="task.status === 'approval'" class="attention-block">
       <h3><Icon name="alert" :size="16" />需要你确认</h3>
@@ -184,8 +186,7 @@ async function run(action) {
       <span class="spacer"></span>
       <span v-if="task.status === 'deferred'" class="hint">无需在此等待，热心市民会按恢复点继续检查。</span>
       <template v-if="!readonly">
-        <button v-if="task.status === 'running'" type="button" :disabled="busy" @click="run('stop')"><Icon name="stop" :size="14" />停止任务</button>
-        <button v-else-if="!ended" type="button" :disabled="busy" @click="run('stop')"><Icon name="pause" :size="14" />暂停任务</button>
+        <button v-if="!ended" type="button" :disabled="busy" @click="run('stop')"><Icon name="stop" :size="14" />停止任务</button>
         <button v-if="resumable" type="button" class="primary" :disabled="busy" @click="run('resume')"><Icon name="play" :size="14" />继续任务</button>
         <button v-if="ended && task.status !== 'sealed'" type="button" :disabled="busy" @click="run('redispatch')"><Icon name="refresh" :size="14" />重新派发</button>
         <button v-if="task.status !== 'sealed' && task.status !== 'running'" type="button" :disabled="busy" title="封存后禁止恢复、续做或重新派发" @click="run('seal')"><Icon name="lock" :size="14" />封存</button>

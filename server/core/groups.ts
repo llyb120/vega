@@ -331,7 +331,18 @@ export class Groups {
     if (row?.task?.group?.groupId === group.id && group.employees.some((member) => member.id === row.employee)) return { employeeId: row.employee, task: row.task };
   }
   private async topicRows(group: Group, { employeeId, task }: { employeeId: string; task: Task }) {
-    const related = new Set(task.group?.sourceSeqs || []);
+    const state = await (await this.employee(employeeId))?.state({ runs: false });
+    const chainIds = new Set<string>([task.id]);
+    const seededSeqs = new Set<number>(task.group?.sourceSeqs || []);
+    if (task.chainId && state) {
+      for (const item of state.tasks) {
+        if (item.chainId === task.chainId && item.group?.groupId === group.id) {
+          chainIds.add(item.id);
+          for (const seq of item.group?.sourceSeqs || []) seededSeqs.add(seq);
+        }
+      }
+    }
+    const related = new Set(seededSeqs);
     const memberSession = group.memberSessions[employeeId], source = task.chatSource;
     if (source?.session && memberSession === source.session) {
       const origin = (await this.store.message(source.session, source.seq))?.group;
@@ -340,7 +351,7 @@ export class Groups {
     const { rows } = await this.store.sharedMessages(group.session);
     const bySeq = new Map(rows.map((m) => [m.seq, m]));
     const beforeCreation = (m: Readonly<Message> | undefined) => m?.at !== undefined && m.at <= task.createdAt;
-    const belongs = (m: Readonly<Message>) => m.topicTaskId === task.id || m.tasks?.some((card) => card.id === task.id);
+    const belongs = (m: Readonly<Message>) => (!!m.topicTaskId && chainIds.has(m.topicTaskId)) || !!m.tasks?.some((card) => chainIds.has(card.id));
     const otherTopic = (m: Readonly<Message>) => !belongs(m) && (m.topicTaskId || m.tasks?.length);
 
     // Legacy chatSource can point at a supplement. Recover the creation turn from this member's group receipts.
@@ -352,7 +363,7 @@ export class Groups {
         if (request?.groupId !== group.id || m.role !== "tool" || m.name !== "employee_task_create" || m.error) continue;
         try {
           const result = JSON.parse(m.text || "null");
-          if (result?.id && (result.id === task.id || result.id === task.origin) && result.exists !== true && beforeCreation(bySeq.get(request.seq))) {
+          if (result?.id && (chainIds.has(result.id) || result.id === task.origin) && result.exists !== true && beforeCreation(bySeq.get(request.seq))) {
             related.add(request.seq);
             break;
           }
@@ -381,7 +392,7 @@ export class Groups {
     }
     return rows.filter((m) => {
       if (!m.seq) return false;
-      if (m.notice) return !!(m.newTask && m.topicTaskId === task.id);
+      if (m.notice) return !!(m.newTask && m.topicTaskId && chainIds.has(m.topicTaskId));
       if (!related.has(m.seq) && (otherTopic(m) || !((m.quote && related.has(m.quote.seq)) || (m.replyToSeq && related.has(m.replyToSeq))))) return false;
       related.add(m.seq);
       return true;
@@ -476,7 +487,7 @@ export class Groups {
       (task.group?.requester.kind === "user" && task.group.requester.id === viewer.id));
   }
   private taskView(task: Task, mine: boolean, canControl: boolean): Obj & { canControl: boolean } {
-    const shared = ["id", "text", "status", "createdAt", "finishedAt", "queueReason", "approval", "waiting", "partialDelivery", "progress", "plan", "result", "completion", "summary", "checkpoint", "error", "deliverableFiles", "preview"];
+    const shared = ["id", "text", "status", "createdAt", "finishedAt", "queueReason", "approval", "waiting", "partialDelivery", "progress", "plan", "result", "completion", "summary", "checkpoint", "error", "deliverableFiles", "preview", "chainId", "parentId", "edgeKind", "retryOf", "chainSeq", "branchLabel"];
     return {
       ...(mine ? task : Object.fromEntries(shared.filter((key) => key in task).map((key) => [key, task[key]]))),
       ...(!mine && task.stepOutputs ? { stepOutputs: task.stepOutputs.map(({ step, label, text, files, preview, at }: Obj) => ({ step, label, text, files, ...(preview ? { preview } : {}), at })) } : {}),
@@ -515,8 +526,12 @@ export class Groups {
       const all = (await employee.state()).tasks.filter((t) => t.group?.groupId === group.id)
         .sort((a, b) => rank(a.status) - rank(b.status) || (b.finishedAt || b.createdAt || 0) - (a.finishedAt || a.createdAt || 0));
       const open = all.filter((t) => !ended(t.status)), done = all.filter((t) => ended(t.status));
-      const tasks = [...open, ...done.slice(0, GROUP_TASKS_ENDED)].map((task) => this.taskView(task, mine, this.canControlTask(viewer, person.ownerId!, task)));
-      members.push({ id: person.id, name: person.name, avatar: person.avatar, mine, tasks, endedHidden: Math.max(0, done.length - GROUP_TASKS_ENDED) });
+      const keptDone = done.slice(0, GROUP_TASKS_ENDED);
+      const keptSet = new Set([...open, ...keptDone]);
+      const activeChains = new Set([...keptSet].map((t) => t.chainId).filter(Boolean));
+      const selectedDone = done.filter((t) => keptSet.has(t) || (!!t.chainId && activeChains.has(t.chainId)));
+      const tasks = [...open, ...selectedDone].map((task) => this.taskView(task, mine, this.canControlTask(viewer, person.ownerId!, task)));
+      members.push({ id: person.id, name: person.name, avatar: person.avatar, mine, tasks, endedHidden: Math.max(0, done.length - selectedDone.length) });
     }
     return { members };
   }
@@ -556,7 +571,7 @@ export class Groups {
         fallback.set(t.id, prev);
       }
     }
-    const meta: Record<string, { id: string; title: string; status: string; employeeId?: string }> = {};
+    const meta: Record<string, { id: string; title: string; status: string; employeeId?: string; chainId?: string; chainSeq?: number; edgeKind?: string; parentId?: string; retryOf?: string }> = {};
     if (!needed.size) return meta;
     for (const employeeId of employeeIds) {
       const employee = await this.employee(employeeId);
@@ -569,6 +584,11 @@ export class Groups {
           title: cut(String(task.text || "").replace(/\s+/g, " ").trim(), 80),
           status: task.status,
           employeeId,
+          ...(task.chainId ? { chainId: task.chainId } : {}),
+          ...(typeof task.chainSeq === "number" ? { chainSeq: task.chainSeq } : {}),
+          ...(task.edgeKind ? { edgeKind: task.edgeKind } : {}),
+          ...(task.parentId ? { parentId: task.parentId } : {}),
+          ...(task.retryOf ? { retryOf: task.retryOf } : {}),
         };
       }
     }

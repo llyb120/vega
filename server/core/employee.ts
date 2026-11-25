@@ -23,6 +23,7 @@ import { loadRows, baseRecord, saveRows } from "./employee-rows";
 import { deleteEmployeeSoul, initEmployeeSoul, observeTaskOutcome } from "./soul";
 import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
+import { sortChainTasks, type TaskChainFields, type TaskEdgeKind } from "../../shared/task-chain";
 import {
   explicitScheduleEvent,
   nextDue,
@@ -36,7 +37,7 @@ import {
 
 export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId" | "clientName" | "browserClientId" | "localPlatform" | "ownerId"> & { browserClientName?: string };
 export type Owner = { token: string; name: string };
-export type Task = Obj & {
+export type Task = Obj & TaskChainFields & {
   id: string;
   text: string;
   status: string;
@@ -130,6 +131,12 @@ export const taskSummary = (t: Task) =>
     id: t.id,
     status: t.status,
     dedupeKey: t.key || undefined,
+    chainId: t.chainId || undefined,
+    parentId: t.parentId || undefined,
+    edgeKind: t.edgeKind || undefined,
+    retryOf: t.retryOf || undefined,
+    chainSeq: t.chainSeq,
+    branchLabel: t.branchLabel || undefined,
     excerpt: excerpt(t.text, 120),
     result: excerpt(t.summary || t.result, 200) || undefined,
     createdAt: at(t.createdAt),
@@ -138,8 +145,8 @@ export const taskSummary = (t: Task) =>
   }).filter(([, v]) => v !== undefined));
 /** Eligibility is about task ownership/state, not how long ago the task was delivered. */
 const evidenceOf = (event: WorkEvent) => String(event.evidence || "").trim();
-export const followUpOpen = (t: Task) =>
-  t.status === "done" && !t.dutyId && !t.fromDuty && t.side !== "computer" && !!t.workSession;
+export const canChainFrom = (t: Task) =>
+  t.status !== "sealed" && !t.dutyId && !t.fromDuty;
 /** Sealed tasks are archived by the user by hand; nothing (model, scheduler, remote member) may revive them. */
 const SEALED_MESSAGE = "任务已封存，禁止恢复、续做或重新派发";
 
@@ -959,6 +966,32 @@ export class Employee {
     root.priority.add(this.employeeId);
     root.wake(Date.now());
   }
+  private attachToChain(s: EmployeeState, source: Task, relation: TaskEdgeKind, branchLabel?: unknown): TaskChainFields {
+    assert(source.status !== "sealed", SEALED_MESSAGE);
+    if (!source.chainId) {
+      source.chainId = id("ch");
+      source.chainSeq ||= 1;
+    }
+    const maxSeq = Math.max(0, ...s.tasks.filter((x) => x.chainId === source.chainId).map((x) => x.chainSeq || 0));
+    const label = typeof branchLabel === "string" && branchLabel.trim() ? clip(branchLabel.trim(), 80) : undefined;
+    if (relation === "retry") {
+      return {
+        chainId: source.chainId,
+        parentId: source.parentId || undefined,
+        edgeKind: "retry",
+        retryOf: source.id,
+        chainSeq: maxSeq + 1,
+        ...(label ? { branchLabel: label } : {}),
+      };
+    }
+    return {
+      chainId: source.chainId,
+      parentId: source.id,
+      edgeKind: relation,
+      chainSeq: maxSeq + 1,
+      ...(label ? { branchLabel: label } : {}),
+    };
+  }
   task(s: EmployeeState, key: string) {
     const t = s.tasks.find((t) => t.id === key);
     assert(t, "Task not found");
@@ -1091,13 +1124,64 @@ export class Employee {
                 !a.key || (typeof a.key === "string" && [...a.key].length <= 200),
                 "key exceeds 200",
               );
-              const old = a.key ? s.tasks.find((t) => t.key === a.key) : undefined;
-              if (old) return { id: old.id, exists: true, status: old.status, next: "这是已有任务，本次创建没有自动续做；先核对原目标和用户意图，需要继续时按状态使用 employee_task_manage 的 resume，不要绕过审批或用户停止。" };
+              let source: Task | undefined;
+              let relation: TaskEdgeKind | undefined;
+              if (a.parentTaskId !== undefined && a.parentTaskId !== "") {
+                assert(typeof a.parentTaskId === "string", "parentTaskId must be a string");
+                source = this.task(s, a.parentTaskId);
+                assert(source.status !== "sealed", SEALED_MESSAGE);
+                assert(!source.dutyId && !source.fromDuty, "职责任务不能作为任务链父节点");
+                relation = a.relation || (source.status === "done" ? "follow_up" : ["cancelled", "stopped", "failed"].includes(source.status) ? "retry" : "fork");
+                assert(["follow_up", "retry", "fork", "subtask"].includes(relation!), "Invalid relation");
+              }
+              const sameKey = a.key ? s.tasks.filter((item) => item.key === a.key) : [];
+              const activeOld = sameKey.find((item) => !ended(item.status));
+              if (activeOld) {
+                return {
+                  id: activeOld.id,
+                  exists: true,
+                  status: activeOld.status,
+                  ...(activeOld.chainId ? { chainId: activeOld.chainId } : {}),
+                  next: "这是进行中的已有任务，未重复创建；请核对原目标和用户意图，并用 employee_task_manage 调整，不要重复派单。",
+                };
+              }
+              const lastOld = sameKey.at(-1);
+              if (lastOld && !source) {
+                return {
+                  id: lastOld.id,
+                  exists: true,
+                  status: lastOld.status,
+                  ...(lastOld.chainId ? { chainId: lastOld.chainId } : {}),
+                  next: ["done", "cancelled", "sealed"].includes(lastOld.status)
+                    ? "这是已结束任务（已完成/已取消/已封存，不可重启）；如需基于它接续或开分支重做，请传 parentTaskId，如需全新独立任务请换新 dedupeKey 或用 /new。"
+                    : "这是已停止/失败的已有任务，本次创建没有自动续做；请核对原目标和用户意图，按状态用 employee_task_manage 的 resume 继续，或传 parentTaskId 开分支重做。",
+                };
+              }
               assert(
                 s.tasks.filter((t) => !ended(t.status)).length < 100,
                 "Active task capacity reached",
               );
-              const bound = t ? undefined : boundExecution || this.bindExecution(s);
+              const chainMeta = source ? this.attachToChain(s, source, relation!, a.branchLabel) : undefined;
+              const base = chainMeta?.parentId ? s.tasks.find((item) => item.id === chainMeta.parentId) : undefined;
+              let bound: { execution: Execution; cwd?: string; note?: string } | undefined = t ? undefined : boundExecution;
+              let switchedNote = "";
+              if (!bound && !t) {
+                if (relation !== "retry" && base) {
+                  if (base.execution?.localAgent && base.execution.clientId) {
+                    const online = this.runtime.client?.(s.ownerId, base.execution.clientId);
+                    if (online && online.clientId === base.execution.clientId) {
+                      bound = { execution: { ...base.execution, ownerId: s.ownerId }, cwd: base.cwd || online.cwd };
+                    } else {
+                      bound = this.bindExecution(s);
+                      switchedNote = "前置任务原执行客户端当前离线，本次已改按当前默认执行位置运行；先核对文件与环境，不跨端假定旧路径存在。";
+                    }
+                  } else {
+                    bound = { execution: { ...(base.execution || this.bindExecution(s).execution), ownerId: s.ownerId }, cwd: base.cwd || s.cwd };
+                  }
+                } else {
+                  bound = this.bindExecution(s);
+                }
+              }
               const task: Task = {
                 id: id("t"),
                 text: content,
@@ -1112,15 +1196,26 @@ export class Employee {
                 execution: t ? { ...(t.execution || {} ) } : bound!.execution,
                 deviceOnly: t?.deviceOnly || boundExecution?.deviceOnly,
                 key: a.key || "",
-                origin: t?.id || "",
+                origin: source?.id || t?.id || "",
                 chatSource: t?.chatSource,
                 nextCheckAt: requestedTime(a, now),
                 plan: [],
                 progress: [],
+                ...(chainMeta || {}),
               };
-              if (bound?.note) task.checkpoint = bound.note;
+              const note = [bound?.note, switchedNote].filter(Boolean).join("\n");
+              if (note) task.checkpoint = note;
               s.tasks.push(task);
-              return { id: task.id };
+              return {
+                id: task.id,
+                ...(chainMeta ? Object.fromEntries(Object.entries({
+                  chainId: chainMeta.chainId,
+                  chainSeq: chainMeta.chainSeq,
+                  parentId: chainMeta.parentId,
+                  edgeKind: chainMeta.edgeKind,
+                  retryOf: chainMeta.retryOf,
+                }).filter(([, v]) => v !== undefined)) : {}),
+              };
             }
             case "update": {
               const task = get();
@@ -1768,23 +1863,16 @@ export class Employee {
             assert(["stop", "remove"].includes(a.action), SEALED_MESSAGE);
           if (a.action === "resume" && a.text) {
             assert(typeof a.text === "string" && a.text.length <= 8000 && a.text.trim(), "Invalid task supplement");
-            assert(!["approval", "cancelled"].includes(t.status), "Use explicit approval or a new task");
+            assert(t.status !== "done", "已完成并交付的任务不可重新启动；如需基于此交付继续修改或追问，请用 employee_task_create(parentTaskId=..., relation='follow_up') 创建后续链式任务。");
+            assert(t.status !== "cancelled", "已取消的任务不可原地恢复；如需重新做，请用 employee_task_create(parentTaskId=..., relation='retry') 在任务链下开分支重做。");
+            assert(t.status !== "approval", "Use explicit approval or a new task");
             const text = a.text.replace(/\r\n?/g, "\n").trim();
             const previous = t.lastSupplement ?? t.answer?.replace(/\r\n?/g, "\n").split("\n用户补充：").at(-1)?.trim();
             const duplicate = previous === text && (!supplementSource || t.lastSupplementSource === supplementSource);
-            const reopening = t.status === "done";
-            if (reopening) {
-              assert(followUpOpen(t), "职责触发或没有原工作会话的已交付任务不能直接续做；请核对原任务和用户意图，不要自动新建替代任务");
-              if (duplicate) return { ok: true, duplicate, status: t.status, next: "This supplement was already handled and delivered; do not reopen the task or create a new one for it" };
-              t.deliveries = [...(t.deliveries || []), { revision: t.revision || 0, finishedAt: t.finishedAt, summary: t.summary || "", result: clip(t.result || "", 8000), deliverableRefs: t.deliverableRefs || [] }].slice(-5);
-              t.answer = (t.answer || "") + `\n[已交付任务的直接后续] 本任务已于 ${at(t.finishedAt) || "未知时间"} 交付；已完成步骤、已验证结果和产物保留，不要重做，不要重复已执行的提交/发送。先按用户最新意图判断：若要求继续原目标，核对原要求和回执，恢复仍需完成的步骤（包括之前标为取消的步骤）；若只要求新增部分，或用户明确放弃某些要求，不擅自扩大范围。用 task_progress 更新原计划，验证后 task_complete 交付本次结果。`;
-            }
             if (!duplicate) {
               t.answer = (t.answer || "") + "\n用户补充：" + a.text;
               t.supplementPending = true;
               t.revision = (t.revision || 0) + 1;
-              // New details do not reset failed attempts; only a delivered task's follow-up starts fresh.
-              if (reopening) t.recovery = undefined;
               if (wantsSettle(t)) t.settlePreferred = true;
               t.lastSupplementSource = supplementSource;
             }
@@ -1802,7 +1890,7 @@ export class Employee {
             t.nextCheckAt = 0;
             t.waiting = "";
             t.finishedAt = 0;
-            return reopening ? { ok: true, duplicate, reopened: true, next: "The delivered task continues in its original session with this supplement; do not create a new task" } : { ok: true, duplicate };
+            return { ok: true, duplicate };
           }
           if (a.action !== "stop")
             assert(
@@ -1909,8 +1997,8 @@ export class Employee {
               break;
             case "resume":
               assert(
-                ended(t.status) && t.status !== "done",
-                "Only stopped/failed/cancelled tasks may continue",
+                ["stopped", "failed"].includes(t.status),
+                "Only stopped/failed tasks may continue",
               );
               t.status = "queued";
               t.nextCheckAt = 0;
@@ -1919,28 +2007,46 @@ export class Employee {
                 "同一任务续做，保留原计划与会话；核对已发生的操作，不重做。上次结果：\n" +
                 (t.result || "");
               break;
-            case "redispatch":
+            case "redispatch": {
               assert(
                 a.confirmed === true,
                 "Explicit confirmation required to redispatch as a NEW task",
               );
+              const relation: TaskEdgeKind = ["follow_up", "retry", "fork", "subtask"].includes(a.relation)
+                ? a.relation
+                : t.status === "done" ? "follow_up" : "retry";
+              const chainMeta = this.attachToChain(s, t, relation, a.branchLabel);
+              const base = chainMeta.parentId ? s.tasks.find((item) => item.id === chainMeta.parentId) : undefined;
+              const bound = this.bindExecution(s);
+              const nextText = typeof a.text === "string" && a.text.trim() ? a.text.trim() : t.text;
               const copy: Task = {
                 id: id("t"),
-                text: t.text,
+                text: nextText,
                 status: "queued",
                 profile: t.profile,
-                cwd: this.bindExecution(s).cwd || s.cwd,
+                cwd: (relation !== "retry" && base?.cwd) || bound.cwd || s.cwd,
                 owner: t.owner,
                 employeeId: this.employeeId,
-                execution: this.bindExecution(s).execution,
+                execution: bound.execution,
                 createdAt: Date.now(),
                 plan: [],
                 progress: [],
                 group: t.group ? clone(t.group) : undefined,
                 origin: t.id,
+                ...chainMeta,
               };
               s.tasks.push(copy);
-              return { id: copy.id };
+              return {
+                id: copy.id,
+                ...Object.fromEntries(Object.entries({
+                  chainId: copy.chainId,
+                  chainSeq: copy.chainSeq,
+                  parentId: copy.parentId,
+                  edgeKind: copy.edgeKind,
+                  retryOf: copy.retryOf,
+                }).filter(([, v]) => v !== undefined)),
+              };
+            }
             case "remove":
               assert(ended(t.status), "Only ended task records may be deleted");
               s.tasks = s.tasks.filter((v) => v.id !== t.id);
@@ -2035,6 +2141,40 @@ export class Employee {
       this.rememberEvent(task, event, true);
       this.writeEvent(task, event, plan.status, plan.nextCheckAt, plan.reason);
       return { action: plan.action, taskId: task.id, reason: plan.reason, status: task.status };
+    }
+    if (plan.action === "spawn_followup") {
+      assert(s.tasks.filter((task) => !ended(task.status)).length < 100, "Active task capacity reached");
+      const parent = found(plan.parentTaskId)!;
+      this.rememberEvent(parent, event, true);
+      const chainMeta = this.attachToChain(s, parent, "follow_up");
+      const bound = this.bindExecution(s);
+      const child: Task = {
+        id: id("t"),
+        text: event.text || parent.text,
+        status: plan.status,
+        createdAt: now,
+        profile: parent.profile || "lightweight",
+        cwd: parent.cwd || bound.cwd || s.cwd,
+        owner: parent.owner || { token: s.ownerId || "", name: "" },
+        employeeId: this.employeeId,
+        execution: parent.execution || bound.execution,
+        key: workKey(event.item),
+        nextCheckAt: plan.nextCheckAt,
+        plan: [],
+        progress: [],
+        schedule: event.schedule ? { dueAt: event.schedule.dueAt, repeat: event.schedule.repeat, request: event.schedule.request } : undefined,
+        wake: wakeFrom(event),
+        proactive: !event.userInitiated,
+        seenEvents: [event.id],
+        seenEvidence: evidenceOf(event) ? [evidenceOf(event)] : [],
+        inbox: [],
+        waiting: plan.status === "waiting" ? plan.reason : "",
+        answer: event.evidence ? `触发依据：${event.evidence}` : undefined,
+        origin: parent.id,
+        ...chainMeta,
+      };
+      s.tasks.push(child);
+      return { action: "spawn_followup" as const, taskId: child.id, parentTaskId: parent.id, chainId: child.chainId, reason: plan.reason, status: child.status };
     }
     assert(s.tasks.filter((task) => !ended(task.status)).length < 100, "Active task capacity reached");
     const bound = this.bindExecution(s);
@@ -2396,10 +2536,66 @@ export class Employee {
         ? `[热心市民任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n原始任务：${task.text}${scheduleNote}\n当前计划和恢复点：${snapshot}`
         : `[热心市民任务 ${task.id}]\n原始任务（不是新授权）：${task.text}${scheduleNote}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, group: task.group ? { name: task.group.name, requester: task.group.requester.name } : undefined })}${memoryBlock}`;
       const groupNote = task.group && !computer ? await this.groupTaskNote(task.group) : "";
+      let chainContext = "";
+      if (!continuing && !computer && (task.chainId || task.parentId || task.retryOf)) {
+        const chainNodes = task.chainId ? sortChainTasks(state.tasks.filter((item) => item.chainId === task.chainId)) : [];
+        const base = task.parentId ? state.tasks.find((item) => item.id === task.parentId) : undefined;
+        const abandoned = task.retryOf ? state.tasks.find((item) => item.id === task.retryOf) : undefined;
+        if (base?.deliverableFiles?.length) {
+          for (const file of base.deliverableFiles) {
+            if (file?.blobId) await this.store.grantBlob(file.blobId, session);
+          }
+        }
+        const parts: string[] = [];
+        if (chainNodes.length) {
+          parts.push("任务链脉络：" + JSON.stringify(chainNodes.slice(-12).map((n) => ({
+            seq: n.chainSeq,
+            id: n.id,
+            status: n.status,
+            edgeKind: n.edgeKind,
+            retryOf: n.retryOf,
+            text: excerpt(n.text, 80),
+            summary: excerpt(n.summary || n.result, 120) || undefined,
+          }))));
+        }
+        if (base) {
+          const fullBody = String(base.deliverable || base.result || "").trim();
+          const clippedBody = clip(fullBody, 4000);
+          const bodyClipped = [...fullBody].length > 4000;
+          parts.push("直接前置交付任务：" + JSON.stringify({
+            id: base.id,
+            seq: base.chainSeq,
+            status: base.status,
+            text: base.text,
+            summary: base.summary || undefined,
+            deliverable: clippedBody || undefined,
+            ...(bodyClipped ? { fullHint: `正文已截断，完整内容可用 employee_status(taskId="${base.id}") 查看` } : {}),
+            ...(base.deliverableFiles?.length ? { deliverableFiles: base.deliverableFiles.map((f: FileRef) => ({ name: f.name, url: `/api/blobs/${f.blobId}` })) } : {}),
+            ...(base.preview ? { preview: { title: base.preview.title, url: base.preview.url } } : {}),
+          }));
+        }
+        if (abandoned) {
+          parts.push("被替代的分支任务：" + JSON.stringify({
+            id: abandoned.id,
+            seq: abandoned.chainSeq,
+            status: abandoned.status,
+            text: abandoned.text,
+            reason: clip(String(abandoned.result || abandoned.waiting || abandoned.approval || ""), 1000) || undefined,
+            checkpoint: abandoned.checkpoint || undefined,
+            plan: abandoned.plan?.length ? abandoned.plan : undefined,
+          }));
+        }
+        if (parts.length) {
+          const guard = abandoned
+            ? "本任务为替代原分支的重做分支；请结合原分支取消/失败原因避免重蹈覆辙，执行前先核对工作区与外部状态，不重放不可逆操作。"
+            : "前置任务已完成并冻结，不得改动其历史交付物；在其成果基础上完成本次新要求，不重复已完成步骤与已执行的不可逆提交/发送。";
+          chainContext = `\n[前置任务链上下文]（${guard}）\n` + parts.join("\n");
+        }
+      }
       const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。每完成一步用task_progress记下做了什么与回执（这就是下一轮用的还原点，换了执行位置靠它接着做）；新现场缺必要文件或无法核验时同样 task_ask_user，不凭空补写。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      let prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery;
+      let prompt = context + chainContext + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery;
       // Only attach concise launch guidance on the first turn of a session; full rules live in system prompt.
       if (!continuing) {
         prompt += computer

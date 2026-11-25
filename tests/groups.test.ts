@@ -477,7 +477,7 @@ test("工作面板 UI: opening a task keeps the main chat beside its topic and t
   assert.doesNotMatch(chat, /只有[^。\n]*归属用户[^。\n]*查看详情/, "group members can view task details");
   assert.match(panel, /props\.api\(taskPath\(key\), "POST"/);
   assert.match(panel, /action === "redispatch" && !confirm/);
-  assert.match(panel, /\{\{ requester\(task\) \}\} 发起/);
+  assert.match(panel, /\{\{ requester\((?:task|group\.task)\) \}\} 发起/);
 });
 
 test("group sends deduplicate by sender and message ID, not by the text", async () => {

@@ -6,7 +6,7 @@ import { Catalog } from "../server/core/catalog";
 import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
-import { followUpOpen, type Task } from "../server/core/employee";
+import { canChainFrom, type Task } from "../server/core/employee";
 import { setWorkPrinciples } from "../server/core/work-principles";
 import { chromeCall, employeeCall } from "./public-call";
 
@@ -17,8 +17,8 @@ async function fixture() {
   await store.put("config", { model: "p/code", scenes: { lightweight: ["p/light"], coding: ["p/code"], computer: ["p/vision"] }, provider: { p: { api: "openai-completions", baseURL: "https://unused.test", models: Object.fromEntries(["light", "code", "vision"].map(id => [id, { modalities: { input: id === "vision" ? ["text", "image"] : ["text"] }, limit: { context: 128000, output: 8192 } }])) } } });
   const employee = await engine.employee.for((await engine.employee.create({ name: "Follow-up employee" }, "owner")).id);
   const chat = await employee.chat("owner");
-  const add = async (text: string) => {
-    const created = await employee.execute("", { action: "add", kind: "todo", text });
+  const add = async (text: string, extra: Record<string, unknown> = {}) => {
+    const created = await employee.execute("", { action: "add", kind: "todo", text, ...extra });
     return employee.task(await employee.state(), created.value.id);
   };
   const segment = async (job: Task) => {
@@ -34,9 +34,8 @@ async function fixture() {
 const legacy = (name: string, args: any) => name === "employee" ? employeeCall(args) : name === "chrome" ? chromeCall(args) : { name, arguments: args };
 const call = (id: string, name: string, args: any) => ({ role: "assistant", calls: [{ id, ...legacy(name, args) }] });
 const progress = (id: string, plan: { content: string; status: string }[]) => call(id, "employee", { action: "progress", text: "进度", plan });
-const complete = (id: string, summary: string) => call(id, "employee", { action: "complete", deliverableRef: [], text: summary + "（证据）", summary });
+const complete = (id: string, summary: string, extra: Record<string, unknown> = {}) => call(id, "employee", { action: "complete", deliverableRef: [], text: summary + "（证据）", summary, ...extra });
 const SEARCH = { content: "在百度搜索「你好」并核实结果页", status: "completed" };
-const CLICK = { content: "点击第一条自然结果并核实目标页", status: "completed" };
 
 /** First delivery: search done in the computer scene of the task's own work session. */
 async function delivered(f: Awaited<ReturnType<typeof fixture>>) {
@@ -51,158 +50,177 @@ async function delivered(f: Awaited<ReturnType<typeof fixture>>) {
   return job;
 }
 
-test("a direct follow-up long after delivery continues the original task and keeps the old result and plan", async () => {
+test("delivered tasks are frozen and cannot be resumed; follow-up creates a linked child task with inherited context", async () => {
   const f = await fixture();
   try {
     const first = await delivered(f);
     const work = first.workSession;
-    await f.employee.update(state => { f.employee.task(state, first.id).finishedAt = Date.now() - 90 * 24 * 60 * 60_000; });
+    const blobId = await f.store.blob("text/plain", Buffer.from("deliverable file"));
+    await f.employee.update(state => {
+      const task = f.employee.task(state, first.id);
+      task.finishedAt = Date.now() - 90 * 24 * 60 * 60_000;
+      task.deliverableFiles = [{ name: "report.txt", mime: "text/plain", size: 16, blobId }];
+    });
     assert.equal((await f.deliveries()).length, 1);
 
-    const reply = await f.employee.control({ action: "resume", id: first.id, text: "在同一结果页点击第一条自然结果" });
-    assert.equal(reply.reopened, true);
-    let job = f.employee.task(await f.employee.state(), first.id);
-    assert.equal(job.status, "queued");
-    assert.equal(job.revision, 1);
-    assert.equal(job.deliveries.length, 1);
-    assert.equal(job.deliveries[0].summary, "已搜索你好，结果页首条为百度百科", "previous delivery is archived, not erased");
-    assert.deepEqual(job.plan, [SEARCH], "plan kept");
+    await assert.rejects(
+      f.employee.control({ action: "resume", id: first.id, text: "在同一结果页点击第一条自然结果" }),
+      /已完成并交付的任务不可重新启动/,
+    );
+    await assert.rejects(
+      f.employee.control({ action: "resume", id: first.id }),
+      /Only stopped\/failed tasks may continue/,
+    );
+    assert.equal(f.employee.task(await f.employee.state(), first.id).status, "done", "done task stays frozen");
 
-    assert.equal((await f.store.session(work)).scene, "lightweight", "coordinator stays in lightweight throughout");
+    const created = await f.employee.execute("", {
+      action: "add",
+      kind: "todo",
+      text: "在同一结果页点击第一条自然结果",
+      parentTaskId: first.id,
+      relation: "follow_up",
+    });
+    assert.ok(created.value.id && created.value.id !== first.id);
+    assert.equal(created.value.parentId, first.id);
+    assert.equal(created.value.edgeKind, "follow_up");
+    assert.equal(created.value.chainSeq, 2);
+
+    const stateAfterCreate = await f.employee.state();
+    const frozenParent = f.employee.task(stateAfterCreate, first.id);
+    assert.equal(frozenParent.status, "done");
+    assert.equal(frozenParent.chainId, created.value.chainId);
+    assert.equal(frozenParent.chainSeq, 1);
+
+    let child = f.employee.task(stateAfterCreate, created.value.id);
     let phase = 0;
-    f.engine.providers.chat = async (model, _system, messages, definitions) => {
+    f.engine.providers.chat = async (model, _system, messages) => {
       if (phase++ === 0) {
-        assert.equal(model.selection, "p/light", "the follow-up starts from the lightweight coordinator");
-        assert(definitions.some(tool => tool.name === "browser_agent"), "browser specialist is directly callable");
-        assert(!definitions.some(tool => tool.name === "switch_scene"), "legacy switch_scene stays hidden on coordinator");
-        assert(messages.some(m => m.calls?.some(c => c.name === "browser_agent")), "earlier history of the same session is present");
+        assert.equal(model.selection, "p/light");
         const latest = messages.filter(m => m.role === "user" && m.runtime !== "dynamic").at(-1)!.text!;
-        assert.match(latest, /在同一结果页点击第一条自然结果/);
-        assert.match(latest, /已交付任务的直接后续.*不要重做/s);
-        assert.match(latest, /在百度搜索「你好」并核实结果页/, "existing plan is shown to the run");
-        return call("browser-again", "browser_agent", { task: "在同一结果页点击第一条自然结果" });
-      }
-      if (model.selection === "p/vision") {
-        assert(definitions.some(tool => tool.name === "browser_tabs"));
-        assert(!definitions.some(tool => tool.name === "bash" || tool.name === "task_complete"));
-        return { role: "assistant", text: "已点击首条结果，打开百度百科词条页" };
-      }
-      if (phase === 3) return complete("early", "未做新步骤就交付");
-      if (phase === 4) {
-        const refused = messages.findLast(m => m.role === "tool" && m.name === "task_complete")!;
-        assert(refused.error && /planRevision=0，revision=1/.test(refused.text!), "the old revision cannot be re-delivered before applying the supplement");
-        return progress("p2", [SEARCH, CLICK]);
+        assert.match(latest, /\[前置任务链上下文\]/);
+        assert.match(latest, /不得改动其历史交付物/);
+        assert.match(latest, /已搜索你好，结果页首条为百度百科/);
+        assert.match(latest, /report\.txt/);
+        return progress("p2", [{ content: "点击第一条自然结果并核实", status: "completed" }]);
       }
       return complete("c2", "已点击首条结果，打开百度百科词条页");
     };
-    job = await f.segment(job);
-    assert.equal(job.status, "done");
-    assert.equal(job.workSession, work, "same work session");
-    assert.equal((await f.store.sessions()).filter(s => s.taskId && !s.phaseRole).length, 1, "one main task session");
-    assert.equal((await f.employee.state()).tasks.length, 1, "no new task");
-    assert.deepEqual(job.plan, [SEARCH, CLICK]);
-    assert.equal(job.summary, "已点击首条结果，打开百度百科词条页");
-    assert.equal(job.deliveries[0].summary, "已搜索你好，结果页首条为百度百科");
-    assert(job.finishedAt > 0);
+    child = await f.segment(child);
+    assert.equal(child.status, "done");
+    assert.notEqual(child.workSession, work, "follow-up gets its own clean work session");
+    assert.ok(await f.store.one("SELECT 1 FROM blob_access WHERE blob_id=? AND session=?", blobId, child.workSession), "parent deliverable blobs are granted to child session");
+    assert.equal(f.employee.task(await f.employee.state(), first.id).summary, "已搜索你好，结果页首条为百度百科", "parent summary untouched");
     const sent = await f.deliveries();
-    assert.equal(sent.length, 2, "exactly one new delivery for the new revision");
-    assert.match(sent[1].text!, /百度百科词条页/);
-    assert.doesNotMatch(sent[1].text!, /结果页首条为百度百科/, "the previous delivery is not replayed");
-
-    const again = await f.employee.control({ action: "resume", id: first.id, text: "在同一结果页点击第一条自然结果" });
-    assert.equal(again.duplicate, true, "the same supplement does not reopen a delivered revision");
-    assert.equal(f.employee.task(await f.employee.state(), first.id).status, "done");
-    assert.equal((await f.deliveries()).length, 2);
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0].tasks?.[0]?.id, first.id);
+    assert.equal(sent[1].tasks?.[0]?.id, child.id);
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
-test("resuming and redispatching use current work principles without changing task history", async () => {
+test("cancelled branch retry hangs under parent #1 (or sibling root when #1 cancelled) and inherits clean parent context", async () => {
   const f = await fixture();
   try {
-    await setWorkPrinciples(f.store, "owner", "旧公共原则");
-    await f.employee.control({ action: "settings", instruction: "使用旧版模板" });
-    const plan = [{ content: "用旧版模板整理资料", status: "completed" }];
-    const brief = "整理指定资料\n当时的工作原则：使用旧版模板";
-    let round = 0;
-    f.engine.providers.chat = async (_model, system) => {
-      assert.match(system, /\[工作原则\]\n旧公共原则\n\n使用旧版模板\n/);
-      return round++ === 0 ? progress("old-plan", plan) : complete("old-delivery", "已整理指定资料");
+    const t1 = await delivered(f);
+    const t2Created = await f.employee.execute("", {
+      action: "add", kind: "todo", text: "方案A补充", parentTaskId: t1.id, relation: "follow_up",
+    });
+    await f.employee.execute("", { action: "done", id: t2Created.value.id }); // cancelled
+    const t2 = f.employee.task(await f.employee.state(), t2Created.value.id);
+    assert.equal(t2.status, "cancelled");
+
+    await assert.rejects(f.employee.control({ action: "resume", id: t2.id }), /Only stopped\/failed tasks may continue/);
+    await assert.rejects(f.employee.control({ action: "resume", id: t2.id, text: "继续" }), /已取消的任务不可原地恢复/);
+
+    const t3Created = await f.employee.execute("", {
+      action: "add", kind: "todo", text: "方案B重做", parentTaskId: t2.id, relation: "retry", branchLabel: "改用方案B",
+    });
+    assert.equal(t3Created.value.chainId, t2Created.value.chainId);
+    assert.equal(t3Created.value.parentId, t1.id, "retry of #2 hangs directly under #1");
+    assert.equal(t3Created.value.retryOf, t2.id);
+    assert.equal(t3Created.value.edgeKind, "retry");
+    assert.equal(t3Created.value.chainSeq, 3);
+
+    const t3 = f.employee.task(await f.employee.state(), t3Created.value.id);
+    let sawContext = "";
+    f.engine.providers.chat = async (_model, _system, messages) => {
+      sawContext = messages.filter(m => m.role === "user" && m.runtime !== "dynamic").at(-1)!.text!;
+      return complete("c3", "方案B完成");
     };
-    const original = await f.segment(await f.add(brief));
+    await f.segment(t3);
+    assert.match(sawContext, /直接前置交付任务.*已搜索你好/s);
+    assert.match(sawContext, /被替代的分支任务.*方案A补充/s);
+
+    // Root cancellation retry stays at root level under same chainId
+    const root = await f.add("独立根任务");
+    await f.employee.execute("", { action: "done", id: root.id });
+    const rootRetry = await f.employee.execute("", {
+      action: "add", kind: "todo", text: "根任务重做", parentTaskId: root.id, relation: "retry",
+    });
+    assert.equal(rootRetry.value.parentId, undefined);
+    assert.equal(rootRetry.value.retryOf, root.id);
+    assert.equal(rootRetry.value.chainSeq, 2);
+    assert.equal(rootRetry.value.chainId, f.employee.task(await f.employee.state(), root.id).chainId);
+  } finally { await f.engine.close(); await f.store.close(); }
+});
+
+test("redispatch joins the task chain and /new forbids parentTaskId", async () => {
+  const f = await fixture();
+  try {
+    await setWorkPrinciples(f.store, "owner", "核对条目总数");
+    let round = 0;
+    f.engine.providers.chat = async () => round++ === 0
+      ? progress("p", [{ content: "整理资料", status: "completed" }])
+      : complete("c", "已整理资料");
+    const original = await f.segment(await f.add("整理指定资料"));
     assert.equal(original.status, "done");
 
-    await f.employee.control({ action: "resume", id: original.id, text: "补上汇总行" });
-    await setWorkPrinciples(f.store, "owner", "核对条目总数");
-    await f.employee.control({ action: "settings", instruction: "使用新版模板" });
-    round = 0;
-    f.engine.providers.chat = async (_model, system, messages) => {
-      assert.doesNotMatch(system, /旧公共原则|使用旧版模板/);
-      assert.match(system, /按当前原则调整尚未完成的步骤/);
-      if (round++ === 0) {
-        assert.match(system, /\[工作原则\]\n核对条目总数\n\n使用新版模板\n/);
-        const task = messages.findLast(m => m.role === "user" && m.runtime !== "dynamic")!.text!;
-        assert.match(task, /用旧版模板整理资料/, "the completed step is retained as history");
-        await setWorkPrinciples(f.store, "owner", "");
-        return progress("new-plan", [...plan, { content: "补上汇总行", status: "completed" }]);
-      }
-      assert.match(system, /\[工作原则\]\n使用新版模板\n/);
-      return complete("new-delivery", "已补上汇总行");
-    };
-    const resumed = await f.segment(original);
-    assert.equal(resumed.status, "done");
-    assert.equal(resumed.workSession, original.workSession);
-    assert.deepEqual(resumed.plan.slice(0, 1), plan);
+    const redispatched = await f.employee.control({ action: "redispatch", id: original.id, confirmed: true });
+    assert.equal(redispatched.parentId, original.id);
+    assert.equal(redispatched.edgeKind, "follow_up");
+    assert.equal(redispatched.chainSeq, 2);
+    const copy = f.employee.task(await f.employee.state(), redispatched.id);
+    assert.equal(copy.chainId, f.employee.task(await f.employee.state(), original.id).chainId);
 
-    const { id } = await f.employee.control({ action: "redispatch", id: original.id, confirmed: true });
-    const copy = f.employee.task(await f.employee.state(), id);
-    assert.equal(copy.text, brief);
-    assert.deepEqual(copy.plan, []);
-    round = 0;
-    f.engine.providers.chat = async (_model, system) => {
-      assert.match(system, /\[工作原则\]\n使用新版模板\n/);
-      assert.match(system, /当前任务由旧任务重新派发/);
-      assert.doesNotMatch(system, /旧公共原则|使用旧版模板/);
-      return round++ === 0 ? progress("copy-plan", [{ content: "用新版模板整理资料", status: "completed" }]) : complete("copy-delivery", "已按当前工作原则整理资料");
-    };
-    assert.equal((await f.segment(copy)).status, "done");
+    // /new rejects parentTaskId in communication session
+    await f.store.append(f.chat.id, { role: "user", text: "用新任务重来", newTask: true });
+    const config = await f.engine.config(), model = await f.engine.catalog.resolve(config, "p/light");
+    const { Tools } = await import("../server/core/tools");
+    const session = await f.store.session(f.chat.id);
+    const tools = await Tools.create(f.engine, session, config, new AbortController().signal, () => {});
+    await assert.rejects(
+      tools.execute({ id: "new-chain-deny", name: "employee_task_create", arguments: { instructions: "全新任务", parentTaskId: original.id } }, model),
+      /\/new.*不要传 parentTaskId/,
+    );
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
-test("follow-up eligibility depends on task state and original session, not delivery age", () => {
-  const task = { status: "done", workSession: "w", finishedAt: 1 } as unknown as Task;
-  assert.equal(followUpOpen(task), true, "an old delivery remains eligible");
-  assert.equal(followUpOpen({ ...task, finishedAt: 0 } as Task), true, "legacy missing timestamps do not decide eligibility");
-  for (const status of ["cancelled", "approval", "stopped", "failed", "running", "queued", "sealed"])
-    assert.equal(followUpOpen({ ...task, status } as Task), false, status);
-  assert.equal(followUpOpen({ ...task, dutyId: "d" } as Task), false, "duty runs are not reopened");
-  assert.equal(followUpOpen({ ...task, side: "computer" } as Task), false);
-  assert.equal(followUpOpen({ ...task, workSession: undefined } as Task), false);
-});
-
-test("without a supplement or for protected statuses a delivered task is not reopened", async () => {
+test("canChainFrom and stopped vs done/cancelled/sealed control boundaries", async () => {
   const f = await fixture();
   try {
+    const task = { status: "done", workSession: "w", finishedAt: 1 } as unknown as Task;
+    assert.equal(canChainFrom(task), true);
+    assert.equal(canChainFrom({ ...task, status: "cancelled" } as Task), true);
+    assert.equal(canChainFrom({ ...task, status: "sealed" } as Task), false);
+    assert.equal(canChainFrom({ ...task, dutyId: "d" } as Task), false);
+
     const job = await delivered(f);
     const set = (patch: Record<string, unknown>) => f.employee.update(s => { Object.assign(f.employee.task(s, job.id), patch); });
     const status = async () => f.employee.task(await f.employee.state(), job.id).status;
 
-    await set({ finishedAt: Date.now() - 365 * 24 * 60 * 60_000 });
-    await assert.rejects(f.employee.control({ action: "resume", id: job.id }), /Only stopped\/failed\/cancelled tasks may continue/, "empty resume never reopens done");
+    await assert.rejects(f.employee.control({ action: "resume", id: job.id }), /Only stopped\/failed tasks may continue/);
     await assert.rejects(f.employee.control({ action: "resume", id: job.id, text: "   " }), /Invalid task supplement/);
     assert.equal(await status(), "done");
 
-    await set({ dutyId: "duty-1" });
-    await assert.rejects(f.employee.control({ action: "resume", id: job.id, text: "再点一次" }), /职责触发.*不能直接续做/);
-    await set({ dutyId: undefined });
+    await set({ status: "cancelled" });
+    await assert.rejects(f.employee.control({ action: "resume", id: job.id }), /Only stopped\/failed tasks may continue/);
+    await assert.rejects(f.employee.control({ action: "resume", id: job.id, text: "继续" }), /已取消的任务不可原地恢复/);
 
-    for (const blocked of ["cancelled", "approval"]) {
-      await set({ status: blocked });
-      await assert.rejects(f.employee.control({ action: "resume", id: job.id, text: "继续" }), /Use explicit approval or a new task/);
-    }
+    await set({ status: "approval" });
+    await assert.rejects(f.employee.control({ action: "resume", id: job.id, text: "继续" }), /Use explicit approval or a new task/);
+
     await set({ status: "stopped" });
     await f.employee.control({ action: "resume", id: job.id, text: "继续原任务" });
     assert.equal(await status(), "queued", "stopped tasks keep their existing supplement behavior");
-    assert.equal(f.employee.task(await f.employee.state(), job.id).deliveries, undefined, "only a delivered task archives a delivery");
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
@@ -229,26 +247,28 @@ test("a supplement that lands after task_complete was accepted makes that comple
       const latest = [...messages].reverse().find((message) => message.role === "user" && message.runtime !== "dynamic")?.text || "";
       assert.match(latest, /顺便点开第一条结果/);
       assert.match(latest, /轮中补充/);
-      assert.equal(f.employee.busy.has(job.id), true, "the supplement is followed in the same run, before the task is released");
+      assert.equal(f.employee.busy.has(job.id), true);
       assert.equal(phase, 3);
       return { role: "assistant", text: "已看到补充，本轮不交付。" };
     };
     let current = await f.segment(job);
-    assert.equal(current.status, "queued", "stale completion is not delivered");
+    assert.equal(current.status, "queued");
     assert.equal((await f.deliveries()).length, 0);
     assert.match(current.answer, /未交付；在已验证结果基础上只做新增部分/);
 
     phase = 0;
-    f.engine.providers.chat = async () => phase++ === 0 ? progress("p2", [SEARCH, CLICK]) : complete("c2", "已搜索并点开第一条结果");
+    f.engine.providers.chat = async () => phase++ === 0
+      ? progress("p2", [SEARCH, { content: "点开第一条结果", status: "completed" }])
+      : complete("c2", "已搜索并点开第一条结果");
     current = await f.segment(current);
     assert.equal(current.status, "done");
     const sent = await f.deliveries();
-    assert.equal(sent.length, 1, "one delivery, for the newest revision only");
+    assert.equal(sent.length, 1);
     assert.match(sent[0].text!, /点开第一条结果/);
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
-test("the communication session offers recent delivery candidates without an age deadline", async () => {
+test("the communication session lists recent frozen done tasks and guides parentTaskId chaining", async () => {
   const f = await fixture();
   try {
     const recent = await delivered(f);
@@ -257,25 +277,19 @@ test("the communication session offers recent delivery candidates without an age
     let seen = "";
     f.engine.providers.chat = async (_model, system, messages) => { seen = system + "\n" + JSON.stringify(messages); return { role: "assistant", text: "好的" }; };
     await f.engine.run(f.chat.id, { role: "user", text: "点一下第一条结果" });
-    const digest = seen.split("[近期已交付、可在原任务续做] ")[1]?.split("\n")[0] || "";
+    const digest = seen.split("[近期已完成任务（只读冻结，后续需求请用 parentTaskId 建链）] ")[1]?.split("\n")[0] || "";
     assert(digest.includes(recent.id));
     assert(digest.includes(old.id), "age does not exclude a task");
-    assert(!digest.includes("followUpUntil"));
-    assert.match(seen, /不以时间决定/);
-    assert.match(seen, /仍不明确则询问/);
+    assert.match(seen, /不要对 done 任务使用 resume/);
+    assert.match(seen, /\[任务续做与任务链规则\]/);
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
-test("a quoted task is the primary reply target rather than other current tasks", async () => {
+test("quoted tasks focus the right task and guide follow_up creation for done tasks", async () => {
   const f = await fixture();
   try {
     const target = await delivered(f);
     const other = await f.add("另一条相似的任务");
-    const newer: Task[] = [];
-    for (let i = 0; i < 5; i++) newer.push(await f.add("另一条最近交付的任务 " + i));
-    await f.employee.update(state => {
-      for (const task of newer) Object.assign(f.employee.task(state, task.id), { status: "done", workSession: "other", finishedAt: Date.now() });
-    });
     const delivery = (await f.deliveries())[0];
     const quote = await f.store.quote(f.chat.id, delivery.seq!);
     let calls = 0;
@@ -283,24 +297,24 @@ test("a quoted task is the primary reply target rather than other current tasks"
       const input = messages.findLast(m => m.role === "user")!.text!;
       const focus = JSON.parse(input.split("[本次引用关联任务] ")[1].split("\n")[0]);
       assert.equal(focus.id, target.id);
-      assert.equal(focus.status, "done", "the user-bound task snapshot stays pinned across tool rounds");
-      if (calls) assert(messages.some(message => message.role === "tool" && message.callId === "resume-target" && !message.error), "the resume result is retained without rewriting the task snapshot");
-      if (!calls) {
-        assert.equal(focus.followUpOpen, true);
-        const eligible = JSON.parse(input.split("[近期已交付、可在原任务续做] ")[1].split("\n")[0]);
-        assert.deepEqual(eligible.map((task: Task) => task.id), [target.id], "the quoted task stays eligible even outside the five most recent deliveries");
-      }
-      for (const task of [other, ...newer]) assert(!input.includes(task.id), "unrelated tasks are not included in the target's injected summary");
-      assert(!input.includes("[当前活跃任务摘要]"));
-      if (calls++ === 0) return call("resume-target", "employee", { action: "resume", id: target.id, text: "改到 dev 分支" });
-      return { role: "assistant", text: "只处理引用的任务。" };
+      assert.equal(focus.status, "done");
+      assert.match(input, /严禁调用 resume/);
+      assert(!input.includes(other.id));
+      if (calls++ === 0) return call("chain-next", "employee", { action: "add", kind: "todo", text: "改到 dev 分支", parentTaskId: target.id, relation: "follow_up" });
+      return { role: "assistant", text: "已基于原交付建后续任务。" };
     };
-    await f.engine.run(f.chat.id, { role: "user", text: "后端改到 dev，我写错了", quote });
-    const updated = f.employee.task(await f.employee.state(), target.id);
-    assert.equal(updated.status, "queued");
-    assert.equal(updated.workSession, target.workSession);
-    assert.match(updated.answer, /改到 dev 分支/);
-    assert.equal(f.employee.task(await f.employee.state(), other.id).answer, undefined);
+    await f.engine.run(f.chat.id, {
+      role: "user",
+      text: "后端改到 dev，我写错了",
+      quote,
+    });
+    const state = await f.employee.state();
+    assert.equal(f.employee.task(state, target.id).status, "done");
+    const child = state.tasks.find(t => t.parentId === target.id);
+    assert.ok(child, "child task created on chain");
+    assert.equal(child!.edgeKind, "follow_up");
+    assert.equal(child!.chainId, f.employee.task(state, target.id).chainId);
+    assert.equal(f.employee.task(state, other.id).answer, undefined);
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
@@ -330,10 +344,7 @@ test("only unlinked or ambiguous quotes fall back to contextual task search", as
     }
     const missing = prompts[2];
     assert.match(missing, /\[本次引用关联任务\] {"id":"missing-task","status":"unavailable"}/);
-    assert(!missing.includes("[当前活跃任务摘要]"), "a missing explicit task must not be substituted with a different task");
-    const state = await f.employee.state();
-    assert.equal(f.employee.task(state, first.id).status, "queued");
-    assert.equal(f.employee.task(state, second.id).status, "queued");
+    assert(!missing.includes("[当前活跃任务摘要]"));
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
@@ -359,146 +370,23 @@ test("quoting a task does not execute a question or override an explicit request
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
-test("an old quoted task remains the reply target and a question alone does not reopen it", async () => {
+test("dedupeKey blocks duplicate active tasks, blocks blind duplicate of done tasks, but allows explicit parentTaskId chaining", async () => {
   const f = await fixture();
   try {
-    const target = await delivered(f), other = await f.add("另一条任务");
-    const delivery = (await f.deliveries())[0];
-    await f.employee.update(state => { f.employee.task(state, target.id).finishedAt = Date.now() - 365 * 24 * 60 * 60_000; });
-    f.engine.providers.chat = async (_model, _system, messages) => {
-      const input = messages.findLast(m => m.role === "user")!.text!;
-      const focus = JSON.parse(input.split("[本次引用关联任务] ")[1].split("\n")[0]);
-      assert.equal(focus.id, target.id);
-      assert.equal(focus.followUpOpen, true);
-      assert(input.includes("[近期已交付、可在原任务续做]"));
-      assert(!input.includes(other.id));
-      return { role: "assistant", text: "这是原任务的结果。" };
-    };
-    await f.engine.run(f.chat.id, { role: "user", text: "这条怎么处理？", quote: await f.store.quote(f.chat.id, delivery.seq!) });
-    assert.equal(f.employee.task(await f.employee.state(), target.id).status, "done");
-    assert.equal(f.employee.task(await f.employee.state(), other.id).status, "queued");
-  } finally { await f.engine.close(); await f.store.close(); }
-});
+    const first = await f.add("开发需求 123", { key: "tapd:123" });
+    const dupActive = await f.employee.execute("", { action: "add", kind: "todo", text: "重复需求", key: "tapd:123" });
+    assert.equal(dupActive.value.exists, true);
+    assert.equal(dupActive.value.id, first.id);
 
-test("an older linked task is offered with all matching candidates and resumes its original goal through clarification waiting", async () => {
-  const f = await fixture();
-  const url = "https://example.test/stories/1120427644139799025";
-  const clarify = { content: "澄清需求并等待回复", status: "cancelled" };
-  const develop = { content: "开发并验证原需求", status: "cancelled" };
-  try {
-    const original = await delivered(f), work = original.workSession;
-    const unrelated = await f.add("另一个站点的需求 https://other.test/stories/1120427644139799025");
-    await f.employee.update(state => {
-      const task = f.employee.task(state, original.id);
-      Object.assign(task, { text: `开发 ${url}?from_iteration_id=old；澄清后开发并验证`, key: "tapd:1120427644139799025", finishedAt: Date.now() - 30 * 24 * 60 * 60_000, plan: [SEARCH, clarify, develop] });
-      for (let i = 0; i < 35; i++) state.tasks.push({ ...task, id: `noise-${i}`, key: `noise:${i}`, text: `无关任务 ${i}`, status: "done" });
-    });
-    const sent = await f.add(`只发过澄清留言 ${url}?from_iteration_id=other`);
-    await f.employee.update(state => Object.assign(f.employee.task(state, sent.id), { status: "done", workSession: "comment-session", summary: "留言已发布，@ 未生效" }));
-    const chat = await f.store.session(f.chat.id);
-    chat.frozenSystem = "旧规则：超过4小时应新建任务。";
-    await f.store.saveSession(chat);
-    let phase = 0;
-    f.engine.providers.chat = async (_model, system, messages) => {
-      assert.match(system, /\[任务续做规则\].*取代旧会话/s, "old frozen sessions receive the new policy");
-      const input = messages.findLast(m => m.role === "user")!.text!;
-      const candidates = JSON.parse(input.split("[按标识匹配的任务候选] ")[1].split("\n")[0]);
-      assert.equal(candidates.total, 2);
-      assert.deepEqual(new Set(candidates.tasks.map((task: Task) => task.id)), new Set([original.id, sent.id]));
-      assert(!candidates.tasks.some((task: Task) => task.id === unrelated.id));
-      assert.match(input, /多个候选.*仍不能区分/s);
-      if (phase++ === 0) return call("resume-original", "employee", { action: "resume", id: original.id, text: "继续原需求：澄清留言已发布但 @ 未生效，先核对通知和回复，澄清后完成原开发与验证。" });
-      return { role: "assistant", text: "继续原任务。" };
-    };
-    await f.engine.run(f.chat.id, { role: "user", text: `${url}?from_iteration_id=new 这个需求单没有在单里澄清吗？` });
-    let current = f.employee.task(await f.employee.state(), original.id);
-    assert.equal(current.status, "queued");
-    assert.equal(current.workSession, work);
-    assert.match(current.answer, /恢复仍需完成的步骤/);
-    assert.match(current.answer, /留言已发布但 @ 未生效/);
-    assert.deepEqual(current.plan, [SEARCH, clarify, develop], "the old plan stays available for evidence-based replanning");
-    phase = 0;
-    f.engine.providers.chat = async (_model, _system, messages) => {
-      const input = messages.findLast(m => m.role === "user" && m.runtime !== "dynamic")!.text!;
-      assert.match(input, /留言已发布但 @ 未生效/);
-      assert.match(input, /不要重复已执行的提交\/发送/);
-      if (phase++ === 0) return progress("revise", [SEARCH, { ...clarify, status: "blocked" }, { ...develop, status: "pending" }]);
-      return call("wait-for-reply", "task_wait", { checkpoint: "留言已发布但未确认触达；核对通知及回复，不重复发送", delayMinutes: 120 });
-    };
-    current = await f.segment(current);
-    assert.equal(current.status, "deferred");
-    assert.equal(current.workSession, work);
-    assert.equal(current.plan[2].status, "pending");
-    assert.match(current.checkpoint, /不重复发送/);
-    const duplicate = await f.employee.execute("", { action: "add", kind: "todo", text: "继续原需求", key: "tapd:1120427644139799025" });
-    assert.equal(duplicate.value.id, original.id);
-    assert.equal(duplicate.value.exists, true);
-    assert.match(duplicate.value.next, /没有自动续做/);
-    assert.equal((await f.employee.state()).tasks.filter(task => task.id === original.id).length, 1);
-  } finally { await f.engine.close(); await f.store.close(); }
-});
+    await f.employee.update(s => { f.employee.task(s, first.id).status = "done"; });
+    const dupDone = await f.employee.execute("", { action: "add", kind: "todo", text: "没传parentTaskId的重开", key: "tapd:123" });
+    assert.equal(dupDone.value.exists, true);
+    assert.match(dupDone.value.next, /不可重启/);
 
-test("business keys and bare IDs identify historical candidates without prefix collisions", async () => {
-  const f = await fixture();
-  try {
-    const task = await f.add("原开发任务"), other = await f.add("另一条任务"), legacy = await f.add("历史需求编号 1120427644139799025 的开发任务");
-    await f.employee.update(state => {
-      f.employee.task(state, task.id).key = "tapd:1120427644139799025";
-      f.employee.task(state, other.id).key = "tapd:11204276441397990250";
-    });
-    const seen: string[] = [];
-    f.engine.providers.chat = async (_model, _system, messages) => { seen.push(messages.findLast(m => m.role === "user")!.text!); return { role: "assistant", text: "收到。" }; };
-    await f.engine.run(f.chat.id, { role: "user", text: "追问 tapd:1120427644139799025" });
-    await f.engine.run(f.chat.id, { role: "user", text: "追问 1120427644139799025" });
-    await f.engine.run(f.chat.id, { role: "user", text: "追问 112042764413979902599" });
-    const exact = JSON.parse(seen[0].split("[按标识匹配的任务候选] ")[1].split("\n")[0]);
-    assert.deepEqual(exact.tasks.map((item: Task) => item.id), [task.id]);
-    const bare = JSON.parse(seen[1].split("[按标识匹配的任务候选] ")[1].split("\n")[0]);
-    assert.deepEqual(new Set(bare.tasks.map((item: Task) => item.id)), new Set([task.id, legacy.id]), "legacy tasks without keys remain visible, and ambiguity is retained");
-    assert(!seen[2].includes("[按标识匹配的任务候选]"), "a numeric prefix is not a business identity");
-  } finally { await f.engine.close(); await f.store.close(); }
-});
-
-test("too many identifier matches are marked truncated instead of appearing unique", async () => {
-  const f = await fixture();
-  try {
-    const task = await f.add("无关任务");
-    await f.employee.update(state => {
-      for (let i = 0; i < 21; i++) state.tasks.push({ ...task, id: `candidate-${i}`, text: `历史需求 1120427644139799025 第 ${i} 项` });
-    });
-    f.engine.providers.chat = async (_model, _system, messages) => {
-      const input = messages.findLast(m => m.role === "user")!.text!;
-      const candidates = JSON.parse(input.split("[按标识匹配的任务候选] ")[1].split("\n")[0]);
-      assert.equal(candidates.total, 21);
-      assert.equal(candidates.truncated, true);
-      assert.equal(candidates.tasks.length, 20);
-      assert.match(input, /列表被截断时先问用户或按任务ID查询/);
-      return { role: "assistant", text: "请指明要继续的任务。" };
-    };
-    await f.engine.run(f.chat.id, { role: "user", text: "继续 1120427644139799025" });
-    assert((await f.employee.state()).tasks.every(item => item.status === "queued"));
-  } finally { await f.engine.close(); await f.store.close(); }
-});
-
-test("identical supplements are idempotent within one user message but a later request can resume again", async () => {
-  const f = await fixture();
-  try {
-    const task = await delivered(f);
-    await f.engine.clearEmployeeChat(f.employee.employeeId);
-    let calls = 0;
-    f.engine.providers.chat = async () => calls++ < 2
-      ? call(`same-${calls}`, "employee", { action: "resume", id: task.id, text: "继续" })
-      : { role: "assistant", text: "继续。" };
-    await f.engine.run(f.chat.id, { role: "user", text: "继续", at: 1000 });
-    let current = f.employee.task(await f.employee.state(), task.id);
-    assert.equal(current.revision, 1, "repeating a tool call from the same message is deduplicated");
-    await f.employee.update(state => Object.assign(f.employee.task(state, task.id), { status: "done", finishedAt: Date.now() }));
-    await f.engine.clearEmployeeChat(f.employee.employeeId);
-    calls = 0;
-    await f.engine.run(f.chat.id, { role: "user", text: "继续", at: 2000 });
-    current = f.employee.task(await f.employee.state(), task.id);
-    assert.equal(current.status, "queued");
-    assert.equal(current.revision, 2, "a new user message is not the old request merely because its text is identical");
+    const chained = await f.employee.execute("", { action: "add", kind: "todo", text: "基于123后续完善", key: "tapd:123", parentTaskId: first.id, relation: "follow_up" });
+    assert.equal(chained.value.exists, undefined);
+    assert.equal(chained.value.parentId, first.id);
+    assert.equal(chained.value.chainSeq, 2);
   } finally { await f.engine.close(); await f.store.close(); }
 });
 

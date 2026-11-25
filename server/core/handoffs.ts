@@ -186,7 +186,7 @@ export class TaskHandoffs {
       let state = await employee.state({ runs: false });
       const task = employee.task(state, taskId);
       assert(!ended(task.status), "任务已结束，不需要交接");
-      assert(!this.running(task), "任务这一轮还在执行；等这一步结束或先暂停任务再交接");
+      assert(!this.running(task), "任务这一轮还在执行；等这一步结束或先停止任务再交接");
       const ownerId = state.ownerId || task.execution?.ownerId || task.owner?.token || "";
       const cloud = this.deps.cloud(ownerId);
       assert(cloud, "未启用云端隔离，无法交接到云端");
@@ -327,7 +327,7 @@ export class TaskHandoffs {
       let scanned: { files: HandoffFile[]; contents: Map<string, Buffer> } = { files: [], contents: new Map() };
       let applied = { conflicts: [] as string[], changed: 0 };
       if (record?.cloudCwd || task.workSession || task.computerSession) {
-        if (!record?.cloudCwd) assert(["stopped", "failed", "cancelled", "waiting", "approval"].includes(task.status), "云端任务已开始，请先暂停再交到本机");
+        if (!record?.cloudCwd) assert(["stopped", "failed", "cancelled", "waiting", "approval"].includes(task.status), "云端任务已开始，请先停止再交到本机");
         scanned = await this.scanCloud(cloud || { fs: filesystem }, task.cwd);
         applied = await this.applyLocal(agent, cwd, sameClient && sameCloud ? record?.base || [] : [], scanned, "cloud");
       }
@@ -614,7 +614,7 @@ export class TaskHandoffs {
       const state = await employee.update((s) => {
         const task = employee.task(s, taskId);
         if (target.expectedStatus !== undefined)
-          assert(task.status === target.expectedStatus && !this.running(task) && !employee.busy?.has(taskId), "任务状态已变化，请先暂停后重新交接");
+          assert(task.status === target.expectedStatus && !this.running(task) && !employee.busy?.has(taskId), "任务状态已变化，请先停止后重新交接");
         if (target.localBrowser !== undefined && (!!task.execution?.localBrowser !== !!target.localBrowser || (task.execution?.browserClientId || "") !== (target.browserClientId || ""))) {
           delete task.browserSyncedAt;
           delete task.browserSyncVersion;

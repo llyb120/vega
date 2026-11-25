@@ -250,8 +250,9 @@ test("generic recovery diagnoses in the original task/session, requires verified
     assert.equal(current.status, "done");
     assert.equal(current.workSession, originalSession);
     assert.equal((await store.sessions()).length, 1);
-    await employee.control({ action: "resume", id: job.id, text: "在已交付结果上补充新要求" });
-    assert.equal(employee.task(await employee.state(), job.id).recovery, undefined, "a delivered follow-up starts a fresh recovery budget");
+    await assert.rejects(employee.control({ action: "resume", id: job.id, text: "在已交付结果上补充新要求" }), /不可重新启动/);
+    const followUp = await employee.execute("", { action: "add", kind: "todo", text: "在已交付结果上补充新要求", parentTaskId: job.id, relation: "follow_up" });
+    assert.equal(employee.task(await employee.state(), followUp.value.id).recovery, undefined, "a follow-up chain task starts with a fresh recovery budget");
   } finally { employee.close(); await store.close(); }
 });
 

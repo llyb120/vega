@@ -80,6 +80,8 @@ test("requesters can answer, approve, stop, resume and explicitly redispatch the
     await reset("approval");
     await control({ action: "approve", approved: false });
     assert.equal((await employee.findTask(shared.id))!.status, "cancelled");
+    await assert.rejects(control({ action: "resume" }), /Only stopped\/failed tasks may continue/);
+    await reset("stopped");
     await control({ action: "resume" });
     assert.equal((await employee.findTask(shared.id))!.status, "queued");
     await control({ action: "stop", id: "task-private" }, owner);

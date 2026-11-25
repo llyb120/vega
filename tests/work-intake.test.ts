@@ -334,7 +334,7 @@ test("an event for an in-flight item is attached and absorbed after the step", a
   }
 });
 
-test("a completed task stays done until there is new evidence", async () => {
+test("a completed task stays done and spawns a follow-up chain task when new evidence arrives", async () => {
   const box = await harness();
   try {
     const created = await box.employee.execute("", { action: "add", kind: "todo", text: "修这个提交", key: "ci:commit-abc" });
@@ -353,19 +353,30 @@ test("a completed task stays done until there is new evidence", async () => {
     assert.equal((await box.employee.state()).tasks[0].status, "done");
 
     const fresh = await box.employee.intake(event("job 9", "ci-9"));
-    assert.equal(fresh.action, "resume");
-    assert.equal(fresh.taskId, id);
-    await box.employee.update((s) => { s.tasks[0].status = "done"; });
+    assert.equal(fresh.action, "spawn_followup");
+    assert.equal(fresh.parentTaskId, id);
+    assert.notEqual(fresh.taskId, id);
+    let state = await box.employee.state();
+    assert.equal(state.tasks.length, 2);
+    assert.equal(state.tasks[0].status, "done", "completed parent stays frozen");
+    assert.equal(state.tasks[1].parentId, id);
+    assert.equal(state.tasks[1].edgeKind, "follow_up");
+    assert.equal(state.tasks[1].chainId, state.tasks[0].chainId);
+    assert.equal(state.tasks[1].chainSeq, 2);
+
+    await box.employee.update((s) => { s.tasks[1].status = "done"; });
     const repeat = await box.employee.intake(event("job 9", "ci-9-again"));
     assert.equal(repeat.action, "leave");
-    assert.equal((await box.employee.state()).tasks[0].status, "done");
+    assert.equal((await box.employee.state()).tasks.length, 2);
 
     const newer = await box.employee.intake(event("job 10", "ci-10"));
-    assert.equal(newer.action, "resume");
-    assert.equal(newer.taskId, id);
-    const state = await box.employee.state();
-    assert.equal(state.tasks.length, 1);
-    assert.equal(state.tasks[0].status, "queued");
+    assert.equal(newer.action, "spawn_followup");
+    assert.equal(newer.parentTaskId, fresh.taskId);
+    state = await box.employee.state();
+    assert.equal(state.tasks.length, 3);
+    assert.equal(state.tasks[2].status, "queued");
+    assert.equal(state.tasks[2].chainId, state.tasks[0].chainId);
+    assert.equal(state.tasks[2].chainSeq, 3);
     assert.equal(box.started(), 0);
   } finally {
     await box.finish();

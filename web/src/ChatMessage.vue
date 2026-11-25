@@ -11,6 +11,7 @@ import StepOutput from "./StepOutput.vue";
 import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
 import { cleanTaskTitle } from "./conversation";
+import { chainEdgeLabel } from "../../shared/task-chain";
 import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
@@ -41,6 +42,7 @@ const sender = computed(() => props.message.author ? { kind: props.message.autho
 // My own bubbles take the color of the employee I am talking to (the chat view passes it); their replies stay neutral.
 const tint = computed(() => (mine.value && !props.message.error ? props.selfTint : undefined));
 const statusOf = (task) => props.taskStatus?.[task.id] ?? (props.tasks ? "deleted" : task.status);
+const taskInfoOf = (taskId) => (props.tasks || []).find((task) => task.id === taskId);
 const attachedTasks = computed(() => (props.message.tasks || []).filter((task) => !props.hiddenTaskIds?.has(task.id)));
 const topicStatus = computed(() => props.topicContext ? (props.taskStatus?.[props.topicContext.id] ?? props.topicContext.status) : "");
 const topicDeleted = computed(() => topicStatus.value === "deleted");
@@ -134,6 +136,7 @@ async function runExport(format) {
           </button>
           <button v-for="task in footerTasks" :key="task.id" type="button" class="chat-bubble-link chat-task-link" :data-task-id="task.id" :disabled="statusOf(task) === 'deleted'" :aria-label="(statusOf(task) === 'deleted' ? '任务已删除：' : '查看任务：') + task.title" @click="emit('task', task.id)">
             <Icon name="tasks" :size="13" />
+            <span v-if="taskInfoOf(task.id)?.chainSeq" class="chat-chain-tag">#{{ taskInfoOf(task.id).chainSeq }}<template v-if="taskInfoOf(task.id)?.edgeKind"> {{ chainEdgeLabel(taskInfoOf(task.id).edgeKind) }}</template></span>
             <span class="chat-link-text">任务：{{ task.title }}</span>
             <span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span>
             <Icon v-if="statusOf(task) !== 'deleted'" name="right" :size="13" />
@@ -235,6 +238,7 @@ async function runExport(format) {
 .chat-quote:hover:not(:disabled) { background: var(--surface-2); color: var(--text-2); }
 .chat-quote strong { max-width: 40%; }
 .chat-quote strong, .chat-quote span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chat-chain-tag { flex: none; padding: 0 4px; border-radius: 4px; background: var(--surface-3); color: var(--text-2); font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .chat-bubble-links { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
 .chat-bubble-links:not(:first-child) { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--border); }
 .chat-bubble-link { display: flex; align-items: center; justify-content: flex-start; gap: 5px; width: calc(100% + 8px); min-width: 0; height: auto; min-height: 24px; margin: 0 -4px; padding: 2px 4px; border: 0; border-radius: 6px; background: transparent; color: var(--accent-text); font-size: 12px; font-weight: 500; line-height: 1.45; text-align: left; }

@@ -2,6 +2,7 @@
 import { ref } from "vue";
 import Icon from "./Icon.vue";
 import { taskLabel, taskTone, planProgress, shortTime } from "./task-status";
+import { chainEdgeLabel } from "../../shared/task-chain";
 const props = defineProps({ attention: Array, active: Array, readonly: Boolean, act: Function, overlay: Boolean });
 const emit = defineEmits(["open", "all", "close"]);
 const answers = ref({}), busy = ref("");
@@ -36,7 +37,7 @@ function brief(text, max = 72) {
         <h4><span class="dot info" aria-hidden="true"></span>进行中<span class="count">{{ others(active, attention).length }}</span></h4>
         <p v-if="!others(active, attention).length" class="panel-empty"><Icon name="check" :size="16" />手头很清爽。交代一个目标，进度会更新在这里。</p>
         <button v-for="task in others(active, attention).slice(0, 8)" :key="task.id" type="button" class="task-row" @click="emit('open', task.id)">
-          <span class="task-row-head"><span :class="['badge', taskTone(task.status)]">{{ taskLabel(task.status) }}</span><time>{{ shortTime(task.createdAt) }}</time></span>
+          <span class="task-row-head"><span class="task-row-badges"><span :class="['badge', taskTone(task.status)]">{{ taskLabel(task.status) }}</span><span v-if="task.chainSeq" class="chain-tag">#{{ task.chainSeq }}<template v-if="task.edgeKind"> {{ chainEdgeLabel(task.edgeKind) }}</template></span></span><time>{{ shortTime(task.createdAt) }}</time></span>
           <strong>{{ task.text }}</strong>
           <span v-if="task.progress?.length || task.queueReason || task.checkpoint" class="task-row-note">{{ task.progress?.at(-1)?.text || task.queueReason || task.checkpoint }}</span>
           <span v-if="planProgress(task.plan)" class="mini-progress" :title="`计划 ${planProgress(task.plan).done}/${planProgress(task.plan).total}`"><span :style="{ width: planProgress(task.plan).percent + '%' }"></span></span>
@@ -67,6 +68,8 @@ function brief(text, max = 72) {
 .task-row { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; gap: 4px; width: 100%; height: auto; margin-bottom: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); font-weight: 400; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .task-row:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface); box-shadow: var(--sh-sm); }
 .task-row-head { display: flex; align-items: center; justify-content: space-between; }
+.task-row-badges { display: inline-flex; align-items: center; gap: 5px; }
+.chain-tag { padding: 0 5px; border-radius: 4px; background: var(--surface-2); color: var(--muted); font-size: 10.5px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .task-row time { color: var(--muted); font-size: 11px; }
 .task-row strong { display: -webkit-box; overflow: hidden; color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.45; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .task-row-note { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1.5; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }

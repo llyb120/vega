@@ -225,13 +225,14 @@ export type IntakePlan =
   | { action: "attach"; taskId: string; reason: string }
   | { action: "queue-fire"; taskId: string; reason: string }
   | { action: "resume"; taskId: string; status: "queued" | "deferred" | "waiting"; nextCheckAt: number; reason: string }
+  | { action: "spawn_followup"; parentTaskId: string; status: "queued" | "deferred" | "waiting"; nextCheckAt: number; reason: string }
   | { action: "start"; status: "queued" | "deferred" | "waiting"; nextCheckAt: number; reason: string };
 
 const evidenceOf = (event: WorkEvent) => (event.evidence || "").trim();
 
-function isNewEvidence(task: IntakeView, event: WorkEvent) {
+function isNewEvidence(tasks: IntakeView[], event: WorkEvent) {
   const evidence = evidenceOf(event);
-  return !!evidence && !(task.seenEvidence || []).includes(evidence);
+  return !!evidence && !tasks.some((task) => (task.seenEvidence || []).includes(evidence));
 }
 
 function userAskedAgain(event: WorkEvent) {
@@ -274,9 +275,18 @@ export function planIntake(tasks: IntakeView[], event: WorkEvent, now: number): 
   if (task.status === "sealed" || task.status === "stopped" || task.status === "cancelled" || task.status === "approval")
     return { action: "leave", taskId: task.id, reason: "用户已停止、已封存或仍在等审批，不自动重启" };
   const due = event.kind === "schedule" || !!event.schedule;
-  const fresh = isNewEvidence(task, event) || userAskedAgain(event);
-  if (task.status === "done" && !due && !fresh)
-    return { action: "leave", taskId: task.id, reason: "已经做完，没有新的证据" };
+  const fresh = isNewEvidence(same, event) || userAskedAgain(event);
+  if (task.status === "done") {
+    if (!event.hold && !due && !fresh)
+      return { action: "leave", taskId: task.id, reason: "已经做完，没有新的证据" };
+    return {
+      action: "spawn_followup",
+      parentTaskId: task.id,
+      status: event.hold ? "waiting" : future(event, now) ? "deferred" : "queued",
+      nextCheckAt: future(event, now) ? event.schedule!.dueAt : 0,
+      reason: event.hold ? holdReason(event.hold) : due ? "定时到点，基于已完成任务建链跟进" : "有新证据，基于已完成任务建链跟进",
+    };
+  }
   if (task.status === "waiting" && !fresh && !due)
     return { action: "leave", taskId: task.id, reason: "还在等用户，没有新的结果" };
   if (future(event, now))
@@ -286,7 +296,7 @@ export function planIntake(tasks: IntakeView[], event: WorkEvent, now: number): 
     taskId: task.id,
     status: "queued",
     nextCheckAt: 0,
-    reason: task.status === "failed" || task.status === "recovering" ? "失败或暂停的同一条任务继续做" : due ? "定时到点，继续同一条" : "有新证据，继续同一条任务",
+    reason: task.status === "failed" || task.status === "recovering" ? "失败或已停止的同一条任务继续做" : due ? "定时到点，继续同一条" : "有新证据，继续同一条任务",
   };
 }
 

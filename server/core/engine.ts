@@ -34,7 +34,8 @@ import { Tools, type Outcome } from "./tools";
 import { Context, estimate, ACP_GUIDE, sinceNewSession } from "./context";
 import { APPUSE_TOOLS } from "./appuse-tools";
 import { DesktopObservations } from "./desktop-observations";
-import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, followUpOpen, type EmployeeRuntime, type Task } from "./employee";
+import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, canChainFrom, type EmployeeRuntime, type Task } from "./employee";
+import { sortChainTasks } from "../../shared/task-chain";
 import { scheduleDigest } from "./work-intake";
 import { EmployeeBrowsers } from "./employee-browsers";
 import { NetworkRelay } from "./network-relay";
@@ -1232,16 +1233,16 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       const activeTasks = !session.phaseRole && employee && !session.taskId
         ? (employee.tasks || []).filter((task) => !ended(task.status)).slice(-20).map(taskSummary)
         : [];
-      const followUps = !session.phaseRole && employee && !session.taskId
-        ? (employee.tasks || []).filter((task) => followUpOpen(task)).slice(-5).map(taskSummary)
+      const recentDone = !session.phaseRole && employee && !session.taskId
+        ? (employee.tasks || []).filter((task) => task.status === "done" && canChainFrom(task)).slice(-5).map(taskSummary)
         : [];
-      const followUpDigest = followUps.length
-        ? `[近期已交付、可在原任务续做] ${JSON.stringify(followUps)}\n这里只列最近5条，较早的任务也可能续做；按用户意图和完整目标判断，不以时间决定。resume 被拒时先核对原因，不要自动新建替代任务。\n`
+      const followUpDigest = recentDone.length
+        ? `[近期已完成任务（只读冻结，后续需求请用 parentTaskId 建链）] ${JSON.stringify(recentDone)}\n已完成任务不可 resume 重启；若用户基于其交付继续或修改，请调用 employee_task_create(parentTaskId=<原任务ID>, relation="follow_up")，不要对 done 任务使用 resume。\n`
         : "";
       const taskDigest = !session.phaseRole && employee && !session.taskId
         ? followUpDigest + scheduleDigest(employee.tasks) + (activeTasks.length
-          ? `\n[当前活跃任务摘要] ${JSON.stringify(activeTasks)}\n先结合用户意图和任务候选判断是否续做原目标；只有新的独立需求才 employee_task_create（建议带 dedupeKey）。摘要不够时用 employee_status 查看完整字段、计划和结果。\n`
-          : `\n[当前活跃任务摘要] 无活跃任务，但已交付的关联任务仍可能续做；先按用户意图及任务候选判断，只有新的独立需求才 employee_task_create。\n`)
+          ? `\n[当前活跃任务摘要] ${JSON.stringify(activeTasks)}\n先结合用户意图和任务候选判断是否调整原目标；只有新的独立需求才 employee_task_create（建议带 dedupeKey）。摘要不够时用 employee_status 查看完整字段、计划和结果。\n`
+          : `\n[当前活跃任务摘要] 无活跃任务；若接续已完成任务请用 parentTaskId 建链，全新独立需求才直接 employee_task_create。\n`)
         : "";
       const employeeIdentity = !session.phaseRole && employee ? `\n[当前热心市民] ${employee.name}（id=${employee.id}）\n你只管理当前热心市民的任务。用户直接交代工作时可用 employee_task_create 派单，无需“交给热心市民”口令。独立工作放到任务中执行；沟通会话用于回答、派单、补充和恢复任务。行为约束以工作原则为准。用户明确说出的时刻或重复周期会记在同一条任务上，到点只续做这一条；不要另建职责或章程，也不要在空闲时找活。\n${EMPLOYEE_SCENE_RULES}\n${EMPLOYEE_MEMORY_RULES}` : "";
       let stable = session.phaseRole
@@ -1336,15 +1337,27 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           const quoted = !groupId && latestChat?.quote ? await this.store.message(key, latestChat.quote.seq) : undefined;
           const quotedTaskId = quoted?.tasks?.length === 1 ? quoted.tasks[0].id : undefined;
           const focusedTaskId = topicTask?.id ?? quotedTaskId;
-          const focusedTask = topicTask ?? (quotedTaskId ? await worker!.findTask(quotedTaskId) : undefined);
-          const focusedFollowUp = !!focusedTask && followUpOpen(focusedTask);
+          const focusedTask = topicTask ?? (focusedTaskId ? (matchScope?.find((task) => task.id === focusedTaskId) ?? (!groupId ? await worker!.findTask(focusedTaskId) : undefined)) : undefined);
+          const focusedChainable = !!focusedTask && canChainFrom(focusedTask);
           const matchText = groupId ? groupMessage?.text || "" : [latestChat?.text, latestChat?.quote?.text].filter(Boolean).join("\n");
           matched = matchScope && latestChat && !focusedTaskId && !topicTaskId ? relatedTasks(matchScope, matchText) : [];
           // shortcut: 最多注入20条匹配摘要；更多时按任务ID缩小范围，不按截断结果猜唯一任务。
-          const matchedTasks = matched.length ? `\n[按标识匹配的任务候选] ${JSON.stringify({ total: matched.length, truncated: matched.length > 20, tasks: matched.slice(-20).map((task) => ({ ...taskSummary(task), ...(task.status === "done" ? { followUpOpen: followUpOpen(task) } : {}) })) })}\n匹配仅供定位，不代表授权或目标相同；比较原目标、用户最新意图与任务详情。追问已授权却遗漏的环节时，结合原目标与上下文判断是否需要在原任务补做并继续；不要只新建眼前一步。多个候选仍不能区分或列表被截断时先问用户或按任务ID查询。纯粹询问状态不自动执行，不绕过审批或用户停止。\n` : "";
-          const taskIndex = employeeState ? "\n当前任务索引（内容已节选；完整内容、进度和结果用employee_status传taskId查看）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: [...task.text].slice(0, 120).join(""), status: task.status, ...(task.key ? { dedupeKey: task.key } : {}) }))) : "";
+          const matchedTasks = matched.length ? `\n[按标识匹配的任务候选] ${JSON.stringify({ total: matched.length, truncated: matched.length > 20, tasks: matched.slice(-20).map((task) => ({ ...taskSummary(task), ...(task.status === "done" ? { chainable: canChainFrom(task) } : {}) })) })}\n匹配仅供定位，不代表授权或目标相同；比较原目标、用户最新意图与任务详情。已完成（done）任务已冻结禁止 resume，需接续时用 employee_task_create(parentTaskId=..., relation="follow_up")；已取消（cancelled）任务不可原地 resume，重做用 relation="retry"；已停止/失败/未完成任务允许 resume 原地继续（除非用户明确指明新任务）。多个候选仍不能区分或列表被截断时先问用户或按任务ID查询。纯粹询问状态不自动执行，不绕过审批或用户停止。\n` : "";
+          const taskIndex = employeeState ? "\n当前任务索引（内容已节选；完整内容、进度和结果用employee_status传taskId查看）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: [...task.text].slice(0, 120).join(""), status: task.status, ...(task.chainId ? { chainId: task.chainId, chainSeq: task.chainSeq } : {}), ...(task.key ? { dedupeKey: task.key } : {}) }))) : "";
+          let focusedGuidance = "";
+          if (focusedTask) {
+            if (focusedTask.status === "done") focusedGuidance = `该任务已完成并冻结，严禁调用 resume；若用户要求修改、补充或继续延伸，必须调用 employee_task_create(parentTaskId="${focusedTask.id}", relation="follow_up") 在任务链下新建后续任务${focusedChainable ? "" : "（若为职责任务则不可建链）"}。`;
+            else if (focusedTask.status === "cancelled") focusedGuidance = `该任务已取消，不可原地 resume；若用户要求重新做，调用 employee_task_create(parentTaskId="${focusedTask.id}", relation="retry") 在任务链下开分支重做。`;
+            else if (focusedTask.status === "stopped") focusedGuidance = `该任务已停止，默认允许调用 employee_task_manage(resume) 原地继续，除非用户明确指明开新任务或新分支。`;
+            else focusedGuidance = `该任务尚未完结，需要调整或补充时优先用 employee_task_manage(resume) 原地处理；纯粹询问状态不自动执行。`;
+          }
+          const focusedChainNodes = focusedTask?.chainId && matchScope
+            ? sortChainTasks(matchScope.filter((t) => t.chainId === focusedTask.chainId)).slice(-8).map((t) => ({ id: t.id, seq: t.chainSeq, status: t.status, edgeKind: t.edgeKind, retryOf: t.retryOf, text: [...t.text].slice(0, 60).join("") }))
+            : [];
+          const focusLabel = topicTask ? "[本次话题关联群任务]" : "[本次引用关联任务]";
+          const focusKind = topicTask ? "话题" : "引用消息";
           const taskContext = focusedTaskId
-            ? `\n${topicTask ? "[本次话题关联群任务]" : "[本次引用关联任务]"} ${JSON.stringify(focusedTask ? { ...taskSummary(focusedTask), ...(focusedTask.status === "done" ? { followUpOpen: focusedFollowUp } : {}) } : { id: focusedTaskId, status: "unavailable" })}\n${focusedFollowUp ? `[近期已交付、可在原任务续做] ${JSON.stringify([taskSummary(focusedTask!)])}\n` : ""}当前${topicTask ? "话题" : "引用消息"}已唯一指明该任务：默认以它为本次回复和任务操作的对象，不要先根据上下文搜索或处理其他任务；仅当本次消息明确要求其他任务或多个任务时才处理这些任务。先判断用户是在询问、补充、续做还是停止；纯粹询问状态不自动执行，追问已授权但遗漏的环节时结合上下文判断是否应在原任务补做并继续。用户要求继续同一目标且 followUpOpen=true 时用 employee_task_manage 的 resume 带 supplement 在原任务续做，保留原目标及已知回执。操作仍受任务状态和审批约束，不按交付时间设期限。关联任务不存在或不可访问时如实说明，不用相似任务替代；需要详情或用户明确要求其他任务时用 employee_status 查询。\n`
+            ? `\n${focusLabel} ${JSON.stringify(focusedTask ? { ...taskSummary(focusedTask), ...(focusedTask.status === "done" ? { chainable: focusedChainable } : {}) } : { id: focusedTaskId, status: "unavailable" })}\n${focusedChainNodes.length > 1 ? `[所在任务链节点] ${JSON.stringify(focusedChainNodes)}\n` : ""}${focusedTask?.status === "done" && focusedChainable ? `[近期已完成任务（只读冻结，后续需求请用 parentTaskId 建链）] ${JSON.stringify([taskSummary(focusedTask)])}\n` : ""}当前${focusKind}已唯一指明该任务：默认以它为本次回复和任务操作的对象，不要先根据上下文搜索或处理其他任务；仅当本次消息明确要求其他任务或多个任务时才处理这些任务。先判断用户是在询问、补充、接续还是停止；纯粹询问状态不自动执行。${focusedGuidance} 关联任务不存在或不可访问时如实说明，不用相似任务替代；需要详情或用户明确要求其他任务时用 employee_status 查询。\n`
             : matchedTasks + taskIndex + (employee && !session.taskId ? taskDigest : "") + (!session.groupId && latestChat?.quote ? "\n[引用消息未唯一关联任务] 只能根据本次消息和上下文寻找；多个候选仍无法确定时先向用户澄清。\n" : "");
           const supplement = session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : "";
           const nativePlacement = latestChat?.chatClientId && !groupId

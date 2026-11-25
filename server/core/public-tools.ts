@@ -135,10 +135,13 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       status: str("任务过滤：all（默认）全部、active 未收尾、ended 已收尾（完成、失败、停止、取消、封存）", { enum: ["all", "active", "ended"] }),
       memoryQuery: str("只影响返回的相关记忆：按这个关键词挑最相关的 30 条；省略为不按关键词", { maxLength: 2000 }) }));
   out.push(tool("employee_task_create",
-    "给当前热心市民派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务但不自动续做；需要继续同一目标时核对状态并用 resume，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。用户明确说出的时刻或重复周期由系统记在同一条任务上，到点只续做这一条，不要为定时另建一条" +
+    "给当前热心市民派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。已完成（done）和已取消（cancelled）的任务不可原地重启或 resume；若要基于已完成交付物继续修改/追问，或对已取消/失败/停止任务开分支重做，传 parentTaskId 和 relation（follow_up 后续 / retry 重做 / fork 分叉）建任务链。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 有进行中任务时不新建；仅存在已结束任务且未传 parentTaskId 时不新建并返回原任务，派单前不必先查重。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。用户明确说出的时刻或重复周期由系统记在同一条任务上，到点只续做这一条，不要为定时另建一条" +
       (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : ctx.group ? "。群聊里只给按群公告归你的工作派单。其他热心市民负责的工作不要派单，直接在回复里 @ 对应成员。" : "。"),
     { instructions: instructions("任务目标、范围、约束和交付标准，保留用户原话；不写工具名或动作名"),
-      dedupeKey: str("业务唯一标识，≤200 字；同 key 已有任务（含已收尾）时直接返回原任务。用户明确要求重做已完成的事时用新 key（如原 key 加 :v2）", { minLength: 1, maxLength: 200 }),
+      parentTaskId: str("可选：前置或来源任务 ID。对已完成任务做后续修改（follow_up）、对已取消/失败/停止任务重做（retry）或分叉探索（fork）时传入，将新任务纳入同一任务链", { minLength: 1 }),
+      relation: str("可选：与 parentTaskId 的关系：follow_up 基于已完成交付继续、retry 重做（自动挂到其父节点下作兄弟分支）、fork 分叉探索；省略时按来源状态自动推断", { enum: ["follow_up", "retry", "fork"] }),
+      branchLabel: str("可选：分支短标签（1–80 字），如“改用方案B”“取消后重做”", { minLength: 1, maxLength: 80 }),
+      dedupeKey: str("业务唯一标识，≤200 字；同 key 已有活跃任务时不新建，已有已结束任务且未传 parentTaskId 时也不新建。传 parentTaskId 建链时可沿用原 key，仅全新重做已完成的事时用新 key", { minLength: 1, maxLength: 200 }),
       runAt: beijing("开始时间；省略立即排队"), delayMinutes: delayMinutes("多久后开始"), profile },
     ["instructions"]));
   if (!task) {
@@ -150,7 +153,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         ["set_profile", "改尚未开始的任务的开局场景偏好"],
         ["reschedule", "改执行时间，runAt 或 delayMinutes 二选一"],
         ["cancel", "取消任务并保留记录，不交付（运行中的先 stop）"],
-        ["resume", "不带 supplement 时按用户明确意图继续已停止、失败或取消的任务；带 supplement 时补充未收尾任务，或在原会话继续已交付任务的同一目标，不按交付时间设期限。写清用户真实意图与已知外部回执；继续原目标时保留计划并恢复仍需完成的步骤，不能只做补充中的一步。正在执行的任务把补充记在原任务上，当前工具或模型输出结束后进入同一轮，不必等整步结束，也不要另建任务。审批、封存和停止仍受原权限约束；无关的新目标才新建"],
+        ["resume", "仅用于未完成任务（排队/执行/恢复/等待）的补充调整，或已停止（stopped）/失败（failed）任务的断点继续（除非用户明确要求开新任务/分支）。已完成（done）和已取消（cancelled）的任务严禁使用 resume，应改用 employee_task_create(parentTaskId=...) 建任务链。正在执行的任务把补充记在原任务上，当前工具或模型输出结束后进入同一轮，不必等整步结束。审批和封存仍受原权限约束"],
         ["answer", "回答正在等待信息的任务；审批只能用户在界面点击，不能用 answer 批准"],
         ["stop", "真正停止执行：回执 executionStopped=true 才算已停，false 表示停止请求已发出、正在收尾"],
       ]) + "。",
@@ -295,7 +298,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
 
     case "employee_status": return employee(defined({ action: "list", id: a.taskId, key: a.dedupeKey, status: a.status === "all" ? undefined : a.status, query: a.memoryQuery }));
     case "employee_task_create":
-      return employee(defined({ action: "add", kind: "todo", text: a.instructions, key: a.dedupeKey, ...when(a, "", false), profile: a.profile }));
+      return employee(defined({ action: "add", kind: "todo", text: a.instructions, key: a.dedupeKey, parentTaskId: a.parentTaskId, relation: a.relation, branchLabel: a.branchLabel, ...when(a, "", false), profile: a.profile }));
     case "employee_task_manage": {
       const r = a.request, id = a.taskId;
       switch (r.command) {

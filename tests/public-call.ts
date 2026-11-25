@@ -11,7 +11,7 @@ export function employeeCall(a: Obj, target: "task" | "self" = "task"): { name: 
   switch (a.action) {
     case "list": return call("employee_status");
     case "add":
-      return call("employee_task_create", { instructions: a.text, dedupeKey: a.key, ...when, profile: a.profile });
+      return call("employee_task_create", { instructions: a.text, dedupeKey: a.key, parentTaskId: a.parentTaskId, relation: a.relation, branchLabel: a.branchLabel, ...when, profile: a.profile });
     case "update":
       if (target === "self") return call("task_reschedule", when);
       return call("employee_task_manage", { taskId: a.id, request: a.nextAt || a.nextCheckInMinutes ? defined({ command: "reschedule", ...when })

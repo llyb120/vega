@@ -161,7 +161,7 @@ test("cancelled tasks wait for any active execution to release the browser", asy
   await until(async () => f.bridge.closed.includes(created));
 });
 
-test("resuming a completed task cannot race an in-progress cleanup", async (t) => {
+test("completed tasks cannot be resumed and finish tab cleanup cleanly", async (t) => {
   const f = await fixture(t), work = await f.job(), created = await f.open(work.tools);
   const request = f.bridge.request.bind(f.bridge);
   let entered!: () => void, unblock!: () => void;
@@ -177,10 +177,9 @@ test("resuming a completed task cannot race an in-progress cleanup", async (t) =
     const resume = f.employee.control({ action: "resume", id: work.id, text: "continue this work" });
     await sleep(20);
     unblock();
-    await resume;
-    assert.equal(f.employee.task(await f.employee.state(), work.id).status, "queued");
-    assert(!f.bridge.closed.includes(created));
-    assert(f.bridge.tabs.some((tab) => tab.tag === created));
+    await assert.rejects(resume, /不可重新启动/);
+    await until(async () => f.bridge.closed.includes(created));
+    assert.equal(f.employee.task(await f.employee.state(), work.id).status, "done");
   } finally { unblock(); }
 });
 
