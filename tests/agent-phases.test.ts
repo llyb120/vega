@@ -161,8 +161,12 @@ test('browser_agent prompt enforces Markdown image embedding and IMAGE_MARKDOWN_
   assert(prompt.includes('禁止放进反引号/代码块'));
   assert(prompt.includes('禁止输出 /data/files/... 磁盘路径'));
   assert(prompt.includes('禁止用 .../ 或 …/ 省略前缀'));
+  assert(prompt.includes('禁止自行猜测域名、协议或本地端口试探'));
   assert(!prompt.includes('截图路径'));
   assert(!prompt.includes('url/path'));
   assert(!IMAGE_MARKDOWN_RULES.includes('(<'));
   assert(!IMAGE_MARKDOWN_RULES.includes('>)'));
+  const codePrompt = specialistSystemPrompt('code_agent');
+  assert(codePrompt.includes('bash(detach=true)'));
+  assert(codePrompt.includes('bash_poll(kill=true)'));
 });

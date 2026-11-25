@@ -15,7 +15,7 @@ import { resolve, dirname, extname, win32, posix } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { spawn } from "node:child_process";
 import { windowsShell } from "./presence";
-import { explicitShellDirectory, assertShellCommand } from "./shell-policy";
+import { explicitShellDirectory, assertShellCommand, isReadOnlyShellProbe } from "./shell-policy";
 import sharp from "sharp";
 import { archiveSlice, readPath, textSlice } from "./file-read";
 import { materializeSkill, skillEntry, skillKind } from "./skills";
@@ -33,7 +33,7 @@ import { omitPlaceholders } from "./tool-args";
 import { CHROME_TOOL_DEFINITIONS, CHROME_TOOLS, EMPLOYEE_TOOLS, VAULT_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type Internal, type ToolContext } from "./public-tools";
 import type { Session, Call, Message } from "./store";
 import type { Engine } from "./engine";
-import { APPUSE_RULES, CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
+import { APPUSE_RULES, CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_CHAT_DELIVERY_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
 import { appuseTools, appuseArguments, appuseResult, APPUSE_TOOLS, normalizeDesktopAction } from "./appuse-tools";
 import { DesktopExperiences } from "./experiences";
 import { Context } from "./context";
@@ -211,7 +211,10 @@ export class Tools {
     if ([...names].some((n) => APPUSE_TOOLS.has(n))) parts.push(APPUSE_RULES);
     if (names.has("vault_get")) parts.push("[密码本] " + VAULT_USAGE);
     if (ctx.kind === "task") parts.push(EMPLOYEE_TASK_RULES);
-    if (ctx.kind === "chat") parts.push("[MCP] 沟通会话不直接调用外部 MCP。用户要求用 MCP 做事时，在派单文本中保留服务名和已授权的操作；任务执行时读取当前热心市民在「技能 / MCP」中保存的配置，不使用「对外 MCP」设置。");
+    if (ctx.kind === "chat") {
+      parts.push(EMPLOYEE_CHAT_DELIVERY_RULES);
+      parts.push("[MCP] 沟通会话不直接调用外部 MCP。用户要求用 MCP 做事时，在派单文本中保留服务名和已授权的操作；任务执行时读取当前热心市民在「技能 / MCP」中保存的配置，不使用「对外 MCP」设置。");
+    }
     if (ctx.kind === "task") {
       this.mcp = await this.engine.mcpFor(this.session, this.config);
       const servers = this.mcp.serviceNames();
@@ -759,7 +762,8 @@ export class Tools {
       }
     }
     if (["write", "edit"].includes(call.name)) this.absolutePath(a.path);
-    if (["write", "edit", "bash"].includes(call.name) && this.session.employeeId && this.session.taskId) {
+    const needsWorkspaceLock = ["write", "edit"].includes(call.name) || (call.name === "bash" && !isReadOnlyShellProbe(a.command));
+    if (needsWorkspaceLock && this.session.employeeId && this.session.taskId) {
       const employee = await this.engine.employeeFor(this.session);
       const paths = (this.session.localAgent ? this.agent()?.platform === "windows" : process.platform === "win32") ? win32 : posix;
       const directory = call.name === "bash" ? shellDirectory : paths.dirname(a.path);

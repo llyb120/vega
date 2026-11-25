@@ -29,6 +29,22 @@ export function explicitShellDirectory(command: string, windows: boolean): strin
   return null;
 }
 
+const readOnlyProbeSegment = new RegExp([
+  String.raw`^(?:pwd|whoami|id|hostname|uname(?:[ \t]+-[a-zA-Z]+)*)$`,
+  String.raw`^(?:which|where|where\.exe|Get-Command)[ \t]+[\w.+-]+(?:[ \t]+[\w.+-]+)*$`,
+  String.raw`^command[ \t]+-v[ \t]+[\w.+-]+(?:[ \t]+[\w.+-]+)*$`,
+  String.raw`^(?:node|npm|npx|pnpm|yarn|bun|python|python3|pip|pip3|go|rustc|cargo|git|java|javac|dotnet|ruby|php|gcc|clang|cmake|make|docker|kubectl|gh|pwsh|powershell|bash|sh)[ \t]+(?:--version|-v|-V|version)$`,
+].join("|"));
+
+// Provably side-effect-free environment probes that never mutate any workspace and therefore do not need
+// to contend on a device-wide workspace write lock.
+export function isReadOnlyShellProbe(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed || /[|><$`()\r\n]/.test(trimmed)) return false;
+  const segments = trimmed.split(/(?:&&|;)/).map((s) => s.trim());
+  return segments.length > 0 && segments.every((seg) => readOnlyProbeSegment.test(seg));
+}
+
 export function assertShellCommand(command: string) {
   assert(!desktopAutomation.test(command), SHELL_POLICY_ERROR);
 }

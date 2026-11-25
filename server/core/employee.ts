@@ -139,6 +139,8 @@ export const taskSummary = (t: Task) =>
     branchLabel: t.branchLabel || undefined,
     excerpt: excerpt(t.text, 120),
     result: excerpt(t.summary || t.result, 200) || undefined,
+    preview: t.preview ? { title: t.preview.title, url: t.preview.url } : undefined,
+    files: t.deliverableFiles?.length ? t.deliverableFiles.map((f: FileRef) => f.name) : undefined,
     createdAt: at(t.createdAt),
     nextAt: ended(t.status) ? undefined : at(t.nextCheckAt),
     finishedAt: at(t.finishedAt),
@@ -1624,8 +1626,11 @@ export class Employee {
                       await this.toChat(s.chatSession, t.group, { role: "assistant", text: content, quote, progress: true, stepOutput: artifact, tasks: [{ id: t.id, title: t.text.slice(0, 80), status: t.status }] }, false);
                     }
                   }
+                  const previewHint = previewRef
+                    ? " previewUrl 为绑定用户登录态的平台鉴权沙盒预览地址，供已登录用户打开（勿用无登录态浏览器猜测域名访问）；若这是最终交付网页，请在 task_complete.preview 再次提交以挂为主交付产物。"
+                    : "";
                   return { ok: true, stepOutput: { step: output.step, ref: duplicate?.ref ?? ref, duplicate: !!duplicate, ...(previewRef ? { previewUrl: previewRef.url } : {}) }, ...reviewHint,
-                    next: duplicate ? "相同产物已交付，本次未重复发送；继续剩余步骤，最终单独调用 task_complete。" : "Step output saved; continue the remaining work, then complete the task separately." };
+                    next: (duplicate ? "相同产物已交付，本次未重复发送；继续剩余步骤，最终单独调用 task_complete。" : "Step output saved; continue the remaining work, then complete the task separately.") + previewHint };
                 }
                 const settled = !!t.plan?.length && !planUnresolved(t.plan).length;
                 const nextHint = settled

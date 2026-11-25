@@ -135,9 +135,9 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       status: str("任务过滤：all（默认）全部、active 未收尾、ended 已收尾（完成、失败、停止、取消、封存）", { enum: ["all", "active", "ended"] }),
       memoryQuery: str("只影响返回的相关记忆：按这个关键词挑最相关的 30 条；省略为不按关键词", { maxLength: 2000 }) }));
   out.push(tool("employee_task_create",
-    "给当前热心市民派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。已完成（done）和已取消（cancelled）的任务不可原地重启或 resume；若要基于已完成交付物继续修改/追问，或对已取消/失败/停止任务开分支重做，传 parentTaskId 和 relation（follow_up 后续 / retry 重做 / fork 分叉）建任务链。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 有进行中任务时不新建；仅存在已结束任务且未传 parentTaskId 时不新建并返回原任务，派单前不必先查重。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。用户明确说出的时刻或重复周期由系统记在同一条任务上，到点只续做这一条，不要为定时另建一条" +
+    "给当前热心市民派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写用户目标、范围、明确约束和可感知的交付效果，执行任务的会话会自己选择实现方式与工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），也不要替用户擅自预设未要求的底层实现或运维方案（例如未指定外部目标主机/平台时，不要把自起本地端口服务、常驻进程或启停脚本写进要求——平台已内置报告导出、文件快照下载和纯前端静态网页预览托管），需要提到操作时写要达成的效果。已完成（done）和已取消（cancelled）的任务不可原地重启或 resume；若要基于已完成交付物继续修改/追问，或对已取消/失败/停止任务开分支重做，传 parentTaskId 和 relation（follow_up 后续 / retry 重做 / fork 分叉）建任务链。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 有进行中任务时不新建；仅存在已结束任务且未传 parentTaskId 时不新建并返回原任务，派单前不必先查重。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。用户明确说出的时刻或重复周期由系统记在同一条任务上，到点只续做这一条，不要为定时另建一条" +
       (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : ctx.group ? "。群聊里只给按群公告归你的工作派单。其他热心市民负责的工作不要派单，直接在回复里 @ 对应成员。" : "。"),
-    { instructions: instructions("任务目标、范围、约束和交付标准，保留用户原话；不写工具名或动作名"),
+    { instructions: instructions("任务目标、范围、明确约束和可感知的交付效果，保留用户原话；不写工具名/动作名，也不擅自预设未要求的底层实现或自起服务方案"),
       parentTaskId: str("可选：前置或来源任务 ID。对已完成任务做后续修改（follow_up）、对已取消/失败/停止任务重做（retry）或分叉探索（fork）时传入，将新任务纳入同一任务链", { minLength: 1 }),
       relation: str("可选：与 parentTaskId 的关系：follow_up 基于已完成交付继续、retry 重做（自动挂到其父节点下作兄弟分支）、fork 分叉探索；省略时按来源状态自动推断", { enum: ["follow_up", "retry", "fork"] }),
       branchLabel: str("可选：分支短标签（1–80 字），如“改用方案B”“取消后重做”", { minLength: 1, maxLength: 80 }),
@@ -182,7 +182,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
           text: str("可选：产物的完整 Markdown 内容，不写进对话正文", { minLength: 1, maxLength: 64000 }),
           ref: int("可选：已写出的产物正文消息编号，或包含 textRef 的工具回执编号；与 text 二选一", { minimum: 1 }),
           paths: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区或云端个人目录内的产物文件绝对路径", { minLength: 1, maxLength: 4096 }), description: "可选：本步骤生成的文件（如 .zip、.xlsx、.pdf、构建包等），系统读取并保存快照供用户下载；接受当前执行端工作区或云端用户 home/tmp 内的普通文件，单个不超过 25MiB、合计不超过 64MiB。不要包含凭据。" },
-          preview: previewSpec("可选：纯前端静态网页产物目录（含 index.html 与相对路径静态资源），系统快照托管到沙盒静态预览地址供用户在新窗口直接打开查看"),
+          preview: previewSpec("可选：阶段性的纯前端静态网页产物目录（含入口 HTML 与相对路径静态资源），系统快照托管为鉴权沙盒预览地址供已登录用户新窗口打开；仅作中间产物，最终主交付须在 task_complete.preview 提交，勿用无登录态浏览器猜测域名访问"),
         }, ["step"], `${STEP_OUTPUT_RULE} 明确填写 text、paths、preview 或正文 ref；系统单独展示并允许导出/下载/预览。已交付的产物不重复发送，已有最终报告覆盖的内容除非明确要求单独导出，否则省略。每任务最多 50 条。草稿、未执行或未验证项须如实说明。`) },
       ["message"]));
     out.push(tool("task_reschedule",
@@ -212,8 +212,8 @@ export function employeeTools(ctx: ToolContext): Tool[] {
           outlineReviewRetry: str("仅补交缺项时复制最近一次 outline_review_incomplete 的同名字段；只传此字段及缺项 outlineReview，不传 evidence、summary 或 deliverableRefs", { minLength: 1, maxLength: 100 }),
           summary: str("交付摘要，1–400 字（务必控制在 150 字以内）；只写核心结论、重要限制或需用户处理事项，勿超 400 字、勿写小标题清单", { minLength: 1, maxLength: 400 }),
           deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则选用尚未作为步骤产物交出的最新较长正文；仅无单独最终正文时传 []" },
-          files: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区或云端个人目录内的交付文件绝对路径", { minLength: 1, maxLength: 4096 }), description: "可选：最终交付给用户下载的文件列表（如 .zip、.xlsx、.pdf、.docx 等非文本报告产物），系统保存快照并在聊天和任务详情提供下载；接受工作区或云端个人目录内普通文件，单个 ≤25MiB、合计 ≤64MiB，勿含凭据" },
-          preview: previewSpec("可选：纯前端静态网页产物目录（含 index.html 与相对路径资源），系统快照托管为沙盒静态预览并在聊天与任务详情提供「新窗口打开」") }));
+          files: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区或云端个人目录内的交付文件绝对路径", { minLength: 1, maxLength: 4096 }), description: "可选：最终交付给用户下载的文件列表（如归档、文档、表格、构建包等非纯文本报告产物），系统保存快照并在聊天和任务详情提供下载；接受工作区或云端个人目录/临时目录内普通文件，单个 ≤25MiB、合计 ≤64MiB，勿含凭据" },
+          preview: previewSpec("纯前端静态网页/应用产物目录（含入口 HTML 与相对路径资源）：系统快照托管为鉴权沙盒预览并在聊天与任务详情提供「新窗口打开」。未指定外部目标主机/平台时，直接用此字段交付或发布静态网页，勿在执行环境自起常驻服务替代") }));
     }
   }
   if (!ctx.member) {

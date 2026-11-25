@@ -13,6 +13,8 @@ import { Tools } from "../server/core/tools";
 import { Auth } from "../server/core/auth";
 import { Redactor } from "../server/core/util";
 import { PreviewTokens, handlePreviewRequest } from "../server/core/previews";
+import { taskSummary } from "../server/core/employee";
+import { EMPLOYEE_CHAT_DELIVERY_RULES, EMPLOYEE_TASK_RULES, sessionDynamicPrompt } from "../server/core/prompt";
 import { renderInline } from "../web/src/markdown.js";
 
 const owner = { id: "u1", username: "owner", role: "operator", disabled: false } as any;
@@ -81,6 +83,8 @@ test("静态前端目录产物托管到沙盒预览路由，支持权限隔离�
   assert.equal(task.preview.url, completeRes.value.previewUrl);
   assert.equal(task.preview.fileCount, 3, ".git 与 node_modules 应被跳过");
   assert.equal(task.preview.title, "财管刷题学习");
+  assert.deepEqual(taskSummary(task).preview, { title: "财管刷题学习", url: task.preview.url });
+  assert.equal(taskSummary(task).files, undefined);
 
   const group = await f.engine.groups.create(owner, { name: "前端群", users: [guest.id], employees: [f.employee.employeeId] });
   await f.employee.update((state) => {
@@ -245,7 +249,57 @@ test("静态预览支持本机客户端目录采集并保留 stepOutput 预览",
   const res = await localTools.execute(stepCall, {} as any);
   assert.equal(res.value.ok, true);
   assert.match(res.value.stepOutput.previewUrl, /^\/preview\/pv-[a-f\d]{32}\/$/);
+  assert.match(res.value.next, /绑定用户登录态的平台鉴权沙盒预览地址/);
+  assert.match(res.value.next, /task_complete\.preview/);
   assert.deepEqual(ops, ["stat", "list", "read_workspace", "read_workspace"]);
   const chatMsg = (await f.store.messages(f.chat.id)).find((m) => m.stepOutput)!;
   assert.equal(typeof chatMsg.stepOutput === "object" && chatMsg.stepOutput.preview?.url, res.value.stepOutput.previewUrl);
+});
+
+test("已有冻结沟通会话与任务会话均注入泛用产物交付规则，taskSummary 同步暴露 files", async (t) => {
+  const f = await fixture(t);
+  f.chat.frozenSystem = "legacy frozen chat prompt";
+  await f.store.saveSession(f.chat);
+  const chatTools = await Tools.create(f.engine, f.chat, await f.engine.config(), new AbortController().signal, () => {});
+  const chatRules = await chatTools.rules();
+  assert(chatRules.includes(EMPLOYEE_CHAT_DELIVERY_RULES));
+  assert.match(chatRules, /先核对关联任务摘要中是否已有现成的 preview 或 files/);
+  assert.match(chatRules, /已有 files 直接告知用户可在原任务交付中下载/);
+  assert.match(chatRules, /不要擅自把底层实现或运维做法/);
+
+  const taskRules = await f.tools.rules();
+  assert(taskRules.includes(EMPLOYEE_TASK_RULES));
+  assert.match(EMPLOYEE_TASK_RULES, /产物交付优先使用平台内置通道/);
+  assert.match(EMPLOYEE_TASK_RULES, /禁止在执行环境自起常驻本地服务或端口进程充当交付地址/);
+  assert.match(EMPLOYEE_TASK_RULES, /勿用无登录态浏览器猜测平台域名访问/);
+  assert.match(EMPLOYEE_TASK_RULES, /仅可起短生命周期临时服务并在验证后立即关闭/);
+  assert.match(EMPLOYEE_TASK_RULES, /bash\(detach=true\)/);
+  assert.match(EMPLOYEE_TASK_RULES, /bash_poll\(kill=true\)/);
+
+  const serverSameSide = await sessionDynamicPrompt(
+    { ...f.session, localAgent: false, localBrowser: false },
+    await f.engine.config(),
+    f.store,
+  );
+  assert.match(serverSameSide, /当前浏览器：服务端私有 Chrome（与当前命令端同机/);
+  const crossSide = await sessionDynamicPrompt(
+    { ...f.session, localAgent: false, localBrowser: true, browserClientId: "c1" },
+    await f.engine.config(),
+    f.store,
+  );
+  assert.match(crossSide, /当前浏览器：客户端 Chrome（与当前命令端不在同一台机器/);
+  const clientSameSide = await sessionDynamicPrompt(
+    { ...f.session, localAgent: true, clientId: "c1", localBrowser: true, browserClientId: "c1" },
+    await f.engine.config(),
+    f.store,
+  );
+  assert.match(clientSameSide, /当前浏览器：客户端 Chrome（与当前命令端同机/);
+
+  await f.employee.update((state) => {
+    f.employee.task(state, f.job).deliverableFiles = [
+      { name: "bundle.zip", mime: "application/octet-stream", size: 12, blobId: "blob-1" },
+    ];
+  });
+  const updated = (await f.employee.findTask(f.job))!;
+  assert.deepEqual(taskSummary(updated).files, ["bundle.zip"]);
 });

@@ -260,3 +260,16 @@ test("memory prompt: tool-list gate and owner remember-now rule", async () => {
   assert.match(prompt, /记忆工具仍按本轮列表使用/);
   assert(!/schema 无记忆写入权限/.test(prompt));
 });
+
+test("dispatch and task deliverable descriptions reinforce built-in preview/file hosting and auth boundaries", () => {
+  const chatByName = Object.fromEntries(employeeTools({ kind: "chat" }).map((t) => [t.name, t]));
+  const taskByName = Object.fromEntries(employeeTools({ kind: "task" }).map((t) => [t.name, t]));
+  assert.match(chatByName.employee_task_create.description, /平台已内置/);
+  assert.match(chatByName.employee_task_create.description, /不要把自起本地端口服务/);
+  const completePreviewDesc = (taskByName.task_complete.parameters as any).properties.preview.description;
+  assert.match(completePreviewDesc, /直接用此字段交付或发布静态网页/);
+  assert.match(completePreviewDesc, /勿在执行环境自起常驻服务替代/);
+  const stepPreviewDesc = (taskByName.task_progress.parameters as any).properties.stepOutput.properties.preview.description;
+  assert.match(stepPreviewDesc, /task_complete\.preview/);
+  assert.match(stepPreviewDesc, /勿用无登录态浏览器猜测域名访问/);
+});

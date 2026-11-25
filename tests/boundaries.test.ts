@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { shell, Tools } from "../server/core/tools";
-import { assertShellCommand, explicitShellDirectory, SHELL_POLICY_ERROR } from "../server/core/shell-policy";
+import { assertShellCommand, explicitShellDirectory, isReadOnlyShellProbe, SHELL_POLICY_ERROR } from "../server/core/shell-policy";
 import { LocalAgents, localShell } from "../server/core/local-agent";
 import { Store } from "../server/core/store";
 import { Vault } from "../server/core/vault";
@@ -162,4 +162,36 @@ test("bash executes pathless commands and runs leading cd fallbacks inside the s
   const fallback = await tools.execute({ id: "cd-fallback", name: "bash", arguments: { command } }, {} as any);
   assert.equal(fallback.error, false, JSON.stringify(fallback.value));
   assert.match(fallback.value.output, /fallback/);
+});
+
+test("read-only environment probes bypass device-wide workspace locking while mutating commands still lock", async (t) => {
+  for (const cmd of ["node --version", "pwd", "which node; node --version", "python3 --version && git --version", "Get-Command node"])
+    assert.equal(isReadOnlyShellProbe(cmd), true, cmd);
+  for (const cmd of ["node --version > /tmp/out", "pwd && rm -rf /tmp/x", "node -e 'console.log(1)'", "mkdir -p /repo/a", "git status", "node --version $(id)"])
+    assert.equal(isReadOnlyShellProbe(cmd), false, cmd);
+
+  const store = await Store.open(":memory:");
+  t.after(async () => await store.close());
+  const session = await store.newSession({ cwd: process.cwd(), scene: "coding", employeeId: "emp-1", taskId: "task-1" });
+  const claims: Array<{ hold: boolean; directory: string | null }> = [];
+  const fakeEmployee = {
+    async findTask() { return undefined; },
+    async claimWorkspace(_s: any, hold: boolean, directory: string | null) {
+      claims.push({ hold, directory });
+      return true;
+    },
+  };
+  const tools = await Tools.create(
+    { store, vault: new Vault(store), mcpFor: () => ({}), employeeFor: async () => fakeEmployee, handoffs: { commandSide: async () => undefined } } as any,
+    session,
+    { model: "", provider: {} },
+    new AbortController().signal,
+    () => {},
+  );
+  const probe = await tools.execute({ id: "probe-1", name: "bash", arguments: { command: "node --version" } }, {} as any);
+  assert.equal(probe.error, false, JSON.stringify(probe.value));
+  assert.equal(claims.length, 0, "read-only probe must not claim a device-wide write lock");
+  const mut = await tools.execute({ id: "mut-1", name: "bash", arguments: { command: "node -e \"console.log('ok')\"" } }, {} as any);
+  assert.equal(mut.error, false, JSON.stringify(mut.value));
+  assert.deepEqual(claims, [{ hold: true, directory: null }]);
 });
