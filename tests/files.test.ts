@@ -28,7 +28,10 @@ test("task screenshot Markdown resolves against real task files without redirect
   try {
     const files = store.files, task = await store.newSession({ cwd: process.cwd(), employeeId: "e1", taskId: "t-right" });
     const name = "a".repeat(32) + "-0.webp";
+    const somName = "a".repeat(32) + "-0-som.webp";
     const url = files.url(await files.write(task, name, "archived screenshot"));
+    await files.write(task, somName, "som screenshot");
+    const somUrl = files.url(join(files.task("e1", "t-right"), somName));
     const sibling = files.url(await files.write({ ...task, taskId: "t-other" }, name, "other screenshot"));
     const typo = url.replace("t-right", "t-typo");
     const missing = typo.replace(name, "b".repeat(32) + "-0.webp");
@@ -42,8 +45,8 @@ test("task screenshot Markdown resolves against real task files without redirect
       `\`![代码示例](<${typo}>)\``,
       "```md", `![代码块](<${typo}>)`, "```",
     ].join("\n");
-    const text = `![短引用](<${name}>)\n![错误目录](</api/team/vega/${typo.slice(5)}?v=1> "标题")\n${untouched}`;
-    assert.equal(await files.resolveTaskScreenshots(task, text), `![短引用](<${url}>)\n![错误目录](<${url}?v=1> "标题")\n${untouched}`);
+    const text = `![短引用](<${name}>)\n![错用标注图](<${somUrl}>)\n![错误目录](</api/team/vega/${typo.slice(5)}?v=1> "标题")\n${untouched}`;
+    assert.equal(await files.resolveTaskScreenshots(task, text), `![短引用](<${url}>)\n![错用标注图](<${url}>)\n![错误目录](<${url}?v=1> "标题")\n${untouched}`);
     assert.equal(await files.resolveTaskScreenshots({ ...task, taskId: undefined }, text), text);
   } finally { await store.close(); }
 });

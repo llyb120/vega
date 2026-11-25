@@ -6,6 +6,7 @@ import { assert } from "./util";
 export const IMAGE_TYPES: Record<string, string> = { ".webp": "image/webp", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg" };
 
 const TASK_SHOT = /^[a-f\d]{32}(?:-\d+)?\.(?:webp|png|jpe?g)$/i;
+const SOM_SHOT = /^([a-f\d]{32}(?:-\d+)?|appuse-[\w.-]+)-som\.(webp|png|jpe?g)$/i;
 const TASK_SHOT_URL = /^\/api\/(?:[\w-]+\/)*files\/employees\/([\w%-]+)\/([\w-]+)\/([\w.-]+)([?#].*)?$/;
 // shortcut: task reports use inline images, extend alongside the renderer if reference-style images are added.
 const INLINE_IMAGE = /(`+)[^\n]*?\1|\\!|(!\[[^\]\n]*\]\([ \t]*)(<[^<>\r\n]+>|[^()<>\s]+)([ \t]*(?:(?:"[^"\r\n]*"|'[^'\r\n]*')[ \t]*)?\))/g;
@@ -23,6 +24,7 @@ export class Files {
   private user(id?: string) { return join(this.root, "users", id || "_"); }
   employee(id: string) { return join(this.root, "employees", id); }
   task(employeeId: string, taskId: string) { return join(this.employee(employeeId), taskId); }
+  preview(employeeId: string, taskId: string, previewId: string) { return join(this.task(employeeId, taskId), "previews", previewId); }
   /** Where a session (or "browser-view:<userId>") writes. */
   dir(owner: Session | string) {
     if (typeof owner === "string") {
@@ -42,7 +44,20 @@ export class Files {
   /** The web address of a file under root. */
   url(path: string) { return "/api/files/" + relative(this.root, path).split(sep).map(encodeURIComponent).join("/"); }
   private async taskShotUrl(employeeId: string, taskId: string, value: string) {
-    const link = TASK_SHOT_URL.exec(value), name = link ? link[3] : value;
+    const link = TASK_SHOT_URL.exec(value), rawName = link ? link[3] : value;
+    const som = SOM_SHOT.exec(rawName);
+    const name = som ? `${som[1]}.${som[2]}` : rawName;
+    if (som) {
+      if (link && link[1] === encodeURIComponent(employeeId)) {
+        const targetTaskId = link[2] || taskId;
+        const cleanPath = join(this.task(employeeId, targetTaskId), name);
+        if (await lstat(cleanPath).then((file) => file.isFile(), () => false)) return this.url(cleanPath) + (link[4] || "");
+      } else if (!link) {
+        const cleanPath = join(this.task(employeeId, taskId), name);
+        if (await lstat(cleanPath).then((file) => file.isFile(), () => false)) return this.url(cleanPath);
+      }
+      return;
+    }
     if (!TASK_SHOT.test(name) || (link && (link[1] !== encodeURIComponent(employeeId) || link[2] === taskId))) return;
     const path = join(this.task(employeeId, taskId), name);
     if (!await lstat(path).then((file) => file.isFile(), () => false)) return;

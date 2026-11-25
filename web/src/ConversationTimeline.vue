@@ -17,6 +17,7 @@ const props = defineProps({
   name: { type: String, default: "Vega" },
   model: String,
   newFrom: { type: Number, default: 0 },
+  archiveBase: String,
 });
 const emit = defineEmits(["open"]);
 const turns = computed((previous) => conversationTurns(props.messages, { running: props.running, live: props.live, thinking: props.thinking, model: props.model }, previous));
@@ -51,13 +52,13 @@ watch(() => props.messages.at(-1)?.seq || 0, (seq) => {
       <FileCard v-for="(file, n) in turn.user.files || []" :key="'f' + n" :file="file" />
     </article>
     <div v-if="turn.body.length || turn.running" class="message-meta"><span>{{ name }}</span></div>
-    <AgentPhaseDetails v-for="phase in phasesByTurn[index]" :key="phase.callId ? `${phase.seq}:${phase.callId}` : phase.seq" :phase="phase" @open="emit('open', $event)" />
+    <AgentPhaseDetails v-for="phase in phasesByTurn[index]" :key="phase.callId ? `${phase.seq}:${phase.callId}` : phase.seq" :phase="phase" :archive-base="archiveBase" @open="emit('open', $event)" />
     <TurnProcess v-if="turn.process.length" :messages="turn.body" :started-at="turn.user?.at" :running="turn.running">
       <template v-for="(entry, i) in turn.process" :key="entry.key">
         <p v-if="entry.kind === 'model'" class="turn-model">当前模型 · <code>{{ entry.model }}</code></p>
         <ToolSteps v-else-if="entry.kind === 'process'" :items="entry.items" :active="turn.running && i === turn.lastProcessIndex ? activeTools : []" :live="turn.running && (i === turn.process.length - 1 || (activeTools.length && i === turn.lastProcessIndex))" />
         <article v-else :class="['message', entry.message.role, { continuation: entry.continuation }]">
-          <MessageText v-if="entry.message.text" :text="entry.message.displayText || entry.message.text" :streaming="entry.message.streaming" />
+          <MessageText v-if="entry.message.text" :text="entry.message.displayText || entry.message.text" :streaming="entry.message.streaming" :archive-base="archiveBase" />
           <img v-for="(image, n) in entry.message.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="助手附图" />
           <div v-if="entry.message.calls?.length && turn.process[i + 1]?.kind !== 'process'" class="calls"><span v-for="call in entry.message.calls" :key="call.id" :title="toolCaption(call)">↳ {{ toolCaption(call) }}</span></div>
         </article>
@@ -66,7 +67,7 @@ watch(() => props.messages.at(-1)?.seq || 0, (seq) => {
     <template v-for="entry in turn.conclusion" :key="entry.key">
       <p v-if="entry.kind === 'model'" class="turn-model">当前模型 · <code>{{ entry.model }}</code></p>
       <article v-else :class="['message', entry.message.role, { continuation: entry.continuation, error: !!entry.message.error }]" :role="entry.message.error ? 'alert' : undefined">
-        <MessageText v-if="entry.message.text" :text="entry.message.displayText || entry.message.text" />
+        <MessageText v-if="entry.message.text" :text="entry.message.displayText || entry.message.text" :archive-base="archiveBase" />
         <img v-for="(image, n) in entry.message.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="助手附图" />
       </article>
     </template>

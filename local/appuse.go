@@ -1063,6 +1063,14 @@ func appuseCaptureWithOptions(owner string, windowID, monitorID *uint32, region 
 			}
 		}
 
+		// 先保留无辅助框、无指针标记的纯净交付图（若本次将绘制 SoM 框或指针）。
+		var cleanData string
+		if len(somBoxes) > 0 || (hasCursor && before != nil) {
+			if _, cleanB64, cleanErr := appuseEncodeJPEG(delivered); cleanErr == nil {
+				cleanData = cleanB64
+			}
+		}
+
 		// 先把离线 [1][2] SoM 标注画在模型副本上，再画系统剑形落点。
 		if len(somBoxes) > 0 {
 			appuseDrawSomRaw(delivered, somBoxes)
@@ -1091,6 +1099,9 @@ func appuseCaptureWithOptions(owner string, windowID, monitorID *uint32, region 
 			"originalWidth": sourceW, "originalHeight": sourceH,
 			"desktopBounds": map[string]any{"x": monitor.X, "y": monitor.Y, "width": monitor.W, "height": monitor.H},
 			"monitorId":     monitor.ID, "mime": "image/jpeg", "path": path, "data": data,
+		}
+		if cleanData != "" {
+			entry["cleanData"] = cleanData
 		}
 		appuseRememberFrame(owner, monitor.ID, grab, entry, shotControls, shotOutside, shotElementsText, shotOverlayPayload, scrollAll)
 		if region != nil {

@@ -281,9 +281,10 @@ function htmlToDocxParagraphs(markdown) {
     }
     const withLinks = trimmed
       .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt, url) => {
-        const src = /^(?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32}$/i.test(url)
-          ? `${origin}/api/blobs/${url.replace(/^(?:\/api\/blobs\/|sqlite:blob\/)/, "")}`
-          : /^\/api\/(?:blobs|files)\//.test(url) ? origin + url : url;
+        const clean = url.replace(/^<|>$/g, "");
+        const src = /^(?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32}$/i.test(clean)
+          ? `${origin}/api/blobs/${clean.replace(/^(?:\/api\/blobs\/|sqlite:blob\/)/, "")}`
+          : /^\/api\/(?:blobs|files)\//.test(clean) ? origin + clean : clean;
         return `${alt || "图片"}（${src}）`;
       })
       .replace(/(^|[\s：:，、,（【])((?:\/api\/blobs\/|sqlite:blob\/)?blob-[a-f\d]{32}|\/api\/files\/(?:[\w.%-]+\/)*[\w.%-]+\.(?:webp|png|jpe?g))(?=$|[\s，。；！？、）】]|[.,;!?](?=\s|$))/gi, (_, prefix, id) => {

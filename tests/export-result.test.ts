@@ -47,10 +47,12 @@ test("XLSX export prefers markdown tables and falls back to plain lines", () => 
 test("DOCX export keeps title and turns bare blob ids into absolute links", () => {
   const bare = "blob-" + "b".repeat(32);
   // location is undefined in node tests; links stay relative-ish via empty origin prefix
-  const bytes = buildDocxBytes({ title: "结论", markdown: `见图 ${bare}` });
+  const bytes = buildDocxBytes({ title: "结论", markdown: `见图 ${bare}\n\n![首屏](</api/files/employees/e1/t1/shot.jpg>)` });
   const doc = strFromU8(unzipSync(bytes)["word/document.xml"]);
   assert.match(doc, /结论/);
   assert.match(doc, new RegExp(`/api/blobs/${bare}`));
+  assert.match(doc, /首屏（\/api\/files\/employees\/e1\/t1\/shot\.jpg）/);
+  assert(!doc.includes("&lt;/api/files/"));
 });
 
 test("HTML export embeds archived images and marks unavailable ones instead of dropping them", async () => {

@@ -179,6 +179,12 @@ test('worker dismiss clicks safe blank outsidePoint and hides cursor cleanly on 
 
   await scope.__exec('cursor_hide', { tabTag: tag });
   assert.ok(cdpCalls.some(([m, p]) => m === 'Runtime.evaluate' && String(p?.expression || '').includes('cursor?.dismiss?.(false)')));
+
+  cdpCalls.length = 0;
+  await scope.__exec('view', { tabTag: tag, viewOpts: { screenshot: true, clean: true } });
+  const evalExprs = cdpCalls.filter(([m]) => m === 'Runtime.evaluate').map(([, p]) => String(p?.expression || ''));
+  assert.ok(evalExprs.some(e => e.includes('cursor?.dismiss?.(true)')), 'clean=true temporarily hides virtual cursor for evidence shot');
+  assert.ok(evalExprs.some(e => e.includes('cursor?.show?.(')), 'clean=true restores virtual cursor after shot');
 });
 
 test('worker scroll targets SPA primary scroll container and verifies/falls back scroll delta', async () => {

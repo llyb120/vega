@@ -446,12 +446,22 @@ async function doView(tab, opts = {}, expiresAt) {
 
   let screenshotB64 = null, screenshotError = null;
   if (opts.screenshot !== false) {
+    const hideCursor = opts.clean === true && st.cursorActive;
     try {
       await ensureVisibleForShot(tab);
+      if (hideCursor) {
+        await evalFrame(tab.id, null, st.mainFrameId, '__novaBrowser?.cursor?.dismiss?.(true)').catch(() => {});
+      }
       const shot = await cdp(tab.id, 'Page.captureScreenshot', { format: 'jpeg', quality: 80, fromSurface: true });
       screenshotB64 = shot?.data || null;
     } catch (err) {
       screenshotError = String(err?.message || err);
+    } finally {
+      if (hideCursor && st.cursorActive) {
+        await evalFrame(tab.id, null, st.mainFrameId, st.cursor
+          ? `__novaBrowser?.cursor?.show?.(${st.cursor[0]},${st.cursor[1]})`
+          : '__novaBrowser?.cursor?.show?.()').catch(() => {});
+      }
     }
   }
 

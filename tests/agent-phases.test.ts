@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { agentPhases, phaseIndex } from '../web/src/agent-phases.js';
 import { codexActivity } from '../server/core/coding-cli';
-import { classifyPhaseStatus, cliEvidence, extractFinalPhaseText, extractPhaseEvidence } from '../server/core/agent-phase';
+import { classifyPhaseStatus, cliEvidence, extractFinalPhaseText, extractPhaseEvidence, specialistSystemPrompt } from '../server/core/agent-phase';
+import { IMAGE_MARKDOWN_RULES } from '../server/core/prompt';
 import { Redactor } from '../server/core/util';
 
 const phase = { name: 'browser_agent', seq: 1 };
@@ -66,17 +67,19 @@ test('isolated phase evidence extraction captures host-verified code/browser pro
   const browserRows: any[] = [
     { seq: 1, role: 'assistant', calls: [{ id: 'n1', name: 'chrome_navigate', arguments: { url: 'https://cursor.com/pricing' } }] },
     { seq: 2, role: 'tool', callId: 'n1', name: 'chrome_navigate',
-      images: [{ mime: 'image/webp', url: '/api/files/employees/e/t/shot1.webp', path: '/data/shot1.webp' }],
+      images: [{ mime: 'image/jpeg', url: '/api/files/employees/e/t/shot1-som.jpg', path: '/data/shot1-som.jpg' }],
       text: JSON.stringify({
         tabTag: 'C1-abc',
         tabs: [{ tag: 'C1-abc', url: 'https://cursor.com/pricing', title: 'cursor.com', active: true }],
+        images: [{ mime: 'image/jpeg', url: '/api/files/employees/e/t/shot1.jpg', path: '/data/shot1.jpg' }],
         documentPath: '/data/doc1.json',
         pages: [{ headings: [{ level: 'H1', text: 'This site can’t be reached' }], stamp: '["chrome-error://chromewebdata/"]' }],
       }) },
   ];
   const browser = extractPhaseEvidence('browser_agent', browserRows, redact);
   assert.equal((browser.evidence as any).tabs[0].tabTag, 'C1-abc');
-  assert.equal((browser.evidence as any).screenshots[0].url, '/api/files/employees/e/t/shot1.webp');
+  assert.equal((browser.evidence as any).screenshots.length, 1);
+  assert.equal((browser.evidence as any).screenshots[0].url, '/api/files/employees/e/t/shot1.jpg');
   assert.equal((browser.evidence as any).documentPaths[0], '/data/doc1.json');
   assert((browser.evidence as any).errors.some((e: string) => /This site can/.test(e)));
   assert.equal(classifyPhaseStatus('browser_agent', '[BLOCKED] 代理无法打开 cursor.com', browser.evidence), 'blocked');
@@ -150,4 +153,16 @@ test('transient tab errors clear after recovery, service worker noise is skipped
   assert.equal(mixedIndexed[0].name, 'browser_agent');
   assert.equal(mixedIndexed[0].phaseSession, 'stage-mixed');
   assert.deepEqual(mixedIndexed[0].messageSeqs, [20, 22]);
+});
+
+test('browser_agent prompt enforces Markdown image embedding and IMAGE_MARKDOWN_RULES omits angle-bracket placeholders', () => {
+  const prompt = specialistSystemPrompt('browser_agent');
+  assert(prompt.includes('![说明](/api/files/...)'));
+  assert(prompt.includes('禁止放进反引号/代码块'));
+  assert(prompt.includes('禁止输出 /data/files/... 磁盘路径'));
+  assert(prompt.includes('禁止用 .../ 或 …/ 省略前缀'));
+  assert(!prompt.includes('截图路径'));
+  assert(!prompt.includes('url/path'));
+  assert(!IMAGE_MARKDOWN_RULES.includes('(<'));
+  assert(!IMAGE_MARKDOWN_RULES.includes('>)'));
 });

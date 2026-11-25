@@ -5,6 +5,7 @@ import ConversationTimeline from "./ConversationTimeline.vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
 import { CHAT_PAGE_SIZE, mergeMessages } from "./chat-history.js";
+import { filesArchiveBase } from "./markdown.js";
 const props = defineProps({
   api: Function,
   sessionId: String,
@@ -164,6 +165,7 @@ async function exportSession() {
   }
 }
 
+const archiveBase = computed(() => filesArchiveBase(session.value?.employeeId, session.value?.taskId));
 const stages = computed(() => {
   const rec = record.value;
   if (!rec?.session) return [];
@@ -229,7 +231,7 @@ onBeforeUnmount(() => { version++; });
       <span v-if="loadingOlder" class="spinner" role="status" aria-label="正在加载更早的记录"></span>
       <button v-else type="button" class="sm ghost" @click="loadOlder">上滑查看更早的记录</button>
     </div>
-    <ConversationTimeline v-if="!raw" :key="sessionId" :messages="messages" :running="running" :model="model" @open="emit('open', $event)" />
+    <ConversationTimeline v-if="!raw" :key="sessionId" :messages="messages" :running="running" :model="model" :archive-base="archiveBase" @open="emit('open', $event)" />
     <template v-else><article
       v-for="(message, i) in messages"
       :key="sessionId + '-' + (message.seq || i)"

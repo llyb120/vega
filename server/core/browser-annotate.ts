@@ -55,7 +55,7 @@ export async function processScreenshot(options: {
   cropCss?: [number, number, number, number] | null;
   boxes: SomBox[];
   drawSom: boolean;
-}): Promise<{ buffer: Buffer; mapping: ShotMapping; mime: "image/jpeg" }> {
+}): Promise<{ buffer: Buffer; cleanBuffer: Buffer; mapping: ShotMapping; mime: "image/jpeg" }> {
   const raw = Buffer.from(options.jpegBase64, "base64");
   const vw = Math.max(1, options.cssViewport[0]);
   const vh = Math.max(1, options.cssViewport[1]);
@@ -66,10 +66,14 @@ export async function processScreenshot(options: {
   const srcH = meta.height || 0;
   if (!srcW || !srcH) throw Error("截图尺寸为空");
 
+  const withinFastCap = !crop && meta.format === "jpeg" && visionScale(srcW, srcH) >= 1;
+  const hasSom = options.drawSom && options.boxes.length > 0;
+
   // Zero-reencode fast path: no crop, no SoM badges, JPEG already within model vision cap.
-  if (!crop && (!options.drawSom || options.boxes.length === 0) && meta.format === "jpeg" && visionScale(srcW, srcH) >= 1) {
+  if (withinFastCap && !hasSom) {
     return {
       buffer: raw,
+      cleanBuffer: raw,
       mapping: new ShotMapping(srcW, srcH, 0, 0, vw, vh),
       mime: "image/jpeg",
     };
@@ -107,7 +111,14 @@ export async function processScreenshot(options: {
   }
 
   const { data, info } = await pipeline.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  if (options.drawSom && options.boxes.length > 0) {
+  let cleanBuffer: Buffer | undefined;
+  if (hasSom) {
+    cleanBuffer = withinFastCap
+      ? raw
+      : await sharp(data, { raw: { width: info.width, height: info.height, channels: 4 } })
+          .removeAlpha()
+          .jpeg({ quality: 82 })
+          .toBuffer();
     drawSomRaw(data, info.width, info.height, options.boxes, [cssX, cssY, cssW, cssH]);
   }
 
@@ -118,6 +129,7 @@ export async function processScreenshot(options: {
 
   return {
     buffer: encoded,
+    cleanBuffer: cleanBuffer ?? encoded,
     mapping: new ShotMapping(info.width, info.height, cssX, cssY, cssW, cssH),
     mime: "image/jpeg",
   };

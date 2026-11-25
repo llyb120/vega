@@ -1421,13 +1421,19 @@ export class Chrome {
         });
         mapping = processed.mapping;
         const ownerDir = await this.fileOwner(owner);
-        const filePath = await this.store.files.write(ownerDir, `${snapId}.jpg`, processed.buffer);
+        const filePath = await this.store.files.write(ownerDir, `${snapId}.jpg`, processed.cleanBuffer);
+        const cleanUrl = this.store.files.url(filePath);
+        let somImage: { mime: string; path: string; url: string } | undefined;
+        if (processed.buffer !== processed.cleanBuffer) {
+          const somPath = await this.store.files.write(ownerDir, `${snapId}-som.jpg`, processed.buffer);
+          somImage = { mime: processed.mime, path: somPath, url: this.store.files.url(somPath) };
+        }
         const frameStream = cropCss ? undefined : `${tag}:viewport`;
-        imagesVal.push({
+        const img: Obj = {
           imageId: `${snapId}-0`,
           snapshotId: snapId,
           path: filePath,
-          url: this.store.files.url(filePath),
+          url: cleanUrl,
           mime: processed.mime,
           pixelWidth: mapping.pixelWidth,
           pixelHeight: mapping.pixelHeight,
@@ -1436,7 +1442,9 @@ export class Chrome {
           width: mapping.cssWidth,
           height: mapping.cssHeight,
           ...(frameStream ? { frameStream } : {}),
-        });
+        };
+        if (somImage) Object.defineProperty(img, "_vision", { value: somImage, enumerable: false });
+        imagesVal.push(img);
       } catch (err: any) {
         shotError = String(err?.message || err);
       }
@@ -1677,12 +1685,14 @@ export class Chrome {
         if (hooks) await hooks.used(tag);
         this.activeTabs.set(owner, tag);
         const snap = this.snapshots.get(`${owner}:${tag}`);
+        const annotate = args.annotate !== false;
         const viewOpts: Obj = {
           scope: args.scope,
           query: args.query,
           maxItems: args.maxItems,
           maxTextChars: args.maxTextChars,
           screenshot: args.screenshot !== false,
+          ...(annotate ? {} : { clean: true }),
         };
         if (args.zoom) {
           if (args.zoom.id !== undefined) viewOpts.zoomId = args.zoom.id;
@@ -1702,7 +1712,7 @@ export class Chrome {
         }
         return await this.tabGate(tag).run(async () => {
           const raw = await this.bridge.request("view", { tabTag: tag, viewOpts }, signal);
-          return this.formatView(owner, tag, raw, true);
+          return this.formatView(owner, tag, raw, annotate);
         });
       }
 

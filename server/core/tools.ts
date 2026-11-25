@@ -677,19 +677,26 @@ export class Tools {
       }
       const result = await localAppuse(this.engine.localAgents, agent, args, this.signal);
       this.engine.desktopObservations.record(this.session.id, agent.clientId, result);
-      // 客户端在 images[].data 里回传 PNG/JPEG；落到会话文件后删掉 base64，只留路径和地址。
+      // 客户端在 images[].data 里回传 PNG/JPEG（若带标注另附 cleanData）；纯净图用于交付留证，标注图供模型视觉定位。
       const images: Outcome["images"] = [];
       for (const image of result.images || []) {
         if (typeof image.data !== "string") continue;
         const data = Buffer.from(image.data, "base64");
+        const cleanData = typeof image.cleanData === "string" && image.cleanData ? Buffer.from(image.cleanData, "base64") : undefined;
         delete image.data;
+        delete image.cleanData;
         const mime = image.mime === "image/jpeg" ? "image/jpeg" : "image/png";
         const ext = mime === "image/jpeg" ? "jpg" : "png";
-        const name = `appuse-${result.snapshotId || "shot"}-${String(image.imageId || "image").replace(/[^\w.-]/g, "_")}.${ext}`;
-        const path = await this.engine.store.files.write(this.session, name, data);
+        const base = `appuse-${result.snapshotId || "shot"}-${String(image.imageId || "image").replace(/[^\w.-]/g, "_")}`;
+        const cleanPath = await this.engine.store.files.write(this.session, `${base}.${ext}`, cleanData || data);
         image.mime = mime;
-        image.path = path; image.url = this.engine.store.files.url(path);
-        images.push({ mime, path, url: image.url });
+        image.path = cleanPath; image.url = this.engine.store.files.url(cleanPath);
+        if (cleanData) {
+          const somPath = await this.engine.store.files.write(this.session, `${base}-som.${ext}`, data);
+          images.push({ mime, path: somPath, url: this.engine.store.files.url(somPath) });
+        } else {
+          images.push({ mime, path: cleanPath, url: image.url });
+        }
       }
       return { value: appuseResult(result, rest), images };
     }
@@ -1030,8 +1037,9 @@ export class Tools {
     this.browserTab = result.tab || result.tabTag || a.tabTag || a.tab || this.browserTab;
     const images: Outcome["images"] = [];
     for (const im of result.images || []) {
-      const mime = im.mime || (/\.jpe?g$/i.test(String(im.path || "")) ? "image/jpeg" : "image/webp");
-      images.push({ mime, path: im.path, url: im.url });
+      const vision = im._vision || im;
+      const mime = vision.mime || (/\.jpe?g$/i.test(String(vision.path || "")) ? "image/jpeg" : "image/webp");
+      images.push({ mime, path: vision.path, url: vision.url });
     }
     // not_executed/needs_review is a structured resumable state, not a tool
     // failure: the model must read status/reason/next and re-observe, not stop.

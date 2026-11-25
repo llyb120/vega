@@ -5,14 +5,15 @@ import vm from "node:vm";
 import { computed, nextTick, reactive, ref } from "vue";
 import { CHAT_PAGE_SIZE, mergeMessages } from "../web/src/chat-history.js";
 import { conversationTurns } from "../web/src/conversation.js";
+import { filesArchiveBase } from "../web/src/markdown.js";
 
 const source = readFileSync("web/src/EmployeeSessionView.vue", "utf8");
 function mount(api: any) {
   const props = { api, sessionId: "fixture", revision: 0, debug: false };
   let dispose = () => {};
   const state = vm.runInNewContext(source.slice(source.indexOf("const props ="), source.indexOf("</script>")) +
-    "\n({ refresh, loadOlder, onScroll, messages, transcript, record, hasMore, loadingOlder, running, busy, error })", {
-    ref, computed, nextTick, CHAT_PAGE_SIZE, mergeMessages, encodeURIComponent,
+    "\n({ refresh, loadOlder, onScroll, messages, transcript, record, hasMore, loadingOlder, running, busy, error, archiveBase })", {
+    ref, computed, nextTick, CHAT_PAGE_SIZE, mergeMessages, filesArchiveBase, encodeURIComponent,
     defineProps: () => props, defineEmits: () => () => {}, watch: () => {}, onBeforeUnmount: (fn: any) => { dispose = fn; },
   });
   return { ...state, props, dispose: () => dispose() };
@@ -215,5 +216,8 @@ test("turn and process keys preserve mounted folds through refresh, tool complet
   assert.equal(prepended.process.at(-1).key, pendingKey);
   assert.equal(new Set(turns.value.map((turn: any) => turn.key)).size, 2);
   assert(timeline.includes(':key="turn.key"'));
+  assert(timeline.includes(':archive-base="archiveBase"'));
+  assert(source.includes(':archive-base="archiveBase"'));
+  assert(readFileSync("web/src/AgentPhaseDetails.vue", "utf8").includes(':archive-base="archiveBase"'));
   assert(readFileSync("web/src/ToolSteps.vue", "utf8").includes("m.callId || m.id || m.seq"));
 });

@@ -33,7 +33,7 @@ test("visionScale, ShotMapping and processScreenshot fast-path + SoM badge rende
   assert.equal(fast.mime, "image/jpeg");
   assert(fast.buffer.equals(smallJpeg), "fast path returns original JPEG bytes untouched");
 
-  // Annotated + cropped path: draws crisp SoM badges & encodes JPEG q82.
+  // Annotated + cropped path: draws crisp SoM badges on buffer & keeps cleanBuffer clean.
   const annotated = await processScreenshot({
     jpegBase64: smallJpeg.toString("base64"),
     cssViewport: [320, 200],
@@ -50,12 +50,18 @@ test("visionScale, ShotMapping and processScreenshot fast-path + SoM badge rende
   const { data: rawPixels, info } = await sharp(annotated.buffer).raw().toBuffer({ resolveWithObject: true });
   assert.equal(info.width, 200);
   assert.equal(info.height, 140);
-  // Dark slate badge pill pixels should alter the uniformly light background.
+  // Dark slate badge pill pixels should alter the uniformly light background on buffer, NOT cleanBuffer.
   let darkPixels = 0;
   for (let i = 0; i < rawPixels.length; i += info.channels) {
     if (rawPixels[i] < 100 && rawPixels[i + 1] < 100) darkPixels++;
   }
   assert(darkPixels > 40, `expected dark slate SoM pills, found ${darkPixels} dark pixels`);
+  const { data: cleanPixels, info: cleanInfo } = await sharp(annotated.cleanBuffer).raw().toBuffer({ resolveWithObject: true });
+  let cleanDark = 0;
+  for (let i = 0; i < cleanPixels.length; i += cleanInfo.channels) {
+    if (cleanPixels[i] < 100 && cleanPixels[i + 1] < 100) cleanDark++;
+  }
+  assert.equal(cleanDark, 0, "cleanBuffer must remain free of SoM badge boxes");
 });
 
 test("ChromeBridge supports /health, /pair, /ws hello+command push+reply, and origin enforcement", async (t) => {
@@ -180,7 +186,14 @@ test("unified browser_tabs / browser_view / browser_act / browser_eval / browser
   assert.equal(opened.images.length, 1);
   assert.equal(opened.images[0].mime, "image/jpeg");
   assert.match(opened.images[0].path, /\.jpg$/);
+  assert(!opened.images[0].path.endsWith("-som.jpg"), "tool output image path must point to clean unannotated shot");
+  assert(!JSON.stringify(opened).includes("-som.jpg"), "_vision must stay non-enumerable and absent from JSON output");
+  assert(opened.images[0]._vision?.path?.endsWith("-som.jpg"), "model vision receives annotated -som.jpg");
   assert(opened.elements.includes("[1] button") && opened.elements.includes("Submit"));
+
+  const cleanView = await chrome.execute("owner", ".", { operation: "browser_view", annotate: false });
+  assert.equal(reqs.at(-1)?.args.viewOpts?.clean, true);
+  assert.equal(cleanView.images[0]._vision, undefined, "annotate=false skips SoM rendering completely");
 
   // browser_act forwards element IDs / dismiss directly and maps coordinate-only steps via snapshot mapping.
   const acted = await chrome.execute("owner", ".", {

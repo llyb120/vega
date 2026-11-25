@@ -382,3 +382,51 @@ test("Chinese parentheses still expand bare blob archive ids", () => {
   const bare = "blob-" + "c".repeat(32);
   assert.match(renderInline(`留底（${bare}）`), new RegExp(`src="/api/blobs/${bare}"`));
 });
+
+test("inline-code archive screenshot paths, disk paths and ellipsized task names render inline safely", () => {
+  const base = filesArchiveBase("e1", "t1");
+  const first = "a6a3fe075a274ff99209ea1ce7e100f2.jpg";
+  const second = "ccc2bb1ac2664ce58c6c589efc4b89a6.jpg";
+  const third = "f665c8bc85184462b62eaa0ac991b338.jpg";
+  const fourth = "ed7a6ad080f54f9a8347fdc1e65c1981.jpg";
+  const fifth = "0169f02253ae4195a74171c811215440.jpg";
+
+  assert.match(
+    renderInline(`首屏：\`/api/files/employees/e1/t1/${first}\``),
+    new RegExp(`<img src="/api/files/employees/e1/t1/${first}"`),
+  );
+  assert.match(
+    renderInline(`首屏：\`/data/files/employees/e1/t1/${second}\``),
+    new RegExp(`<img src="/api/files/employees/e1/t1/${second}"`),
+  );
+
+  const report = [
+    `- 滚到底：\`.../${third}\``,
+    `- 判定态：\`…/${fourth}\``,
+    `- 裸文件名：\`${fifth}\``,
+  ].join("\n");
+  const { html } = renderMarkdown(report, { archiveBase: base });
+  assert.equal((html.match(/<img /g) || []).length, 3);
+  assert(html.includes(`src="/api/files/employees/e1/t1/${third}"`));
+  assert(html.includes(`src="/api/files/employees/e1/t1/${fourth}"`));
+  assert(html.includes(`src="/api/files/employees/e1/t1/${fifth}"`));
+
+  // Ellipsized standalone names outside backticks also expand when archiveBase is known.
+  assert.match(
+    renderMarkdown(`截图：…/${fourth}`, { archiveBase: base }).html,
+    new RegExp(`<img src="/api/files/employees/e1/t1/${fourth}"`),
+  );
+
+  // Path traversal, non-archive files, and fenced code blocks must remain literal.
+  for (const literal of [
+    "`/api/files/employees/e1/../secret.jpg`",
+    "`../secret.jpg`",
+    "`.../../../secret.jpg`",
+    "`/etc/passwd.png`",
+    "`favicon.ico`",
+    "`photo.jpg`",
+  ]) {
+    assert(!renderMarkdown(literal, { archiveBase: base }).html.includes("<img"), literal);
+  }
+  assert(!renderMarkdown(`\`\`\`txt\n/api/files/employees/e1/t1/${first}\n\`\`\``).html.includes("<img"));
+});

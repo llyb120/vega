@@ -1,7 +1,7 @@
 <script setup vapor>
 import { computed, ref } from 'vue';
 import MessageText from './MessageText.vue';
-const props = defineProps({ phase: { type: Object, required: true } });
+const props = defineProps({ phase: { type: Object, required: true }, archiveBase: String });
 const emit = defineEmits(['open']);
 const open = ref(false);
 const cliResult = computed(() => {
@@ -29,10 +29,10 @@ const statuses = { returned: '已交回', blocked: '受阻交回', interrupted: 
       </div>
       <template v-for="m in phase.rows" :key="m.seq">
         <template v-if="!m.phaseReturned && m.seq !== phase.seq">
-          <MessageText v-if="m.role === 'assistant' && m.text" :text="m.displayText || m.text" />
+          <MessageText v-if="m.role === 'assistant' && m.text" :text="m.displayText || m.text" :archive-base="archiveBase" />
           <details v-for="c in m.calls || []" :key="c.id"><summary>#{{ m.seq }} · 调用 {{ c.name }}</summary><pre>{{ JSON.stringify(c.arguments, null, 2) }}</pre></details>
           <template v-if="m.role === 'tool'">
-            <MessageText v-if="m.seq === phase.resultSeq" :text="cliResult" />
+            <MessageText v-if="m.seq === phase.resultSeq" :text="cliResult" :archive-base="archiveBase" />
             <details><summary>#{{ m.seq }} · {{ m.name }} · {{ m.error ? '错误回执' : (m.name === phase.name && !phase.executor ? '委托回执' : '回执') }}</summary><pre>{{ m.text }}</pre>
               <img v-for="(im, n) in m.images || []" :key="n" :src="im.url || (im.blobId ? `/api/blobs/${im.blobId}` : `data:${im.mime};base64,${im.data}`)" alt="工具回执附图" />
             </details>

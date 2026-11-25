@@ -24,6 +24,25 @@ function archivePathURL(value) {
   return "/api/files/" + match[1].split("/").map(encodeURIComponent).join("/");
 }
 
+/** Task/session-scoped Chrome screenshot filename (optionally prefixed with .../ or …/) → /api/files/… */
+function taskScreenshotURL(value) {
+  if (!archiveBase) return;
+  const bare = String(value || "").replace(/^(?:\.{3}|…)\//, "");
+  if (!SCREENSHOT_NAME.test(bare)) return;
+  const base = String(archiveBase).replace(/\/+$/, "");
+  if (/^\/api\/files\/(?:[\w.%-]+\/)+[\w.%-]+$/i.test(base)) return `${base}/${encodeURIComponent(bare)}`;
+}
+
+/** Inline-code archive screenshot path (/api/files/...jpg, /data/files/employees/...jpg, or task-scoped 32-hex / .../32-hex). */
+function inlineCodeImageURL(code) {
+  const value = String(code || "").trim();
+  if (!value || /\s/.test(value)) return;
+  if (/^\/api\/files\/(?:[\w.%-]+\/)*[\w.%-]+\.(?:webp|png|jpe?g)$/i.test(value) && !/(^|\/)\.\.?(\/|$)/.test(value.slice(11))) {
+    return value;
+  }
+  return archivePathURL(value) || taskScreenshotURL(value);
+}
+
 function imageURL(value) {
   // Prefer strict 32-hex archive ids (bare blob-… or prefixed); keep prefixed non-hex ids for fixtures/legacy.
   const hex = /^(?:\/api\/blobs\/|sqlite:blob\/)?(blob-[a-f\d]{32})$/i.exec(value);
@@ -35,10 +54,8 @@ function imageURL(value) {
   const fromPath = archivePathURL(value);
   if (fromPath) return fromPath;
   // Bare Chrome screenshot filename when the page knows the task/session files directory.
-  if (archiveBase && SCREENSHOT_NAME.test(value)) {
-    const base = String(archiveBase).replace(/\/+$/, "");
-    if (/^\/api\/files\/(?:[\w.%-]+\/)+[\w.%-]+$/i.test(base)) return `${base}/${encodeURIComponent(value)}`;
-  }
+  const fromTask = taskScreenshotURL(value);
+  if (fromTask) return fromTask;
   if (/^data:image\/(?:png|jpeg|gif|webp|bmp|avif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value))
     return value;
   if (!/^https?:\/\//i.test(value) || /[\u0000-\u001f\u007f\\]/.test(value)) return;
@@ -73,7 +90,10 @@ export function renderInline(text) {
     return MARK + (fragments.length - 1) + MARK;
   };
   const source = String(text).replace(/\u0000/g, "")
-    .replace(/`([^`\n]+)`/g, (_, code) => protect(`<code>${escape(code)}</code>`, code))
+    .replace(/`([^`\n]+)`/g, (_, code) => {
+      const src = inlineCodeImageURL(code);
+      return src ? protect(imgTag(src), code) : protect(`<code>${escape(code)}</code>`, code);
+    })
     .replace(
       /!\[([^\]\n]*)\]\([ \t]*(?:<([^<>\n]+)>|((?:\\[()\\]|[^()\s\\]|\([^()\s]*\))+))(?:[ \t]+(?:"([^"\n]*)"|'([^'\n]*)'))?[ \t]*\)/g,
       (match, alt, bracketed, bare, doubleTitle, singleTitle) => {
@@ -91,7 +111,7 @@ export function renderInline(text) {
           `(?:\\/api\\/blobs\\/|sqlite:blob\\/)?blob-[a-f\\d]{32}` +
           `|\\/api\\/files\\/(?:[\\w.%-]+\\/)*[\\w.%-]+\\.(?:webp|png|jpe?g)` +
           `|(?:[A-Za-z]:)?(?:\\/[\\w.-]+)+\\/(?:employees|users|views)\\/(?:[\\w.-]+\\/)+[\\w.-]+\\.(?:webp|png|jpe?g)` +
-          (archiveBase ? `|(?:[a-f\\d]{32}(?:-\\d+)?|live-[\\w-]+)\\.(?:webp|png|jpe?g)` : "") +
+          (archiveBase ? `|(?:(?:\\.{3}|…)\\/)?(?:[a-f\\d]{32}(?:-\\d+)?|live-[\\w-]+)\\.(?:webp|png|jpe?g)` : "") +
         `)${AFTER}`,
         "gi",
       ),
@@ -106,7 +126,7 @@ export function renderInline(text) {
     });
   const html = escape(source)
     .replace(
-      /\[([^\]\n]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g,
+      /\[([^\]\n]+)\]\((https?:\/\/[^\s)\u0000]+|\/preview\/pv-[a-f\d]{32}(?:\/[^\s)\u0000]*)?)\)/g,
       (_, label, url) =>
         `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`,
     )

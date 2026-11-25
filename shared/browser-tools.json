@@ -40,7 +40,7 @@
   },
   {
     "name": "browser_view",
-    "description": "查看当前绑定（或指定）标签页的交互元素清单、可见文本、当前聚焦元素、虚拟鼠标指针坐标 cursor，以及带 [编号] 标注的视口截图。截图上的 [1][2] 编号与元素列表一一对应，坐标 @(x,y) 与截图像素完全对齐。browser_tabs 导航和 browser_act 执行后已自动返回新视图，无需紧接着重复调用。",
+    "description": "查看当前绑定（或指定）标签页的交互元素清单、可见文本、当前聚焦元素、虚拟鼠标指针坐标 cursor，以及带 [编号] 标注的视口截图。截图上的 [1][2] 编号与元素列表一一对应，坐标 @(x,y) 与截图像素完全对齐；返回的 images[].url/path 自动指向无辅助框的纯净图（可直接用于交付留证），需要连虚拟鼠标也隐藏的纯净截图时传 annotate=false。browser_tabs 导航和 browser_act 执行后已自动返回新视图，无需紧接着重复调用。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -73,6 +73,10 @@
         "screenshot": {
           "type": "boolean",
           "description": "是否附带截图，默认 true；false 只读 DOM 极速返回"
+        },
+        "annotate": {
+          "type": "boolean",
+          "description": "截图是否绘制 [编号] 辅助框与虚拟鼠标；默认 true（便于操作定位，且返回的 images[].url/path 始终自动指向无框纯净图）；仅用于交付留证且不希望出现虚拟鼠标时可设 false"
         },
         "maxItems": {
           "type": "integer",
