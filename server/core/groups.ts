@@ -476,10 +476,10 @@ export class Groups {
       (task.group?.requester.kind === "user" && task.group.requester.id === viewer.id));
   }
   private taskView(task: Task, mine: boolean, canControl: boolean): Obj & { canControl: boolean } {
-    const shared = ["id", "text", "status", "createdAt", "finishedAt", "queueReason", "approval", "waiting", "partialDelivery", "progress", "plan", "result", "completion", "summary", "checkpoint", "error", "deliverableFiles"];
+    const shared = ["id", "text", "status", "createdAt", "finishedAt", "queueReason", "approval", "waiting", "partialDelivery", "progress", "plan", "result", "completion", "summary", "checkpoint", "error", "deliverableFiles", "preview"];
     return {
       ...(mine ? task : Object.fromEntries(shared.filter((key) => key in task).map((key) => [key, task[key]]))),
-      ...(!mine && task.stepOutputs ? { stepOutputs: task.stepOutputs.map(({ step, label, text, files, at }: Obj) => ({ step, label, text, files, at })) } : {}),
+      ...(!mine && task.stepOutputs ? { stepOutputs: task.stepOutputs.map(({ step, label, text, files, preview, at }: Obj) => ({ step, label, text, files, ...(preview ? { preview } : {}), at })) } : {}),
       requester: task.group!.requester,
       canControl,
     };

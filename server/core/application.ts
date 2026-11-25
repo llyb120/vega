@@ -11,6 +11,7 @@ import { cloudEnabled } from "./cloud";
 import { BrowserLive } from "./browser-live";
 import { EventsSocket } from "./events-socket";
 import { ClientSockets } from "./client-socket";
+import { PreviewTokens } from "./previews";
 export type Application = {
   store: Store;
   engine: Engine;
@@ -21,6 +22,7 @@ export type Application = {
   eventsSocket: EventsSocket;
   clientSockets: ClientSockets;
   headless: HeadlessBrowser;
+  previewTokens: PreviewTokens;
 };
 let application: Application | undefined;
 export function app() {
@@ -61,6 +63,7 @@ export async function initialize(pageScript: string, livePageScript: string) {
       return engine.active.has(session);
     }, async (userId, clientId) => await engine.taskStatusFor(userId, clientId), async (userId, clientId) => await engine.handoffs.offline(clientId, userId)),
     headless: new HeadlessBrowser(),
+    previewTokens: new PreviewTokens(),
   };
   const dbPath = process.env.VEGA_DB || "vega.db";
   if (!cloudEnabled()) {

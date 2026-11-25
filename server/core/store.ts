@@ -5,6 +5,7 @@ import { Db, Sqlite, type Dialect } from "./db";
 import { cloudFor } from "./cloud";
 import { Files } from "./files";
 import type { FileRef } from "./attachments";
+import type { PreviewRef } from "./previews";
 import { assert, id, type Obj } from "./util";
 import { quoteOf, type ChatAuthor, type ChatQuote } from "../../shared/chat-quote";
 import type { RequestUsage, UsageCounts, UsageScope } from "./request-usage";
@@ -61,7 +62,9 @@ export type Message = {
   /** A task milestone the executing session chose to tell the user (task_progress tellUser). */
   progress?: boolean;
   /** Step output is a separate card, not a group instruction to dispatch mentions. */
-  stepOutput?: boolean | { step: number; label: string; text?: string; files?: FileRef[] };
+  stepOutput?: boolean | { step: number; label: string; text?: string; files?: FileRef[]; preview?: PreviewRef };
+  /** Static web preview attached to a delivery message. */
+  preview?: PreviewRef;
   /** Host-recorded scene of an assistant tool batch, never inferred from model or call arguments. */
   toolScene?: string;
   /** Host-owned link to the delegating assistant message in this session (survives task suspension). */

@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { MCP } from "./mcp";
 import { units, refName, archivedResult } from "./history";
 import { CHROME_TOOLS, STANDALONE_TOOLS } from "./public-tools";
+import { removeEmployeePreviews } from "./previews";
 import { EMPLOYEE_CHAT_RULES, EMPLOYEE_CONTINUITY_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, phaseDynamicPrompt, sessionPrompt, sessionStablePrompt, sessionDynamicPrompt, loadSkills, selectedSkillPrompt, steerPrompt, clampPromptCacheKey, BOOST } from "./prompt";
 import { classifyPhaseStatus, extractFinalPhaseText, extractPhaseEvidence, isChromeNetworkErrorOutcome, phaseReceiptNext, specialistSystemPrompt, type PhaseRole } from "./agent-phase";
 import { SUBAGENT_GUIDE, CHILD_DYNAMIC_TAIL, isAgentTool, formatAgentHandoff, inheritView, withoutOpenTail, reserveAgent, beginAgent, finishAgent, interruptAgent, cancelSessionAgents, resumeSessionAgents, takeReadyAgents, hasPendingAgents, awaitPendingAgents, waitUntilAgentReady, type AgentChild } from "./spawn-agent";
@@ -760,6 +761,7 @@ export class Engine {
                 }
                 const name = (await employee.profile()).name;
                 await employee.forget();
+                await removeEmployeePreviews(this.store, key);
                 // Its group memberships go with it.
                 await this.groups.dropEmployee(key, name);
               });
@@ -798,6 +800,7 @@ export class Engine {
                   this.providers.reset(session.id);
                 }
                 await employee.clearWork();
+                await removeEmployeePreviews(this.store, key);
               });
       // Screenshots, DOM records and archived results of every task and the chat go with them.
       await this.store.files.remove(this.store.files.employee(key));

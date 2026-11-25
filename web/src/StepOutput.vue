@@ -2,6 +2,7 @@
 import { ref } from "vue";
 import Icon from "./Icon.vue";
 import FileCard from "./FileCard.vue";
+import PreviewCard from "./PreviewCard.vue";
 import MessageText from "./MessageText.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
 
@@ -26,6 +27,7 @@ async function runExport(format) {
       <summary>查看内容</summary>
       <MessageText v-if="contentOpen" :text="output.text" :archive-base="archiveBase" />
     </details>
+    <PreviewCard v-if="output.preview" :preview="output.preview" />
     <div v-if="output.files?.length" class="step-output-files"><FileCard v-for="file in output.files" :key="file.blobId" :file="file" /></div>
     <div v-if="output.text" class="step-output-export">
       <button type="button" class="ghost sm" :aria-expanded="exportOpen" :disabled="exporting" @click="exportOpen = !exportOpen"><Icon name="download" :size="14" />单独导出</button>

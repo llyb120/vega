@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import { taskTabsFinished } from "./task-browser-tabs";
 import { STEP_OUTPUT_RULE } from "./public-tools";
 import type { FileRef } from "./attachments";
+import { materializePreview, removeTaskPreviews, type CollectedPreview, type PreviewRef } from "./previews";
 import { assert, id, clone, clip, sleep, type Obj } from "./util";
 import { Vault, VAULT_USAGE } from "./vault";
 import { requireSceneModel, schedulerLimits, type Config } from "./config";
@@ -172,7 +173,7 @@ const stripCompleteActionSuffix = (step: string) =>
   step.trim().replace(/[，,、；;\s]*(?:并|然后|最后)?(?:单独)?(?:调用|使用)?\s*task_complete(?:\s*交付)?\s*$/i, "").trim();
 type OutlineDraft = {
   token: string; scope: string; evidence: string; summary?: string; deliverableRef?: number | number[];
-  files?: { name: string; data: Buffer }[];
+  files?: { name: string; data: Buffer }[]; preview?: CollectedPreview;
   review: Obj[]; missing: string[];
 };
 /** Model-authored reply text in a task session that complete() may cite as the deliverable body. */
@@ -1014,6 +1015,7 @@ export class Employee {
     owner: Owner = { token: "", name: "" },
     boundExecution?: { execution: Execution; cwd: string; note?: string; deviceOnly?: boolean },
     stepFiles: { name: string; data: Buffer }[] = [],
+    preview?: CollectedPreview,
   ): Promise<{ value: any; stop?: boolean; secret?: string }> {
     const action = a.action;
     assert(!this.deleting, "Employee is being deleted");
@@ -1184,7 +1186,7 @@ export class Employee {
                   return { ok: false, code: "outline_review_retry_expired", changedSteps: outlineSteps(t), next: "复核草稿已失效；按当前任务和计划，用 evidence 和完整 outlineReview 重新交付，不传 outlineReviewRetry。" };
                 }
                 assert(a.text === undefined && a.summary === undefined && a.deliverableRef === undefined &&
-                  a.files === undefined &&
+                  a.files === undefined && a.preview === undefined &&
                   Array.isArray(a.outlineReview) && a.outlineReview.length,
                 "复核补交只传 outlineReviewRetry 和缺项 outlineReview；如需修改原交付内容，请完整提交。");
               } else if (run) {
@@ -1196,6 +1198,7 @@ export class Employee {
               const summary = draft ? draft.summary : a.summary;
               const deliverableRef = draft ? draft.deliverableRef : a.deliverableRef;
               const files = draft ? draft.files : (stepFiles.length ? stepFiles : undefined);
+              const collectedPreview = draft ? draft.preview : preview;
               const pending = planUnresolved(t.plan);
               const sessionRows = t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [];
               const stepOutputs = (t.stepOutputs || []).filter((output: Obj) => output.session === t.workSession);
@@ -1280,7 +1283,7 @@ export class Employee {
               if (unchecked.length) {
                 // A draft lives only in this run; no rejected delivery is saved or published as a result.
                 const token = run && review ? id("r") : undefined;
-                if (run && token && review) run.outlineDraft = { token, scope: scope(), evidence, summary, deliverableRef, files, review, missing: unchecked };
+                if (run && token && review) run.outlineDraft = { token, scope: scope(), evidence, summary, deliverableRef, files, preview: collectedPreview, review, missing: unchecked };
                 return {
                   ok: false, code: "outline_review_incomplete", changedSteps: unchecked,
                   ...(token ? { outlineReviewRetry: token } : {}),
@@ -1353,9 +1356,23 @@ export class Employee {
               } else {
                 delete t.deliverableFiles;
               }
+              let previewRef: PreviewRef | undefined;
+              if (collectedPreview) {
+                previewRef = await materializePreview(this.store, {
+                  employeeId: this.employeeId,
+                  taskId: t.id,
+                  ownerId: s.ownerId || t.owner?.token || "",
+                  groupId: t.group?.groupId,
+                  collected: collectedPreview,
+                });
+                t.preview = previewRef;
+              } else {
+                delete t.preview;
+              }
               stop = true;
               return {
                 ok: true,
+                ...(previewRef ? { previewUrl: previewRef.url } : {}),
                 next: "Task verified; the scheduler saves and delivers the conclusion. End this turn now.",
                 memorySuggestions: suggestions,
               };
@@ -1460,6 +1477,7 @@ export class Employee {
                   assert(output.text === undefined || (typeof output.text === "string" && output.text.trim() && [...output.text].length <= 64000), "步骤产物文本需要 1–64000 字");
                   assert(output.ref === undefined || output.text === undefined, "stepOutput.text 和 ref 只能选一个：已有完整产物文本就保留 text、删掉 ref；引用已写出的正文才用 ref。只报进度请省略整个 stepOutput。");
                   assert((output.paths === undefined && !stepFiles.length) || (Array.isArray(output.paths) && output.paths.length === stepFiles.length && stepFiles.length > 0), "步骤产物文件未准备好");
+                  assert((output.preview === undefined && !preview) || (output.preview !== undefined && !!preview), "静态预览产物未准备好");
                   const session = this.busy.get(t.id)?.session || (t.side === "computer" ? t.computerSession : t.workSession);
                   assert(session && (session === t.workSession || session === t.computerSession), "当前任务会话不可用，未保存步骤产物");
                   const source = await this.store.lastMessage(session, "assistant");
@@ -1472,14 +1490,19 @@ export class Employee {
                   else assert(source?.calls?.some((call) => call.name === "task_progress" && call.arguments?.stepOutput?.step === output.step), "未指定 ref 时，步骤产物必须与本次 task_progress 在同一条回复");
                   const rawText = output.text ?? body?.text ?? "";
                   assert([...rawText].length <= 64000, "步骤产物正文最多 64000 字，请分开提交");
-                  assert(rawText.trim() || stepFiles.length, "步骤产物需要非空文本或文件：只更新进度请省略 stepOutput；要交产物请填写 text、paths 或正文 ref。");
+                  assert(rawText.trim() || stepFiles.length || preview, "步骤产物需要非空文本、文件或静态预览：只更新进度请省略 stepOutput；要交产物请填写 text、paths、preview 或正文 ref。");
                   const text = await this.store.files.resolveTaskScreenshots({ employeeId: this.employeeId, taskId: t.id }, rawText);
                   const ref = output.ref ? body!.seq! : source!.seq!;
                   const label = t.plan[output.step - 1].content;
-                  const fingerprint = createHash("sha256").update(JSON.stringify([text, ...stepFiles.map((file) => [file.name, createHash("sha256").update(file.data).digest("hex")])])).digest("hex");
+                  const fingerprint = createHash("sha256").update(JSON.stringify([
+                    text,
+                    ...stepFiles.map((file) => [file.name, createHash("sha256").update(file.data).digest("hex")]),
+                    ...(preview ? [[preview.title, preview.entry, preview.files.map((f) => [f.relPath, createHash("sha256").update(f.data).digest("hex")])]] : []),
+                  ])).digest("hex");
                   const outputs: Obj[] = t.stepOutputs ||= [];
                   const duplicate = outputs.find((item) => item.session === session && item.step === output.step && item.label === label &&
-                    (item.fingerprint === fingerprint || (!item.fingerprint && !stepFiles.length && !item.files?.length && item.text === text)));
+                    (item.fingerprint === fingerprint || (!item.fingerprint && !stepFiles.length && !preview && !item.files?.length && !item.preview && item.text === text)));
+                  let previewRef: PreviewRef | undefined = duplicate?.preview;
                   if (!duplicate) {
                     assert(outputs.length < 50, "一个任务最多保存 50 条步骤产物");
                     const files: FileRef[] = [];
@@ -1489,7 +1512,16 @@ export class Employee {
                       if (s.chatSession) await this.store.grantBlob(blobId, s.chatSession);
                       files.push({ name: file.name, mime: "application/octet-stream", size: file.data.length, blobId });
                     }
-                    const artifact = { step: output.step, label, text, ...(files.length ? { files } : {}) };
+                    if (preview) {
+                      previewRef = await materializePreview(this.store, {
+                        employeeId: this.employeeId,
+                        taskId: t.id,
+                        ownerId: s.ownerId || t.owner?.token || "",
+                        groupId: t.group?.groupId,
+                        collected: preview,
+                      });
+                    }
+                    const artifact = { step: output.step, label, text, ...(files.length ? { files } : {}), ...(previewRef ? { preview: previewRef } : {}) };
                     outputs.push({ ...artifact, session, ref, fingerprint, at: now });
                     if (s.chatSession || t.group) {
                       const quote = !t.group && t.chatSource?.session === s.chatSession && await this.store.message(s.chatSession!, t.chatSource.seq) ? await this.store.quote(s.chatSession!, t.chatSource.seq) : undefined;
@@ -1497,7 +1529,7 @@ export class Employee {
                       await this.toChat(s.chatSession, t.group, { role: "assistant", text: content, quote, progress: true, stepOutput: artifact, tasks: [{ id: t.id, title: t.text.slice(0, 80), status: t.status }] }, false);
                     }
                   }
-                  return { ok: true, stepOutput: { step: output.step, ref: duplicate?.ref ?? ref, duplicate: !!duplicate }, ...reviewHint,
+                  return { ok: true, stepOutput: { step: output.step, ref: duplicate?.ref ?? ref, duplicate: !!duplicate, ...(previewRef ? { previewUrl: previewRef.url } : {}) }, ...reviewHint,
                     next: duplicate ? "相同产物已交付，本次未重复发送；继续剩余步骤，最终单独调用 task_complete。" : "Step output saved; continue the remaining work, then complete the task separately." };
                 }
                 const settled = !!t.plan?.length && !planUnresolved(t.plan).length;
@@ -1912,6 +1944,7 @@ export class Employee {
             case "remove":
               assert(ended(t.status), "Only ended task records may be deleted");
               s.tasks = s.tasks.filter((v) => v.id !== t.id);
+              await removeTaskPreviews(this.store, this.employeeId, t.id);
               await this.store.files.remove(this.store.files.task(this.employeeId, t.id));
               this.store.afterCommit(() => this.runtime.taskFinished?.(t.id));
               break;
@@ -2577,6 +2610,7 @@ export class Employee {
           quote,
           delivery: true,
           ...(delivered && task.deliverableFiles?.length ? { files: task.deliverableFiles } : {}),
+          ...(delivered && task.preview ? { preview: task.preview } : {}),
           tasks: [{ id: task.id, title: task.text.slice(0, 80), status: task.status }],
         };
         // In a group, a result or a question goes back to whoever asked (see Groups.post).

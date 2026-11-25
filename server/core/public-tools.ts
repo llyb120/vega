@@ -92,6 +92,11 @@ const memoryId = str("记忆 ID（memory_search 返回的 id）", { minLength: 1
 const credentialId = str("密码本条目 ID（vault_list 返回的 id）", { minLength: 1 });
 const instructions = (what: string) => str(what + "，1–8000 字", { minLength: 1, maxLength: 8000 });
 const delayMinutes = (what: string) => int(`${what}，从现在起多少分钟，1–10080`, { minimum: 1, maximum: 10080 });
+const previewSpec = (description: string) => obj({
+  dir: str("当前执行端工作区（或云端用户个人目录）内的静态前端产物目录绝对路径", { minLength: 1, maxLength: 4096 }),
+  entry: str("可选：入口 HTML 相对路径，默认 index.html", { minLength: 1, maxLength: 256 }),
+  title: str("可选：预览卡片显示标题，1–120 字", { minLength: 1, maxLength: 120 }),
+}, ["dir"], description);
 const profile = str("开局场景偏好：lightweight（默认）或 coding，推荐用英文值；也接受中文别名 轻量化（= lightweight）、编码（= coding）。新主任务实际总是先用轻量模型判断，真正编码时在原会话用 switch_scene 升级", { enum: ["lightweight", "coding", "轻量化", "编码"] });
 const vaultUrl = str("可选：当前页面或服务地址，辅助核对使用条件；通常自动参考当前浏览器观察", { minLength: 1, maxLength: 2048 });
 
@@ -174,7 +179,8 @@ export function employeeTools(ctx: ToolContext): Tool[] {
           text: str("可选：产物的完整 Markdown 内容，不写进对话正文", { minLength: 1, maxLength: 64000 }),
           ref: int("可选：已写出的产物正文消息编号，或包含 textRef 的工具回执编号；与 text 二选一", { minimum: 1 }),
           paths: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区或云端个人目录内的产物文件绝对路径", { minLength: 1, maxLength: 4096 }), description: "可选：本步骤生成的文件（如 .zip、.xlsx、.pdf、构建包等），系统读取并保存快照供用户下载；接受当前执行端工作区或云端用户 home/tmp 内的普通文件，单个不超过 25MiB、合计不超过 64MiB。不要包含凭据。" },
-        }, ["step"], `${STEP_OUTPUT_RULE} 明确填写 text、paths 或正文 ref；系统单独展示并允许导出。已交付的产物不重复发送，已有最终报告覆盖的内容除非明确要求单独导出，否则省略。每任务最多 50 条。草稿、未执行或未验证项须如实说明。`) },
+          preview: previewSpec("可选：纯前端静态网页产物目录（含 index.html 与相对路径静态资源），系统快照托管到沙盒静态预览地址供用户在新窗口直接打开查看"),
+        }, ["step"], `${STEP_OUTPUT_RULE} 明确填写 text、paths、preview 或正文 ref；系统单独展示并允许导出/下载/预览。已交付的产物不重复发送，已有最终报告覆盖的内容除非明确要求单独导出，否则省略。每任务最多 50 条。草稿、未执行或未验证项须如实说明。`) },
       ["message"]));
     out.push(tool("task_reschedule",
       "把当前任务整体改到以后再继续（例如用户要求晚点或明天再处理、要等的时间点还没到）：runAt 或 delayMinutes 二选一。任务转为延后并立即结束本轮，到时在原会话续做。只改本任务自己；在等已提交的外部作业结果、需要记下恢复点时用 task_wait。用户说清的时刻或周期由系统记在同一条任务上。",
@@ -203,7 +209,8 @@ export function employeeTools(ctx: ToolContext): Tool[] {
           outlineReviewRetry: str("仅补交缺项时复制最近一次 outline_review_incomplete 的同名字段；只传此字段及缺项 outlineReview，不传 evidence、summary 或 deliverableRefs", { minLength: 1, maxLength: 100 }),
           summary: str("交付摘要，1–400 字（务必控制在 150 字以内）；只写核心结论、重要限制或需用户处理事项，勿超 400 字、勿写小标题清单", { minLength: 1, maxLength: 400 }),
           deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则选用尚未作为步骤产物交出的最新较长正文；仅无单独最终正文时传 []" },
-          files: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区或云端个人目录内的交付文件绝对路径", { minLength: 1, maxLength: 4096 }), description: "可选：最终交付给用户下载的文件列表（如 .zip、.xlsx、.pdf、.docx 等非文本报告产物），系统保存快照并在聊天和任务详情提供下载；接受工作区或云端个人目录内普通文件，单个 ≤25MiB、合计 ≤64MiB，勿含凭据" } }));
+          files: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区或云端个人目录内的交付文件绝对路径", { minLength: 1, maxLength: 4096 }), description: "可选：最终交付给用户下载的文件列表（如 .zip、.xlsx、.pdf、.docx 等非文本报告产物），系统保存快照并在聊天和任务详情提供下载；接受工作区或云端个人目录内普通文件，单个 ≤25MiB、合计 ≤64MiB，勿含凭据" },
+          preview: previewSpec("可选：纯前端静态网页产物目录（含 index.html 与相对路径资源），系统快照托管为沙盒静态预览并在聊天与任务详情提供「新窗口打开」") }));
     }
   }
   if (!ctx.member) {
@@ -320,7 +327,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
     case "task_relay_computer": return employee({ action: "relay", scene: "computer", text: a.handoff });
     case "task_complete": {
       if (a.evidence === undefined && a.outlineReviewRetry === undefined) throw new ArgumentError("参数 缺少必填字段 evidence（仅补交复核缺项时可省略）");
-      return employee(defined({ action: "complete", text: a.evidence, summary: a.summary, deliverableRef: a.deliverableRefs, outlineReview: a.outlineReview, outlineReviewRetry: a.outlineReviewRetry, files: a.files }));
+      return employee(defined({ action: "complete", text: a.evidence, summary: a.summary, deliverableRef: a.deliverableRefs, outlineReview: a.outlineReview, outlineReviewRetry: a.outlineReviewRetry, files: a.files, preview: a.preview }));
     }
     case "memory_search": return employee(defined({ action: "memory_search", query: a.query, status: a.status, memoryScene: a.memoryScene }));
     case "memory_propose": return employee(defined({ action: "memory_propose", claim: a.claim, memoryKind: a.memoryKind, scope: a.scope, tags: a.tags, memoryScene: a.memoryScene, evidence: a.evidence, id: a.memoryId, pinned: a.pinned }));

@@ -49,6 +49,7 @@ import {
   localShellKill,
 } from "./local-agent";
 import { absoluteFilePath, assert, clip, id, workspaceFile, type Obj } from "./util";
+import { collectStaticDirectory, type CollectedPreview } from "./previews";
 import { usageScope } from "./request-usage";
 import type { Config, Model } from "./config";
 import type { Tool } from "./provider";
@@ -881,6 +882,25 @@ export class Tools {
     }
     return roots;
   }
+  private async collectPreview(spec: unknown): Promise<CollectedPreview> {
+    assert(spec && typeof spec === "object" && !Array.isArray(spec), "preview 参数无效");
+    const { dir, entry, title } = spec as Obj;
+    const agent = this.agent();
+    const roots = agent ? [this.session.cwd] : await this.allowedArtifactRoots();
+    return collectStaticDirectory({
+      dir,
+      entry,
+      title,
+      cwd: this.session.cwd,
+      extraRoots: roots.slice(1),
+      fs: this.cloud?.fs || filesystem,
+      agent,
+      hub: this.engine.localAgents,
+      redactor: this.engine.redactors.get(this.session.id),
+      signal: this.signal,
+      windows: agent ? agent.platform === "windows" : process.platform === "win32",
+    });
+  }
   // shortcut: server/cloud path validation and the later read can race on a hostile shared machine; use handle-relative reads there.
   private async deliverableFiles(paths: string[]) {
     assert(Array.isArray(paths) && paths.length > 0 && paths.length <= ATTACHMENTS_MAX, `交付产物最多 ${ATTACHMENTS_MAX} 个文件`);
@@ -921,7 +941,7 @@ export class Tools {
   }
   private async employee(internal: Internal, tool = "", publicArgs: Obj = {}): Promise<Outcome> {
     const a = internal.args;
-    this.refuseSecrets(tool, { text: a.text, condition: a.condition, summary: a.summary, note: a.note, plan: a.plan, stepOutput: a.stepOutput, outlineReview: a.outlineReview, files: a.files }, publicArgs);
+    this.refuseSecrets(tool, { text: a.text, condition: a.condition, summary: a.summary, note: a.note, plan: a.plan, stepOutput: a.stepOutput, outlineReview: a.outlineReview, files: a.files, preview: a.preview }, publicArgs);
     const employee = await this.engine.employeeFor(this.session);
     const source = this.session.employeeId && !this.session.taskId ? (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user") : undefined;
     const taskLink = async (id: string, replace = false, existing = false) => {
@@ -982,10 +1002,17 @@ export class Tools {
     if (a.action === "vault_get") employee.authorize(await employee.state(), this.session.taskId || "", a);
     const scope = a.action === "vault_get" ? await this.credentialScope(a) : "";
     let stepFiles: { name: string; data: Buffer }[] | undefined;
-    if ((a.action === "progress" && a.stepOutput?.paths) || (a.action === "complete" && a.files)) {
+    let preview: CollectedPreview | undefined;
+    if ((a.action === "progress" && (a.stepOutput?.paths || a.stepOutput?.preview)) || (a.action === "complete" && (a.files || a.preview))) {
       const task = employee.authorize(await employee.state(), this.session.taskId || "", a);
       assert(task && (task.workSession === this.session.id || task.computerSession === this.session.id), "只能交付当前任务会话的产物");
-      stepFiles = await this.deliverableFiles(a.action === "progress" ? a.stepOutput.paths : a.files);
+      if (a.action === "progress") {
+        if (a.stepOutput?.paths) stepFiles = await this.deliverableFiles(a.stepOutput.paths);
+        if (a.stepOutput?.preview) preview = await this.collectPreview(a.stepOutput.preview);
+      } else {
+        if (a.files) stepFiles = await this.deliverableFiles(a.files);
+        if (a.preview) preview = await this.collectPreview(a.preview);
+      }
       this.signal.throwIfAborted();
     }
     let placement: Parameters<typeof employee.execute>[3];
@@ -1004,7 +1031,7 @@ export class Tools {
     const result = await employee.execute(
       this.session.taskId || "",
       { ...addArgs, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) },
-      undefined, placement, stepFiles,
+      undefined, placement, stepFiles, preview,
     );
     if (a.action === "vault_get" && result.secret) {
       const credential = JSON.parse(result.secret);
