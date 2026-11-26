@@ -22,7 +22,7 @@ import (
 )
 
 const extensionOrigin = "chrome-extension://bhiemmbmefifaloapbcopihahhckolce"
-const extensionVersion = "0.2.5"
+const extensionVersion = "0.2.9"
 
 //go:embed page_runtime.js
 var embeddedPageRuntime string

@@ -33,7 +33,7 @@ func TestWriteBundledExtensionWritesVegaManifestAndPorts(t *testing.T) {
 	if err = json.Unmarshal(data, &manifest); err != nil {
 		t.Fatalf("manifest JSON: %v", err)
 	}
-	if manifest.Name != "Vega Chrome" || manifest.Version != "0.2.5" || manifest.Key == "" {
+	if manifest.Name != "Vega Chrome" || manifest.Version != "0.2.9" || manifest.Key == "" {
 		t.Fatalf("unexpected manifest: %+v", manifest)
 	}
 	worker, err := os.ReadFile(filepath.Join(dir, "worker.js"))

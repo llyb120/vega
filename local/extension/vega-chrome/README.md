@@ -1,6 +1,6 @@
 # Vega Chrome 扩展
 
-Vega 自己的 Chrome 扩展（v0.2.5）。它只与 Vega 客户端/服务端配对：扩展身份（manifest `key` 决定扩展 ID）和本机回环端口段都独立于 Nova，两边同时安装也不会互相连接或抢占同一个浏览器。
+Vega 自己的 Chrome 扩展（v0.2.9）。它只与 Vega 客户端/服务端配对：扩展身份（manifest `key` 决定扩展 ID）和本机回环端口段都独立于 Nova，两边同时安装也不会互相连接或抢占同一个浏览器。
 
 ## 加载
 

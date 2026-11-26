@@ -1367,7 +1367,14 @@ export class Chrome {
   }
   private resolveBoundTab(owner: string, explicit?: string): string {
     const trimmed = typeof explicit === "string" ? explicit.trim() : "";
-    if (trimmed) return trimmed;
+    if (trimmed) {
+      if (/^C\d+$/.test(trimmed)) {
+        const bound = this.activeTabs.get(owner) || "";
+        const m = /^C\d+-(.+)$/.exec(bound);
+        if (m?.[1]) return `${trimmed}-${m[1]}`;
+      }
+      return trimmed;
+    }
     const bound = this.activeTabs.get(owner);
     if (bound) return bound;
     const legacy = [...this.observations].filter(([key]) => key.startsWith(owner + ":"));
@@ -1881,6 +1888,23 @@ export class Chrome {
       }
 
       if (toolName === "browser_debug") {
+        if (args.kind === "status") {
+          const base = typeof (this.bridge as any).status === "function" ? (this.bridge as any).status() : { connected: false };
+          let ext: Obj | undefined;
+          if (base?.connected) {
+            try {
+              ext = await this.bridge.request(
+                "status",
+                {},
+                AbortSignal.any([AbortSignal.timeout(3000), ...(parent ? [parent] : [])]),
+              );
+            } catch {}
+          }
+          return {
+            ...base,
+            ...(ext ? { version: ext.version, incognitoAllowed: ext.incognitoAllowed } : {}),
+          };
+        }
         if (args.kind === "downloads") {
           return await this.downloads({
             downloadId: args.downloadId,

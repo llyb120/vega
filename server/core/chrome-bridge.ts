@@ -49,7 +49,7 @@ export class ChromeBridge {
   >();
   queued = new EventEmitter();
   onPoll?: () => void;
-  version = "0.2.5";
+  version = "0.2.9";
 
   constructor(public privateInstance = false, public runtime = "") {}
 

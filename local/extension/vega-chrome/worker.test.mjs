@@ -60,7 +60,7 @@ function createHarness(overrides = {}) {
       onUpdated: event(),
       ...overrides.tabs,
     },
-    tabGroups: { query: async () => [], update: async () => {} },
+    tabGroups: { query: async () => [], update: async () => {}, ...overrides.tabGroups },
     windows: {
       get: async () => ({ ...win }),
       getAll: async () => [{ ...win }],
@@ -95,7 +95,7 @@ function createHarness(overrides = {}) {
     webNavigation: { onCreatedNavigationTarget: event() },
     runtime: {
       id: 'ext-id',
-      getManifest: () => ({ version: '0.2.5' }),
+      getManifest: () => ({ version: '0.2.9' }),
       getPlatformInfo: async () => ({ os: 'win' }),
       reload: () => {},
       onMessage: event(),
@@ -286,7 +286,7 @@ test('worker probes /health then /pair and only opens authenticated WebSocket to
         probed.push([url, opts.method]);
         if (url === 'http://127.0.0.1:47753/health') {
           if (opts.method === 'GET') return { ok: false, status: 403 };
-          return { ok: true, json: async () => ({ ok: true, app: 'vega', version: '0.2.5' }) };
+          return { ok: true, json: async () => ({ ok: true, app: 'vega', version: '0.2.9' }) };
         }
         if (url === 'http://127.0.0.1:47754/health') {
           return { ok: true, json: async () => ({ ok: true, app: 'other-service' }) };
@@ -509,11 +509,186 @@ test('navigation target events, multiple instances, reconnect, miniapps and atta
   assert.equal(posts[0].body.tabTag, source.tag);
 
   assert.ok(scope.api.globMatch('https://github.com/*/pull/*', 'https://github.com/a/b/pull/1?x=1'));
-  assert.equal(scope.api.newer('0.2.5', '0.2.0'), true);
-  assert.equal(scope.api.newer('0.1.9', '0.2.5'), false);
+  assert.equal(scope.api.newer('0.2.9', '0.2.0'), true);
+  assert.equal(scope.api.newer('0.1.9', '0.2.9'), false);
 
   await scope.api.execute({ operation: 'cdp', args: { tabTag: source.tag, method: 'Runtime.evaluate' }, expiresAt: Date.now() + 3000 });
   await scope.api.execute({ operation: 'cdp', args: { tabTag: source.tag, method: 'Input.dispatchMouseEvent' }, expiresAt: Date.now() + 3000 });
   assert.equal(JSON.stringify(sent.filter(s => s !== 'Page.enable' && s !== 'Page.getFrameTree')), JSON.stringify(['attach', 'settle', 'Runtime.evaluate', 'Input.dispatchMouseEvent']));
   assert.ok(delays.includes(300000), 'idle detach after five minutes');
+});
+
+test('attaching keeps a single Vega tab group, reuses it across detaches, merges duplicates, and skips cookies_export', async () => {
+  const tabsList = [
+    { id: 11, windowId: 5, url: 'https://example.com/1', title: 'One', active: true, status: 'complete', groupId: -1, incognito: false },
+    { id: 12, windowId: 5, url: 'https://example.com/2', title: 'Two', active: false, status: 'complete', groupId: -1, incognito: false },
+    { id: 13, windowId: 5, url: 'https://example.com/3', title: 'User', active: false, status: 'complete', groupId: 99, incognito: false },
+  ];
+  const groups = new Map([[99, { id: 99, windowId: 5, title: 'Work', color: 'green' }]]);
+  let nextGroupId = 1;
+  let createdGroups = 0;
+  let ungrouped = 0;
+  const { scope } = createHarness({
+    tabs: {
+      query: async (q = {}) => tabsList.filter(t =>
+        (q.windowId === undefined || t.windowId === q.windowId)
+        && (q.groupId === undefined || t.groupId === q.groupId)),
+      get: async id => ({ ...tabsList.find(t => t.id === id) }),
+      group: async ({ tabIds, groupId, createProperties }) => {
+        const ids = Array.isArray(tabIds) ? tabIds : [tabIds];
+        let gid = groupId;
+        if (gid === undefined) {
+          gid = nextGroupId++;
+          createdGroups++;
+          groups.set(gid, { id: gid, windowId: createProperties.windowId, title: '', color: 'grey' });
+        }
+        for (const id of ids) {
+          const t = tabsList.find(item => item.id === id);
+          if (t) t.groupId = gid;
+        }
+        for (const [id] of [...groups]) {
+          if (!tabsList.some(t => t.groupId === id)) groups.delete(id);
+        }
+        return gid;
+      },
+      ungroup: async () => { ungrouped++; },
+    },
+    tabGroups: {
+      query: async (q = {}) => [...groups.values()].filter(g =>
+        (q.windowId === undefined || g.windowId === q.windowId)
+        && (q.title === undefined || g.title === q.title)),
+      update: async (id, props) => {
+        const g = groups.get(id);
+        if (g) Object.assign(g, props);
+        return g;
+      },
+    },
+  });
+  const src = await readFile(new URL('./worker.js', import.meta.url), 'utf8');
+  runInNewContext(src + '\nglobalThis.__exec = executeCommand;', scope);
+  await scope.__exec('cookies_export', {});
+  assert.equal(createdGroups, 0, 'cookies_export must not group tabs');
+
+  const { tabs } = await scope.__exec('tabs');
+  const [t1, t2, t3] = tabs;
+
+  for (let i = 0; i < 2; i++) {
+    await scope.__exec('view', { tabTag: t1.tag, viewOpts: { screenshot: false } });
+    await scope.__exec('stop', { tabTag: t1.tag });
+  }
+  await scope.__exec('view', { tabTag: t2.tag, viewOpts: { screenshot: false } });
+  await scope.__exec('view', { tabTag: t3.tag, viewOpts: { screenshot: false } });
+
+  assert.equal(createdGroups, 1, 'should create only one Vega tab group');
+  assert.equal(ungrouped, 0, 'detaching should not ungroup and trigger group recreation');
+  assert.equal(tabsList[0].groupId, 1);
+  assert.equal(tabsList[1].groupId, 1);
+  assert.equal(tabsList[2].groupId, 99, 'custom user tab group must remain untouched');
+
+  groups.set(2, { id: 2, windowId: 5, title: 'Vega', color: 'blue' });
+  tabsList[1].groupId = 2;
+  await scope.__exec('stop', { tabTag: t2.tag });
+  await scope.__exec('view', { tabTag: t2.tag, viewOpts: { screenshot: false } });
+  assert.equal(tabsList[1].groupId, 1, 'duplicate Vega group tabs should merge into primary group');
+  assert.equal(groups.has(2), false);
+});
+
+test('worker type handles native <select> via selectOption without insertText, and skips unchanged inventory writes', async () => {
+  const selectCalls = [];
+  let sessionSetCount = 0;
+  let tabQueryCount = 0;
+  const tab = { id: 11, windowId: 5, url: 'https://example.com', title: 'Example', active: true, status: 'complete', groupId: -1, incognito: false };
+  const { scope, cdpCalls } = createHarness({
+    tabs: {
+      query: async () => { tabQueryCount += 1; return [tab]; },
+    },
+    onCdp: async (method, params) => {
+      const expr = String(params?.expression || '');
+      if (method === 'Runtime.evaluate' && expr.includes('__novaBrowser.resolve(4,"type")')) {
+        return { result: { value: { x: 240, y: 120, rect: [200, 100, 80, 40], tag: 'select', role: 'select', name: 'Country', editable: false } } };
+      }
+      if (method === 'Runtime.evaluate' && expr.includes('__novaBrowser.selectOption(')) {
+        selectCalls.push(expr);
+        return { result: { value: { selected: 'United States', value: 'US' } } };
+      }
+      return undefined;
+    },
+  });
+  scope.chrome.storage.session.set = async () => { sessionSetCount += 1; };
+  const src = await readFile(new URL('./worker.js', import.meta.url), 'utf8');
+  runInNewContext(src + '\nglobalThis.__exec = executeCommand;', scope);
+
+  const first = await scope.__exec('tabs', {});
+  assert.equal(sessionSetCount, 1);
+  await scope.__exec('tabs', {});
+  assert.equal(sessionSetCount, 1, 'unchanged inventory does not rewrite storage.session');
+
+  const act = await scope.__exec('act', {
+    tabTag: first.tabs[0].tag,
+    steps: [{ op: 'type', id: 4, text: 'United States' }],
+    viewOpts: { screenshot: false },
+  });
+  assert.equal(act.ok, true);
+  assert.equal(selectCalls.length, 1);
+  assert.ok(selectCalls[0].includes('selectOption(4,"United States")'));
+  assert.equal(act.actions[0], 'selected "United States" in [4]');
+  assert.equal(cdpCalls.some(([m]) => m === 'Input.insertText'), false, 'must not insertText into <select>');
+
+  const queriesBeforeAct = tabQueryCount;
+  await scope.__exec('act', {
+    tabTag: first.tabs[0].tag,
+    steps: [{ op: 'click', id: 1 }, { op: 'press', key: 'Tab' }, { op: 'press', key: 'Enter' }],
+    viewOpts: { screenshot: false },
+  });
+  assert.equal(tabQueryCount, queriesBeforeAct + 2, 'mid-batch skips inventory() when no tab events fired');
+});
+
+test('worker iframeTransform clips out-of-bounds iframe items cleanly', async () => {
+  const { scope } = createHarness({
+    onCdp: async (method, params) => {
+      if (method === 'Page.getFrameTree') {
+        return { frameTree: { frame: { id: 'main-frame' }, childFrames: [{ frame: { id: 'child-frame' } }] } };
+      }
+      if (method === 'Page.createIsolatedWorld') {
+        return { executionContextId: params.frameId === 'child-frame' ? 9 : 7 };
+      }
+      if (method === 'DOM.getFrameOwner') return { backendNodeId: 55 };
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'iframe-obj' } };
+      if (method === 'Runtime.callFunctionOn') return { result: { value: [200, 100, 1, 1, 300, 200] } };
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params?.expression || '');
+        const isChild = params?.contextId === 9;
+        if (expr.includes('__novaBrowser.observe(')) {
+          if (!isChild) {
+            return { result: { value: { url: 'https://example.com', title: 'Host', readyState: 'complete', viewport: [1280, 800, 1], scroll: [0, 0, 1280, 800], hasIframes: true, items: [], text: '' } } };
+          }
+          return {
+            result: {
+              value: {
+                url: 'https://child.example.com',
+                title: 'Child',
+                readyState: 'complete',
+                viewport: [300, 200, 1],
+                scroll: [0, 0, 600, 200],
+                items: [
+                  { id: 1, role: 'button', name: 'VisibleBtn', x: 50, y: 50, rect: [30, 35, 40, 30], inView: true },
+                  { id: 2, role: 'button', name: 'ClippedBtn', x: 350, y: 50, rect: [330, 35, 40, 30], inView: true },
+                ],
+                text: 'child',
+              },
+            },
+          };
+        }
+      }
+      return undefined;
+    },
+  });
+  const src = await readFile(new URL('./worker.js', import.meta.url), 'utf8');
+  runInNewContext(src + '\nglobalThis.__exec = executeCommand;', scope);
+  const { tabs } = await scope.__exec('tabs', {});
+
+  const view = await scope.__exec('view', { tabTag: tabs[0].tag, viewOpts: { screenshot: false } });
+  assert.deepEqual(Array.from(view.items, i => i.name), ['VisibleBtn'], 'clipped out-of-bounds iframe item must be omitted');
+  assert.equal(view.items[0].x, 250);
+  assert.equal(view.items[0].y, 150);
 });

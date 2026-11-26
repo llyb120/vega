@@ -243,7 +243,7 @@ export function extractPhaseEvidence(
         name === "browser_view" ? `${args.tab || ""} ${args.screenshot ? "screenshot" : ""}`.trim() || "view" :
         name === "browser_act" || name === "chrome_act" ? args.notes || (Array.isArray(args.actions) ? args.actions.map((a: any) => a?.action).filter(Boolean).join("→") : "") :
         name === "browser_eval" ? args.notes || args.tab || "eval" :
-        name === "browser_debug" ? `${args.action || "status"} ${args.tab || ""}`.trim() :
+        name === "browser_debug" ? `${args.kind || args.action || "status"} ${args.tab || ""}`.trim() :
         name === "browser_experience" ? `${args.action || ""} ${args.scope || ""}`.trim() :
         name === "chrome_navigate" ? args.url || "" :
         name === "chrome_tab_control" ? `${args.command || ""} ${args.tabTag || ""}` :

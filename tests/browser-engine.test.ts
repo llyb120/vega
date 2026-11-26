@@ -79,7 +79,7 @@ test("ChromeBridge supports /health, /pair, /ws hello+command push+reply, and or
   const health = await (await fetch(`${base}/health`, { headers: { origin: extOrigin } })).json() as any;
   assert.equal(health.ok, true);
   assert.equal(health.app, "vega");
-  assert.equal(health.version, "0.2.5");
+  assert.equal(health.version, "0.2.9");
 
   const clientId = "11111111-1111-4111-8111-111111111111";
   const pairRes = await fetch(`${base}/pair`, {
@@ -89,7 +89,7 @@ test("ChromeBridge supports /health, /pair, /ws hello+command push+reply, and or
       origin: extOrigin,
       authorization: `Bearer ${bridge.token}`,
     },
-    body: JSON.stringify({ clientId, version: "0.2.5" }),
+    body: JSON.stringify({ clientId, version: "0.2.9" }),
   });
   assert.equal(pairRes.status, 200);
   const { token, app } = await pairRes.json() as any;
@@ -129,7 +129,7 @@ test("ChromeBridge supports /health, /pair, /ws hello+command push+reply, and or
 
   const hello = await helloPromise;
   assert.equal(hello.type, "hello");
-  assert.equal(hello.version, "0.2.5");
+  assert.equal(hello.version, "0.2.9");
   assert.equal(hello.runtime, "/* runtime v6 */");
 
   const tabsRes = await bridge.request("tabs", {});
@@ -344,4 +344,54 @@ test("processScreenshot reuses unchanged frames and invalidates when SoM layout 
     prior,
   });
   assert.equal(changedSom.unchanged, undefined, "SoM layout change must invalidate unchanged reuse");
+});
+
+test("browser_debug(kind='status') works both connected and disconnected, and short tab tags expand", async (t: TestContext) => {
+  const store = await Store.open(":memory:");
+  t.after(async () => await store.close());
+  await store.saveSession({ id: "owner", title: "", cwd: ".", createdAt: 0 });
+  const jpeg = await sharp({
+    create: { width: 320, height: 200, channels: 3, background: { r: 245, g: 245, b: 245 } },
+  }).jpeg({ quality: 85 }).toBuffer();
+
+  let connected = false;
+  const requestedTags: string[] = [];
+  const bridge = {
+    status() {
+      return {
+        connected,
+        browser: connected ? "Google Chrome" : undefined,
+        browsers: connected ? ["Google Chrome"] : [],
+        origin: "http://127.0.0.1:47753",
+        extensionId: "bhiemmbmefifaloapbcopihahhckolce",
+        extensionVersion: "0.2.9",
+      };
+    },
+    async request(op: string, args: Obj) {
+      if (op === "status") return { version: "0.2.9", incognitoAllowed: true };
+      if (op === "open") return { tabTag: "C1-abcd", tabs: [{ tag: "C1-abcd", active: true, url: args.url }] };
+      if (op === "view") {
+        requestedTags.push(args.tabTag);
+        return { url: "https://example.test/", title: "Ex", viewport: [320, 200, 1], scroll: [0, 0, 320, 200], items: [], text: "", screenshotB64: jpeg.toString("base64") };
+      }
+      return {};
+    },
+    hideCursor() {},
+    close() {},
+  };
+
+  const chrome = new Chrome(store, bridge as any, "");
+  const offline = await chrome.execute("owner", ".", { operation: "browser_debug", kind: "status" });
+  assert.equal(offline.connected, false);
+  assert.equal(offline.extensionVersion, "0.2.9");
+
+  connected = true;
+  const online = await chrome.execute("owner", ".", { operation: "browser_debug", kind: "status" });
+  assert.equal(online.connected, true);
+  assert.equal(online.version, "0.2.9");
+  assert.equal(online.incognitoAllowed, true);
+
+  await chrome.execute("owner", ".", { operation: "browser_tabs", action: "open", url: "https://example.test/", view: false });
+  await chrome.execute("owner", ".", { operation: "browser_view", tab: "C2" });
+  assert.deepEqual(requestedTags, ["C2-abcd"]);
 });
