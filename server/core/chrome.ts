@@ -1613,6 +1613,9 @@ export class Chrome {
       observeMs: Number(raw?.observeMs) || 0,
     };
     if (scrollHint) out.scrollHint = scrollHint;
+    if (raw?.loadingState && (raw.loadingState.skeleton || raw.loadingState.blank || raw.loadingState.readyState !== "complete")) {
+      out.loadingHint = `页面疑似仍处于加载中或空骨架屏（readyState=${raw.loadingState.readyState || "unknown"}，正文约 ${Number(raw.loadingState.textChars) || 0} 字）。可先用 browser_act(steps=[{op:"wait", ms:3000}]) 等待后观察，不要立刻 reload 打断加载；若等待后仍为空骨架，请先调用 browser_debug(kind="all") 开启网络与控制台捕获后再 reload 一次，核查是否有 401/SSO 登录失效、接口/JS 加载失败或代理超时。`;
+    }
     if (cursorImg) out.cursor = cursorImg;
     if (raw?.focused !== undefined && raw.focused !== null) out.focused = raw.focused;
     if (overlayOut) out.overlay = overlayOut;

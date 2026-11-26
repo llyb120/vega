@@ -1116,6 +1116,16 @@
       text,
       observeMs: Math.round(performance.now() - started),
     };
+    const skel = detectSkeleton();
+    if (skel.stillLoading) {
+      out.loadingState = {
+        readyState: skel.readyState,
+        skeleton: skel.skeleton,
+        blank: skel.blank,
+        textChars: skel.textChars,
+        skeletonNodes: skel.skeletonNodes,
+      };
+    }
     if (window.visualViewport && window.visualViewport.scale > 1.001) {
       out.visualViewport = [
         window.visualViewport.offsetLeft,
@@ -1252,6 +1262,94 @@
     return false;
   }
 
+  // -------------------- SPA Skeleton Detection & Content Settling --------------------
+  const SKELETON_SEL = '[class*="skeleton" i],[class*="shimmer" i],[aria-busy="true"],[role="progressbar"],.ant-spin-spinning,.el-loading-mask,.t-loading,.t-skeleton,.ant-skeleton,.el-skeleton';
+
+  function detectSkeleton() {
+    const root = document.body || document.documentElement;
+    if (!root) {
+      return { readyState: document.readyState, textChars: 0, skeletonNodes: 0, skeleton: false, blank: true, stillLoading: true };
+    }
+    const vw = innerWidth || 1280, vh = innerHeight || 800;
+    let textChars = 0, scanned = 0;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let t; (t = walker.nextNode()) && scanned++ < 400 && textChars < 240;) {
+      const p = t.parentElement;
+      if (!p || isIgnored(p)) continue;
+      const pt = p.tagName;
+      if (pt === 'SCRIPT' || pt === 'STYLE' || pt === 'NOSCRIPT') continue;
+      const s = compact(t.nodeValue, 240);
+      if (!s) continue;
+      const cs = getComputedStyle(p);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+      const r = p.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      textChars += s.length;
+    }
+
+    let skeletonNodes = 0, skeletonArea = 0, visibleSpinners = 0;
+    const candidates = document.querySelectorAll(SKELETON_SEL);
+    for (let i = 0; i < candidates.length && i < 40; i++) {
+      const el = candidates[i];
+      if (!el || isIgnored(el)) continue;
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0 || r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw) continue;
+      skeletonNodes++;
+      skeletonArea += Math.min(r.width, vw) * Math.min(r.height, vh);
+      if (el.getAttribute('aria-busy') === 'true'
+        || el.getAttribute('role') === 'progressbar'
+        || el.matches?.('.ant-spin-spinning,.el-loading-mask,.t-loading')) {
+        visibleSpinners++;
+      }
+    }
+
+    const skeleton = skeletonArea >= 16000 || visibleSpinners > 0;
+    const blank = textChars < 40;
+    const stillLoading = document.readyState !== 'complete' || blank || skeleton;
+    return { readyState: document.readyState, textChars, skeletonNodes, skeleton, blank, stillLoading };
+  }
+
+  function waitContent(maxMs = 4500) {
+    const initial = detectSkeleton();
+    if (!initial.stillLoading) {
+      return waitQuiet(80, Math.min(250, maxMs)).then(q => ({ ready: true, ...initial, ...q }));
+    }
+    return new Promise(resolve => {
+      if (!document.documentElement) { resolve({ ready: false, ...initial, ms: 0 }); return; }
+      const started = performance.now();
+      let lastChange = started, done = false;
+      const obs = new MutationObserver(records => {
+        for (const rec of records) {
+          const target = rec.target?.nodeType === 1 ? rec.target : rec.target?.parentElement;
+          if (target && !isIgnored(target)) {
+            lastChange = performance.now();
+            break;
+          }
+        }
+      });
+      obs.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+      const finish = (ready, state) => {
+        if (done) return;
+        done = true;
+        clearInterval(timer);
+        obs.disconnect();
+        resolve({ ready, ...state, ms: Math.round(performance.now() - started) });
+      };
+      const tick = () => {
+        const now = performance.now();
+        const state = detectSkeleton();
+        if (!state.stillLoading && (now - lastChange) >= 200) {
+          finish(true, state);
+        } else if (now - started >= maxMs) {
+          finish(!state.stillLoading, state);
+        }
+      };
+      const timer = setInterval(tick, 150);
+    });
+  }
+
   // -------------------- Smart Cursor-Ignoring DOM Quiet --------------------
   function waitQuiet(quietMs = 80, maxMs = 600) {
     return new Promise(resolve => {
@@ -1308,6 +1406,8 @@
     scrollTarget,
     verifyOrFallbackScroll,
     waitQuiet,
+    detectSkeleton,
+    waitContent,
     evalCode,
     cursor: {
       show: showCursor,

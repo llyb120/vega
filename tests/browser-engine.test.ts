@@ -464,3 +464,31 @@ test("browser_debug(kind='status') works both connected and disconnected, and sh
   await chrome.execute("owner", ".", { operation: "browser_view", tab: "C2" });
   assert.deepEqual(requestedTags, ["C2-abcd"]);
 });
+
+test("formatView emits loadingHint for skeleton/blank pages and omits it when content is ready", async (t: TestContext) => {
+  const store = await Store.open(":memory:");
+  t.after(async () => await store.close());
+  const chrome = new Chrome(store, new ChromeBridge(), "");
+
+  const readyOut = await chrome.formatView("owner", "C1-1", {
+    url: "https://example.test/",
+    title: "Ready",
+    viewport: [1280, 800, 1],
+    scroll: [0, 0, 1280, 800],
+    items: [],
+    text: "Loaded content",
+  });
+  assert.equal(readyOut.loadingHint, undefined);
+
+  const skeletonOut = await chrome.formatView("owner", "C1-1", {
+    url: "https://tapd.example.test/story/1",
+    title: "TAPD",
+    viewport: [1280, 800, 1],
+    scroll: [0, 0, 1280, 800],
+    items: [],
+    text: "",
+    loadingState: { readyState: "complete", skeleton: true, blank: true, textChars: 0, skeletonNodes: 5 },
+  });
+  assert.match(String(skeletonOut.loadingHint || ""), /空骨架屏/);
+  assert.match(String(skeletonOut.loadingHint || ""), /browser_debug\(kind="all"\)/);
+});

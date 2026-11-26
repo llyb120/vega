@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,7 +13,9 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -196,4 +201,128 @@ func TestRelaySwitchAndPermits(t *testing.T) {
 			t.Errorf("permits(%v) = %v", test, !test.expected)
 		}
 	}
+}
+
+func TestRelayFastWindowNegotiationAndHappyEyeballs(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 1. Happy Eyeballs skips a closed/refused first IP and connects to a live listener on the second IP.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	deadLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadPort := deadLn.Addr().(*net.TCPAddr).Port
+	deadLn.Close()
+	livePort := ln.Addr().(*net.TCPAddr).Port
+
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}()
+	// Closed IPv6 ::1 + live IPv4 127.0.0.1 on the live port.
+	conn, err := dialHappyEyeballs(ctx, []net.IP{net.ParseIP("::1"), net.ParseIP("127.0.0.1")}, livePort)
+	if err != nil {
+		t.Fatalf("happy eyeballs failed: %v", err)
+	}
+	_ = conn.Close()
+	if bad, err := dialHappyEyeballs(ctx, []net.IP{net.ParseIP("127.0.0.1")}, deadPort); err == nil {
+		_ = bad.Close()
+		t.Fatal("expected error for closed port")
+	}
+
+	// 2. Negotiated fast relay sends [2, 1] readiness and pipelines >32KiB chunks without waiting for per-frame ACK.
+	local, target := net.Pipe()
+	defer local.Close()
+	defer target.Close()
+
+	up := make(chan []byte, 32)
+	down := make(chan []byte, 32)
+	var closed atomic.Bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+			var env struct {
+				Data *string `json:"data"`
+			}
+			if json.Unmarshal(body, &env) != nil || env.Data == nil {
+				http.Error(w, "bad", http.StatusBadRequest)
+				return
+			}
+			raw, err := base64.StdEncoding.DecodeString(*env.Data)
+			if err != nil {
+				http.Error(w, "bad64", http.StatusBadRequest)
+				return
+			}
+			up <- raw
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		flush := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		writeEvent(w, flush, fmt.Sprintf(`{"type":"channel","channel":"fast-1","window":8,"maxFrame":%d}`, relayFastFrame))
+		for !closed.Load() {
+			select {
+			case msg := <-down:
+				encoded, _ := json.Marshal(map[string]string{"type": "relay", "data": base64.StdEncoding.EncodeToString(msg)})
+				if !writeEvent(w, flush, string(encoded)) {
+					return
+				}
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}))
+	defer func() { closed.Store(true); backend.Close() }()
+
+	ws, _, err := DialContext(ctx, "http"+strings.TrimPrefix(backend.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	done := make(chan struct{})
+	go func() { pumpRelay(ctx, local, ws); close(done) }()
+
+	ready := <-up
+	if !bytes.Equal(ready, []byte{2, 1}) {
+		t.Fatalf("expected fast readiness [2, 1], got %v", ready)
+	}
+
+	// Write 3 chunks of 64 KiB back-to-back WITHOUT sending ACKs in between: sliding window allows all 3 upstream.
+	chunk := bytes.Repeat([]byte{0x42}, 64<<10)
+	go func() {
+		for i := 0; i < 3; i++ {
+			_, _ = target.Write(chunk)
+		}
+	}()
+	received := 0
+	for received < 3*len(chunk) {
+		frame := <-up
+		if frame[0] != 0 || len(frame) <= relayFrame+1 && len(frame)-1 != len(chunk) {
+			// Net.Pipe preserves single write sizes of 64KiB (> 32KiB legacy frame).
+			t.Fatalf("unexpected frame len=%d head=%d", len(frame), frame[0])
+		}
+		received += len(frame) - 1
+	}
+	_ = target.SetDeadline(time.Now().Add(2 * time.Second))
+	// Downstream >32KiB frame also succeeds under fast read limit.
+	bigDown := bytes.Repeat([]byte{0x77}, (96 << 10))
+	down <- append([]byte{0}, bigDown...)
+	gotDown := make([]byte, len(bigDown))
+	if _, err := io.ReadFull(target, gotDown); err != nil || !bytes.Equal(gotDown, bigDown) {
+		t.Fatalf("downstream fast frame failed: err=%v len=%d", err, len(gotDown))
+	}
+	ack := <-up
+	if !bytes.Equal(ack, []byte{1}) {
+		t.Fatalf("expected ACK [1], got %v", ack)
+	}
+	_ = strconv.Itoa(livePort)
 }

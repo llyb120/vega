@@ -74,7 +74,16 @@ test("employee browsers automatically receive the owner's stable network proxy",
   assert(args.includes("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"));
   assert(args.includes("--disable-quic"));
   assert(args.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
-  assert(!headlessArguments("profile", "extension").some((arg) => arg.startsWith("--proxy-")));
+  const baseArgs = headlessArguments("profile", "extension");
+  assert(!baseArgs.some((arg) => arg.startsWith("--proxy-")));
+  assert(baseArgs.includes("--disable-dev-shm-usage"));
+  assert(baseArgs.includes("--disable-quic"));
+  assert(baseArgs.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
+  assert(baseArgs.includes("--disable-background-timer-throttling"));
+  assert(baseArgs.includes("--disable-backgrounding-occluded-windows"));
+  assert(baseArgs.includes("--disable-renderer-backgrounding"));
+  const ua = baseArgs.find((arg) => arg.startsWith("--user-agent="));
+  assert(ua && ua.includes("Chrome/") && !ua.includes("HeadlessChrome"), "cloud UA must look like regular desktop Chrome");
 });
 
 test("cloud browsers use the owner's identity for profiles, uploads and cleanup without shared fallback", async (t) => {

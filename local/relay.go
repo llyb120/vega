@@ -18,7 +18,11 @@ import (
 	"time"
 )
 
-const relayFrame = 32 << 10
+const (
+	relayFrame     = 32 << 10
+	relayFastFrame = 256 << 10
+	relayMaxWindow = 16
+)
 
 func relayRules(text string) ([]string, error) {
 	rules := []string{}
@@ -86,20 +90,126 @@ func dialRelay(ctx context.Context, host string, port int) (net.Conn, error) {
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("域名没有可用地址")
 	}
+	seen := make(map[string]struct{}, len(addresses))
+	v4 := make([]net.IP, 0, len(addresses))
+	v6 := make([]net.IP, 0, len(addresses))
 	for _, addr := range addresses {
 		if !relayIPAllowed(addr.IP) {
 			return nil, fmt.Errorf("禁止中继回环、链路本地或特殊用途地址")
 		}
-	}
-	// Resolve once and dial the checked IP, not the hostname (DNS rebinding).
-	for _, addr := range addresses {
-		var conn net.Conn
-		conn, err = (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(addr.IP.String(), strconv.Itoa(port)))
-		if err == nil {
-			return conn, nil
+		key := addr.IP.String()
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		if addr.IP.To4() != nil {
+			v4 = append(v4, addr.IP)
+		} else {
+			v6 = append(v6, addr.IP)
 		}
 	}
-	return nil, err
+	ordered := append(v4, v6...)
+	if len(ordered) > 6 {
+		ordered = ordered[:6]
+	}
+	return dialHappyEyeballs(ctx, ordered, port)
+}
+
+// dialHappyEyeballs resolves once and dials only checked IPs (no hostname dial / DNS rebinding),
+// staggering parallel attempts so a single dead IPv6/IPv4 address never stalls the whole request.
+func dialHappyEyeballs(ctx context.Context, ips []net.IP, port int) (net.Conn, error) {
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("域名没有可用地址")
+	}
+	if len(ips) == 1 {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(ips[0].String(), strconv.Itoa(port)))
+	}
+	dialCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type attempt struct {
+		conn net.Conn
+		err  error
+	}
+	results := make(chan attempt, len(ips))
+	var launched atomic.Int32
+	launch := func(ip net.IP) {
+		launched.Add(1)
+		go func() {
+			conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
+			if err == nil {
+				select {
+				case results <- attempt{conn: conn}:
+				default:
+					_ = conn.Close()
+				}
+				return
+			}
+			results <- attempt{err: err}
+		}()
+	}
+
+	launch(ips[0])
+	next := 1
+	stagger := time.NewTimer(250 * time.Millisecond)
+	defer stagger.Stop()
+	var lastErr error
+	completed := 0
+	for completed < len(ips) {
+		var staggerCh <-chan time.Time
+		if next < len(ips) {
+			staggerCh = stagger.C
+		}
+		select {
+		case res := <-results:
+			completed++
+			if res.conn != nil {
+				cancel()
+				// Drain any concurrent winner that connected before cancel took effect.
+				for completed < int(launched.Load()) {
+					select {
+					case extra := <-results:
+						completed++
+						if extra.conn != nil {
+							_ = extra.conn.Close()
+						}
+					default:
+						completed = int(launched.Load())
+					}
+				}
+				return res.conn, nil
+			}
+			if res.err != nil {
+				lastErr = res.err
+			}
+			if next < len(ips) {
+				launch(ips[next])
+				next++
+				if next < len(ips) {
+					if !stagger.Stop() {
+						select {
+						case <-stagger.C:
+						default:
+						}
+					}
+					stagger.Reset(250 * time.Millisecond)
+				}
+			}
+		case <-staggerCh:
+			if next < len(ips) {
+				launch(ips[next])
+				next++
+				if next < len(ips) {
+					stagger.Reset(250 * time.Millisecond)
+				}
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("连接失败")
 }
 
 // relayTarget is one server-requested TCP destination; Fallback means the server could not dial it itself.
@@ -137,7 +247,7 @@ func (a *Agent) configureRelay(connection *directConnection, saved ServerCredent
 	runner.relayRules = rules
 	runner.relayOn = saved.relayAllowed()
 	enabled := runner.relayOn
-	slots := make(chan struct{}, 64)
+	slots := make(chan struct{}, 128)
 	runner.relay = func(session context.Context, request job) {
 		select {
 		case slots <- struct{}{}:
@@ -186,6 +296,27 @@ func pumpRelay(ctx context.Context, remote net.Conn, ws *Conn) {
 	defer cancel()
 	cleanup := context.AfterFunc(ctx, func() { _ = remote.Close(); _ = ws.Close() })
 	defer cleanup()
+	negFrame, negWindow := ws.RelayParams(ctx)
+	maxFrame := relayFrame
+	window := 1
+	fast := false
+	if negFrame > relayFrame || negWindow > 1 {
+		fast = true
+		if negFrame > relayFrame {
+			if negFrame > relayFastFrame {
+				maxFrame = relayFastFrame
+			} else {
+				maxFrame = negFrame
+			}
+		}
+		if negWindow > 1 {
+			if negWindow > relayMaxWindow {
+				window = relayMaxWindow
+			} else {
+				window = negWindow
+			}
+		}
+	}
 	var mu sync.Mutex
 	send := func(data []byte) error {
 		mu.Lock()
@@ -193,34 +324,41 @@ func pumpRelay(ctx context.Context, remote net.Conn, ws *Conn) {
 		_ = ws.SetWriteDeadline(time.Now().Add(30 * time.Second))
 		return ws.WriteMessage(BinaryMessage, data)
 	}
-	ws.SetReadLimit(relayFrame + 1)
-	if send([]byte{2}) != nil {
+	ws.SetReadLimit(int64(maxFrame) + 1)
+	readyFrame := []byte{2}
+	if fast {
+		readyFrame = []byte{2, 1}
+	}
+	if send(readyFrame) != nil {
 		return
 	}
-	acknowledgements := make(chan struct{}, 1)
-	var outstanding atomic.Bool
+	credits := make(chan struct{}, window)
+	for i := 0; i < window; i++ {
+		credits <- struct{}{}
+	}
+	var inFlight atomic.Int32
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer cancel()
-		buffer := make([]byte, relayFrame+1)
+		buffer := make([]byte, maxFrame+1)
 		for {
 			_ = remote.SetReadDeadline(time.Now().Add(5 * time.Minute))
 			n, err := remote.Read(buffer[1:])
 			if n > 0 {
-				buffer[0] = 0
-				outstanding.Store(true)
-				if send(buffer[:n+1]) != nil {
-					return
-				}
 				timer := time.NewTimer(30 * time.Second)
 				select {
-				case <-acknowledgements:
+				case <-credits:
 					timer.Stop()
 				case <-timer.C:
 					return
 				case <-ctx.Done():
 					timer.Stop()
+					return
+				}
+				inFlight.Add(1)
+				buffer[0] = 0
+				if send(buffer[:n+1]) != nil {
 					return
 				}
 			}
@@ -237,11 +375,11 @@ func pumpRelay(ctx context.Context, remote net.Conn, ws *Conn) {
 			return
 		}
 		if data[0] == 1 && len(data) == 1 {
-			if !outstanding.CompareAndSwap(true, false) {
+			if inFlight.Add(-1) < 0 {
 				return
 			}
 			select {
-			case acknowledgements <- struct{}{}:
+			case credits <- struct{}{}:
 			default:
 				return
 			}

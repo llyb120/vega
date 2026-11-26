@@ -692,3 +692,50 @@ test('worker iframeTransform clips out-of-bounds iframe items cleanly', async ()
   assert.equal(view.items[0].x, 250);
   assert.equal(view.items[0].y, 150);
 });
+
+test('open with viewOpts attaches before waitContent and forwards loadingState for skeleton pages', async () => {
+  const evaluated = [];
+  let currentTab = { id: 13, windowId: 5, url: 'https://spa.example.test/item/1', title: 'SPA', active: true, status: 'loading', groupId: -1, incognito: false };
+  const { scope } = createHarness({
+    tabs: {
+      query: async () => [currentTab],
+      get: async () => ({ ...currentTab }),
+      create: async props => {
+        currentTab = { ...currentTab, url: props.url, status: 'complete' };
+        return { ...currentTab };
+      },
+    },
+    onCdp: async (method, params) => {
+      if (method === 'Runtime.evaluate') {
+        const expr = String(params?.expression || '');
+        evaluated.push(expr);
+        if (expr.includes('__novaBrowser.waitContent(')) {
+          return { result: { value: { ready: false, stillLoading: true, skeleton: true } } };
+        }
+        if (expr.includes('__novaBrowser.observe(')) {
+          return {
+            result: {
+              value: {
+                url: currentTab.url,
+                title: currentTab.title,
+                readyState: 'complete',
+                loadingState: { readyState: 'complete', skeleton: true, blank: true, textChars: 0, skeletonNodes: 6 },
+                viewport: [1280, 800, 1],
+                scroll: [0, 0, 1280, 800],
+                items: [],
+                text: '',
+                observeMs: 4,
+              },
+            },
+          };
+        }
+      }
+      return undefined;
+    },
+  });
+  const src = await readFile(new URL('./worker.js', import.meta.url), 'utf8');
+  runInNewContext(src + '\nglobalThis.__exec = executeCommand;', scope);
+  const opened = await scope.__exec('open', { url: 'https://spa.example.test/item/1', viewOpts: { screenshot: false } });
+  assert.ok(evaluated.some(e => e.includes('__novaBrowser.waitContent(')), 'open must attach and invoke waitContent before final view');
+  assert.deepEqual(opened.view.loadingState, { readyState: 'complete', skeleton: true, blank: true, textChars: 0, skeletonNodes: 6 });
+});

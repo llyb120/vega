@@ -83,10 +83,12 @@ type Conn struct {
 	ready  chan struct{} // 收到 {"type":"channel"} 后关闭：上行必须带通道 id
 	done   chan struct{} // 整条通道结束（读流结束或被 Close）
 
-	channelMu sync.Mutex
-	channel   string
-	readyOnce sync.Once
-	stopOnce  sync.Once
+	channelMu     sync.Mutex
+	channel       string
+	relayMaxFrame int
+	relayWindow   int
+	readyOnce     sync.Once
+	stopOnce      sync.Once
 
 	stateMu       sync.Mutex
 	readDeadline  time.Time
@@ -235,20 +237,22 @@ func readLine(reader *bufio.Reader) ([]byte, error) {
 
 func (conn *Conn) dispatch(payload []byte) error {
 	var envelope struct {
-		Type    string  `json:"type"`
-		Channel string  `json:"channel"`
-		Open    int     `json:"open"`
-		Close   int     `json:"close"`
-		Code    int     `json:"code"`
-		Reason  string  `json:"reason"`
-		Data    *string `json:"data"`
+		Type     string  `json:"type"`
+		Channel  string  `json:"channel"`
+		Window   int     `json:"window"`
+		MaxFrame int     `json:"maxFrame"`
+		Open     int     `json:"open"`
+		Close    int     `json:"close"`
+		Code     int     `json:"code"`
+		Reason   string  `json:"reason"`
+		Data     *string `json:"data"`
 	}
 	if json.Unmarshal(payload, &envelope) != nil {
 		return &CloseError{Code: closeAbnormal, Reason: "invalid realtime frame"}
 	}
 	switch envelope.Type {
 	case "channel":
-		conn.setChannel(envelope.Channel)
+		conn.setChannel(envelope.Channel, envelope.MaxFrame, envelope.Window)
 		return nil
 	case "lane":
 		if envelope.Open > 0 {
@@ -288,11 +292,25 @@ func (conn *Conn) deliver(message frame) {
 	}
 }
 
-func (conn *Conn) setChannel(id string) {
+func (conn *Conn) setChannel(id string, maxFrame, window int) {
 	conn.channelMu.Lock()
 	conn.channel = id
+	conn.relayMaxFrame = maxFrame
+	conn.relayWindow = window
 	conn.channelMu.Unlock()
 	conn.readyOnce.Do(func() { close(conn.ready) })
+}
+
+func (conn *Conn) RelayParams(ctx context.Context) (maxFrame, window int) {
+	select {
+	case <-conn.ready:
+	case <-conn.done:
+	case <-ctx.Done():
+	case <-time.After(500 * time.Millisecond):
+	}
+	conn.channelMu.Lock()
+	defer conn.channelMu.Unlock()
+	return conn.relayMaxFrame, conn.relayWindow
 }
 
 func (conn *Conn) channelID() string {

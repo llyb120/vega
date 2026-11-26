@@ -295,26 +295,39 @@ async function evalFrame(tabId, cdpSessionId, frameId, expression) {
   throw Error('页面上下文重建失败');
 }
 
-async function waitForLoad(tabId, budgetMs = 3500) {
+async function waitForLoad(tabId, budgetMs = 7000, expiresAt) {
   const st = getState(tabId);
-  const deadline = Date.now() + budgetMs;
-  while (Date.now() < deadline) {
+  const hardCap = expiresAt ? Math.max(Date.now() + 500, expiresAt - 5000) : Date.now() + budgetMs;
+  const deadline = Math.min(Date.now() + budgetMs, hardCap);
+  const navDeadline = Math.min(deadline, Date.now() + Math.max(1500, Math.floor(budgetMs * 0.65)));
+  while (Date.now() < navDeadline) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab) return;
     const tabLoading = tab.status !== 'complete' || Boolean(tab.pendingUrl);
     if (!st.loading && !tabLoading) {
+      if (!attached.has(tabId) && tab.url && permittedUrl(tab.url) && tab.url !== 'about:blank') {
+        await attach(tab, expiresAt).catch(() => null);
+      }
+      if (!attached.has(tabId)) break;
       const rs = await cdp(tabId, 'Runtime.evaluate', { expression: 'document.readyState', returnByValue: true, silent: true }, null, 1500)
         .then(r => r?.result?.value).catch(() => 'complete');
-      if (rs === 'complete' || rs === 'interactive') break;
+      if (rs === 'complete') break;
     }
-    const left = Math.max(20, Math.min(120, deadline - Date.now()));
+    const left = Math.max(20, Math.min(120, navDeadline - Date.now()));
     await new Promise(resolve => {
       const timer = setTimeout(resolve, left);
       st.loadWaiters.push(() => { clearTimeout(timer); resolve(); });
     });
   }
-  if (st.mainFrameId) {
-    await evalFrame(tabId, null, st.mainFrameId, '__novaBrowser.waitQuiet(80, 220)').catch(() => {});
+  if (attached.has(tabId)) {
+    if (!st.mainFrameId) {
+      const tree = await cdp(tabId, 'Page.getFrameTree', {}, null, 1500).catch(() => null);
+      st.mainFrameId = tree?.frameTree?.frame?.id || '';
+    }
+    if (st.mainFrameId) {
+      const remain = Math.max(220, Math.min(4500, deadline - Date.now()));
+      await evalFrame(tabId, null, st.mainFrameId, `typeof __novaBrowser.waitContent === 'function' ? __novaBrowser.waitContent(${remain}) : __novaBrowser.waitQuiet(80, 220)`).catch(() => {});
+    }
   }
 }
 
@@ -532,6 +545,7 @@ async function doView(tab, opts = {}, expiresAt) {
     url: mainVal?.url || tab.url || '',
     title: mainVal?.title || tab.title || '',
     readyState: mainVal?.readyState || 'complete',
+    ...(mainVal?.loadingState ? { loadingState: mainVal.loadingState } : {}),
     viewport: mainVal?.viewport || [1280, 800, 1],
     scroll: mainVal?.scroll || [0, 0, 1280, 800],
     scrollInfo,
@@ -837,7 +851,7 @@ async function doAct(tab, args, expiresAt) {
       await sleep(30);
       const freshTab = await chrome.tabs.get(tab.id).catch(() => null);
       if (st.loading || freshTab?.status !== 'complete' || freshTab?.pendingUrl) {
-        await waitForLoad(tab.id, 3000);
+        await waitForLoad(tab.id, 4500, expiresAt);
       } else if (st.mainFrameId) {
         await evalFrame(tab.id, null, st.mainFrameId, '__novaBrowser.waitQuiet(80, 600)').catch(() => {});
       }
@@ -852,7 +866,7 @@ async function doAct(tab, args, expiresAt) {
   if (openedTabs.length === 1 && openedTabs[0].controllable) {
     try {
       targetTab = await resolveTag(openedTabs[0].tag);
-      await waitForLoad(targetTab.id, 3000);
+      await waitForLoad(targetTab.id, 4500, expiresAt);
     } catch {}
   }
 
@@ -1080,7 +1094,7 @@ async function executeCommand(op, args = {}, meta = {}) {
       await chrome.tabs.update(tab.id, { active: true });
       await chrome.windows.update(tab.windowId, { focused: true });
     }
-    if (url !== 'about:blank' && args.viewOpts) await waitForLoad(tab.id, 3500);
+    if (url !== 'about:blank' && args.viewOpts) await waitForLoad(tab.id, 7000, expiresAt);
     const tabs = await inventory();
     const tabTag = model.tabs[tab.id]?.tag;
     const view = args.viewOpts ? await doView(tab, args.viewOpts, expiresAt).catch(() => null) : null;
@@ -1126,7 +1140,7 @@ async function executeCommand(op, args = {}, meta = {}) {
     const st = getState(tab.id);
     st.loading = true; st.contexts.clear();
     await chrome.tabs.update(tab.id, { url: checkUrl(args.url) });
-    if (args.viewOpts) await waitForLoad(tab.id, 3500);
+    if (args.viewOpts) await waitForLoad(tab.id, 7000, expiresAt);
     const view = args.viewOpts ? await doView(tab, args.viewOpts, expiresAt).catch(() => null) : null;
     return { tabTag: args.tabTag, tabs: await inventory(), ...(view !== null ? { view } : {}) };
   }
@@ -1136,7 +1150,7 @@ async function executeCommand(op, args = {}, meta = {}) {
     if (op === 'back') await chrome.tabs.goBack(tab.id);
     else if (op === 'forward') await chrome.tabs.goForward(tab.id);
     else await chrome.tabs.reload(tab.id);
-    if (args.viewOpts) await waitForLoad(tab.id, 3500);
+    if (args.viewOpts) await waitForLoad(tab.id, 7000, expiresAt);
     const view = args.viewOpts ? await doView(tab, args.viewOpts, expiresAt).catch(() => null) : null;
     return { tabTag: args.tabTag, tabs: await inventory(), ...(view !== null ? { view } : {}) };
   }

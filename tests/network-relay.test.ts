@@ -418,3 +418,82 @@ test("deterministic ENOTFOUND direct dial falls back to same-account client, cac
   assert.equal((await read(s3, 10))[1], 4);
   assert.equal(jobs, 2);
 });
+
+test("negotiated fast relay supports sliding window and 256KiB frames in FIFO order", async (t) => {
+  const f = await fixture(t);
+  await f.relay.configure(grant, ["spa.internal:443"]);
+  const outbound: Buffer[] = [];
+  let command: any;
+  f.onCommand((job) => {
+    command = job;
+    const peer = tunnel(job.id, (frame) => outbound.push(frame));
+    f.relay.open(peer, grant, job.id);
+    f.relay.incoming(job.id, grant, upstream([2, 1]));
+  });
+  const socket = await socks(await f.relay.proxy("alice"), "spa.internal", 443, t);
+  assert.equal((await read(socket, 10))[1], 0);
+  const until = async (check: () => boolean) => { for (let i = 0; i < 400 && !check(); i++) await new Promise(r => setTimeout(r, 5)); assert(check()); };
+
+  // Send (WINDOW + 2) full 256KiB chunks: first WINDOW frames pipeline immediately without waiting for ACKs.
+  const totalChunks = NetworkRelay.WINDOW + 2;
+  const payload = Buffer.alloc(totalChunks * NetworkRelay.FAST_FRAME, 0x5a);
+  for (let i = 0; i < totalChunks; i++) payload[i * NetworkRelay.FAST_FRAME] = i & 0xff;
+  socket.write(payload);
+
+  await until(() => outbound.length === NetworkRelay.WINDOW);
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(outbound.length, NetworkRelay.WINDOW, "window bounds in-flight frames without stalling at 1");
+  assert(outbound.some((fr) => fr.length > (32 << 10) + 1 && fr.length <= NetworkRelay.FAST_FRAME + 1), "fast relay sends frames above the legacy 32KiB cap up to 256KiB");
+
+  const sent: Buffer[] = [];
+  while (Buffer.concat(sent).length < payload.length) {
+    await until(() => outbound.length > 0);
+    const frame = outbound.shift()!;
+    assert.equal(frame[0], 0);
+    sent.push(frame.subarray(1));
+    f.relay.incoming(command.id, grant, upstream([1]));
+  }
+  assert.deepEqual(Buffer.concat(sent), payload);
+
+  // Pipelined incoming frames are written in strict FIFO order and ACKed one by one.
+  const downstreamA = Buffer.alloc(NetworkRelay.FAST_FRAME, 0x31);
+  const downstreamB = Buffer.alloc(64 << 10, 0x32);
+  f.relay.incoming(command.id, grant, upstream(Buffer.concat([Buffer.from([0]), downstreamA])));
+  f.relay.incoming(command.id, grant, upstream(Buffer.concat([Buffer.from([0]), downstreamB])));
+  const gotA = await read(socket, downstreamA.length);
+  const gotB = await read(socket, downstreamB.length);
+  assert.deepEqual(gotA, downstreamA);
+  assert.deepEqual(gotB, downstreamB);
+  await until(() => outbound.filter((fr) => fr.length === 1 && fr[0] === 1).length === 2);
+});
+
+test("parallel direct probes immediately fail over when a sibling probe fails over to client", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const f = await fixture(t);
+  await f.relay.configure(grant, [], true);
+  let resolveSlowLookup!: (value: { address: string; family: number }[]) => void;
+  let lookupCalls = 0;
+  f.relay.resolveHost = async () => {
+    lookupCalls++;
+    if (lookupCalls === 1) throw Object.assign(Error("ENOTFOUND"), { code: "ENOTFOUND" });
+    return await new Promise((resolve) => { resolveSlowLookup = resolve; });
+  };
+  let jobs = 0;
+  f.onCommand((job) => {
+    jobs++;
+    const peer = tunnel(job.id);
+    f.relay.open(peer, grant, job.id);
+    f.relay.incoming(job.id, grant, upstream([2, 1]));
+  });
+  const proxy = await f.relay.proxy("alice");
+  const s2Promise = socks(proxy, "parallel.internal", 443, t);
+  const s1Promise = socks(proxy, "parallel.internal", 443, t);
+  const [s1, s2] = await Promise.all([s1Promise, s2Promise]);
+  // s1 fails DNS quickly and caches client route; unblock s2's DNS with a blackhole IP and verify s2 does not wait 2s.
+  assert.equal((await read(s1, 10))[1], 0);
+  const started = Date.now();
+  resolveSlowLookup([{ address: "192.0.2.1", family: 4 }]);
+  assert.equal((await read(s2, 10))[1], 0);
+  assert(Date.now() - started < 500, "sibling probe must fail over immediately via cached route");
+  assert.equal(jobs, 2);
+});

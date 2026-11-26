@@ -33,6 +33,17 @@ export function privateWorker(source: string, instance: Pick<PrivateBrowser, "po
     .replace(pair, `{method:'POST',headers:{Authorization:${JSON.stringify("Bearer " + instance.token)}},signal:AbortSignal.timeout(3000)}`);
 }
 
+export function defaultHeadlessUserAgent(env = process.env, osPlatform = platform()) {
+  const override = env.VEGA_CHROME_USER_AGENT?.trim();
+  if (override) return override;
+  const system = osPlatform === "win32"
+    ? "Windows NT 10.0; Win64; x64"
+    : osPlatform === "darwin"
+      ? "Macintosh; Intel Mac OS X 10_15_7"
+      : "X11; Linux x86_64";
+  return `Mozilla/5.0 (${system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36`;
+}
+
 export function headlessArguments(profile: string, extension: string, network?: Pick<PrivateBrowser, "port" | "proxy">) {
   const args = [
     "--headless=new",
@@ -40,6 +51,14 @@ export function headlessArguments(profile: string, extension: string, network?: 
     "--no-default-browser-check",
     "--window-size=1920,1200",
     "--password-store=basic",
+    // Avoid /dev/shm 64MB container exhaustion, QUIC UDP stalls under dynamic proxy, and HeadlessChrome UA blocking.
+    "--disable-dev-shm-usage",
+    "--disable-quic",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    `--user-agent=${defaultHeadlessUserAgent()}`,
     // No "started debugging this browser" bar (headless shows it too): it shrank the viewport 56px on every attach.
     // Safe here: the private profile only runs the Vega extension.
     "--silent-debugger-extension-api",
@@ -53,7 +72,6 @@ export function headlessArguments(profile: string, extension: string, network?: 
     `--proxy-server=${network.proxy}`,
     `--proxy-bypass-list=<-loopback>;127.0.0.1:${network.port}`,
     "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
-    "--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
   );
   return args;
 }

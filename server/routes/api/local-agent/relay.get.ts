@@ -1,5 +1,6 @@
 import { defineEventHandler, getHeader, createError } from "h3";
 import { app } from "../../../core/application";
+import { NetworkRelay } from "../../../core/network-relay";
 import { laneParams, openStream, wire, wireRequest } from "../../../core/sse";
 
 const denied = (error: any): never => {
@@ -21,7 +22,7 @@ export default defineEventHandler(async (event) => {
   id = stream.id;
   stream.attach(0, sink);
   const socket = wire(stream, request);
-  socket.send({ type: "channel", channel: stream.id });
+  socket.send({ type: "channel", channel: stream.id, window: NetworkRelay.WINDOW, maxFrame: NetworkRelay.FAST_FRAME });
   try {
     relay.open(socket, grant, flow);
   } catch {

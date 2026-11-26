@@ -12,7 +12,20 @@ type Record = Grant & { rules: string[]; on?: boolean };
 /** 中继开关已取消：服务端可单向借用在线客户端出网（按账号隔离），忽略旧的 on 关闭记录。 */
 const allowed = (_record: Record) => true;
 type TunnelPeer = Wire;
-type Flow = { grant: Grant; transport: Agent["transport"]; socket: Socket; peer?: TunnelPeer; ready: boolean; sending: boolean; incoming: boolean; timer: ReturnType<typeof setTimeout>; finish: (reason?: string) => void };
+type Flow = {
+  grant: Grant;
+  transport: Agent["transport"];
+  socket: Socket;
+  peer?: TunnelPeer;
+  ready: boolean;
+  window: number;
+  maxFrame: number;
+  inFlight: number;
+  incomingQueue: Buffer[];
+  draining: boolean;
+  timer: ReturnType<typeof setTimeout>;
+  finish: (reason?: string) => void;
+};
 
 export function relayRules(value: unknown): string[] {
   assert(Array.isArray(value) && value.length <= 64, "最多配置 64 条中继规则");
@@ -69,13 +82,17 @@ export class NetworkRelay {
   private proxies = new Map<string, Promise<{ server: Server; port: number; sockets: Set<Socket> }>>();
   private flows = new Map<string, Flow>();
   private peers = new Map<string, string>();
+  private directWaiters = new Map<string, Set<() => void>>();
   private closed = false;
   // 同一个地址最近从客户端走通过就不用再探：否则每个连接都要先直连失败或超时一次。
   private routes = new Map<string, number>();
   static ROUTE_TTL_MS = 10 * 60_000;
-  static DIRECT_FALLBACK_TIMEOUT_MS = 5000;
+  static DIRECT_FALLBACK_TIMEOUT_MS = 2000;
   static DIRECT_ONLY_TIMEOUT_MS = 12000;
   static DIRECT_STAGGER_MS = 300;
+  static FAST_FRAME = 256 << 10;
+  static WINDOW = 8;
+  static MAX_INCOMING_QUEUE = 16;
   /** 某账号的中继规则或在线状态变化时触发，用于动态刷新该账号私有浏览器的代理模式。 */
   onChange?: (userId: string) => void;
   /** DNS 多地址解析（可被单测覆盖以确定性验证多 IP 故障切换）。 */
@@ -165,7 +182,7 @@ export class NetworkRelay {
       starting = (async () => {
         const sockets = new Set<Socket>();
         const server = createServer((socket) => {
-          if (sockets.size >= 128) { socket.destroy(); return; }
+          if (sockets.size >= 256) { socket.destroy(); return; }
           sockets.add(socket);
           socket.on("error", () => {}).once("close", () => sockets.delete(socket));
           socket.setTimeout(15000, () => socket.destroy());
@@ -206,6 +223,7 @@ export class NetworkRelay {
    */
   private async direct(userId: string, socket: Socket, host: string, port: number, hasFallback: boolean) {
     const timeoutMs = hasFallback ? NetworkRelay.DIRECT_FALLBACK_TIMEOUT_MS : NetworkRelay.DIRECT_ONLY_TIMEOUT_MS;
+    const key = this.routeKey(userId, host, port);
     let targets: { address: string; family: number }[];
     const ipFamily = isIP(host);
     if (ipFamily) {
@@ -238,17 +256,27 @@ export class NetworkRelay {
       }
     }
     if (socket.destroyed || this.closed) return;
+    if (hasFallback && !ipFamily && this.viaClient(userId, host, port)) {
+      this.retry(userId, socket, host, port, "Cached client route");
+      return;
+    }
 
     let settled = false;
     let nextIdx = 0;
     let lastError = "连接超时";
     let staggerTimer: ReturnType<typeof setTimeout> | undefined;
     const active = new Set<Socket>();
+    let waiters: Set<() => void> | undefined;
+    let abortToFallback: (() => void) | undefined;
 
     const cleanup = (keep?: Socket) => {
       clearTimeout(overallTimer);
       clearTimeout(staggerTimer);
       staggerTimer = undefined;
+      if (waiters && abortToFallback) {
+        waiters.delete(abortToFallback);
+        if (waiters.size === 0) this.directWaiters.delete(key);
+      }
       for (const candidate of active) {
         if (candidate !== keep) candidate.destroy();
       }
@@ -268,6 +296,19 @@ export class NetworkRelay {
       cleanup();
       this.retry(userId, socket, host, port, lastError);
     }, timeoutMs);
+
+    if (hasFallback && !ipFamily) {
+      waiters = this.directWaiters.get(key);
+      if (!waiters) { waiters = new Set(); this.directWaiters.set(key, waiters); }
+      abortToFallback = () => {
+        if (settled) return;
+        settled = true;
+        socket.off("close", onClientClose);
+        cleanup();
+        this.retry(userId, socket, host, port, "Concurrent probe failed over");
+      };
+      waiters.add(abortToFallback);
+    }
 
     const tryNext = () => {
       if (settled || nextIdx >= targets.length) return;
@@ -327,12 +368,18 @@ export class NetworkRelay {
       if (socket.destroyed || this.closed) return;
       if (!selected) return fail("该账号当前没有可借用的在线客户端，且服务端直连失败。");
       console.warn("[Vega relay] Direct dial failed; retrying through the account client", { userId, clientId: selected.record.clientId, host, port, reason });
-      this.routes.set(this.routeKey(userId, host, port), Date.now());
+      const key = this.routeKey(userId, host, port);
+      this.routes.set(key, Date.now());
+      const waiters = this.directWaiters.get(key);
+      if (waiters) {
+        this.directWaiters.delete(key);
+        for (const wake of [...waiters]) wake();
+      }
       this.tunnel(socket, selected.record, selected.agent, host, port, true);
     }).catch(() => socket.destroy());
   }
   private tunnel(socket: Socket, record: Record, agent: Agent, host: string, port: number, fallback = false) {
-    assert(this.flows.size < 512 && [...this.flows.values()].filter((f) => f.grant.userId === record.userId && f.grant.clientId === record.clientId).length < 64, "Too many relay connections");
+    assert(this.flows.size < 1024 && [...this.flows.values()].filter((f) => f.grant.userId === record.userId && f.grant.clientId === record.clientId).length < 128, "Too many relay connections");
     const id = randomUUID();
     const finish = (reason?: string) => {
       const flow = this.flows.get(id);
@@ -346,7 +393,19 @@ export class NetworkRelay {
       if (flow.peer) { this.peers.delete(flow.peer.id); flow.peer.close(1000, "Relay closed"); }
       socket.destroy();
     };
-    const flow: Flow = { grant: record, transport: agent.transport, socket, ready: false, sending: false, incoming: false, timer: setTimeout(() => finish("Client readiness timed out"), 15000), finish };
+    const flow: Flow = {
+      grant: record,
+      transport: agent.transport,
+      socket,
+      ready: false,
+      window: 1,
+      maxFrame: FRAME,
+      inFlight: 0,
+      incomingQueue: [],
+      draining: false,
+      timer: setTimeout(() => finish("Client readiness timed out"), 15000),
+      finish,
+    };
     this.flows.set(id, flow);
     socket.once("close", () => finish(flow.ready ? undefined : "SOCKS connection closed before client readiness"));
     try { agent.transport!.send({ type: "relay", id, args: { host, port, ...(fallback ? { fallback: true } : {}) } }); }
@@ -362,10 +421,18 @@ export class NetworkRelay {
     const flow = this.flows.get(this.peers.get(peer.id) || "");
     if (!flow) { peer.close(1000, "Relay closed"); return; }
     try {
-      assert(data.length > 0 && data.length <= FRAME + 1, "Invalid relay frame");
+      const limit = (flow.ready ? flow.maxFrame : FRAME) + 1;
+      assert(data.length > 0 && data.length <= limit, "Invalid relay frame");
       if (data[0] === 2) {
-        assert(data.length === 1 && !flow.ready, "Unexpected relay readiness");
+        assert(!flow.ready && (data.length === 1 || (data.length === 2 && data[1] === 1)), "Unexpected relay readiness");
         flow.ready = true;
+        if (data.length === 2 && data[1] === 1) {
+          flow.window = NetworkRelay.WINDOW;
+          flow.maxFrame = NetworkRelay.FAST_FRAME;
+        } else {
+          flow.window = 1;
+          flow.maxFrame = FRAME;
+        }
         clearTimeout(flow.timer);
         flow.socket.setTimeout(300000);
         reply(flow.socket);
@@ -373,31 +440,57 @@ export class NetworkRelay {
         flow.socket.once("end", flow.finish);
         this.send(flow);
       } else if (data[0] === 1) {
-        assert(data.length === 1 && flow.ready && flow.sending, "Unexpected acknowledgement");
-        flow.sending = false;
+        assert(data.length === 1 && flow.ready && flow.inFlight > 0, "Unexpected acknowledgement");
+        flow.inFlight--;
         clearTimeout(flow.timer);
+        if (flow.inFlight > 0) {
+          flow.timer = setTimeout(() => flow.finish("Acknowledgement timed out"), 30000);
+        }
         this.send(flow);
       } else {
-        assert(data[0] === 0 && data.length > 1 && flow.ready && !flow.incoming, "Unexpected relay data");
-        flow.incoming = true;
-        flow.socket.write(Buffer.from(data.subarray(1)), (error) => {
-          flow.incoming = false;
-          if (error || flow.socket.destroyed) flow.finish();
-          else peer.send({ type: "relay", data: encodeFrame(Buffer.from([1])) }, { data: true });
-        });
+        assert(data[0] === 0 && data.length > 1 && flow.ready && flow.incomingQueue.length < NetworkRelay.MAX_INCOMING_QUEUE, "Unexpected relay data");
+        flow.incomingQueue.push(Buffer.from(data.subarray(1)));
+        this.drainIncoming(flow);
       }
     } catch { flow.finish("Invalid tunnel frame"); }
   }
+  private drainIncoming(flow: Flow) {
+    if (flow.draining || flow.socket.destroyed) return;
+    const next = flow.incomingQueue.shift();
+    if (!next) return;
+    flow.draining = true;
+    flow.socket.write(next, (error) => {
+      flow.draining = false;
+      if (error || flow.socket.destroyed) {
+        flow.finish();
+        return;
+      }
+      try {
+        flow.peer!.send({ type: "relay", data: encodeFrame(Buffer.from([1])) }, { data: true });
+      } catch {
+        flow.finish("Tunnel send failed");
+        return;
+      }
+      this.drainIncoming(flow);
+    });
+  }
   private send(flow: Flow) {
-    if (flow.sending || flow.socket.destroyed || !flow.ready) return;
-    const size = Math.min(FRAME, flow.socket.readableLength);
-    if (!size) return;
-    const data = flow.socket.read(size) as Buffer | null;
-    if (!data) return;
-    // shortcut: one bounded frame in flight per direction; add a credit window if WAN throughput requires it.
-    flow.sending = true;
-    flow.timer = setTimeout(() => flow.finish("Acknowledgement timed out"), 30000);
-    try { flow.peer!.send({ type: "relay", data: encodeFrame(Buffer.concat([Buffer.from([0]), data])) }, { data: true }); } catch { flow.finish("Tunnel send failed"); }
+    while (flow.inFlight < flow.window && !flow.socket.destroyed && flow.ready) {
+      const size = Math.min(flow.maxFrame, flow.socket.readableLength);
+      if (!size) break;
+      const data = flow.socket.read(size) as Buffer | null;
+      if (!data) break;
+      flow.inFlight++;
+      if (flow.inFlight === 1) {
+        flow.timer = setTimeout(() => flow.finish("Acknowledgement timed out"), 30000);
+      }
+      try {
+        flow.peer!.send({ type: "relay", data: encodeFrame(Buffer.concat([Buffer.from([0]), data])) }, { data: true });
+      } catch {
+        flow.finish("Tunnel send failed");
+        return;
+      }
+    }
   }
   closePeer(id: string) {
     const flow = this.flows.get(this.peers.get(id) || "");
@@ -411,6 +504,7 @@ export class NetworkRelay {
   }
   async close() {
     this.closed = true;
+    this.directWaiters.clear();
     for (const flow of this.flows.values()) flow.finish();
     for (const pending of this.proxies.values()) {
       const proxy = await pending.catch(() => undefined);
