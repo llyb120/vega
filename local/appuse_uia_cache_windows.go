@@ -202,6 +202,85 @@ func appuseSetUIATimeouts(automation unsafe.Pointer) {
 	}
 }
 
+type appusePopupInfo struct {
+	hwnd uint32
+	kind string
+	rect appuseControlRect
+}
+
+func isRepetitiveUIAKind(kind int32) bool {
+	return kind == 50007 || kind == 50024 || kind == 50029
+}
+
+func appuseRectContainsRect(outer, inner appuseControlRect) bool {
+	cx, cy := inner.X+inner.Width/2, inner.Y+inner.Height/2
+	return cx >= outer.X && cx <= outer.X+outer.Width && cy >= outer.Y && cy <= outer.Y+outer.Height
+}
+
+func nearDuplicateUIANode(existing, candidate appuseUIANode) bool {
+	al, at, ar, ab := existing.Rect.X, existing.Rect.Y, existing.Rect.X+existing.Rect.Width, existing.Rect.Y+existing.Rect.Height
+	bl, bt, br, bb := candidate.Rect.X, candidate.Rect.Y, candidate.Rect.X+candidate.Rect.Width, candidate.Rect.Y+candidate.Rect.Height
+	closeRect := absInt(al-bl) <= 3 && absInt(at-bt) <= 3 && absInt(ar-br) <= 3 && absInt(ab-bb) <= 3
+	return closeRect && (existing.Name == candidate.Name || candidate.Name == "")
+}
+
+// appuseDiscoverPopupHWNDs 扫描 Win32 Z-order 中位于目标窗口之上的系统弹出菜单、owned 工具窗与同进程弹出对话框。
+func appuseDiscoverPopupHWNDs(targetHWND uint32, winRect appuseControlRect) []appusePopupInfo {
+	target := uintptr(targetHWND)
+	if target == 0 {
+		return nil
+	}
+	var targetPID uint32
+	if tid, _, _ := procWindowThreadPID.Call(target, uintptr(unsafe.Pointer(&targetPID))); tid == 0 || targetPID == 0 {
+		return nil
+	}
+	const (
+		gwHwndNext = 2
+		gwOwner    = 4
+		wsPopup    = 0x80000000
+	)
+	gwlStyle := ^uintptr(15) // GWL_STYLE (-16)
+	winArea := int64(maxInt(0, winRect.Width)) * int64(maxInt(0, winRect.Height))
+	var out []appusePopupInfo
+	cur, _, _ := procGetTopWindow.Call(0)
+	for step := 0; step < 64 && cur != 0 && cur != target; step++ {
+		if !appuseWindowHiddenOrTransparent(cur) {
+			var classBuf [64]uint16
+			clen, _, _ := procClassName.Call(cur, uintptr(unsafe.Pointer(&classBuf[0])), uintptr(len(classBuf)))
+			class := ""
+			if clen > 0 && int(clen) <= len(classBuf) {
+				class = windows.UTF16ToString(classBuf[:clen])
+			}
+			var pid uint32
+			_, _, _ = procWindowThreadPID.Call(cur, uintptr(unsafe.Pointer(&pid)))
+			if rect, ok := appuseWindowVisibleBounds(cur); ok {
+				w, h := int(rect.Right-rect.Left), int(rect.Bottom-rect.Top)
+				if w >= 40 && h >= 24 {
+					isSysMenu := class == "#32768" || class == "ComboLBox"
+					style, _, _ := procGetWindowLongW.Call(cur, gwlStyle)
+					owner, _, _ := procGetWindow.Call(cur, gwOwner)
+					owned := owner == target
+					area := int64(w) * int64(h)
+					sameProcPopup := pid == targetPID && (owned || (uint32(style)&wsPopup) != 0 || (winArea > 0 && area < winArea*92/100))
+					if isSysMenu || sameProcPopup {
+						kind := "dialog"
+						if isSysMenu || strings.Contains(strings.ToLower(class), "menu") {
+							kind = "menu"
+						}
+						out = append(out, appusePopupInfo{
+							hwnd: uint32(cur),
+							kind: kind,
+							rect: appuseControlRect{X: int(rect.Left), Y: int(rect.Top), Width: w, Height: h},
+						})
+					}
+				}
+			}
+		}
+		cur, _, _ = procGetWindow.Call(cur, gwHwndNext)
+	}
+	return out
+}
+
 func appuseWalkCachedTree(windowID uint32, maxDepth, maxNodes int, timeBudget time.Duration, outerTimeout time.Duration, selfRects []appuseControlRect, fastOnly bool) (appuseUIAExtract, error) {
 	out := appuseUIAExtract{WindowID: windowID}
 	if !appuseUIABusy.CompareAndSwap(false, true) {
@@ -278,8 +357,9 @@ func appuseWalkCachedTree(windowID uint32, maxDepth, maxNodes int, timeBudget ti
 		}
 
 		var bestOverlay *appuseOverlayInfo
-		var walk func(elem unsafe.Pointer, level int, inOverlay bool) bool
-		walk = func(elem unsafe.Pointer, level int, inOverlay bool) bool {
+		var occludingPopups []appuseControlRect
+		var walk func(elem unsafe.Pointer, level int, inOverlay bool, popupPass bool) bool
+		walk = func(elem unsafe.Pointer, level int, inOverlay bool, popupPass bool) bool {
 			if extract.Visited >= maxNodes {
 				truncate("nodeLimit")
 				return false
@@ -347,14 +427,13 @@ func appuseWalkCachedTree(windowID uint32, maxDepth, maxNodes int, timeBudget ti
 			}
 			stateStr := strings.Join(states, ",")
 
-			// Detect open menu / popup overlay inside window tree.
-			nodeIsOverlay := inOverlay || kind == 50009 || (kind == 50032 && level > 0 && w < winRect.Width)
-			if kind == 50009 && level > 0 && bestOverlay == nil && w >= 40 && h >= 24 {
-				bestOverlay = &appuseOverlayInfo{
-					Kind:       "menu",
-					Role:       role,
-					Name:       name,
-					ScreenRect: cRect,
+			// Detect open menu / popup dialog inside window tree.
+			nodeIsOverlay := inOverlay || kind == 50009 || (kind == 50032 && level > 0 && winRect.Width > 0 && winRect.Height > 0 && int64(w)*int64(h) < int64(winRect.Width)*int64(winRect.Height)*90/100)
+			if level > 0 && w >= 80 && h >= 48 && (winRect.Width*winRect.Height == 0 || int64(w)*int64(h) < int64(winRect.Width)*int64(winRect.Height)*90/100) {
+				if kind == 50009 {
+					bestOverlay = &appuseOverlayInfo{Kind: "menu", Role: role, Name: name, ScreenRect: cRect}
+				} else if kind == 50032 && bestOverlay == nil {
+					bestOverlay = &appuseOverlayInfo{Kind: "dialog", Role: role, Name: name, ScreenRect: cRect}
 				}
 			}
 
@@ -401,7 +480,16 @@ func appuseWalkCachedTree(windowID uint32, maxDepth, maxNodes int, timeBudget ti
 					name = localType
 				}
 				if !fastOnly || (interactive && (name != "" || autoID != "" || value != "")) {
-					extract.Nodes = append(extract.Nodes, appuseUIANode{
+					occludedByPopup := false
+					if !popupPass {
+						for _, pr := range occludingPopups {
+							if appuseRectContainsRect(pr, cRect) {
+								occludedByPopup = true
+								break
+							}
+						}
+					}
+					candidate := appuseUIANode{
 						Role:         role,
 						Name:         name,
 						AutomationID: autoID,
@@ -414,7 +502,19 @@ func appuseWalkCachedTree(windowID uint32, maxDepth, maxNodes int, timeBudget ti
 						Rect:         cRect,
 						Depth:        level,
 						Order:        len(extract.Nodes),
-					})
+					}
+					nearDup := false
+					if !occludedByPopup {
+						for _, ex := range extract.Nodes {
+							if nearDuplicateUIANode(ex, candidate) {
+								nearDup = true
+								break
+							}
+						}
+					}
+					if !occludedByPopup && !nearDup {
+						extract.Nodes = append(extract.Nodes, candidate)
+					}
 				}
 			}
 
@@ -426,16 +526,38 @@ func appuseWalkCachedTree(windowID uint32, maxDepth, maxNodes int, timeBudget ti
 				truncate("providerError")
 				return true
 			}
+			const fastRepetitiveSiblingCap = 8
+			repetitiveSiblings := 0
 			for child != nil {
-				more := walk(child, level+1, nodeIsOverlay)
-				if !more {
-					comRelease(child)
-					return false
-				}
 				var next unsafe.Pointer
 				hr := comCall(walker, uiaSlotWalkerNextSiblingBC, uintptr(child), uintptr(cacheReq), uintptr(unsafe.Pointer(&next)))
+				skipRepetitive := false
+				if fastOnly && level > 0 {
+					cOff, cOffErr := uiaBool(child, uiaSlotElemCachedIsOffscreen)
+					if cOffErr != nil || !cOff {
+						if cKind, err := uiaInt(child, uiaSlotElemCachedControlType); err == nil && isRepetitiveUIAKind(int32(cKind)) {
+							repetitiveSiblings++
+							if repetitiveSiblings > fastRepetitiveSiblingCap {
+								skipRepetitive = true
+							}
+						}
+					}
+				}
+				if !skipRepetitive {
+					more := walk(child, level+1, nodeIsOverlay, popupPass)
+					if !more {
+						comRelease(child)
+						if next != nil {
+							comRelease(next)
+						}
+						return false
+					}
+				}
 				comRelease(child)
 				if uiaFailed(hr) != nil {
+					if next != nil {
+						comRelease(next)
+					}
 					truncate("providerError")
 					return true
 				}
@@ -444,10 +566,35 @@ func appuseWalkCachedTree(windowID uint32, maxDepth, maxNodes int, timeBudget ti
 			return true
 		}
 
-		walk(root, 0, false)
+		for _, pop := range appuseDiscoverPopupHWNDs(windowID, winRect) {
+			occludingPopups = append(occludingPopups, pop.rect)
+			if bestOverlay == nil {
+				bestOverlay = &appuseOverlayInfo{Kind: pop.kind, ScreenRect: pop.rect}
+			}
+			var popRoot unsafe.Pointer
+			if uiaFailed(comCall(automation, uiaSlotElementFromHandleBC, uintptr(pop.hwnd), uintptr(cacheReq), uintptr(unsafe.Pointer(&popRoot)))) == nil && popRoot != nil {
+				more := walk(popRoot, 0, true, true)
+				comRelease(popRoot)
+				if !more {
+					break
+				}
+			}
+		}
+		if extract.Visited < maxNodes && time.Since(started) < timeBudget {
+			walk(root, 0, false, false)
+		}
 		if bestOverlay != nil {
-			bestOverlay.OutsidePoint = appuseComputeOutsidePoint(bestOverlay.ScreenRect, winRect)
-			extract.Overlay = bestOverlay
+			anyInOverlay := false
+			for i := range extract.Nodes {
+				if extract.Nodes[i].Overlay || appuseRectContainsRect(bestOverlay.ScreenRect, extract.Nodes[i].Rect) {
+					extract.Nodes[i].Overlay = true
+					anyInOverlay = true
+				}
+			}
+			if anyInOverlay {
+				bestOverlay.OutsidePoint = appuseComputeOutsidePoint(bestOverlay.ScreenRect, winRect)
+				extract.Overlay = bestOverlay
+			}
 		}
 		done <- answer{extract: extract}
 	}()

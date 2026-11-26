@@ -10,7 +10,7 @@ import (
 const (
 	appuseImageMaxEdge   = 1568
 	appuseImageMaxPixels = 1_150_000
-	appuseJPEGQuality    = 82
+	appuseJPEGQuality    = 85
 )
 
 // appuseVisionScale 对齐 Nova 的 vision_scale / TS browser-annotate.ts，限制长边 <= 1568 且总像素 <= 1.15M。
@@ -81,18 +81,55 @@ func appuseBlendPx(img *image.RGBA, x, y int, r, g, b, a uint8) {
 	img.Pix[off+3] = 255
 }
 
-func appuseDrawRectOutline(img *image.RGBA, x0, y0, x1, y1 int) {
+type appuseSomColor struct{ R, G, B, A uint8 }
+
+var appuseSomPalette = [4][2]appuseSomColor{
+	{{49, 46, 129, 236}, {79, 70, 229, 108}},   // deep indigo
+	{{6, 78, 59, 236}, {16, 185, 129, 108}},   // deep emerald
+	{{136, 19, 55, 236}, {225, 29, 72, 108}},  // deep rose
+	{{12, 74, 110, 236}, {14, 165, 233, 108}}, // deep slate-cyan
+}
+
+func appuseSomSignature(boxes []appuseSomBox, w, h int) uint64 {
+	const (
+		offset64 uint64 = 14695981039346656037
+		prime64  uint64 = 1099511628211
+	)
+	mix := func(h uint64, v uint64) uint64 {
+		for i := 0; i < 8; i++ {
+			h ^= (v >> (i * 8)) & 0xff
+			h *= prime64
+		}
+		return h
+	}
+	hash := offset64
+	hash = mix(hash, uint64(w))
+	hash = mix(hash, uint64(h))
+	for _, box := range boxes {
+		if box.W <= 1 || box.H <= 1 {
+			continue
+		}
+		hash = mix(hash, uint64(box.ID))
+		hash = mix(hash, uint64(box.X))
+		hash = mix(hash, uint64(box.Y))
+		hash = mix(hash, uint64(box.W))
+		hash = mix(hash, uint64(box.H))
+	}
+	return hash
+}
+
+func appuseDrawRectOutline(img *image.RGBA, x0, y0, x1, y1 int, color appuseSomColor) {
 	for x := x0; x <= x1; x++ {
-		appuseBlendPx(img, x, y0, 79, 70, 229, 96)
-		appuseBlendPx(img, x, y1, 79, 70, 229, 96)
+		appuseBlendPx(img, x, y0, color.R, color.G, color.B, color.A)
+		appuseBlendPx(img, x, y1, color.R, color.G, color.B, color.A)
 	}
 	for y := y0 + 1; y < y1; y++ {
-		appuseBlendPx(img, x0, y, 79, 70, 229, 96)
-		appuseBlendPx(img, x1, y, 79, 70, 229, 96)
+		appuseBlendPx(img, x0, y, color.R, color.G, color.B, color.A)
+		appuseBlendPx(img, x1, y, color.R, color.G, color.B, color.A)
 	}
 }
 
-func appuseDrawPillBadge(img *image.RGBA, x, y, pw, ph int, label string) {
+func appuseDrawPillBadge(img *image.RGBA, x, y, pw, ph int, label string, fill appuseSomColor) {
 	for dy := 0; dy < ph; dy++ {
 		for dx := 0; dx < pw; dx++ {
 			if (dx == 0 || dx == pw-1) && (dy == 0 || dy == ph-1) {
@@ -103,7 +140,7 @@ func appuseDrawPillBadge(img *image.RGBA, x, y, pw, ph int, label string) {
 			if isBorder {
 				appuseBlendPx(img, x+dx, y+dy, 255, 255, 255, 245)
 			} else {
-				appuseBlendPx(img, x+dx, y+dy, 30, 41, 59, 232)
+				appuseBlendPx(img, x+dx, y+dy, fill.R, fill.G, fill.B, fill.A)
 			}
 		}
 	}
@@ -127,7 +164,7 @@ func appuseDrawPillBadge(img *image.RGBA, x, y, pw, ph int, label string) {
 	}
 }
 
-// appuseDrawSomRaw 在模型副本图上绘制无碰撞的 [1][2] 编号角标与淡轮廓；绝不修改原始 GuardFrames。
+// appuseDrawSomRaw 在模型副本图上绘制无碰撞的 4 色 [1][2] 编号角标与淡轮廓；绝不修改原始 GuardFrames。
 func appuseDrawSomRaw(img *image.RGBA, boxes []appuseSomBox) {
 	if img == nil || len(boxes) == 0 {
 		return
@@ -137,16 +174,12 @@ func appuseDrawSomRaw(img *image.RGBA, boxes []appuseSomBox) {
 		return
 	}
 	type placedRect struct{ x0, y0, x1, y1 int }
-	placed := make([]placedRect, 0, len(boxes))
-	overlaps := func(x, y, bw, bh int) bool {
-		x1, y1 := x+bw, y+bh
-		for _, r := range placed {
-			if x < r.x1 && x1 > r.x0 && y < r.y1 && y1 > r.y0 {
-				return true
-			}
-		}
-		return false
+	type mappedBox struct {
+		id, x0, y0, x1, y1 int
+		fill               appuseSomColor
 	}
+	type smallCenter struct{ id, cx, cy int }
+
 	clamp := func(v, lo, hi int) int {
 		if v < lo {
 			return lo
@@ -156,6 +189,8 @@ func appuseDrawSomRaw(img *image.RGBA, boxes []appuseSomBox) {
 		}
 		return v
 	}
+
+	mapped := make([]mappedBox, 0, len(boxes))
 	for _, box := range boxes {
 		if box.W <= 1 || box.H <= 1 {
 			continue
@@ -167,38 +202,75 @@ func appuseDrawSomRaw(img *image.RGBA, boxes []appuseSomBox) {
 		if x1 <= x0+2 || y1 <= y0+2 {
 			continue
 		}
-		appuseDrawRectOutline(img, x0, y0, x1, y1)
+		pair := appuseSomPalette[absInt(box.ID)%len(appuseSomPalette)]
+		appuseDrawRectOutline(img, x0, y0, x1, y1, pair[1])
+		mapped = append(mapped, mappedBox{box.ID, x0, y0, x1, y1, pair[0]})
+	}
 
-		label := intToStr(box.ID)
+	small := make([]smallCenter, 0, len(mapped))
+	for _, m := range mapped {
+		if m.x1-m.x0 <= 56 && m.y1-m.y0 <= 28 {
+			small = append(small, smallCenter{m.id, (m.x0 + m.x1) / 2, (m.y0 + m.y1) / 2})
+		}
+	}
+
+	placed := make([]placedRect, 0, len(mapped))
+	overlaps := func(x, y, bw, bh int) bool {
+		x1, y1 := x+bw, y+bh
+		for _, r := range placed {
+			if x < r.x1 && x1 > r.x0 && y < r.y1 && y1 > r.y0 {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, m := range mapped {
+		label := intToStr(m.id)
 		pw := len(label)*appuseSomGlyphW + maxInt(0, len(label)-1) + 6
 		ph := appuseSomGlyphH + 4
-		candidates := [][2]int{
-			{x0, maxInt(0, y0-ph+2)},
-			{x0 + 1, y0 + 1},
-			{maxInt(0, x1-pw), maxInt(0, y0-ph+2)},
-			{maxInt(0, x1-pw-1), y0 + 1},
-			{x0, minInt(h-ph, y1-2)},
-			{maxInt(0, x0-pw+2), y0},
+		if pw > w || ph > h {
+			continue
 		}
-		chosen := candidates[0]
+		candidates := [][2]int{
+			{m.x0 - 1, m.y0 - ph + 1},
+			{m.x0, m.y0},
+			{m.x1 - pw + 1, m.y0 - ph + 1},
+			{m.x0 - 1, m.y1},
+			{m.x1 - pw, m.y0},
+			{m.x0 - pw, m.y0},
+			{m.x1, m.y0},
+			{m.x1 - pw + 1, m.y1},
+		}
+		bestPenalty := 2
+		var chosen [2]int
 		found := false
 		for _, c := range candidates {
-			cx := clamp(c[0], 0, maxInt(0, w-pw))
-			cy := clamp(c[1], 0, maxInt(0, h-ph))
-			if !overlaps(cx, cy, pw, ph) {
+			cx := clamp(c[0], 0, w-pw)
+			cy := clamp(c[1], 0, h-ph)
+			if overlaps(cx, cy, pw, ph) {
+				continue
+			}
+			penalty := 0
+			for _, s := range small {
+				if s.id != m.id && s.cx >= cx && s.cx < cx+pw && s.cy >= cy && s.cy < cy+ph {
+					penalty = 1
+					break
+				}
+			}
+			if !found || penalty < bestPenalty {
 				chosen = [2]int{cx, cy}
+				bestPenalty = penalty
 				found = true
-				break
+				if penalty == 0 {
+					break
+				}
 			}
 		}
-		if !found {
-			chosen = [2]int{
-				clamp(candidates[0][0], 0, maxInt(0, w-pw)),
-				clamp(candidates[0][1], 0, maxInt(0, h-ph)),
-			}
+		if found {
+			placed = append(placed, placedRect{chosen[0], chosen[1], chosen[0] + pw, chosen[1] + ph})
+			appuseDrawPillBadge(img, chosen[0], chosen[1], pw, ph, label, m.fill)
 		}
-		placed = append(placed, placedRect{chosen[0], chosen[1], chosen[0] + pw, chosen[1] + ph})
-		appuseDrawPillBadge(img, chosen[0], chosen[1], pw, ph, label)
 	}
 }
 

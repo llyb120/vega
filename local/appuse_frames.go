@@ -16,6 +16,7 @@ type appuseFrame struct {
 	SourceW        uint32
 	SourceH        uint32
 	Monitor        uint32
+	SomSig         uint64
 	Payload        map[string]any
 	Controls       []appuseControlItem
 	OverlayOutside *appusePoint
@@ -49,7 +50,7 @@ func appusePreviousFrame(owner string) map[uint32]*appuseFrame {
 }
 
 // appuseRememberFrame 记下一次交付的原始像素；entry 里去掉 data（base64 只在本次结果里）。
-func appuseRememberFrame(owner string, monitor uint32, grab *image.RGBA, entry map[string]any, controls []appuseControlItem, outside *appusePoint, elementsText []string, overlayPayload map[string]any, scrollHint *appuseScrollInfo) {
+func appuseRememberFrame(owner string, monitor uint32, grab *image.RGBA, entry map[string]any, somSig uint64, controls []appuseControlItem, outside *appusePoint, elementsText []string, overlayPayload map[string]any, scrollHint *appuseScrollInfo) {
 	payload := make(map[string]any, len(entry))
 	for key, value := range entry {
 		if key == "data" {
@@ -67,7 +68,7 @@ func appuseRememberFrame(owner string, monitor uint32, grab *image.RGBA, entry m
 	}
 	frames[monitor] = &appuseFrame{
 		Image: grab, SourceW: uint32(grab.Bounds().Dx()), SourceH: uint32(grab.Bounds().Dy()),
-		Monitor: monitor, Payload: payload,
+		Monitor: monitor, SomSig: somSig, Payload: payload,
 		Controls: controls, OverlayOutside: outside,
 		ElementsText: elementsText, OverlayPayload: overlayPayload, ScrollHint: scrollHint,
 		Captured: time.Now(),

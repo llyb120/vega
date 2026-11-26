@@ -275,10 +275,13 @@ func TestRememberedFramesEnableUnchangedReuse(t *testing.T) {
 		"originalWidth": uint32(100), "originalHeight": uint32(50),
 		"monitorId": uint32(0), "path": "C:\\shots\\a.png", "data": "base64-should-be-dropped",
 	}
-	appuseRememberFrame("owner-frames", 0, grab, entry, nil, nil, nil, nil, nil)
+	appuseRememberFrame("owner-frames", 0, grab, entry, 0, nil, nil, nil, nil, nil)
 	frame := appusePreviousFrame("owner-frames")[0]
 	if frame == nil || frame.Image == nil {
 		t.Fatal("应记住这次交付")
+	}
+	if frame.SomSig != 0 {
+		t.Fatalf("预期 SomSig=0，实际 %d", frame.SomSig)
 	}
 	if !appuseFrameFresh(frame, appuseSnapshotTTL) {
 		t.Fatal("刚记下的帧应是新鲜的")

@@ -878,8 +878,9 @@ func appuseCaptureWithOptions(owner string, windowID, monitorID *uint32, region 
 	var uiaMs int64
 	var encodeMs int64
 	var uiaExtract appuseUIAExtract
+	var foreignOccluders []appuseControlRect
+	var uiaWG sync.WaitGroup
 	if controlsOn {
-		uiaStarted := time.Now()
 		var uiaWin uint32
 		if windowID != nil {
 			uiaWin = *windowID
@@ -887,24 +888,27 @@ func appuseCaptureWithOptions(owner string, windowID, monitorID *uint32, region 
 			uiaWin = *before
 		}
 		if uiaWin != 0 {
-			uiaExtract = appuseCollectFastUIA(uiaWin, appuseSelfProtectedRects())
+			selfRects := appuseSelfProtectedRects()
+			uiaWG.Add(1)
+			go func() {
+				defer uiaWG.Done()
+				uiaStarted := time.Now()
+				foreignOccluders = appuseForeignOccludersAbove(uiaWin)
+				uiaExtract = appuseCollectFastUIA(uiaWin, selfRects)
+				uiaMs = time.Since(uiaStarted).Milliseconds()
+			}()
 		}
-		uiaMs = time.Since(uiaStarted).Milliseconds()
 	}
+	defer uiaWG.Wait()
 
-	images := []map[string]any{}
-	shots := []appuseShot{}
-	elementsAll := []string{}
-	var overlayAll map[string]any
-	var scrollAll *appuseScrollInfo
-	if controlsOn && uiaExtract.PrimaryScroll != nil {
-		scrollAll = uiaExtract.PrimaryScroll
+	type capturedMonitor struct {
+		monitor appuseSurface
+		grab    *image.RGBA
+		sourceW uint32
+		sourceH uint32
+		origin  appuseSurface
 	}
-	nextControlID := 1
-
-	// 上一帧的原始像素：用来判断这次画面是否真的变了（unchanged 不重传图）。
-	previous := appusePreviousFrame(owner)
-	changed := false
+	captured := make([]capturedMonitor, 0, len(monitors))
 	for _, monitor := range monitors {
 		if target != nil && *target != monitor.ID {
 			continue
@@ -921,42 +925,54 @@ func appuseCaptureWithOptions(owner string, windowID, monitorID *uint32, region 
 		if window != nil && sourceW == window.W && sourceH == window.H {
 			origin = appuseSurface{ID: monitor.ID, PID: window.PID, X: window.X, Y: window.Y, W: window.W, H: window.H}
 		}
+		captured = append(captured, capturedMonitor{
+			monitor: monitor, grab: grab, sourceW: sourceW, sourceH: sourceH, origin: origin,
+		})
+	}
+	uiaWG.Wait()
 
-		if prior := previous[monitor.ID]; prior != nil {
-			if region == nil && appuseEqualPixels(prior.Image, grab, 0.002) {
-				// 画面没变：沿用上一张图与它的路径，不重传、也不占用新的快照 ID。
-				unchanged := prior.Entry()
-				candidate := map[string]any{}
-				for key, value := range unchanged {
-					candidate[key] = value
-				}
-				if appuseEntryGeometryMatches(candidate, monitor, sourceW, sourceH) {
-					candidate["unchanged"] = true
-					shots = append(shots, appuseShot{
-						ImageID: candidate["imageId"].(string), Surface: monitor, Origin: origin,
-						PixelsW: uint32(candidate["width"].(int)), PixelsH: uint32(candidate["height"].(int)),
-						SourceW: prior.SourceW, SourceH: prior.SourceH, Path: candidate["path"].(string),
-						Controls: prior.Controls, OverlayOutside: prior.OverlayOutside,
-						WindowID: windowID, Monitor: monitor.ID,
-					})
-					if controlsOn {
-						elementsAll = append(elementsAll, prior.ElementsText...)
-						if overlayAll == nil && prior.OverlayPayload != nil {
-							overlayAll = prior.OverlayPayload
-						}
-						if scrollAll == nil && prior.ScrollHint != nil {
-							scrollAll = prior.ScrollHint
-						}
-					}
-					images = append(images, candidate)
-					continue
-				}
+	inForeign := func(x, y int) bool {
+		for _, r := range foreignOccluders {
+			if r.contains(x, y) {
+				return true
 			}
 		}
+		return false
+	}
+	if controlsOn && len(foreignOccluders) > 0 {
+		if len(uiaExtract.Nodes) > 0 {
+			kept := uiaExtract.Nodes[:0]
+			for _, node := range uiaExtract.Nodes {
+				if node.Overlay || !inForeign(node.Rect.X+node.Rect.Width/2, node.Rect.Y+node.Rect.Height/2) {
+					kept = append(kept, node)
+				}
+			}
+			uiaExtract.Nodes = kept
+		}
+		if uiaExtract.Overlay != nil && uiaExtract.Overlay.OutsidePoint != nil {
+			opt := uiaExtract.Overlay.OutsidePoint
+			if inForeign(int(opt.X), int(opt.Y)) {
+				uiaExtract.Overlay.OutsidePoint = nil
+			}
+		}
+	}
 
-		changed = true
+	images := []map[string]any{}
+	shots := []appuseShot{}
+	elementsAll := []string{}
+	var overlayAll map[string]any
+	var scrollAll *appuseScrollInfo
+	if controlsOn && uiaExtract.PrimaryScroll != nil {
+		scrollAll = uiaExtract.PrimaryScroll
+	}
+	nextControlID := 1
+
+	// 上一帧的原始像素：用来判断这次画面是否真的变了（unchanged 不重传图）。
+	previous := appusePreviousFrame(owner)
+	changed := false
+	for _, capMon := range captured {
+		monitor, grab, sourceW, sourceH, origin := capMon.monitor, capMon.grab, capMon.sourceW, capMon.sourceH, capMon.origin
 		imageID := fmt.Sprintf("monitor-%d", monitor.ID)
-		delivered := grab
 		crop := appuseRegion{X: 0, Y: 0, Width: sourceW, Height: sourceH}
 		if region != nil {
 			if err := region.validate(sourceW, sourceH); err != nil {
@@ -964,22 +980,15 @@ func appuseCaptureWithOptions(owner string, windowID, monitorID *uint32, region 
 			}
 			crop = *region
 			imageID = fmt.Sprintf("%s-region-%d-%d-%d-%d", imageID, region.X, region.Y, region.Width, region.Height)
-			delivered = grab.SubImage(image.Rect(int(region.X), int(region.Y), int(region.X+region.Width), int(region.Y+region.Height))).(*image.RGBA)
 		}
-		scaled := appuseScale(delivered, maxEdge, region != nil)
-		// 绝不就地修改原始 grab 像素，保证 GuardFrames 与 unchanged 检测拿到零标注纯画面。
-		if scaled == delivered {
-			delivered = appuseCloneRGBA(scaled)
-		} else {
-			delivered = scaled
-		}
-		delW, delH := delivered.Bounds().Dx(), delivered.Bounds().Dy()
+		delW, delH, _ := appuseScaledSize(int(crop.Width), int(crop.Height), maxEdge, region != nil)
 
 		shotControls := []appuseControlItem{}
 		shotElementsText := []string{}
 		somBoxes := []appuseSomBox{}
 		var shotOutside *appusePoint
 		var shotOverlayPayload map[string]any
+		localControlID := nextControlID
 
 		mapRectToDelivered := func(sr appuseControlRect) (x, y, w, h int, srcRegion appuseRegion, ok bool) {
 			if origin.W == 0 || origin.H == 0 || crop.Width == 0 || crop.Height == 0 {
@@ -1033,8 +1042,8 @@ func appuseCaptureWithOptions(owner string, windowID, monitorID *uint32, region 
 				}
 				cx := maxInt(0, minInt(delW-1, bx+bw/2))
 				cy := maxInt(0, minInt(delH-1, by+bh/2))
-				cid := nextControlID
-				nextControlID++
+				cid := localControlID
+				localControlID++
 				shotControls = append(shotControls, appuseControlItem{
 					ID: cid, Role: node.Role, Name: node.Name, Value: node.Value, State: node.State,
 					ImageX: cx, ImageY: cy,
@@ -1061,6 +1070,57 @@ func appuseCaptureWithOptions(owner string, windowID, monitorID *uint32, region 
 					}
 				}
 			}
+		}
+		var curSomSig uint64
+		if controlsOn {
+			curSomSig = appuseSomSignature(somBoxes, delW, delH)
+		}
+
+		if prior := previous[monitor.ID]; prior != nil {
+			if region == nil && (!controlsOn || prior.SomSig == curSomSig) && appuseEqualPixels(prior.Image, grab, 0.002) {
+				// 画面与控件布局签名都未变：沿用上一张图与路径，不重传也不重复标绘。
+				unchanged := prior.Entry()
+				candidate := map[string]any{}
+				for key, value := range unchanged {
+					candidate[key] = value
+				}
+				if appuseEntryGeometryMatches(candidate, monitor, sourceW, sourceH) {
+					candidate["unchanged"] = true
+					nextControlID += len(prior.Controls)
+					shots = append(shots, appuseShot{
+						ImageID: candidate["imageId"].(string), Surface: monitor, Origin: origin,
+						PixelsW: uint32(candidate["width"].(int)), PixelsH: uint32(candidate["height"].(int)),
+						SourceW: prior.SourceW, SourceH: prior.SourceH, Path: candidate["path"].(string),
+						Controls: prior.Controls, OverlayOutside: prior.OverlayOutside,
+						WindowID: windowID, Monitor: monitor.ID,
+					})
+					if controlsOn {
+						elementsAll = append(elementsAll, prior.ElementsText...)
+						if overlayAll == nil && prior.OverlayPayload != nil {
+							overlayAll = prior.OverlayPayload
+						}
+						if scrollAll == nil && prior.ScrollHint != nil {
+							scrollAll = prior.ScrollHint
+						}
+					}
+					images = append(images, candidate)
+					continue
+				}
+			}
+		}
+
+		nextControlID = localControlID
+		changed = true
+		delivered := grab
+		if region != nil {
+			delivered = grab.SubImage(image.Rect(int(region.X), int(region.Y), int(region.X+region.Width), int(region.Y+region.Height))).(*image.RGBA)
+		}
+		scaled := appuseScale(delivered, maxEdge, region != nil)
+		// 绝不就地修改原始 grab 像素，保证 GuardFrames 与 unchanged 检测拿到零标注纯画面。
+		if scaled == delivered {
+			delivered = appuseCloneRGBA(scaled)
+		} else {
+			delivered = scaled
 		}
 
 		// 先保留无辅助框、无指针标记的纯净交付图（若本次将绘制 SoM 框或指针）。
@@ -1103,7 +1163,7 @@ func appuseCaptureWithOptions(owner string, windowID, monitorID *uint32, region 
 		if cleanData != "" {
 			entry["cleanData"] = cleanData
 		}
-		appuseRememberFrame(owner, monitor.ID, grab, entry, shotControls, shotOutside, shotElementsText, shotOverlayPayload, scrollAll)
+		appuseRememberFrame(owner, monitor.ID, grab, entry, curSomSig, shotControls, shotOutside, shotElementsText, shotOverlayPayload, scrollAll)
 		if region != nil {
 			entry["region"] = region
 		}
@@ -1172,12 +1232,8 @@ func appuseMonitorOrNil(monitor uint32, windowID *uint32) *uint32 {
 	return &monitor
 }
 
-func appuseScale(src *image.RGBA, maxEdge uint32, forced bool) *image.RGBA {
-	width, height := src.Bounds().Dx(), src.Bounds().Dy()
-	long := float64(width)
-	if height > width {
-		long = float64(height)
-	}
+func appuseScaledSize(width, height int, maxEdge uint32, forced bool) (int, int, bool) {
+	long := float64(maxInt(width, height))
 	scale := appuseVisionScale(width, height)
 	if maxEdge > 0 && (forced || long > float64(maxEdge)) {
 		edgeScale := float64(maxEdge) / long
@@ -1186,15 +1242,21 @@ func appuseScale(src *image.RGBA, maxEdge uint32, forced bool) *image.RGBA {
 		}
 	}
 	// 模型看到的图不会超过 vision_scale 给出的像素；再放大反而让坐标对不上。
-	if scale > 1 {
-		scale = 1
-	}
 	if scale >= 0.999 {
+		return width, height, false
+	}
+	dstW := maxInt(1, int(math.Round(float64(width)*scale)))
+	dstH := maxInt(1, int(math.Round(float64(height)*scale)))
+	return dstW, dstH, true
+}
+
+func appuseScale(src *image.RGBA, maxEdge uint32, forced bool) *image.RGBA {
+	width, height := src.Bounds().Dx(), src.Bounds().Dy()
+	dstW, dstH, scaled := appuseScaledSize(width, height, maxEdge, forced)
+	if !scaled {
 		return src
 	}
-	dstW := uint32(math.Max(1, math.Round(float64(width)*scale)))
-	dstH := uint32(math.Max(1, math.Round(float64(height)*scale)))
-	dst := image.NewRGBA(image.Rect(0, 0, int(dstW), int(dstH)))
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
 	xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), src, src.Bounds(), xdraw.Over, nil)
 	return dst
 }

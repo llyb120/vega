@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
+	"os"
 	"strings"
 	"sync"
 	"unsafe"
@@ -25,32 +26,38 @@ type appuseWinPoint struct{ X, Y int32 }
 var (
 	appuseUser32   = windows.NewLazySystemDLL("user32.dll")
 	appuseKernel32 = windows.NewLazySystemDLL("kernel32.dll")
+	appuseDwmApi   = windows.NewLazySystemDLL("dwmapi.dll")
 
-	procDpiContext      = appuseUser32.NewProc("SetProcessDpiAwarenessContext")
-	procDpiAware        = appuseUser32.NewProc("SetProcessDPIAware")
-	procEnumWindows     = appuseUser32.NewProc("EnumWindows")
-	procWindowVisible   = appuseUser32.NewProc("IsWindowVisible")
-	procWindowIconic    = appuseUser32.NewProc("IsIconic")
-	procWindowText      = appuseUser32.NewProc("GetWindowTextW")
-	procWindowTextLen   = appuseUser32.NewProc("GetWindowTextLengthW")
-	procClassName       = appuseUser32.NewProc("GetClassNameW")
-	procWindowThreadPID = appuseUser32.NewProc("GetWindowThreadProcessId")
-	procWindowRect      = appuseUser32.NewProc("GetWindowRect")
-	procForeground      = appuseUser32.NewProc("GetForegroundWindow")
-	procSetForeground   = appuseUser32.NewProc("SetForegroundWindow")
-	procBringToTop      = appuseUser32.NewProc("BringWindowToTop")
-	procShowWindow      = appuseUser32.NewProc("ShowWindow")
-	procAttachInput     = appuseUser32.NewProc("AttachThreadInput")
-	procGetCursorPos    = appuseUser32.NewProc("GetCursorPos")
-	procSetCursorPos    = appuseUser32.NewProc("SetCursorPos")
-	procSendInput       = appuseUser32.NewProc("SendInput")
-	procMonitorOfWindow = appuseUser32.NewProc("MonitorFromWindow")
-	procMonitorInfo     = appuseUser32.NewProc("GetMonitorInfoW")
-	procSystemMetrics   = appuseUser32.NewProc("GetSystemMetrics")
-	procCurrentThread   = appuseKernel32.NewProc("GetCurrentThreadId")
-	procOpenProcess     = appuseKernel32.NewProc("OpenProcess")
-	procProcessImage    = appuseKernel32.NewProc("QueryFullProcessImageNameW")
-	procCloseHandle     = appuseKernel32.NewProc("CloseHandle")
+	procDpiContext         = appuseUser32.NewProc("SetProcessDpiAwarenessContext")
+	procDpiAware           = appuseUser32.NewProc("SetProcessDPIAware")
+	procEnumWindows        = appuseUser32.NewProc("EnumWindows")
+	procWindowVisible      = appuseUser32.NewProc("IsWindowVisible")
+	procWindowIconic       = appuseUser32.NewProc("IsIconic")
+	procWindowText         = appuseUser32.NewProc("GetWindowTextW")
+	procWindowTextLen      = appuseUser32.NewProc("GetWindowTextLengthW")
+	procClassName          = appuseUser32.NewProc("GetClassNameW")
+	procWindowThreadPID    = appuseUser32.NewProc("GetWindowThreadProcessId")
+	procWindowRect         = appuseUser32.NewProc("GetWindowRect")
+	procForeground         = appuseUser32.NewProc("GetForegroundWindow")
+	procSetForeground      = appuseUser32.NewProc("SetForegroundWindow")
+	procBringToTop         = appuseUser32.NewProc("BringWindowToTop")
+	procShowWindow         = appuseUser32.NewProc("ShowWindow")
+	procAttachInput        = appuseUser32.NewProc("AttachThreadInput")
+	procGetCursorPos       = appuseUser32.NewProc("GetCursorPos")
+	procSetCursorPos       = appuseUser32.NewProc("SetCursorPos")
+	procSendInput          = appuseUser32.NewProc("SendInput")
+	procMonitorOfWindow    = appuseUser32.NewProc("MonitorFromWindow")
+	procMonitorInfo        = appuseUser32.NewProc("GetMonitorInfoW")
+	procSystemMetrics      = appuseUser32.NewProc("GetSystemMetrics")
+	procGetTopWindow       = appuseUser32.NewProc("GetTopWindow")
+	procGetWindow          = appuseUser32.NewProc("GetWindow")
+	procGetWindowLongW     = appuseUser32.NewProc("GetWindowLongW")
+	procGetDisplayAffinity = appuseUser32.NewProc("GetWindowDisplayAffinity")
+	procDwmGetWindowAttr   = appuseDwmApi.NewProc("DwmGetWindowAttribute")
+	procCurrentThread      = appuseKernel32.NewProc("GetCurrentThreadId")
+	procOpenProcess        = appuseKernel32.NewProc("OpenProcess")
+	procProcessImage       = appuseKernel32.NewProc("QueryFullProcessImageNameW")
+	procCloseHandle        = appuseKernel32.NewProc("CloseHandle")
 )
 
 var appuseDPI sync.Once
@@ -452,4 +459,75 @@ func appuseKeyOf(name string) (appuseKey, error) {
 		}
 	}
 	return appuseKey{}, fmt.Errorf("不支持的按键：%s", name)
+}
+
+func appuseWindowVisibleBounds(hwnd uintptr) (appuseWinRect, bool) {
+	const dwmwaExtendedFrameBounds = 9
+	var rect appuseWinRect
+	hr, _, _ := procDwmGetWindowAttr.Call(hwnd, dwmwaExtendedFrameBounds, uintptr(unsafe.Pointer(&rect)), unsafe.Sizeof(rect))
+	if int32(hr) >= 0 && rect.Right > rect.Left && rect.Bottom > rect.Top {
+		return rect, true
+	}
+	if ok, _, _ := procWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&rect))); ok != 0 && rect.Right > rect.Left && rect.Bottom > rect.Top {
+		return rect, true
+	}
+	return appuseWinRect{}, false
+}
+
+func appuseWindowHiddenOrTransparent(hwnd uintptr) bool {
+	if vis, _, _ := procWindowVisible.Call(hwnd); vis == 0 {
+		return true
+	}
+	if iconic, _, _ := procWindowIconic.Call(hwnd); iconic != 0 {
+		return true
+	}
+	const (
+		dwmwaCloaked          = 14
+		wdaExcludeFromCapture = 0x00000011
+		wsExTransparent       = 0x00000020
+	)
+	var cloaked uint32
+	_, _, _ = procDwmGetWindowAttr.Call(hwnd, dwmwaCloaked, uintptr(unsafe.Pointer(&cloaked)), 4)
+	if cloaked != 0 {
+		return true
+	}
+	var affinity uint32
+	if ok, _, _ := procGetDisplayAffinity.Call(hwnd, uintptr(unsafe.Pointer(&affinity))); ok != 0 && affinity == wdaExcludeFromCapture {
+		return true
+	}
+	gwlExStyle := ^uintptr(19) // GWL_EXSTYLE (-20)
+	ex, _, _ := procGetWindowLongW.Call(hwnd, gwlExStyle)
+	return (uint32(ex) & wsExTransparent) != 0
+}
+
+// appuseForeignOccludersAbove 识别 Z-order 在目标窗口之上的其他进程可见实心窗口区域。
+func appuseForeignOccludersAbove(targetHWND uint32) []appuseControlRect {
+	if targetHWND == 0 {
+		return nil
+	}
+	target := uintptr(targetHWND)
+	var targetPID uint32
+	if tid, _, _ := procWindowThreadPID.Call(target, uintptr(unsafe.Pointer(&targetPID))); tid == 0 || targetPID == 0 {
+		return nil
+	}
+	ownPID := uint32(os.Getpid())
+	const gwHwndNext = 2
+	cur, _, _ := procGetTopWindow.Call(0)
+	var out []appuseControlRect
+	for step := 0; step < 64 && cur != 0 && cur != target; step++ {
+		if !appuseWindowHiddenOrTransparent(cur) {
+			var pid uint32
+			_, _, _ = procWindowThreadPID.Call(cur, uintptr(unsafe.Pointer(&pid)))
+			if pid != 0 && pid != targetPID && pid != ownPID {
+				if rect, ok := appuseWindowVisibleBounds(cur); ok {
+					w, h := int(rect.Right-rect.Left), int(rect.Bottom-rect.Top)
+					if w > 8 && h > 8 {
+						out = append(out, appuseControlRect{X: int(rect.Left), Y: int(rect.Top), Width: w, Height: h})
+					}
+				}
+			}
+		}
+		cur, _, _ = procGetWindow.Call(cur, gwHwndNext)
+	}
+	return out
 }
