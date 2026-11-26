@@ -293,6 +293,75 @@ test("credentialScope reads current URL, title, text and editable fields from br
   assert.deepEqual(seenPayload.pages[0].fields.map((f: any) => f.name), ["Username"]);
 });
 
+test("browser_view strips all-zero zoom placeholder objects while preserving partial coordinate checks", async (t: TestContext) => {
+  const { Engine } = await import("../server/core/engine");
+  const { Catalog } = await import("../server/core/catalog");
+  const { Subscriptions } = await import("../server/core/subscriptions");
+  const { Tools } = await import("../server/core/tools");
+  const store = await Store.open(":memory:");
+  const viewRequests: any[] = [];
+  const bridge = {
+    async request(op: string, payload: any) {
+      if (op === "tabs") return { tabs: [{ tag: "C1-1", active: true, url: "https://example.test/" }] };
+      if (op === "view") {
+        viewRequests.push(payload.viewOpts);
+        return {
+          url: "https://example.test/",
+          title: "Example",
+          text: "Hello",
+          viewport: [800, 600, 1],
+          scroll: [0, 0, 800, 600],
+          items: [],
+        };
+      }
+      return {};
+    },
+    hideCursor() {},
+    close() {},
+  };
+  const chrome = new Chrome(store, bridge as any, "");
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), chrome);
+  engine.employee.closed = true;
+  t.after(async () => {
+    await engine.close();
+    await store.close();
+  });
+  await store.put("config", {
+    scenes: { computer: ["p/m"] },
+    provider: { p: { api: "openai-completions", baseURL: "https://unused.test", models: { m: { modalities: { input: ["text", "image"] } } } } },
+  });
+  const session = await store.newSession({ scene: "computer" });
+  const tools = await Tools.create(engine, session, await engine.config(), new AbortController().signal, () => {});
+  await chrome.execute(session.id, ".", { operation: "browser_tabs", action: "list", view: false });
+
+  const okRes = await tools.execute({
+    id: "bv-zero-zoom",
+    name: "browser_view",
+    arguments: {
+      tab: "C1-1",
+      screenshot: false,
+      zoom: { id: 0, x: 0, y: 0, width: 0, height: 0 },
+    },
+  }, { supportsImages: true } as any);
+  assert.equal(okRes.error, undefined);
+  assert.equal(viewRequests.length, 1);
+  assert.equal(viewRequests[0].zoomRect, undefined);
+  assert.equal(viewRequests[0].zoomId, undefined);
+
+  await assert.rejects(
+    tools.execute({
+      id: "bv-partial-zoom",
+      name: "browser_view",
+      arguments: {
+        tab: "C1-1",
+        screenshot: false,
+        zoom: { x: 10, y: 20, width: 0, height: 0 },
+      },
+    }, { supportsImages: true } as any),
+    /必须大于 0/,
+  );
+});
+
 test("processScreenshot reuses unchanged frames and invalidates when SoM layout changes", async () => {
   const { somSignature } = await import("../server/core/browser-annotate");
   const smallJpeg = await sharp({

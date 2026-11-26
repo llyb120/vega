@@ -604,8 +604,20 @@ export class Tools {
     const vault = (await this.engine.employeeFor(this.session)).vault;
     const entry = (await vault.list()).find((item) => item.id === a.id);
     assert(entry, "Vault entry not found for this task");
-    const task = this.session.taskId ? (await this.engine.employeeFor(this.session)).task(await (await this.engine.employeeFor(this.session)).state(), this.session.taskId).text
-      : (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "";
+    let task = "";
+    if (this.session.taskId) {
+      const emp = await this.engine.employeeFor(this.session);
+      const baseTask = emp.task(await emp.state(), this.session.taskId).text;
+      const parentMessages = await this.engine.store.messages(this.session.phaseParent || this.session.id);
+      const answers = parentMessages
+        .filter((m) => m.role === "user" && typeof m.taskInput?.answer === "string" && m.taskInput.answer.trim())
+        .slice(-3)
+        .map((m) => m.taskInput!.answer!.trim().slice(-400));
+      const tail = answers.length ? "\n\n[最新用户补充]\n" + answers.join("\n---\n") : "";
+      task = tail ? baseTask.slice(0, Math.max(0, 4000 - tail.length)) + tail : baseTask.slice(0, 4000);
+    } else {
+      task = ((await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user")?.text || "").slice(0, 4000);
+    }
     const browser = this.session.localBrowser ? this.engine.localBrowsers.peek(this.session.id) : this.session.ownerId && (this.session.employeeId || this.session.taskId || this.cloud) ? this.engine.browsers.peek(this.engine.browserProfileKey(this.session.ownerId)) : this.engine.chrome;
     const observations = [...(browser?.observations.values() || [])].filter((observation) => browser!.observations.get(this.session.id + ":" + observation.tabTag) === observation);
     const observation = this.browserTab ? observations.find((item) => item.tabTag === this.browserTab) : observations.length === 1 ? observations[0] : undefined;
@@ -626,7 +638,8 @@ export class Tools {
       };
     });
     const previousUse = typeof entry.usedFor === "string" && entry.usedFor.trim() ? entry.usedFor.trim().slice(0, 200) : undefined;
-    const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (""), task: task.slice(0, 4000), ...(a.url ? { url: vaultSite(a.url) } : {}), ...(previousUse ? { previousUse } : {}), pages }, this.signal, usageScope(this.session));
+    const updatedAfterLastUse = typeof entry.updatedAt === "number" && (!entry.usedAt || entry.updatedAt > entry.usedAt);
+    const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (""), task, ...(a.url ? { url: vaultSite(a.url) } : {}), ...(previousUse ? { previousUse } : {}), ...(updatedAfterLastUse ? { updatedAfterLastUse: true } : {}), pages }, this.signal, usageScope(this.session));
     this.signal.throwIfAborted();
     const latest = (await vault.list()).find((item) => item.id === entry.id);
     assert(latest?.name === entry.name && latest?.condition === entry.condition, "凭据使用条件已变化，请重新核对");
@@ -680,6 +693,15 @@ export class Tools {
             (output.ref == null || output.ref === 0) &&
             (output.paths == null || (Array.isArray(output.paths) && !output.paths.length)) &&
             emptyPreview(output.preview)) delete rest.stepOutput;
+      }
+      if ((call.name === "browser_view" || call.name === "appuse_view") && rest.zoom && typeof rest.zoom === "object" && !Array.isArray(rest.zoom)) {
+        const zoom = rest.zoom as Obj;
+        const keys = Object.keys(zoom);
+        if (keys.length > 0 &&
+            keys.every(k => ["id", "x", "y", "width", "height", "space"].includes(k)) &&
+            Object.values(zoom).every(v => v == null || v === 0 || (typeof v === "string" && !v.trim()))) {
+          delete rest.zoom;
+        }
       }
       // 桌面动作先归一弱模型的等价写法（别名/字符串坐标），再拿窄 schema 严格校验其余部分。
       const incoming = APPUSE_TOOLS.has(call.name) && Array.isArray(rest.actions)

@@ -174,3 +174,42 @@ test("credentialScope passes safe queryHints and previousUse for explicitly incl
     assert.equal(JSON.parse(result.secret!).scopeSite, "https://sso.example.test");
   } finally { await engine.close(); await store.close(); }
 });
+
+test("credentialScope passes parent task user answers and updatedAfterLastUse to verifier after vault update", async () => {
+  const { store, engine } = await fixture();
+  const employee = await engine.employee.for((await engine.employee.create({ name: "Worker" }, "owner")).id);
+  try {
+    const created = await employee.execute("", { action: "add", kind: "todo", text: "登录工作门户并读取需求" });
+    await employee.update((state) => { state.tasks[0].status = "running"; });
+    const taskSession = await store.newSession({ employeeId: employee.employeeId, taskId: created.value.id, scene: "lightweight" });
+    await store.append(taskSession.id, { role: "user", text: "开始执行" });
+    await store.append(taskSession.id, { role: "user", text: "续做", taskInput: { answer: "用户答：密码本已经更新" } });
+    const phaseSession = await store.phaseStage(taskSession, "browser_agent", "computer", "fixture/light", 1);
+    employee.busy.set(created.value.id, { session: taskSession.id, computer: true });
+
+    const entry = await employee.vault.save({ name: "sso", condition: "用于登录工作门户或统一认证", content: "old-secret" });
+    const firstList = (await employee.vault.list()).find((item) => item.id === entry.id)!;
+    assert.equal(typeof firstList.updatedAt, "number");
+    assert.equal(typeof firstList.secretUpdatedAt, "number");
+
+    await employee.vault.get(entry.id, "初次登录工作门户");
+    await new Promise((r) => setTimeout(r, 10));
+    await employee.vault.save({ id: entry.id, name: "sso", condition: "用于登录工作门户或统一认证", content: "new-secret" });
+
+    const tools = await Tools.create(engine, phaseSession, await engine.config(), new AbortController().signal, () => {});
+    const call = { id: "get", ...employeeCall({ action: "vault_get", id: entry.id, text: "用户已确认密码本更新，重新取用登录" }) };
+    let seenInput: any;
+    let seenSystem = "";
+    engine.providers.chat = async (_model, system, messages) => {
+      seenSystem = system;
+      seenInput = JSON.parse(messages[0].text!);
+      return decision(true, "条目已更新且用户确认已更新");
+    };
+    const res = await tools.execute(call, { supportsImages: true } as any);
+    assert.equal(JSON.parse(res.secret!).content, "new-secret");
+    assert.equal(seenInput.updatedAfterLastUse, true);
+    assert.match(seenInput.task, /\[最新用户补充\]/);
+    assert.match(seenInput.task, /用户答：密码本已经更新/);
+    assert.match(seenSystem, /updatedAfterLastUse=true/);
+  } finally { employee.busy.clear(); await engine.close(); await store.close(); }
+});

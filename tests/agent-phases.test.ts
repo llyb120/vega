@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { agentPhases, phaseIndex } from '../web/src/agent-phases.js';
 import { codexActivity } from '../server/core/coding-cli';
 import { classifyPhaseStatus, cliEvidence, extractFinalPhaseText, extractPhaseEvidence, specialistSystemPrompt } from '../server/core/agent-phase';
-import { IMAGE_MARKDOWN_RULES } from '../server/core/prompt';
+import { CHROME_RULES, IMAGE_MARKDOWN_RULES } from '../server/core/prompt';
 import { Redactor } from '../server/core/util';
 
 const phase = { name: 'browser_agent', seq: 1 };
@@ -169,4 +169,12 @@ test('browser_agent prompt enforces Markdown image embedding and IMAGE_MARKDOWN_
   const codePrompt = specialistSystemPrompt('code_agent');
   assert(codePrompt.includes('bash(detach=true)'));
   assert(codePrompt.includes('bash_poll(kill=true)'));
+});
+
+test('browser_agent prompt and CHROME_RULES allow filling user-provided OTP/verification codes while blocking when missing', () => {
+  const prompt = specialistSystemPrompt('browser_agent');
+  assert(prompt.includes('若主控已转交用户刚提供的验证码/访问码，应直接用 browser_act 填入当前验证页并提交'));
+  assert(prompt.includes('出现短信/邮箱验证码、访问码或 2FA/OTP 且本次委派尚未提供该验证码'));
+  assert(CHROME_RULES.includes('若主控已转交用户刚提供的验证码，直接用 browser_act 填入并提交'));
+  assert(CHROME_RULES.includes('未获用户提供短信/邮箱验证码或 2FA/OTP 时才立刻报告主控问用户'));
 });

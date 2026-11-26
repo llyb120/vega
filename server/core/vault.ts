@@ -132,6 +132,7 @@ export class Vault {
     let content: string | undefined = a.content || undefined;
     // An entry becoming an SSH key must hold one, even when its stored content is kept.
     if (type === "ssh_key") content = sshPrivateKey(content ?? decrypt(await this.key(), "vault", old!.secret).toString());
+    const now = Date.now();
     const entry = {
       ...old,
       id: old?.id || id("v"),
@@ -141,7 +142,9 @@ export class Vault {
       // No list at all means every employee of the owner may use it.
       employees: declared?.length ? declared : undefined,
       secret: content ? encrypt(await this.key(), "vault", content) : old!.secret,
-      createdAt: old?.createdAt || Date.now(),
+      createdAt: old?.createdAt || now,
+      updatedAt: now,
+      ...(content || old?.secretUpdatedAt ? { secretUpdatedAt: content ? now : old!.secretUpdatedAt } : {}),
     };
     await this.store.save(kind, entry.id, entry);
     return { id: entry.id };
