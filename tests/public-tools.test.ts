@@ -6,6 +6,7 @@ import { Tools } from "../server/core/tools";
 import {
   ArgumentError, BROWSER_TOOLS, CHROME_TOOL_DEFINITIONS, STANDALONE_TOOLS, checkArgs, employeeTools, toInternal, vaultTools, type ToolContext,
 } from "../server/core/public-tools";
+import { EMPLOYEE_DECISION_RULES, EMPLOYEE_TASK_RULES } from "../server/core/prompt";
 
 const all = (ctx: ToolContext) => [...employeeTools(ctx), ...vaultTools(ctx), ...CHROME_TOOL_DEFINITIONS];
 const schemaOf = (name: string, ctx: ToolContext) => {
@@ -272,4 +273,22 @@ test("dispatch and task deliverable descriptions reinforce built-in preview/file
   const stepPreviewDesc = (taskByName.task_progress.parameters as any).properties.stepOutput.properties.preview.description;
   assert.match(stepPreviewDesc, /task_complete\.preview/);
   assert.match(stepPreviewDesc, /勿用无登录态浏览器猜测域名访问/);
+});
+
+test("task_wait vs task_ask_user guidance stays generic and prefers scheduled sleep on valid receipts", () => {
+  const taskByName = Object.fromEntries(employeeTools({ kind: "task" }).map((t) => [t.name, t]));
+  const waitDesc = taskByName.task_wait.description;
+  const askDesc = taskByName.task_ask_user.description;
+  for (const text of [waitDesc, EMPLOYEE_DECISION_RULES, EMPLOYEE_TASK_RULES]) {
+    assert.match(text, /回执或读回已落库/);
+    assert.match(text, /下游通知送达|下游送达证明/);
+    assert.match(text, /task_ask_user/);
+    assert(!/未触达或不确定时如实告知/.test(text));
+    assert(!/TAPD|notify=1/i.test(text));
+  }
+  assert.match(waitDesc, /发送报错、提交结果不明或已有明确证据/);
+  assert.match(EMPLOYEE_TASK_RULES, /发送失败、提交结果不明或有明确证据/);
+  assert.match(askDesc, /task_wait 自动休眠并定时复查/);
+  assert.match(askDesc, /不要仅因接口回执不含下游通知送达或已读证明/);
+  assert(!/TAPD|notify=1/i.test(askDesc));
 });
