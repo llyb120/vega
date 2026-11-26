@@ -3,6 +3,7 @@ import type { Message } from "./store";
 import { clip, type Obj } from "./util";
 
 const isBrowserToolName = (name: string) => CHROME_TOOLS.has(name) || LEGACY_CHROME_TOOLS.has(name);
+const isAppuseToolName = (name: string) => name.startsWith("appuse_") || name.startsWith("jianlai_");
 export type Unit = { start: number; end: number; ref?: number; open: boolean };
 export const refName = (seq: number) => "m" + String(seq).padStart(5, "0");
 export function units(rows: Message[]): Unit[] {
@@ -140,16 +141,49 @@ export function promptHistory(
   for (let i = rows.length - 1; i >= 0; i--) {
     let m = rows[i];
     if (m.role !== "tool") continue;
-    const parsed = isBrowserToolName(m.name || "") ? resultBody(m) : undefined,
-      value = parsed?.value,
-      tab = value?.tabTag ?? value?.tab;
-    // An archived observation keeps documentPath; its preview stands in for pages / frameStream.
-    if (tab && value && (value.pages?.length || value.frameStream?.length || (value.archivePath && value.documentPath && value.preview))) {
-      const n = (dom.get(tab) || 0) + 1;
-      dom.set(tab, n);
+    const browser = isBrowserToolName(m.name || ""),
+      appuse = !browser && isAppuseToolName(m.name || "");
+    if (!browser && !appuse) continue;
+    const parsed = resultBody(m),
+      value = parsed?.value;
+    if (!value) continue;
+    if (browser) {
+      const tab = value.tabTag ?? value.tab;
+      // An archived observation keeps documentPath; its preview stands in for pages / frameStream.
+      const hasDom = Boolean(
+        value.pages?.length ||
+          value.frameStream?.length ||
+          typeof value.elements === "string" ||
+          typeof value.text === "string" ||
+          (value.archivePath && value.documentPath && value.preview),
+      );
+      if (tab && hasDom) {
+        const n = (dom.get(`browser:${tab}`) || 0) + 1;
+        dom.set(`browser:${tab}`, n);
+        if (n > 2) {
+          const { pages: _pages, frameStream: _frameStream, preview: _preview, elements: _elements, text: _text, ...rest } = value;
+          rest.domOmitted = rest.documentPath
+            ? `[DOM 已移出上下文：${rest.documentPath}，需要时用 read 分页读回]`
+            : "该标签仅保留最近两次 DOM；旧观察正文已省略。";
+          m = rows[i] = { ...m, text: parsed!.prefix + JSON.stringify(rest) };
+        }
+      }
+    } else {
+      const hasControls = Boolean(
+        (Array.isArray(value.elements) && value.elements.length) ||
+          typeof value.elements === "string" ||
+          (Array.isArray(value.items) && value.items.length),
+      );
+      if (!hasControls) continue;
+      const stream =
+        value.images?.[0]?.frameStream ||
+        value.images?.[0]?.imageId ||
+        (value.windowId != null ? `win-${value.windowId}` : "desktop");
+      const n = (dom.get(`appuse:${stream}`) || 0) + 1;
+      dom.set(`appuse:${stream}`, n);
       if (n > 2) {
-        const { pages: _pages, frameStream: _frameStream, preview: _preview, ...rest } = value;
-        rest.domOmitted = `[DOM 已移出上下文：${rest.documentPath}，需要时用 read 分页读回]`;
+        const { elements: _elements, items: _items, ...rest } = value;
+        rest.elementsOmitted = "仅保留最近两次桌面控件清单；旧控件列表已省略。";
         m = rows[i] = { ...m, text: parsed!.prefix + JSON.stringify(rest) };
       }
     }
@@ -167,7 +201,7 @@ export function archivedResult(name: string, value: Obj, raw: string, archivePat
 }
 
 /**
- * Chrome images show a page state that later operations make stale: per tab only the images of the latest two
+ * Chrome & appuse images show a page/desktop state that later operations make stale: per stream only the images of the latest two
  * image-bearing results stay (all images of one result together, duplicate frames counted once); the rest become
  * their file paths, readable with read. Other tools' images
  * may stay useful and are only trimmed beyond two when trimImages is set.
@@ -182,10 +216,18 @@ export function historyImages(
     const m = rows[i];
     if (m.role !== "tool" || !m.images?.length) continue;
     const chrome = isBrowserToolName(m.name || ""),
-      parsed = chrome ? resultBody(m) : undefined;
+      appuse = !chrome && isAppuseToolName(m.name || ""),
+      parsed = chrome || appuse ? resultBody(m) : undefined;
     const keep = m.images.map(() => true);
-    if (chrome) {
-      const key = String(parsed?.value.tabTag ?? parsed?.value.tab ?? "");
+    if (chrome || appuse) {
+      const key = chrome
+        ? `browser:${String(parsed?.value.tabTag ?? parsed?.value.tab ?? "")}`
+        : `appuse:${String(
+            parsed?.value.images?.[0]?.frameStream ??
+              (m.images[0] as Obj)?.frameStream ??
+              parsed?.value.images?.[0]?.imageId ??
+              (parsed?.value.windowId != null ? `win-${parsed.value.windowId}` : "desktop"),
+          )}`;
       let tab = tabs.get(key);
       if (!tab) tabs.set(key, tab = { results: 0, paths: new Set() });
       const full = tab.results >= 2;
@@ -198,7 +240,9 @@ export function historyImages(
     const omitted = m.images.filter((_, j) => !keep[j]).map((image) => image.path).filter((path, j, all) => path && all.indexOf(path) === j);
     const notice = chrome
       ? `[截图已移出上下文：${omitted.join("，")}，需要时用 read 读回；看页面现状请重新截图]`
-      : "Older tool images omitted from model view; original images/metadata remain archived.";
+      : appuse
+        ? `[桌面截图已移出上下文：${omitted.join("，")}，需要时用 read 或 appuse_recall 读回；看桌面现状请重新观察]`
+        : "Older tool images omitted from model view; original images/metadata remain archived.";
     rows[i] = {
       ...m,
       images: m.images.filter((_, j) => keep[j]),
