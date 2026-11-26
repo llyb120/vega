@@ -560,6 +560,13 @@ func appuseActOperation(request *appuseRequest, maxEdge uint32) map[string]any {
 	completed := 0
 	attempted := false
 	failureText := ""
+	batch := newAppuseBatchClipboard()
+	finishedClipboard := false
+	defer func() {
+		if !finishedClipboard {
+			_ = batch.finish()
+		}
+	}()
 	for index := range request.Actions {
 		action := request.Actions[index]
 		if action.Action != "wait" {
@@ -579,13 +586,17 @@ func appuseActOperation(request *appuseRequest, maxEdge uint32) map[string]any {
 		if action.Action != "wait" {
 			attempted = true
 		}
-		if err := appusePerform(shot, action); err != nil {
+		if err := appusePerform(shot, action, batch); err != nil {
 			failureText = err.Error()
 			break
 		}
 		completed++
 		time.Sleep(appuseActionDelay(request.Actions, index))
 	}
+	if err := batch.finish(); err != nil && failureText == "" {
+		failureText = err.Error()
+	}
+	finishedClipboard = true
 	snapshot.Invalidated = "动作已执行，请先观察新画面，不重放输入"
 	if appuseElementsLast != nil {
 		appuseElementsLast.Snapshot.Invalidated = snapshot.Invalidated
@@ -1470,13 +1481,18 @@ func appuseGlideAndMove(target appusePoint, glide bool) error {
 	}
 	if actual, ok := appuseCursor(); ok {
 		if absInt32(actual.X-target.X) > 2 || absInt32(actual.Y-target.Y) > 2 {
-			return fmt.Errorf("系统鼠标落点与请求不符（请求 %d,%d，实际 %d,%d），未按下按钮；请根据新图继续", target.X, target.Y, actual.X, actual.Y)
+			// 跨不同 DPI 缩放的显示器首跳可能被 Windows 夹在旧缩放边界，同坐标补跳一次。
+			_ = appuseMovePointer(target.X, target.Y, false)
+			actual, ok = appuseCursor()
+			if ok && (absInt32(actual.X-target.X) > 2 || absInt32(actual.Y-target.Y) > 2) {
+				return fmt.Errorf("系统鼠标落点与请求不符（请求 %d,%d，实际 %d,%d），未按下按钮；请根据新图继续", target.X, target.Y, actual.X, actual.Y)
+			}
 		}
 	}
 	return nil
 }
 
-func appusePerform(shot *appuseShot, action appuseAction) error {
+func appusePerform(shot *appuseShot, action appuseAction, batch *appuseBatchClipboard) error {
 	glide := action.Glide == nil || (*action.Glide && action.Action != "scroll")
 	switch action.Action {
 	case "wait":
@@ -1497,7 +1513,7 @@ func appusePerform(shot *appuseShot, action appuseAction) error {
 			if err := appuseClick("left"); err != nil {
 				return err
 			}
-			time.Sleep(60 * time.Millisecond)
+			appuseWaitForFocusReady(65 * time.Millisecond)
 		}
 		if action.Clear != nil && *action.Clear {
 			if err := appusePressCombo("ctrl+a"); err != nil {
@@ -1510,8 +1526,14 @@ func appusePerform(shot *appuseShot, action appuseAction) error {
 			time.Sleep(35 * time.Millisecond)
 		}
 		// Windows 走整段粘贴：逐键输入会被中文输入法改写/吞掉。
-		if err := appusePasteText(*action.Text); err != nil {
-			return err
+		var pasteErr error
+		if batch != nil {
+			pasteErr = batch.paste(*action.Text)
+		} else {
+			pasteErr = appusePasteText(*action.Text)
+		}
+		if pasteErr != nil {
+			return pasteErr
 		}
 		if action.Submit != nil && *action.Submit {
 			time.Sleep(50 * time.Millisecond)
@@ -1775,7 +1797,7 @@ func appuseGlide(from, to appusePoint) error {
 	if distance < 2 {
 		return appuseMovePointer(to.X, to.Y, true)
 	}
-	milliseconds := math.Min(380, 90+56*math.Log2(1+distance/22))
+	milliseconds := math.Min(210, math.Max(55, 55+32*math.Log2(1+distance/28)))
 	bend := (rand.Float64() - 0.5) * 0.22
 	overshoot := 0.0
 	if distance > 140 {

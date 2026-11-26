@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"image"
+	"time"
 )
 
 type appuseKey struct{ VK uint16 }
@@ -50,3 +51,5 @@ func appuseTypeText(string) error { return fmt.Errorf(appuseUnsupported) }
 func appuseKeyOf(string) (appuseKey, error) { return appuseKey{}, fmt.Errorf(appuseUnsupported) }
 
 func appuseForeignOccludersAbove(uint32) []appuseControlRect { return nil }
+
+func appuseWaitForFocusReady(time.Duration) {}

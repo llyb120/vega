@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/kbinani/screenshot"
@@ -53,6 +54,7 @@ var (
 	procGetWindow          = appuseUser32.NewProc("GetWindow")
 	procGetWindowLongW     = appuseUser32.NewProc("GetWindowLongW")
 	procGetDisplayAffinity = appuseUser32.NewProc("GetWindowDisplayAffinity")
+	procGetGUIThreadInfo   = appuseUser32.NewProc("GetGUIThreadInfo")
 	procDwmGetWindowAttr   = appuseDwmApi.NewProc("DwmGetWindowAttribute")
 	procCurrentThread      = appuseKernel32.NewProc("GetCurrentThreadId")
 	procOpenProcess        = appuseKernel32.NewProc("OpenProcess")
@@ -530,4 +532,37 @@ func appuseForeignOccludersAbove(targetHWND uint32) []appuseControlRect {
 		cur, _, _ = procGetWindow.Call(cur, gwHwndNext)
 	}
 	return out
+}
+
+// appuseWaitForFocusReady 轮询前台线程是否有真实键盘焦点窗口（避免固定长等）。
+func appuseWaitForFocusReady(maxWait time.Duration) {
+	deadline := time.Now().Add(maxWait)
+	type guiThreadInfo struct {
+		cbSize        uint32
+		flags         uint32
+		hwndActive    uintptr
+		hwndFocus     uintptr
+		hwndCapture   uintptr
+		hwndMenuOwner uintptr
+		hwndMoveSize  uintptr
+		hwndCaret     uintptr
+		rcCaret       appuseWinRect
+	}
+	for {
+		fg, _, _ := procForeground.Call()
+		if fg != 0 {
+			tid, _, _ := procWindowThreadPID.Call(fg, 0)
+			if tid != 0 {
+				var info guiThreadInfo
+				info.cbSize = uint32(unsafe.Sizeof(info))
+				if ok, _, _ := procGetGUIThreadInfo.Call(tid, uintptr(unsafe.Pointer(&info))); ok != 0 && info.hwndFocus != 0 {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

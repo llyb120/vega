@@ -38,6 +38,7 @@ var (
 	procTextTranslate      = textUser32.NewProc("TranslateMessage")
 	procTextDispatch       = textUser32.NewProc("DispatchMessageW")
 	procTextPostMessage    = textUser32.NewProc("PostMessageW")
+	procTextGetClipOwner   = textUser32.NewProc("GetClipboardOwner")
 	procTextModule         = textKernel32.NewProc("GetModuleHandleW")
 
 	procTextGlobalAlloc  = textKernel32.NewProc("GlobalAlloc")
@@ -53,8 +54,10 @@ const (
 	clipFormatUnicodeText = 13
 	clipFormatText        = 1
 	gmemMoveable          = 0x0002
+	wmRenderFormat        = 0x0305
 	wmRenderAllFormats    = 0x0300
 	wmDestroyClipboard    = 0x0301
+	pasteGracePeriod      = 320 * time.Millisecond
 )
 
 // textDelivery 是一段待粘贴文本的延迟渲染状态。
@@ -69,10 +72,50 @@ type textDelivery struct {
 
 var textState textDelivery
 
-// appusePasteText 用剪贴板粘贴整段文字；返回是否真的被目标取用。
-func appusePasteText(text string) error {
+// appuseBatchClipboard 在同一批动作内复用剪贴板备份与隐藏消息窗口，
+// 把粘贴后异步读取宽限期（320ms）与动作间隔重叠，批次结束统一恢复用户原剪贴板。
+type appuseBatchClipboard struct {
+	saved      savedClipboard
+	staged     bool
+	graceUntil time.Time
+}
+
+func newAppuseBatchClipboard() *appuseBatchClipboard {
+	return &appuseBatchClipboard{}
+}
+
+func textOwned() bool {
+	textState.mu.Lock()
+	hwnd := textState.hwnd
+	textState.mu.Unlock()
+	if hwnd == 0 {
+		return false
+	}
+	owner, _, _ := procTextGetClipOwner.Call()
+	return windows.Handle(owner) == hwnd
+}
+
+func (b *appuseBatchClipboard) waitGrace() error {
+	if b.graceUntil.IsZero() {
+		return nil
+	}
+	if remaining := time.Until(b.graceUntil); remaining > 0 {
+		time.Sleep(remaining)
+	}
+	b.graceUntil = time.Time{}
+	if b.staged && !textOwned() {
+		b.staged = false
+		return fmt.Errorf("可能已输入，请核验，勿重放：粘贴期间剪贴板被其他程序改写，已保留新的剪贴板")
+	}
+	return nil
+}
+
+func (b *appuseBatchClipboard) paste(text string) error {
 	if text == "" {
 		return nil
+	}
+	if err := b.waitGrace(); err != nil {
+		return err
 	}
 	units := windows.StringToUTF16(text)
 	textState.mu.Lock()
@@ -82,16 +125,20 @@ func appusePasteText(text string) error {
 	if err := textEnsureWindow(); err != nil {
 		return err
 	}
+	if !b.staged {
+		b.saved = textSaveClipboard()
+	} else if !textOwned() {
+		b.staged = false
+		b.saved = textSaveClipboard()
+	}
 	if err := textOffer(); err != nil {
 		return err
 	}
-	// 先记下用户剪贴板，等目标取走之后才恢复（现在还不能恢复：数据是延迟提供的）。
-	saved := textSaveClipboard()
+	b.staged = true
 	if err := appusePressCombo("ctrl+v"); err != nil {
-		textRestoreClipboard(saved)
+		_ = b.finish()
 		return err
 	}
-	// 等目标来取：拿到后延迟渲染结束，再恢复用户剪贴板。
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		textState.mu.Lock()
@@ -100,18 +147,41 @@ func appusePasteText(text string) error {
 		if done {
 			break
 		}
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(15 * time.Millisecond)
 	}
 	textState.mu.Lock()
 	consumed := len(textState.pending) == 0
 	textState.mu.Unlock()
-	// 无论取没取走都要交还剪贴板，并把延迟渲染收回去。
-	textFinish()
-	textRestoreClipboard(saved)
 	if !consumed {
+		_ = b.finish()
 		return fmt.Errorf("粘贴未能确认送达（目标未取用剪贴板）；可能输入框未获得焦点，请核对焦点后重试，不要重放整批")
 	}
+	b.graceUntil = time.Now().Add(pasteGracePeriod)
 	return nil
+}
+
+func (b *appuseBatchClipboard) finish() error {
+	graceErr := b.waitGrace()
+	stillOwned := b.staged && textOwned()
+	textFinish()
+	if stillOwned {
+		textRestoreClipboard(b.saved)
+	}
+	b.staged = false
+	b.saved = savedClipboard{}
+	return graceErr
+}
+
+// appusePasteText 用剪贴板粘贴整段文字；返回是否真的被目标取用。
+func appusePasteText(text string) error {
+	if text == "" {
+		return nil
+	}
+	batch := newAppuseBatchClipboard()
+	if err := batch.paste(text); err != nil {
+		return err
+	}
+	return batch.finish()
 }
 
 // textEnsureWindow 建一个隐藏的剪贴板消息窗口：延迟渲染与 WM_RENDERALLFORMATS 都发给它。
@@ -129,6 +199,9 @@ func textEnsureWindow() error {
 		name := butterflyUTF16("VegaClipboardRender")
 		procedure := syscall.NewCallback(func(hwnd windows.Handle, message uint32, wparam, lparam uintptr) uintptr {
 			switch message {
+			case wmRenderFormat:
+				textRenderFormat(uint32(wparam))
+				return 0
 			case wmRenderAllFormats:
 				textRenderAll()
 				return 0
@@ -175,18 +248,48 @@ func textEnsureWindow() error {
 	}
 }
 
-// textOffer 以延迟渲染方式占住剪贴板：文本在目标真正索取时才生成。
+// textOffer 以延迟渲染方式占住剪贴板：文本在目标真正索取时才生成，并附带隐私排除标记避免进系统剪贴板历史/云同步。
 func textOffer() error {
 	textState.mu.Lock()
 	hwnd := textState.hwnd
 	textState.mu.Unlock()
+	privacyFormats := make([]uint32, 0, 3)
+	privacyHandles := make([]uintptr, 0, 3)
+	zeroDWORD := []byte{0, 0, 0, 0}
+	for _, name := range []string{
+		"CanIncludeInClipboardHistory",
+		"CanUploadToCloudClipboard",
+		"ExcludeClipboardContentFromMonitorProcessing",
+	} {
+		if f, _, _ := procTextRegisterFormat.Call(uintptr(unsafe.Pointer(butterflyUTF16(name)))); f != 0 {
+			if h := textGlobalBytes(zeroDWORD); h != 0 {
+				privacyFormats = append(privacyFormats, uint32(f))
+				privacyHandles = append(privacyHandles, h)
+			}
+		}
+	}
+	freeUnusedPrivacy := func(from int) {
+		for i := from; i < len(privacyHandles); i++ {
+			if privacyHandles[i] != 0 {
+				_, _, _ = procTextGlobalFree.Call(privacyHandles[i])
+			}
+		}
+	}
 	if opened, _, _ := procTextOpenClipboard.Call(uintptr(hwnd)); opened == 0 {
+		freeUnusedPrivacy(0)
 		return fmt.Errorf("无法打开剪贴板（可能被其它程序占用）")
 	}
 	if emptied, _, _ := procTextEmpty.Call(); emptied == 0 {
 		_, _, _ = procTextCloseClipboard.Call()
+		freeUnusedPrivacy(0)
 		return fmt.Errorf("无法清空剪贴板")
 	}
+	for i, f := range privacyFormats {
+		if ok, _, _ := procTextSetClipboard.Call(uintptr(f), privacyHandles[i]); ok != 0 {
+			privacyHandles[i] = 0 // 系统已接管该句柄
+		}
+	}
+	freeUnusedPrivacy(0)
 	// NULL 句柄 = 延迟渲染：由我们持有数据，目标来取时再给。
 	_, _, _ = procTextSetClipboard.Call(clipFormatUnicodeText, 0)
 	_, _, _ = procTextSetClipboard.Call(clipFormatText, 0)
@@ -195,6 +298,40 @@ func textOffer() error {
 	textState.owned = 1
 	textState.mu.Unlock()
 	return nil
+}
+
+func textRenderFormat(format uint32) {
+	if format != clipFormatUnicodeText && format != clipFormatText {
+		return
+	}
+	textState.mu.Lock()
+	pending := append([]uint16{}, textState.pending...)
+	textState.pending = nil
+	textState.mu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+	if handle := textGlobal(pending); handle != 0 {
+		_, _, _ = procTextSetClipboard.Call(clipFormatUnicodeText, handle)
+	}
+}
+
+func textGlobalBytes(data []byte) uintptr {
+	if len(data) == 0 {
+		return 0
+	}
+	handle, _, _ := procTextGlobalAlloc.Call(gmemMoveable, uintptr(len(data)))
+	if handle == 0 {
+		return 0
+	}
+	pointer, _, _ := procTextGlobalLock.Call(handle)
+	if pointer == 0 {
+		_, _, _ = procTextGlobalFree.Call(handle)
+		return 0
+	}
+	_, _, _ = procTextMoveMemory.Call(pointer, uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)))
+	_, _, _ = procTextGlobalUnlock.Call(handle)
+	return handle
 }
 
 // textRenderAll 在 WM_RENDERALLFORMATS 里交出全部格式（控制权即将离开本进程时的兜底）。
