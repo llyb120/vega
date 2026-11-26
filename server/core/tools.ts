@@ -583,7 +583,7 @@ export class Tools {
 
   private safePageQueryHints(parsed: URL): Record<string, string> | undefined {
     const hints: Record<string, string> = {};
-    for (const key of ["from", "site", "app", "service"]) {
+    for (const key of ["from", "site", "app", "service", "client_id", "tenant", "realm"]) {
       const raw = parsed.searchParams.get(key)?.trim();
       if (!raw || raw.length > 80) continue;
       if (/^https?:\/\//i.test(raw)) {
@@ -591,6 +591,11 @@ export class Tools {
       } else if (/^[a-zA-Z0-9._:/-]{1,80}$/.test(raw)) {
         hints[key] = raw;
       }
+    }
+    for (const key of ["redirect_uri", "ref", "next", "continue", "return_to", "returnUrl"]) {
+      const raw = parsed.searchParams.get(key)?.trim();
+      if (!raw || raw.length > 512 || !/^https?:\/\//i.test(raw)) continue;
+      try { hints[key] = vaultSite(raw); } catch {}
     }
     return Object.keys(hints).length ? hints : undefined;
   }

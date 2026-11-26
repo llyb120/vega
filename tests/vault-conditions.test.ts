@@ -141,16 +141,16 @@ test("credential components are redacted in audit copies without replacing actua
 
 test("credentialScope passes safe queryHints and previousUse for explicitly included unified SSO portals without leaking tokens", async () => {
   const { store, engine, session, get, vault } = await fixture();
-  const entry = await vault.save({ name: "tapd", condition: "用于登录tapd或者太湖或者蓝盾", content: "partner-secret" });
-  await vault.get(entry.id, "登录太湖以访问授权的 TAPD 需求单");
+  const entry = await vault.save({ name: "company-sso", condition: "用于登录工作门户或公司统一身份认证 SSO", content: "sso-secret" });
+  await vault.get(entry.id, "通过公司统一身份认证登录授权的工作门户");
   engine.chrome.snapshots.set(session.id + ":tab", {
     id: "snap-1",
     tabTag: "tab",
-    url: "https://tai.it.tencent.com/odc-login/login?from=tapd-9n8b7v6c5x&login_challenge=secret123&ticket=private",
-    title: "TAI·太湖",
-    text: "Partner Accounts and Authentication Center Tencent Partner Tencent Staff",
+    url: "https://sso.example.test/oauth/login?client_id=portal-web&redirect_uri=https%3A%2F%2Fapp.example.test%2Fprivate%2Fpath%3Ftoken%3Dleaked-token&login_challenge=secret123&ticket=private",
+    title: "Unified Identity Authentication",
+    text: "Authentication Center Employee Partner Password Token",
     captured: Date.now(),
-    items: [{ id: 1, role: "textbox", name: "Enter account or email", editable: true, inView: true }],
+    items: [{ id: 1, role: "textbox", name: "Account or email", editable: true, inView: true }],
   } as any);
   try {
     let seenSystem = "";
@@ -158,16 +158,19 @@ test("credentialScope passes safe queryHints and previousUse for explicitly incl
     engine.providers.chat = async (_model, system, messages) => {
       seenSystem = system;
       seenInput = JSON.parse(messages[0].text!);
-      return decision(true, "条件已包含太湖，且来源为 tapd");
+      return decision(true, "条件明确包含统一身份认证 SSO 且来源吻合");
     };
-    const result = await get(entry.id, "登录太湖以只读访问 TAPD 迭代卡片");
+    const result = await get(entry.id, "通过统一身份认证只读访问工作门户");
     assert.equal(seenInput.pages.length, 1);
-    assert.equal(seenInput.pages[0].url, "https://tai.it.tencent.com/odc-login/login");
-    assert.deepEqual(seenInput.pages[0].queryHints, { from: "tapd-9n8b7v6c5x" });
+    assert.equal(seenInput.pages[0].url, "https://sso.example.test/oauth/login");
+    assert.deepEqual(seenInput.pages[0].queryHints, { client_id: "portal-web", redirect_uri: "https://app.example.test" });
     assert(!JSON.stringify(seenInput).includes("secret123"));
     assert(!JSON.stringify(seenInput).includes("ticket"));
-    assert.match(seenInput.previousUse, /登录太湖/);
-    assert.match(seenSystem, /太湖\/TAI等统一登录入口/);
-    assert.equal(JSON.parse(result.secret!).scopeSite, "https://tai.it.tencent.com");
+    assert(!JSON.stringify(seenInput).includes("leaked-token"));
+    assert(!JSON.stringify(seenInput).includes("/private/path"));
+    assert.match(seenInput.previousUse, /统一身份认证/);
+    assert.match(seenSystem, /统一登录\/身份认证系统本身/);
+    assert(!/太湖/.test(seenSystem), "verifier prompt stays system-agnostic");
+    assert.equal(JSON.parse(result.secret!).scopeSite, "https://sso.example.test");
   } finally { await engine.close(); await store.close(); }
 });
