@@ -13,6 +13,7 @@ package main
 import (
 	"fmt"
 	"image"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -73,9 +74,15 @@ const (
 	dxgiErrorWaitTimeout    = 0x887A0027
 	dxgiErrorAccessLost     = 0x887A0026
 	dxgiErrorNotAvailable   = 0x887A0022 // 已有其它程序在抓这块屏幕
-	dxgiAcquireTimeoutMs    = 100
-	// 首帧可能只有鼠标更新（LastPresentTime==0），最多重试这么多次再放弃。
-	dxgiFrameAttempts = 20
+	dxgiAcquireTimeoutMs    = 18
+	// 单次 Acquire 最多排空这么多次仅鼠标更新帧，避免漏掉后面的真实桌面帧。
+	dxgiFrameAttempts = 16
+)
+
+const (
+	dxgiStatusFresh = iota + 1
+	dxgiStatusNoUpdate
+	dxgiStatusUnsupported
 )
 
 // comCall 调某个接口的第 index 个 vtable 槽。
@@ -123,48 +130,114 @@ type dxgiMapped struct {
 	DepthPitch uint32
 }
 
-// dxgiCapture 是一条可复用的采集链路；每帧重建设备代价太高。
-type dxgiCapture struct {
-	device  unsafe.Pointer
-	context unsafe.Pointer
-	dup     unsafe.Pointer
-	monitor uint32
-	width   uint32
-	height  uint32
+type dxgiRectKey struct {
+	x, y int32
+	w, h uint32
 }
 
-var dxgiCurrent *dxgiCapture
+// dxgiCapture 是一条可复用的采集链路（含可复用 staging 纹理与最近一帧基线）；每帧重建设备代价太高。
+type dxgiCapture struct {
+	device    unsafe.Pointer
+	context   unsafe.Pointer
+	dup       unsafe.Pointer
+	staging   unsafe.Pointer
+	stagingW  uint32
+	stagingH  uint32
+	lastFrame *image.RGBA
+	monitor   uint32
+	width     uint32
+	height    uint32
+}
 
-// dxgiGrab 尝试用 Desktop Duplication 抓一屏；失败交给 GDI 回退。
+var (
+	dxgiPoolMu sync.Mutex
+	dxgiPool   = map[dxgiRectKey]*dxgiCapture{}
+)
+
+// dxgiGrab 非阻塞式 Desktop Duplication 抓屏：
+// - 返回 (img, nil)：拿到最新 GPU 帧或热会话缓存的静止帧；
+// - 返回 (nil, nil)：冷静止屏（会话已留在池中预热）或不支持的格式，调用方走 GDI 后调用 dxgiSeedCache；
+// - 返回 (nil, err)：D3D11/DXGI 异常，调用方回退 GDI。
 func dxgiGrab(surface appuseSurface) (*image.RGBA, error) {
-	if dxgiCurrent != nil && (dxgiCurrent.monitor != surface.ID || dxgiCurrent.width != surface.W || dxgiCurrent.height != surface.H) {
-		dxgiCloseCapture()
-	}
-	if dxgiCurrent == nil {
-		capture, err := dxgiOpenCapture(surface)
-		if err != nil {
-			return nil, err
+	dxgiPoolMu.Lock()
+	defer dxgiPoolMu.Unlock()
+	key := dxgiRectKey{x: surface.X, y: surface.Y, w: surface.W, h: surface.H}
+	if capture, ok := dxgiPool[key]; ok {
+		if capture.monitor != surface.ID {
+			delete(dxgiPool, key)
+			dxgiCloseCapture(capture)
+		} else {
+			frame, status, err := dxgiAcquireLatest(capture, 0)
+			switch {
+			case err != nil:
+				// DXGI_ERROR_ACCESS_LOST / 分辨率切换 / 锁屏：丢弃旧会话并重建一次。
+				delete(dxgiPool, key)
+				dxgiCloseCapture(capture)
+			case status == dxgiStatusFresh:
+				return frame, nil
+			case status == dxgiStatusNoUpdate:
+				if capture.lastFrame != nil {
+					return appuseCloneRGBA(capture.lastFrame), nil
+				}
+				return nil, nil
+			case status == dxgiStatusUnsupported:
+				delete(dxgiPool, key)
+				dxgiCloseCapture(capture)
+				return nil, nil
+			}
 		}
-		dxgiCurrent = capture
 	}
-	frame, err := dxgiNextFrame(dxgiCurrent)
+
+	capture, err := dxgiOpenCapture(surface)
 	if err != nil {
-		// 链路一旦失联就必须重建（AccessLost 常见于锁屏、分辨率切换、UAC）。
-		dxgiCloseCapture()
 		return nil, err
 	}
-	return frame, nil
+	frame, status, err := dxgiAcquireLatest(capture, dxgiAcquireTimeoutMs)
+	switch {
+	case err != nil || status == dxgiStatusUnsupported:
+		dxgiCloseCapture(capture)
+		return nil, err
+	case status == dxgiStatusFresh:
+		dxgiPool[key] = capture
+		return frame, nil
+	default:
+		// 冷静止屏：把已打开的会话留在池中，下次再抓即可直接命中。
+		dxgiPool[key] = capture
+		return nil, nil
+	}
 }
 
-func dxgiCloseCapture() {
-	capture := dxgiCurrent
+// dxgiSeedCache 在冷静止屏走 GDI 抓到基线帧后写入热会话缓存；先排空一次 DXGI，确保较新的 GPU 帧优先。
+func dxgiSeedCache(surface appuseSurface, img *image.RGBA) {
+	if img == nil || img.Bounds().Dx() != int(surface.W) || img.Bounds().Dy() != int(surface.H) {
+		return
+	}
+	dxgiPoolMu.Lock()
+	defer dxgiPoolMu.Unlock()
+	key := dxgiRectKey{x: surface.X, y: surface.Y, w: surface.W, h: surface.H}
+	capture, ok := dxgiPool[key]
+	if !ok {
+		return
+	}
+	_, status, err := dxgiAcquireLatest(capture, 0)
+	if err != nil || status == dxgiStatusUnsupported {
+		delete(dxgiPool, key)
+		dxgiCloseCapture(capture)
+		return
+	}
+	if status == dxgiStatusNoUpdate && capture.lastFrame == nil {
+		capture.lastFrame = appuseCloneRGBA(img)
+	}
+}
+
+func dxgiCloseCapture(capture *dxgiCapture) {
 	if capture == nil {
 		return
 	}
+	comRelease(capture.staging)
 	comRelease(capture.dup)
 	comRelease(capture.context)
 	comRelease(capture.device)
-	dxgiCurrent = nil
 }
 
 // dxgiOpenCapture 建 D3D11 设备与对应输出的 duplication。
@@ -210,32 +283,41 @@ func dxgiOpenCapture(surface appuseSurface) (*dxgiCapture, error) {
 	return &dxgiCapture{device: device, context: context, dup: dup, monitor: surface.ID, width: surface.W, height: surface.H}, nil
 }
 
-// dxgiNextFrame 取一帧并读回像素。
-func dxgiNextFrame(capture *dxgiCapture) (*image.RGBA, error) {
+// dxgiAcquireLatest 非阻塞（或首帧短等）取一帧最新桌面画面，跳过纯鼠标更新帧。
+func dxgiAcquireLatest(capture *dxgiCapture, initialTimeoutMs uint32) (*image.RGBA, int, error) {
 	for attempt := 0; attempt < dxgiFrameAttempts; attempt++ {
+		timeout := uint32(0)
+		if attempt == 0 {
+			timeout = initialTimeoutMs
+		}
 		var info dxgiFrameInfo
 		var resource unsafe.Pointer
-		hr := comCall(capture.dup, dxgiAcquireNextFrameSlot, dxgiAcquireTimeoutMs,
+		hr := comCall(capture.dup, dxgiAcquireNextFrameSlot, uintptr(timeout),
 			uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&resource)))
 		if int32(hr) < 0 {
 			if uint32(hr) == dxgiErrorWaitTimeout {
-				return nil, fmt.Errorf("这一帧没有新变化（AcquireNextFrame 超时）")
+				return nil, dxgiStatusNoUpdate, nil
 			}
-			return nil, fmt.Errorf("AcquireNextFrame 失败（0x%08x）", uint32(hr))
+			return nil, 0, fmt.Errorf("AcquireNextFrame 失败（0x%08x）", uint32(hr))
 		}
 		if resource == nil || info.LastPresentTime == 0 {
-			// 新链路的前几帧不带桌面图（Nova 同样跳过），释放后再等一帧。
+			// 纯鼠标位置/形状更新不带桌面像素；释放后继续排空队列中的真实帧。
+			comRelease(resource)
 			comCall(capture.dup, dxgiReleaseFrameSlot)
 			continue
 		}
-		frame, err := dxgiReadTexture(capture, resource)
+		frame, unsupported, err := dxgiReadTexture(capture, resource)
 		comCall(capture.dup, dxgiReleaseFrameSlot)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		return frame, nil
+		if unsupported {
+			return nil, dxgiStatusUnsupported, nil
+		}
+		capture.lastFrame = appuseCloneRGBA(frame)
+		return frame, dxgiStatusFresh, nil
 	}
-	return nil, fmt.Errorf("桌面长时间没有新画面（DXGI 拿不到首帧）")
+	return nil, dxgiStatusNoUpdate, nil
 }
 
 // dxgiFrameInfo 对应 DXGI_OUTDUPL_FRAME_INFO（含最后的 TotalMetadataBufferSize）。
@@ -252,47 +334,53 @@ type dxgiFrameInfo struct {
 	PointerShapeBufferSize    uint32
 }
 
-// dxgiReadTexture 把桌面纹理拷到可回读的 staging 纹理并转成 RGBA。
-func dxgiReadTexture(capture *dxgiCapture, resource unsafe.Pointer) (*image.RGBA, error) {
+// dxgiReadTexture 把桌面纹理拷到可复用的 staging 纹理并转成 RGBA。
+func dxgiReadTexture(capture *dxgiCapture, resource unsafe.Pointer) (*image.RGBA, bool, error) {
 	defer comRelease(resource)
 	texture := comQuery(resource, &iidTexture2D)
 	if texture == nil {
-		return nil, fmt.Errorf("桌面资源不是 D3D11 纹理")
+		return nil, false, fmt.Errorf("桌面资源不是 D3D11 纹理")
 	}
 	defer comRelease(texture)
 	desc := dxgiTextureDesc{}
 	if hr := comCall(texture, d3dTextureGetDescSlot, uintptr(unsafe.Pointer(&desc))); int32(hr) < 0 {
-		return nil, fmt.Errorf("读取纹理描述失败（0x%08x）", uint32(hr))
+		return nil, false, fmt.Errorf("读取纹理描述失败（0x%08x）", uint32(hr))
 	}
 	if desc.Width == 0 || desc.Height == 0 {
-		return nil, fmt.Errorf("纹理尺寸为空")
+		return nil, true, nil
 	}
 	if desc.Width != capture.width || desc.Height != capture.height {
-		return nil, fmt.Errorf("桌面纹理尺寸与显示器不一致（%dx%d）", desc.Width, desc.Height)
+		return nil, true, nil
 	}
 	// 只认 BGRA8：HDR/其它格式交给 GDI，绝不猜通道顺序。
 	if desc.Format != dxgiFormatB8G8R8A8Unorm {
-		return nil, fmt.Errorf("不支持的桌面格式（DXGI_FORMAT %d）", desc.Format)
+		return nil, true, nil
 	}
-	staging := dxgiTextureDesc{
-		Width: desc.Width, Height: desc.Height, MipLevels: 1, ArraySize: 1,
-		Format: desc.Format, SampleCnt: 1, Usage: d3d11UsageStaging, CPUFlags: d3d11CpuAccessRead,
+	if capture.staging == nil || capture.stagingW != desc.Width || capture.stagingH != desc.Height {
+		comRelease(capture.staging)
+		capture.staging = nil
+		staging := dxgiTextureDesc{
+			Width: desc.Width, Height: desc.Height, MipLevels: 1, ArraySize: 1,
+			Format: desc.Format, SampleCnt: 1, Usage: d3d11UsageStaging, CPUFlags: d3d11CpuAccessRead,
+		}
+		var copyTexture unsafe.Pointer
+		if hr := comCall(capture.device, d3dCreateTexture2DSlot,
+			uintptr(unsafe.Pointer(&staging)), 0, uintptr(unsafe.Pointer(&copyTexture))); int32(hr) < 0 || copyTexture == nil {
+			return nil, false, fmt.Errorf("无法创建回读纹理（0x%08x）", uint32(hr))
+		}
+		capture.staging = copyTexture
+		capture.stagingW = desc.Width
+		capture.stagingH = desc.Height
 	}
-	var copyTexture unsafe.Pointer
-	if hr := comCall(capture.device, d3dCreateTexture2DSlot,
-		uintptr(unsafe.Pointer(&staging)), 0, uintptr(unsafe.Pointer(&copyTexture))); int32(hr) < 0 || copyTexture == nil {
-		return nil, fmt.Errorf("无法创建回读纹理（0x%08x）", uint32(hr))
-	}
-	defer comRelease(copyTexture)
-	comCall(capture.context, d3dContextCopyResourceSlot, uintptr(copyTexture), uintptr(texture))
+	comCall(capture.context, d3dContextCopyResourceSlot, uintptr(capture.staging), uintptr(texture))
 	var mapped dxgiMapped
-	if hr := comCall(capture.context, d3dContextMapSlot, uintptr(copyTexture), 0, d3d11MapRead, 0, uintptr(unsafe.Pointer(&mapped))); int32(hr) < 0 || mapped.Data == nil {
-		return nil, fmt.Errorf("无法映射回读纹理（0x%08x）", uint32(hr))
+	if hr := comCall(capture.context, d3dContextMapSlot, uintptr(capture.staging), 0, d3d11MapRead, 0, uintptr(unsafe.Pointer(&mapped))); int32(hr) < 0 || mapped.Data == nil {
+		return nil, false, fmt.Errorf("无法映射回读纹理（0x%08x）", uint32(hr))
 	}
-	defer func() { comCall(capture.context, d3dContextUnmapSlot, uintptr(copyTexture), 0) }()
+	defer func() { comCall(capture.context, d3dContextUnmapSlot, uintptr(capture.staging), 0) }()
 	width, height, pitch := int(desc.Width), int(desc.Height), int(mapped.RowPitch)
 	if pitch < width*4 {
-		return nil, fmt.Errorf("回读行宽异常（%d < %d）", pitch, width*4)
+		return nil, false, fmt.Errorf("回读行宽异常（%d < %d）", pitch, width*4)
 	}
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	source := unsafe.Slice((*uint8)(mapped.Data), pitch*height)
@@ -304,5 +392,5 @@ func dxgiReadTexture(capture *dxgiCapture, resource unsafe.Pointer) (*image.RGBA
 			target[x*4], target[x*4+1], target[x*4+2], target[x*4+3] = r, g, b, 255
 		}
 	}
-	return img, nil
+	return img, false, nil
 }

@@ -83,11 +83,16 @@ func appuseMonitors() ([]appuseSurface, error) {
 }
 
 func appuseCaptureMonitor(surface appuseSurface) (*image.RGBA, error) {
-	// 优先 DXGI（GPU 合成后的整帧）；任何失败都回退到 GDI，并保留原错误供诊断。
-	if grab, err := dxgiGrab(surface); err == nil {
+	// 优先 DXGI（GPU 合成后的整帧）；静止/不可用时回退到 GDI，并把基线帧写回 DXGI 热缓存。
+	if grab, err := dxgiGrab(surface); err == nil && grab != nil {
 		return grab, nil
 	}
-	return gdiGrab(surface)
+	grab, err := gdiGrab(surface)
+	if err != nil {
+		return nil, err
+	}
+	dxgiSeedCache(surface, grab)
+	return grab, nil
 }
 
 // gdiGrab 是 GDI BitBlt 抓屏：DXGI 不可用时的回退路径，也是自检的参照基准。
