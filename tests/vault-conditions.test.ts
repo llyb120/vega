@@ -138,3 +138,36 @@ test("credential components are redacted in audit copies without replacing actua
     assert.equal(action.text, "sample@example.test");
   }
 });
+
+test("credentialScope passes safe queryHints and previousUse for explicitly included unified SSO portals without leaking tokens", async () => {
+  const { store, engine, session, get, vault } = await fixture();
+  const entry = await vault.save({ name: "tapd", condition: "用于登录tapd或者太湖或者蓝盾", content: "partner-secret" });
+  await vault.get(entry.id, "登录太湖以访问授权的 TAPD 需求单");
+  engine.chrome.snapshots.set(session.id + ":tab", {
+    id: "snap-1",
+    tabTag: "tab",
+    url: "https://tai.it.tencent.com/odc-login/login?from=tapd-9n8b7v6c5x&login_challenge=secret123&ticket=private",
+    title: "TAI·太湖",
+    text: "Partner Accounts and Authentication Center Tencent Partner Tencent Staff",
+    captured: Date.now(),
+    items: [{ id: 1, role: "textbox", name: "Enter account or email", editable: true, inView: true }],
+  } as any);
+  try {
+    let seenSystem = "";
+    let seenInput: any;
+    engine.providers.chat = async (_model, system, messages) => {
+      seenSystem = system;
+      seenInput = JSON.parse(messages[0].text!);
+      return decision(true, "条件已包含太湖，且来源为 tapd");
+    };
+    const result = await get(entry.id, "登录太湖以只读访问 TAPD 迭代卡片");
+    assert.equal(seenInput.pages.length, 1);
+    assert.equal(seenInput.pages[0].url, "https://tai.it.tencent.com/odc-login/login");
+    assert.deepEqual(seenInput.pages[0].queryHints, { from: "tapd-9n8b7v6c5x" });
+    assert(!JSON.stringify(seenInput).includes("secret123"));
+    assert(!JSON.stringify(seenInput).includes("ticket"));
+    assert.match(seenInput.previousUse, /登录太湖/);
+    assert.match(seenSystem, /太湖\/TAI等统一登录入口/);
+    assert.equal(JSON.parse(result.secret!).scopeSite, "https://tai.it.tencent.com");
+  } finally { await engine.close(); await store.close(); }
+});

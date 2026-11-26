@@ -303,3 +303,26 @@ test("已有冻结沟通会话与任务会话均注入泛用产物交付规则�
   const updated = (await f.employee.findTask(f.job))!;
   assert.deepEqual(taskSummary(updated).files, ["bundle.zip"]);
 });
+
+test("task_complete 携带空 preview 占位对象时自动忽略，不触发静态目录校验", async (t) => {
+  const f = await fixture(t);
+  const completeCall = {
+    id: "complete-empty-preview",
+    name: "task_complete",
+    arguments: {
+      evidence: "已核实交付完成",
+      summary: "已完成",
+      deliverableRefs: [],
+      preview: { dir: "", entry: "", title: "" },
+    },
+  };
+  await f.store.append(f.session.id, { role: "assistant", model: "fixture/model", text: "", calls: [completeCall] });
+  const res = await f.tools.execute(completeCall, {} as any);
+  assert.equal(res.error, undefined);
+  assert.equal(res.value.ok, true);
+  assert.equal(res.value.previewUrl, undefined);
+  assert.equal(res.stop, true);
+  const finished = (await f.employee.findTask(f.job))!;
+  assert.equal(finished.completion, "已核实交付完成");
+  assert.equal(finished.preview, undefined);
+});

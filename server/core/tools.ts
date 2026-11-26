@@ -581,6 +581,20 @@ export class Tools {
     return this.engine.localAgents.list(ownerId).map((item) => this.engine.localAgents.active(ownerId, item.id)).find((agent) => agent && agent.sshKeys !== false);
   }
 
+  private safePageQueryHints(parsed: URL): Record<string, string> | undefined {
+    const hints: Record<string, string> = {};
+    for (const key of ["from", "site", "app", "service"]) {
+      const raw = parsed.searchParams.get(key)?.trim();
+      if (!raw || raw.length > 80) continue;
+      if (/^https?:\/\//i.test(raw)) {
+        try { hints[key] = vaultSite(raw); } catch {}
+      } else if (/^[a-zA-Z0-9._:/-]{1,80}$/.test(raw)) {
+        hints[key] = raw;
+      }
+    }
+    return Object.keys(hints).length ? hints : undefined;
+  }
+
   private async credentialScope(a: Obj) {
     const vault = (await this.engine.employeeFor(this.session)).vault;
     const entry = (await vault.list()).find((item) => item.id === a.id);
@@ -595,11 +609,19 @@ export class Tools {
     const sourcePages = snapshot && (!observation || snapshot.captured >= (observation as any).captured || !observation.pages?.length)
       ? [{ url: snapshot.url, title: snapshot.title || "", text: snapshot.text || "", items: snapshot.items || [] }]
       : observation?.pages || [];
-    const pages = sourcePages.filter((page) => /^https?:\/\//i.test(page.url)).map((page) => ({
-      url: vaultSite(page.url) + new URL(page.url).pathname, title: page.title || "", text: String(page.visibleText || page.text || "").slice(0, 2000),
-      fields: (page.items || []).filter((item: Obj) => item.editable && item.inView !== false).slice(0, 12).map((item: Obj) => ({ name: item.name, context: item.fieldContext })),
-    }));
-    const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (""), task: task.slice(0, 4000), ...(a.url ? { url: vaultSite(a.url) } : {}), pages }, this.signal, usageScope(this.session));
+    const pages = sourcePages.filter((page) => /^https?:\/\//i.test(page.url)).map((page) => {
+      const parsed = new URL(page.url);
+      const queryHints = this.safePageQueryHints(parsed);
+      return {
+        url: vaultSite(page.url) + parsed.pathname,
+        ...(queryHints ? { queryHints } : {}),
+        title: page.title || "",
+        text: String(page.visibleText || page.text || "").slice(0, 2000),
+        fields: (page.items || []).filter((item: Obj) => item.editable && item.inView !== false).slice(0, 12).map((item: Obj) => ({ name: item.name, context: item.fieldContext })),
+      };
+    });
+    const previousUse = typeof entry.usedFor === "string" && entry.usedFor.trim() ? entry.usedFor.trim().slice(0, 200) : undefined;
+    const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (""), task: task.slice(0, 4000), ...(a.url ? { url: vaultSite(a.url) } : {}), ...(previousUse ? { previousUse } : {}), pages }, this.signal, usageScope(this.session));
     this.signal.throwIfAborted();
     const latest = (await vault.list()).find((item) => item.id === entry.id);
     assert(latest?.name === entry.name && latest?.condition === entry.condition, "凭据使用条件已变化，请重新核对");
@@ -639,13 +661,20 @@ export class Tools {
     if (split) {
       const { _after, ...publicArgs } = call.arguments || {};
       rest = publicArgs;
-      if (call.name === "task_progress" && rest.stepOutput) {
+      if (call.name === "task_progress" && rest.stepOutput && typeof rest.stepOutput === "object" && !Array.isArray(rest.stepOutput)) {
         const output = rest.stepOutput;
+        const emptyPreview = (p: unknown) =>
+          p == null ||
+          (typeof p === "object" && !Array.isArray(p) &&
+            Object.keys(p).every(k => ["dir", "entry", "title"].includes(k)) &&
+            Object.values(p as Obj).every(v => v == null || (typeof v === "string" && !v.trim())));
         // Unused provider placeholders must not turn same-reply progress prose into an artifact.
         if (Number.isInteger(output.step) && output.step >= 0 && output.step <= 50 &&
-            Object.keys(output).every(k => ["step", "text", "paths", "ref"].includes(k)) &&
+            Object.keys(output).every(k => ["step", "text", "paths", "ref", "preview"].includes(k)) &&
             (output.text == null || (typeof output.text === "string" && output.text.length <= 64000 && !output.text.trim())) &&
-            (output.ref == null || output.ref === 0) && (output.paths == null || (Array.isArray(output.paths) && !output.paths.length))) delete rest.stepOutput;
+            (output.ref == null || output.ref === 0) &&
+            (output.paths == null || (Array.isArray(output.paths) && !output.paths.length)) &&
+            emptyPreview(output.preview)) delete rest.stepOutput;
       }
       // 桌面动作先归一弱模型的等价写法（别名/字符串坐标），再拿窄 schema 严格校验其余部分。
       const incoming = APPUSE_TOOLS.has(call.name) && Array.isArray(rest.actions)

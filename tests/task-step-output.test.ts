@@ -118,7 +118,13 @@ test("产物占位和同条续做日志只保存进度；用户明确要导出�
     };
     const empty = { step: 0, text: "", ref: 0, paths: [] };
     const resumeNote = "续做记录：已核对后端分支，正在定位问题。";
-    const placeholders = [empty, { ...empty, step: 1 }, { ...empty, step: 1, text: " \n " }, { step: 1 }];
+    const placeholders = [
+      empty,
+      { ...empty, step: 1 },
+      { ...empty, step: 1, text: " \n " },
+      { ...empty, step: 1, preview: { dir: "", entry: "", title: "" } },
+      { step: 1 },
+    ];
     for (const stepOutput of placeholders) {
       const result = await submit(stepOutput, stepOutput === empty ? "" : resumeNote);
       assert.equal(result.toldUser, true);
@@ -133,9 +139,15 @@ test("产物占位和同条续做日志只保存进度；用户明确要导出�
     await assert.rejects(submit({ ...empty, step: 1, ref: 999 }), /非空正文/);
     await assert.rejects(submit({ ...empty, step: 1, ref: 999, text: "实际产物" }), /只能选一个/);
     await assert.rejects(submit({ ...empty, step: 1, typo: true }), /不接受字段/);
-    const artifact = await submit({ step: 1, text: resumeNote });
-    assert.equal(artifact.stepOutput.step, 1);
+    await assert.rejects(submit({ step: 1, preview: { dir: "", title: "缺少目录" } }), /dir/);
+    const withEmptyPreview = await submit({ step: 1, text: resumeNote, preview: { dir: "", entry: "", title: "" } });
+    assert.equal(withEmptyPreview.stepOutput.step, 1);
+    assert.equal(withEmptyPreview.stepOutput.preview, undefined);
     assert.equal((await employee.findTask(id))!.stepOutputs[0].text, resumeNote);
+    assert.equal((await employee.findTask(id))!.stepOutputs[0].preview, undefined);
+    const artifact = await submit({ step: 1, text: resumeNote + "（第二次）" });
+    assert.equal(artifact.stepOutput.step, 1);
+    assert.equal((await employee.findTask(id))!.stepOutputs[1].text, resumeNote + "（第二次）");
   } finally { await engine.close(); await store.close(); }
 });
 

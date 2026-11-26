@@ -21,6 +21,21 @@ test("omittable follows the declared bound, never the value alone", () => {
   assert.equal(omittable({}, []), false);
   assert.equal(omittable({}, false), false);
   assert.equal(omittable({}, null), true);
+
+  const previewSchema = {
+    type: "object",
+    required: ["dir"],
+    properties: {
+      dir: { type: "string", minLength: 1 },
+      entry: { type: "string", minLength: 1 },
+      title: { type: "string", minLength: 1 },
+    },
+  };
+  assert.equal(omittable(previewSchema, { dir: "", entry: "", title: "" }), true);
+  assert.equal(omittable(previewSchema, {}), false);
+  assert.equal(omittable(previewSchema, { dir: "", title: "real" }), false);
+  assert.equal(omittable(previewSchema, { dir: "", unknown: "" }), false);
+  assert.equal(omittable({ ...previewSchema, required: [] }, {}), false);
 });
 
 test("a just-passed time means as soon as possible; older times explain how to run now", () => {
