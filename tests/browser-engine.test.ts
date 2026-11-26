@@ -292,3 +292,56 @@ test("credentialScope reads current URL, title, text and editable fields from br
   assert(seenPayload.pages[0].text.includes("company account"));
   assert.deepEqual(seenPayload.pages[0].fields.map((f: any) => f.name), ["Username"]);
 });
+
+test("processScreenshot reuses unchanged frames and invalidates when SoM layout changes", async () => {
+  const { somSignature } = await import("../server/core/browser-annotate");
+  const smallJpeg = await sharp({
+    create: { width: 320, height: 200, channels: 3, background: { r: 245, g: 245, b: 245 } },
+  }).jpeg({ quality: 85 }).toBuffer();
+  const boxes1 = [{ id: 1, rect: [40, 50, 80, 30] as [number, number, number, number] }];
+  const boxes2 = [{ id: 2, rect: [40, 50, 80, 30] as [number, number, number, number] }];
+  assert.notEqual(
+    somSignature(boxes1, 320, 200, [0, 0, 320, 200]),
+    somSignature(boxes2, 320, 200, [0, 0, 320, 200]),
+  );
+
+  const first = await processScreenshot({
+    jpegBase64: smallJpeg.toString("base64"),
+    cssViewport: [320, 200],
+    boxes: boxes1,
+    drawSom: true,
+    stream: "C1-1:viewport",
+  });
+  assert.equal(first.unchanged, undefined);
+  assert(first.plain && first.basis);
+
+  const prior = {
+    stream: "C1-1:viewport",
+    basis: first.basis!,
+    plain: first.plain!,
+    width: first.mapping.pixelWidth,
+    height: first.mapping.pixelHeight,
+    path: "/tmp/first.jpg",
+    url: "/first.jpg",
+  };
+  const same = await processScreenshot({
+    jpegBase64: smallJpeg.toString("base64"),
+    cssViewport: [320, 200],
+    boxes: boxes1,
+    drawSom: true,
+    stream: "C1-1:viewport",
+    prior,
+  });
+  assert.equal(same.unchanged, true);
+  assert.equal(same.reused?.path, "/tmp/first.jpg");
+
+  const changedSom = await processScreenshot({
+    jpegBase64: smallJpeg.toString("base64"),
+    cssViewport: [320, 200],
+    boxes: boxes2,
+    drawSom: true,
+    stream: "C1-1:viewport",
+    prior,
+  });
+  assert.equal(changedSom.unchanged, undefined, "SoM layout change must invalidate unchanged reuse");
+});

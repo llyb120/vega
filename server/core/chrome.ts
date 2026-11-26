@@ -1,5 +1,5 @@
 import { normalizeAction } from "./browser-actions";
-import { processScreenshot, ShotMapping, type SomBox } from "./browser-annotate";
+import { processScreenshot, ShotMapping, type DeliveredShot, type SomBox } from "./browser-annotate";
 import { validatePlan, literalMet, runCandidates, bindStep, chains, runState, type Candidate } from "./browser-run";
 import { assertCredentialInput, credentialOrigins, vaultSite, type CredentialBinding } from "./credentials";
 import sharp from "sharp";
@@ -66,6 +66,7 @@ type TabSnapshot = {
   captured: number;
   mapping?: ShotMapping;
   items: Obj[];
+  delivered?: DeliveredShot;
 };
 
 const BROWSER_NAMED_KEYS = new Set([
@@ -1386,10 +1387,19 @@ export class Chrome {
     assert(site && origins.every((allowed) => allowed.has(site)), "凭据尚未针对当前页面核对或已切换认证页面，已阻止这次凭据写入；请先观察实际页面（含 SSO / 子框架）再重新 vault_get 核对使用条件，无需补网站配置，不要跨系统试用账号。");
   }
 
-  async formatView(owner: string, tag: string, raw: Obj, drawSom = true): Promise<Obj> {
+  async formatView(owner: string, tag: string, raw: Obj, drawSom = true, trackStream = true): Promise<Obj> {
     const snapId = id();
     const cssW = Math.max(1, Number(raw?.viewport?.[0]) || 1280);
     const cssH = Math.max(1, Number(raw?.viewport?.[1]) || 800);
+    const baseCss: [number, number, number, number] =
+      Array.isArray(raw?.visualViewport) && raw.visualViewport.length === 4
+        ? [
+            Number(raw.visualViewport[0]) || 0,
+            Number(raw.visualViewport[1]) || 0,
+            Math.max(1, Number(raw.visualViewport[2]) || cssW),
+            Math.max(1, Number(raw.visualViewport[3]) || cssH),
+          ]
+        : [0, 0, cssW, cssH];
     const items: Obj[] = Array.isArray(raw?.items) ? raw.items : [];
     const boxes: SomBox[] = [];
     for (const it of items) {
@@ -1408,6 +1418,9 @@ export class Chrome {
     let mapping: ShotMapping | undefined;
     let shotError: string | undefined = raw?.screenshotError || undefined;
     const imagesVal: Obj[] = [];
+    const prevSnap = this.snapshots.get(`${owner}:${tag}`);
+    const frameStream = !cropCss && trackStream ? `${tag}:viewport` : undefined;
+    let nextDelivered: DeliveredShot | undefined;
 
     const rawShotB64 = typeof raw?.screenshotB64 === "string" ? raw.screenshotB64 : typeof raw?.screenshotBase64 === "string" ? raw.screenshotBase64 : "";
     if (rawShotB64.length > 0) {
@@ -1415,36 +1428,71 @@ export class Chrome {
         const processed = await processScreenshot({
           jpegBase64: rawShotB64,
           cssViewport: [cssW, cssH],
+          baseCss,
           cropCss,
           boxes,
           drawSom,
+          prior: prevSnap?.delivered,
+          stream: frameStream,
         });
         mapping = processed.mapping;
-        const ownerDir = await this.fileOwner(owner);
-        const filePath = await this.store.files.write(ownerDir, `${snapId}.jpg`, processed.cleanBuffer);
-        const cleanUrl = this.store.files.url(filePath);
-        let somImage: { mime: string; path: string; url: string } | undefined;
-        if (processed.buffer !== processed.cleanBuffer) {
-          const somPath = await this.store.files.write(ownerDir, `${snapId}-som.jpg`, processed.buffer);
-          somImage = { mime: processed.mime, path: somPath, url: this.store.files.url(somPath) };
+        if (processed.unchanged && processed.reused) {
+          nextDelivered = processed.reused;
+          const img: Obj = {
+            imageId: `${snapId}-0`,
+            snapshotId: snapId,
+            path: processed.reused.path,
+            url: processed.reused.url,
+            mime: processed.mime,
+            pixelWidth: mapping.pixelWidth,
+            pixelHeight: mapping.pixelHeight,
+            x: mapping.cssX,
+            y: mapping.cssY,
+            width: mapping.cssWidth,
+            height: mapping.cssHeight,
+            unchanged: true,
+            ...(frameStream ? { frameStream } : {}),
+          };
+          if (processed.reused.somImage) Object.defineProperty(img, "_vision", { value: processed.reused.somImage, enumerable: false });
+          imagesVal.push(img);
+        } else {
+          const ownerDir = await this.fileOwner(owner);
+          const filePath = await this.store.files.write(ownerDir, `${snapId}.jpg`, processed.cleanBuffer);
+          const cleanUrl = this.store.files.url(filePath);
+          let somImage: { mime: string; path: string; url: string } | undefined;
+          if (processed.buffer !== processed.cleanBuffer) {
+            const somPath = await this.store.files.write(ownerDir, `${snapId}-som.jpg`, processed.buffer);
+            somImage = { mime: processed.mime, path: somPath, url: this.store.files.url(somPath) };
+          }
+          if (frameStream && processed.plain && processed.basis) {
+            nextDelivered = {
+              stream: frameStream,
+              basis: processed.basis,
+              plain: processed.plain,
+              width: mapping.pixelWidth,
+              height: mapping.pixelHeight,
+              path: filePath,
+              url: cleanUrl,
+              somImage,
+            };
+          }
+          const img: Obj = {
+            imageId: `${snapId}-0`,
+            snapshotId: snapId,
+            path: filePath,
+            url: cleanUrl,
+            mime: processed.mime,
+            pixelWidth: mapping.pixelWidth,
+            pixelHeight: mapping.pixelHeight,
+            x: mapping.cssX,
+            y: mapping.cssY,
+            width: mapping.cssWidth,
+            height: mapping.cssHeight,
+            ...(frameStream ? { frameStream } : {}),
+          };
+          if (somImage) Object.defineProperty(img, "_vision", { value: somImage, enumerable: false });
+          imagesVal.push(img);
         }
-        const frameStream = cropCss ? undefined : `${tag}:viewport`;
-        const img: Obj = {
-          imageId: `${snapId}-0`,
-          snapshotId: snapId,
-          path: filePath,
-          url: cleanUrl,
-          mime: processed.mime,
-          pixelWidth: mapping.pixelWidth,
-          pixelHeight: mapping.pixelHeight,
-          x: mapping.cssX,
-          y: mapping.cssY,
-          width: mapping.cssWidth,
-          height: mapping.cssHeight,
-          ...(frameStream ? { frameStream } : {}),
-        };
-        if (somImage) Object.defineProperty(img, "_vision", { value: somImage, enumerable: false });
-        imagesVal.push(img);
       } catch (err: any) {
         shotError = String(err?.message || err);
       }
@@ -1518,6 +1566,7 @@ export class Chrome {
       captured: Date.now(),
       mapping,
       items,
+      delivered: nextDelivered,
     });
 
     const scrollArr = Array.isArray(raw?.scroll) ? raw.scroll : [0, 0, cssW, cssH];
@@ -1710,9 +1759,10 @@ export class Chrome {
             }
           }
         }
+        const trackStream = !args.query && !args.zoom;
         return await this.tabGate(tag).run(async () => {
           const raw = await this.bridge.request("view", { tabTag: tag, viewOpts }, signal);
-          return this.formatView(owner, tag, raw, annotate);
+          return this.formatView(owner, tag, raw, annotate, trackStream);
         });
       }
 
