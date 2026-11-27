@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && (!darwin || !cgo)
 
 package main
 
@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 )
+
+func previewMain(fn func()) { fn() }
 
 // Non-Windows has no system tray here: run headless and log to stderr.
 // Quit with Ctrl+C / SIGTERM.

@@ -57,6 +57,8 @@ func installTrayOpen() {
 	}
 }
 
+func previewMain(fn func()) { fn() }
+
 func systrayRun(configure, onQuit func()) {
 	systray.Run(func() {
 		systray.SetTitle("牵牛星")

@@ -22,6 +22,45 @@ func TestInstancePinIsRequiredAndValidated(t *testing.T) {
 	}
 }
 
+func TestInstancePinAppBundleFallback(t *testing.T) {
+	root := t.TempDir()
+	macOSDir := filepath.Join(root, "Vega.app", "Contents", "MacOS")
+	resDir := filepath.Join(root, "Vega.app", "Contents", "Resources")
+	if err := os.MkdirAll(macOSDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(resDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readInstancePin(macOSDir); err == nil || !strings.Contains(err.Error(), "instance.json") {
+		t.Fatalf("missing instance.json across all bundle paths must fail: %v", err)
+	}
+	parentPin := filepath.Join(root, "instance.json")
+	if err := os.WriteFile(parentPin, []byte(`{"origin":"https://parent.example"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := readInstancePin(macOSDir)
+	if err != nil || pin.Origin != "https://parent.example" {
+		t.Fatalf("parent bundle fallback failed: %+v %v", pin, err)
+	}
+	resPin := filepath.Join(resDir, "instance.json")
+	if err := os.WriteFile(resPin, []byte(`{"origin":"https://resources.example"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err = readInstancePin(macOSDir)
+	if err != nil || pin.Origin != "https://resources.example" {
+		t.Fatalf("Contents/Resources fallback must take priority over parent: %+v %v", pin, err)
+	}
+	directPin := filepath.Join(macOSDir, "instance.json")
+	if err := os.WriteFile(directPin, []byte(`{"origin":"https://direct.example"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err = readInstancePin(macOSDir)
+	if err != nil || pin.Origin != "https://direct.example" {
+		t.Fatalf("direct exeDir must take highest priority: %+v %v", pin, err)
+	}
+}
+
 func TestSiteBaseRejectsAmbiguousAddresses(t *testing.T) {
 	for _, raw := range []string{
 		"https://name:password@vega.example/vega", "https://vega.example/vega?x=1", "https://vega.example/vega?",

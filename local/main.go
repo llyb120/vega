@@ -61,31 +61,35 @@ func main() {
 			if len(os.Args) > 2 {
 				kind = os.Args[2]
 			}
-			if kind == "confirm" {
-				// 走 appuse 真正那条路：卡上点了什么、倒计时到了没有，都看最后这行输出。
-				fmt.Println("confirm:", appuseConfirmInput("preview"))
-				return
-			}
-			butterflyChipStart()
-			if kind == "running" {
-				butterflyNotify("running", "正在用鼠标键盘操作这台电脑（appuse act），期间请不要抢鼠标")
-			} else {
-				butterflyNotify("needs_review", "appuse 可能已经部分执行：点击后输入文字可能已发出；请核对屏幕上的实际结果")
-			}
-			time.Sleep(20 * time.Second)
+			previewMain(func() {
+				if kind == "confirm" {
+					// 走 appuse 真正那条路：卡上点了什么、倒计时到了没有，都看最后这行输出。
+					fmt.Println("confirm:", appuseConfirmInput("preview"))
+					return
+				}
+				butterflyChipStart()
+				if kind == "running" {
+					butterflyNotify("running", "正在用鼠标键盘操作这台电脑（appuse act），期间请不要抢鼠标")
+				} else {
+					butterflyNotify("needs_review", "appuse 可能已经部分执行：点击后输入文字可能已发出；请核对屏幕上的实际结果")
+				}
+				time.Sleep(20 * time.Second)
+			})
 			return
 		case "--glow-preview":
 			// 只为看光效与剑形指针：与 appuse 点亮时完全同一条路径（持有租约 → 亮光效/换指针 → 还原）。
-			glowStart()
-			lease, err := appuseAcquireInput("preview", "act")
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "vega-local:", err)
-				return
-			}
-			glowHold()
-			time.Sleep(12 * time.Second)
-			glowRelease()
-			lease.release()
+			previewMain(func() {
+				glowStart()
+				lease, err := appuseAcquireInput("preview", "act")
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "vega-local:", err)
+					return
+				}
+				glowHold()
+				time.Sleep(12 * time.Second)
+				glowRelease()
+				lease.release()
+			})
 			return
 		case "--grab-preview":
 			// 抓屏自检：DXGI 与 GDI 各抓一帧逐像素比对，证明“优先 DXGI + 失败回退”没把画面弄坏。

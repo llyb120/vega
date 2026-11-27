@@ -48,10 +48,32 @@ func validSiteBase(base string) bool {
 	return err == nil && u.String() == base
 }
 
-// readInstancePin 读 exe 同目录的安装包信息。没有它就不是从站点下载的安装包，直接拒绝启动。
+// readInstancePin 读 exe 同目录的安装包信息（macOS .app 包额外支持 Contents/Resources 与 .app 同级目录）。
+// 没有它就不是从站点下载的安装包，直接拒绝启动。
 func readInstancePin(exeDir string) (instancePin, error) {
 	var pin instancePin
-	data, err := os.ReadFile(filepath.Join(exeDir, instanceFileName))
+	candidates := []string{filepath.Join(exeDir, instanceFileName)}
+	if filepath.Base(exeDir) == "MacOS" {
+		contentsDir := filepath.Dir(exeDir)
+		appDir := filepath.Dir(contentsDir)
+		if filepath.Base(contentsDir) == "Contents" && strings.HasSuffix(strings.ToLower(filepath.Base(appDir)), ".app") {
+			candidates = append(candidates,
+				filepath.Join(contentsDir, "Resources", instanceFileName),
+				filepath.Join(filepath.Dir(appDir), instanceFileName),
+			)
+		}
+	}
+	var data []byte
+	var err error
+	for _, candidate := range candidates {
+		data, err = os.ReadFile(candidate)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
+			return pin, err
+		}
+	}
 	if err != nil {
 		return pin, fmt.Errorf("缺少站点信息 %s：请回到站点重新下载安装包（ZIP）", instanceFileName)
 	}

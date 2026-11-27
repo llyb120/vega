@@ -25,7 +25,7 @@ var assistantMarked []byte
 
 const assistantGrokPath = "grok/"
 
-var assistantGrokAssets fs.FS // embedded on Windows only
+var assistantGrokAssets fs.FS // embedded on desktop (Windows & macOS)
 
 func (a *Agent) assistantMount(mux *http.ServeMux) {
 	base := a.assistantPath()
