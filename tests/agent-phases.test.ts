@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { agentPhases, phaseIndex } from '../web/src/agent-phases.js';
 import { codexActivity } from '../server/core/coding-cli';
-import { classifyPhaseStatus, cliEvidence, createBrowserLoopGuard, createToolLoopGuard, extractFinalPhaseText, extractPhaseEvidence, specialistSystemPrompt } from '../server/core/agent-phase';
+import { buildCodeCheckpointLedger, classifyPhaseStatus, cliEvidence, createBrowserLoopGuard, createToolLoopGuard, detectOomInText, extractFinalPhaseText, extractOomSignal, extractPhaseEvidence, formatCodeCheckpointBlock, formatCodeCheckpointNote, specialistSystemPrompt, summarizeShellCommand } from '../server/core/agent-phase';
 import { CHROME_RULES, EMPLOYEE_SCENE_RULES, IMAGE_MARKDOWN_RULES } from '../server/core/prompt';
 import { Redactor } from '../server/core/util';
 
@@ -280,4 +280,71 @@ test('createToolLoopGuard catches goto+click cycles, non-nav periodic loops, rep
   // 4. reset() clears rolling history cleanly.
   errGuard.reset();
   assert.equal(errGuard.observe([{ name: 'bash', arguments: { command: 'curl https://example.test/4' } }], [{ error: true, value: { error: 'Operation timed out' } }]), null);
+});
+
+test('OOM detection, shell command summarization, and code checkpoint ledger track edits, passed checks, and OOM blocks cleanly', () => {
+  assert.equal(
+    summarizeShellCommand('set -eu\ncd /repo/be || exit 1\nexport GOPROXY=off\ngo test -count=1 ./services ./services/game'),
+    'go test -count=1 ./services ./services/game',
+  );
+  assert.equal(
+    detectOomInText('ok\tdashboard-backend/services\ndashboard-backend/services/datamap: /usr/local/go/pkg/tool/linux_amd64/compile: signal: killed\nFAIL'),
+    'dashboard-backend/services/datamap: /usr/local/go/pkg/tool/linux_amd64/compile: signal: killed',
+  );
+  assert.equal(extractOomSignal('bash', { error: true, value: { exitCode: 137, output: '' } }), 'exitCode=137 (SIGKILL/OOM)');
+  assert.equal(extractOomSignal('bash', { error: true, value: { exitCode: 1, output: 'no matches' } }), null);
+  assert.equal(
+    extractOomSignal('bash_poll', { error: true, value: { exitCode: 1, output: 'fatal error: out of memory' } }),
+    'fatal error: out of memory',
+  );
+
+  const redact = new Redactor();
+  redact.add('secret-token-xyz');
+  const rows: any[] = [
+    { seq: 1, role: 'assistant', calls: [
+      { id: 'e1', name: 'edit', arguments: { path: '/repo/be/services/mobile.go' } },
+      { id: 'e2', name: 'edit', arguments: { path: '/repo/be/services/mobile.go' } },
+      { id: 'w1', name: 'write', arguments: { path: '/repo/be/router/mobile_revenue.go' } },
+      { id: 'rg1', name: 'bash', arguments: { command: 'set -eu\ncd /repo/be\nrg -n missing_sym .' } },
+      { id: 'ok1', name: 'bash', arguments: { command: 'set -eu\ncd /repo/be\ngo test -vet=off ./services ./services/game' } },
+      { id: 'oom1', name: 'bash', arguments: { command: 'set -eu\ncd /repo/be\ngo test -vet=off ./router # secret-token-xyz' } },
+      { id: 'bg1', name: 'bash', arguments: { command: 'set -eu\ncd /repo/be\ngo test -p 1 ./router' } },
+    ] },
+    { seq: 2, role: 'tool', callId: 'e1', name: 'edit', text: JSON.stringify({ path: '/repo/be/services/mobile.go' }) },
+    { seq: 3, role: 'tool', callId: 'e2', name: 'edit', text: JSON.stringify({ path: '/repo/be/services/mobile.go' }) },
+    { seq: 4, role: 'tool', callId: 'w1', name: 'write', text: JSON.stringify({ path: '/repo/be/router/mobile_revenue.go' }) },
+    { seq: 5, role: 'tool', callId: 'rg1', name: 'bash', error: true, text: JSON.stringify({ exitCode: 1, output: '' }) },
+    { seq: 6, role: 'tool', callId: 'ok1', name: 'bash', text: JSON.stringify({ exitCode: 0, output: 'ok' }) },
+    { seq: 7, role: 'tool', callId: 'oom1', name: 'bash', error: true, text: JSON.stringify({ exitCode: 1, output: 'services/datamap: compile: signal: killed' }) },
+    { seq: 8, role: 'tool', callId: 'bg1', name: 'bash', text: JSON.stringify({ running: true, jobId: 7 }) },
+    { seq: 9, role: 'assistant', calls: [{ id: 'poll1', name: 'bash_poll', arguments: { job_id: 7, wait: 1 } }] },
+    { seq: 10, role: 'tool', callId: 'poll1', name: 'bash_poll', error: true, text: JSON.stringify({ jobId: 7, exitCode: 1, output: 'services/search: compile: signal: killed' }) },
+  ];
+
+  const ledger = buildCodeCheckpointLedger(rows, redact);
+  assert.deepEqual(ledger.filesChanged, [
+    { path: '/repo/be/services/mobile.go', edits: 2 },
+    { path: '/repo/be/router/mobile_revenue.go', edits: 1 },
+  ]);
+  assert.deepEqual(ledger.passedChecks, ['go test -vet=off ./services ./services/game']);
+  assert.deepEqual(ledger.failedChecks, [], 'read-only rg exit=1 must not pollute failedChecks');
+  assert.equal(ledger.oomBlocked.length, 2);
+  assert(!ledger.oomBlocked[0].includes('secret-token-xyz'));
+  assert(ledger.oomBlocked[1].includes('go test -p 1 ./router'));
+
+  const block = formatCodeCheckpointBlock(ledger);
+  assert(block.includes('### 宿主核验代码还原点'));
+  assert(block.includes('/repo/be/services/mobile.go (×2)'));
+  assert(block.includes('已通过验证（无新改动勿重跑）'));
+  assert(block.includes('已确认 OOM / signal: killed 禁区'));
+
+  const note = formatCodeCheckpointNote(ledger);
+  assert(note.startsWith('代码还原点：已改 2 个文件'));
+  assert(note.includes('OOM禁区（勿重跑）'));
+  assert([...note].length <= 450);
+
+  const codePrompt = specialistSystemPrompt('code_agent');
+  assert(codePrompt.includes('禁止开启 set -e'));
+  assert(codePrompt.includes('signal: killed / OOM'));
+  assert(EMPLOYEE_SCENE_RULES.includes('拆成 2–3 个小阶段'));
 });

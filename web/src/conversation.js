@@ -263,6 +263,35 @@ const DETAIL_KEYS = {
   tool: ["command", "path", "query", "url", "prompt"],
 };
 
+function isShellBoilerplateSegment(seg) {
+  const s = seg.trim();
+  if (!s || s.startsWith("#")) return true;
+  if (/^(?:set\s+[-+][a-zA-Z0-9]+(?:\s+-o\s+\S+|\s+\S+)*|set\s+-o\s+\S+|shopt\b.*)$/.test(s)) return true;
+  if (/^ulimit\b/.test(s)) return true;
+  if (/^export\s+[A-Za-z_][A-Za-z0-9_]*=[^;&|]*$/.test(s)) return true;
+  if (/^(?:cd|pushd)\s+[^;&]+?(?:\s*\|\|\s*(?:exit\b[^;&]*|return\b[^;&]*|:|true))?$/.test(s)) return true;
+  if (/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s;|&]+)$/.test(s)) return true;
+  return false;
+}
+
+/** Skip leading shell boilerplate (set -eu, cd, export, ulimit, var=) so captions show the substantive command. */
+export function extractBashCaption(command) {
+  const lines = String(command || "").split(/\r?\n/);
+  let fallback = "";
+  for (const raw of lines) {
+    let line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (!fallback) fallback = line;
+    while (line) {
+      const m = /^(.+?)\s*(?:&&|;)\s*(.+)$/.exec(line);
+      if (!m || !isShellBoilerplateSegment(m[1])) break;
+      line = m[2].trim();
+    }
+    if (line && !isShellBoilerplateSegment(line)) return line;
+  }
+  return fallback;
+}
+
 /** One-line label for a tool row: bash shows the command, others show name · key arg. */
 export function toolCaption(item, limit = 120) {
   const name = String(item?.name || "工具").replace(/\s+/g, " ").trim() || "工具";
@@ -278,7 +307,9 @@ export function toolCaption(item, limit = 120) {
       }
     }
   }
-  detail = detail.split(/\r?\n/, 1)[0].replace(/\s+/g, " ").trim();
+  detail = (kind === "execute" ? extractBashCaption(detail) : detail.split(/\r?\n/, 1)[0])
+    .replace(/\s+/g, " ")
+    .trim();
   if (detail.length > limit) detail = detail.slice(0, Math.max(0, limit - 1)) + "…";
   if (!detail) return name;
   if (kind === "execute") return detail;

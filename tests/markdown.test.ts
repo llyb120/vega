@@ -154,6 +154,10 @@ test("unconfirmed tool calls remain in their process group rather than blank ass
 test("tool captions surface bash commands and key args instead of bare tool names", () => {
   assert.equal(toolCaption({ name: "bash", arguments: { command: "git branch -a" } }), "git branch -a");
   assert.equal(toolCaption({ name: "bash", arguments: { command: "echo one\necho two" } }), "echo one");
+  assert.equal(toolCaption({ name: "bash", arguments: { command: "set -eu\ncd /repo/be || exit 1\ngo test -count=1 ./services" } }), "go test -count=1 ./services");
+  assert.equal(toolCaption({ name: "bash", arguments: { command: "set -euo pipefail\n# comment\nulimit -c 0\nexport GOPROXY=off GOTOOLCHAIN=local\nroot=/tmp/ws\nrg -n 'revenueScope' src/" } }), "rg -n 'revenueScope' src/");
+  assert.equal(toolCaption({ name: "bash", arguments: { command: "set -eu; cd /repo/fe && npm run check" } }), "npm run check");
+  assert.equal(toolCaption({ name: "bash", arguments: { command: "set -eu\ncd /tmp" } }), "set -eu");
   assert.equal(toolCaption({ name: "bash" }), "bash");
   assert.equal(toolCaption({ name: "read", arguments: { path: "src/App.vue" } }), "read · src/App.vue");
   assert.match(toolCaption({ name: "bash", arguments: { command: "x".repeat(200) } }), /…$/);

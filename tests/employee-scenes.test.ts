@@ -1316,3 +1316,49 @@ test("queued task after task_wait writes queueReason instead of stale checkpoint
     assert.match(lastMsg.text || "", /工作区正由另一任务写入/);
   } finally { await engine.close(); await store.close(); }
 });
+
+test("code_agent applies 3-tier OOM stop-loss (remind -> ban retries -> circuit break) and emits restorePoint ledger", async () => {
+  const { store, engine, add, segment } = await fixture();
+  const config = await engine.config();
+  config.scenes!.coding = ["p/code"];
+  await store.put("config", config);
+
+  const oomCmd = `node -e "console.log('services/datamap: compile: signal: killed'); process.exit(1)"`;
+  let coordTurn = 0;
+  let codeTurn = 0;
+  const codeNotices: string[] = [];
+
+  engine.providers.chat = async (model, _system, messages) => {
+    if (model.selection === "p/light") {
+      coordTurn++;
+      if (coordTurn === 1) return call("code-oom", "code_agent", { task: "修改文件并运行测试" });
+      const receiptMsg = messages.findLast((m) => m.role === "tool" && m.name === "code_agent")!;
+      const receipt = JSON.parse(receiptMsg.text!);
+      assert.equal(receipt.status, "blocked");
+      assert.match(receipt.result, /^\[BLOCKED\]/);
+      assert(Array.isArray(receipt.oomBlocked) && receipt.oomBlocked.length >= 1);
+      assert(typeof receipt.restorePoint === "string" && receipt.restorePoint.includes("OOM禁区"));
+      return coordTurn === 2 ? verified() : completed();
+    }
+
+    codeTurn++;
+    const dynText = messages.filter((m) => m.runtime === "dynamic").map((m) => m.text || "").join("\n");
+    codeNotices.push(dynText);
+    if (codeTurn === 1) return call("oom-1", "bash", { command: oomCmd });
+    if (codeTurn === 2) return call("oom-2", "bash", { command: oomCmd + " # retry 1" });
+    if (codeTurn === 3) return call("oom-3", "bash", { command: oomCmd + " # retry 2" });
+    return { role: "assistant", text: "[BLOCKED] 编译持续触发 signal: killed / OOM，已按宿主熔断交回。" };
+  };
+
+  try {
+    const job = await segment(await add("修复后端接口并验证"));
+    assert.equal(job.status, "done");
+    assert.equal(codeTurn, 4, "3 OOM kills must trigger circuit break and wrap up on turn 4");
+    assert(codeNotices[1].includes("[宿主 OOM 提醒]"), "1st OOM emits gentle reminder");
+    assert(codeNotices[2].includes("[宿主 OOM 止损]"), "2nd OOM bans parameter/package retries");
+    assert(codeNotices[3].includes("[宿主熔断]"), "3rd OOM triggers host circuit break");
+  } finally {
+    await engine.close();
+    await store.close();
+  }
+});

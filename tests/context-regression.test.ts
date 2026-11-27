@@ -104,3 +104,66 @@ test("Stage never labels intermediate tool-call commentary as a source conclusio
   assert((await (await Context.open(store, source.id)).stage()).includes("verified complete"));
   await store.close();
 });
+
+test("coding compaction injects code checkpoint rules and preserves host-verified ledger block in saved fold", async () => {
+  const store = await Store.open(":memory:"),
+    auth = new Subscriptions(store, ""),
+    engine = await Engine.create(store, new Catalog(store, auth), new Chrome(store, new ChromeBridge(), ""));
+  engine.employee.closed = true;
+  const config: any = {
+      model: "p/m",
+      provider: {
+        p: {
+          api: "openai-completions",
+          baseURL: "https://unused.test",
+          models: { m: { limit: { context: 128000, output: 8192 } } },
+        },
+      },
+      contextMode: "auto",
+    },
+    session = await store.newSession({ scene: "coding", phaseRole: "code_agent" }),
+    tools = await Tools.create(engine, session, config, new AbortController().signal, () => {}),
+    model = resolveModel(config);
+
+  let sawCodingSystem = false;
+  let sawLedgerInput = false;
+  engine.providers.chat = async (_model, system, messages) => {
+    sawCodingSystem = system.includes("Coding checkpoint requirements:") && system.includes("DO NOT RE-RUN");
+    sawLedgerInput = (messages[0].text || "").includes("### 宿主核验代码还原点");
+    return { role: "assistant", text: "阶段总结：已完成服务端修改与基础测试。" };
+  };
+
+  try {
+    await store.append(session.id, { role: "user", text: "Fix mobile revenue commission and run tests." });
+    await store.append(session.id, {
+      role: "assistant",
+      calls: [
+        { id: "c1", name: "edit", arguments: { path: "/ws/be/services/mobile.go" } },
+        { id: "c2", name: "bash", arguments: { command: "set -eu\ncd /ws/be\ngo test -vet=off ./services" } },
+        { id: "c3", name: "bash", arguments: { command: "set -eu\ncd /ws/be\ngo test -vet=off ./router" } },
+      ],
+    });
+    await store.append(session.id, { role: "tool", callId: "c1", name: "edit", text: JSON.stringify({ path: "/ws/be/services/mobile.go" }) });
+    await store.append(session.id, { role: "tool", callId: "c2", name: "bash", text: JSON.stringify({ exitCode: 0, output: "ok\tdashboard-backend/services\t0.2s\n" + "x".repeat(4000) }) });
+    await store.append(session.id, { role: "tool", callId: "c3", name: "bash", error: true, text: JSON.stringify({ exitCode: 1, output: "services/datamap: compile: signal: killed" }) });
+    // Add recent protected-tail units so the earlier coding span is eligible for folding.
+    for (let i = 0; i < 3; i++) {
+      await store.append(session.id, { role: "user", text: "follow-up-" + i });
+      await store.append(session.id, { role: "assistant", text: "ack-" + i });
+    }
+
+    await engine.compact(tools, model, "system", true);
+    assert.equal(sawCodingSystem, true);
+    assert.equal(sawLedgerInput, true);
+    const folds = await (await Context.open(store, session.id)).folds();
+    assert.equal(folds.length, 1);
+    assert(folds[0].summary.includes("### 宿主核验代码还原点"));
+    assert(folds[0].summary.includes("/ws/be/services/mobile.go"));
+    assert(folds[0].summary.includes("go test -vet=off ./services"));
+    assert(folds[0].summary.includes("services/datamap: compile: signal: killed"));
+  } finally {
+    await tools.close();
+    await engine.close();
+    await store.close();
+  }
+});
