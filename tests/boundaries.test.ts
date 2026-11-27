@@ -8,6 +8,7 @@ import { assertShellCommand, explicitShellDirectory, isReadOnlyShellProbe, SHELL
 import { LocalAgents, localShell } from "../server/core/local-agent";
 import { Store } from "../server/core/store";
 import { Vault } from "../server/core/vault";
+import { TaskNotRunningError } from "../server/core/employee";
 import { CODING_RULES } from "../server/core/prompt";
 import commandCases from "../local/testdata/shell-policy.json";
 
@@ -194,4 +195,26 @@ test("read-only environment probes bypass device-wide workspace locking while mu
   const mut = await tools.execute({ id: "mut-1", name: "bash", arguments: { command: "node -e \"console.log('ok')\"" } }, {} as any);
   assert.equal(mut.error, false, JSON.stringify(mut.value));
   assert.deepEqual(claims, [{ hold: true, directory: null }]);
+});
+
+test("TaskNotRunningError from claimWorkspace returns task_not_running instead of queued workspace contention", async (t) => {
+  const store = await Store.open(":memory:");
+  t.after(async () => await store.close());
+  const session = await store.newSession({ cwd: process.cwd(), scene: "coding", employeeId: "emp-1", taskId: "task-1" });
+  const fakeEmployee = {
+    async findTask() { return undefined; },
+    async claimWorkspace() { throw new TaskNotRunningError("recovering"); },
+  };
+  const tools = await Tools.create(
+    { store, vault: new Vault(store), mcpFor: () => ({}), employeeFor: async () => fakeEmployee, handoffs: { commandSide: async () => undefined } } as any,
+    session,
+    { model: "", provider: {} },
+    new AbortController().signal,
+    () => {},
+  );
+  const res = await tools.execute({ id: "mut-2", name: "bash", arguments: { command: "git status" } }, {} as any);
+  assert.equal(res.error, true);
+  assert.equal(res.stop, true);
+  assert.equal(res.value.status, "task_not_running");
+  assert.match(res.value.error, /已不在运行中.*recovering/);
 });

@@ -2072,6 +2072,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       const finalText = rawFinalText ? clip(redact.text(rawFinalText), 16000) : "";
       const executor = `model/${usedModel}`;
       const queued = stageMessages.some((m) => m.role === "tool" && m.error && /"status":"queued"/.test(m.text || ""));
+      const taskNotRunning = stageMessages.some((m) => m.role === "tool" && m.error && /"status":"task_not_running"/.test(m.text || ""));
 
       let outcome: Outcome;
       if (queued) {
@@ -2080,6 +2081,13 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           stop: true,
           cliActivity: activity,
           value: { status: "queued", executor, phaseSession: stage.id, evidence, next: "工作区写入占用，任务已排队，资源释放后自动续做。" },
+        };
+      } else if (taskNotRunning) {
+        outcome = {
+          error: true,
+          stop: true,
+          cliActivity: activity,
+          value: { status: "error", executor, phaseSession: stage.id, error: "任务当前已不在运行中，本步未执行。", evidence },
         };
       } else if (phasePause) {
         outcome = {

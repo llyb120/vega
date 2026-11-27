@@ -37,6 +37,10 @@ export async function initialize(pageScript: string, livePageScript: string) {
     bridge = new ChromeBridge(false, pageScript),
     chrome = new Chrome(store, bridge, pageScript, "experience", livePageScript),
     engine = await Engine.create(store, catalog, chrome);
+  store.db.onLockLost = (reason) => {
+    console.error("[Vega] 数据库单活锁已丢失，已停止本实例任务调度以防止与新实例冲突：", reason);
+    engine.employee.close();
+  };
   catalog.refreshPrices = true;
   void catalog.modelMetadata(true);
   const token = process.env.VEGA_TOKEN || randomBytes(32).toString("base64url");

@@ -11,7 +11,7 @@ import { Catalog } from "../server/core/catalog";
 import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { Tools } from "../server/core/tools";
-import { Employee, type EmployeeRuntime, type Task } from "../server/core/employee";
+import { Employee, TaskNotRunningError, type EmployeeRuntime, type Task } from "../server/core/employee";
 import { EmployeeBrowsers } from "../server/core/employee-browsers";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { privateWorker } from "../server/core/headless";
@@ -707,6 +707,26 @@ test("directory aliases cannot bypass the shared lock when actual workspace writ
     assert.equal(await b.claimWorkspace(sessionB, true), true);
     b.releaseWorkspace(second.id);
     assert.equal(employee.writers.size, 0);
+  } finally { employee.close(); await store.close(); }
+});
+
+test("claimWorkspace throws TaskNotRunningError instead of falsely queuing non-running tasks", async () => {
+  const { store, employee } = await fixture();
+  try {
+    const job = await task(employee, "interrupted job");
+    const session = await store.newSession({ taskId: job.id, employeeId: employee.employeeId, cwd: process.cwd() });
+    for (const status of ["recovering", "stopped"] as const) {
+      await employee.update((state) => { state.tasks[0].status = status; });
+      await assert.rejects(
+        employee.claimWorkspace(session, true),
+        (err: any) => err instanceof TaskNotRunningError && err.code === "TASK_NOT_RUNNING" && err.taskStatus === status,
+      );
+      const saved = (await employee.state()).tasks[0];
+      assert.equal(saved.status, status);
+      assert.equal(saved.workspaceWait, undefined);
+      assert.equal(saved.queueReason, undefined);
+      assert.equal(employee.writers.size, 0);
+    }
   } finally { employee.close(); await store.close(); }
 });
 

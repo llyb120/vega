@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { Store } from "../server/core/store";
-import { mysqlOptions, translate } from "../server/core/mysql";
+import { mysqlLockTimeout, mysqlOptions, MysqlSingletonLock, singletonLockName, translate, type LockConnection } from "../server/core/mysql";
 
 // Runs on the configured backend: DB_TYPE=sqlite (default) or DB_TYPE=mysql.
 
@@ -134,4 +135,125 @@ test("a stray open transaction on SQLite's connection does not wedge later write
   await db.conn.query("exec", "BEGIN", []);
   await db.transaction(() => db.run("INSERT INTO wedge_probe VALUES (1)"));
   assert.equal((await db.all("SELECT n FROM wedge_probe")).length, 1);
+});
+
+test("MySQL singleton lock names stay within MySQL 64-char limit and distinguish long names", () => {
+  const a = singletonLockName("a".repeat(60) + "_one");
+  const b = singletonLockName("a".repeat(60) + "_two");
+  assert(a.length <= 64 && b.length <= 64);
+  assert.notEqual(a, b);
+  assert.equal(singletonLockName(""), singletonLockName("vega"));
+});
+
+test("mysqlLockTimeout defaults to 30 and honors valid MYSQL_LOCK_TIMEOUT values", () => {
+  const saved = process.env.MYSQL_LOCK_TIMEOUT;
+  try {
+    delete process.env.MYSQL_LOCK_TIMEOUT;
+    assert.equal(mysqlLockTimeout(), 30);
+    process.env.MYSQL_LOCK_TIMEOUT = "0";
+    assert.equal(mysqlLockTimeout(), 0);
+    process.env.MYSQL_LOCK_TIMEOUT = "45";
+    assert.equal(mysqlLockTimeout(), 45);
+    process.env.MYSQL_LOCK_TIMEOUT = "-5";
+    assert.equal(mysqlLockTimeout(), 30);
+    process.env.MYSQL_LOCK_TIMEOUT = "abc";
+    assert.equal(mysqlLockTimeout(), 30);
+  } finally {
+    if (saved === undefined) delete process.env.MYSQL_LOCK_TIMEOUT;
+    else process.env.MYSQL_LOCK_TIMEOUT = saved;
+  }
+});
+
+function mockMysqlCluster() {
+  let nextId = 1;
+  const locks = new Map<string, number>();
+  const connections: Array<EventEmitter & LockConnection & { id: number; ended: boolean; queries: string[] }> = [];
+  const connect = async () => {
+    const id = nextId++;
+    const emitter = new EventEmitter();
+    const conn = Object.assign(emitter, {
+      id,
+      ended: false,
+      queries: [] as string[],
+      async query(sql: string, params: unknown[] = []): Promise<[any]> {
+        conn.queries.push(sql);
+        if (conn.ended) throw new Error("Connection closed");
+        if (sql.includes("GET_LOCK")) {
+          const name = String(params[0]);
+          const holder = locks.get(name);
+          if (holder !== undefined && holder !== id) return [[{ locked: 0 }]];
+          locks.set(name, id);
+          return [[{ locked: 1 }]];
+        }
+        if (sql.includes("IS_USED_LOCK")) {
+          const name = String(params[0]);
+          return [[{ me: id, holder: locks.get(name) ?? null }]];
+        }
+        if (sql.includes("RELEASE_LOCK")) {
+          const name = String(params[0]);
+          if (locks.get(name) === id) { locks.delete(name); return [[{ released: 1 }]]; }
+          return [[{ released: 0 }]];
+        }
+        return [[]];
+      },
+      async end() {
+        if (conn.ended) return;
+        conn.ended = true;
+        for (const [name, holder] of locks) if (holder === id) locks.delete(name);
+      },
+    });
+    connections.push(conn);
+    return conn;
+  };
+  return { connect, locks, connections };
+}
+
+test("MysqlSingletonLock prevents a second instance from starting and releases on close", async () => {
+  const cluster = mockMysqlCluster();
+  const lockName = singletonLockName("vega_prod");
+  const first = await MysqlSingletonLock.acquire(cluster.connect, lockName, "vega_prod", { timeoutSeconds: 5, keepaliveMs: 60_000 });
+  assert.equal(cluster.locks.get(lockName), 1);
+
+  await assert.rejects(
+    MysqlSingletonLock.acquire(cluster.connect, lockName, "vega_prod", { timeoutSeconds: 5, keepaliveMs: 60_000 }),
+    /另一个 Vega 实例正在使用当前 MySQL 数据库/,
+  );
+  assert.equal(cluster.connections[1].ended, true, "failed connection is closed");
+  assert.equal(cluster.locks.get(lockName), 1, "first instance still holds the lock");
+
+  await first.release();
+  assert.equal(cluster.locks.has(lockName), false);
+  assert(cluster.connections[0].queries.some((sql) => sql.includes("RELEASE_LOCK")));
+  assert.equal(cluster.connections[0].ended, true);
+
+  const second = await MysqlSingletonLock.acquire(cluster.connect, lockName, "vega_prod", { timeoutSeconds: 5, keepaliveMs: 60_000 });
+  await second.release();
+});
+
+test("MysqlSingletonLock recovers transparently when reconnected cleanly and fires onLost once if stolen", async () => {
+  const cluster = mockMysqlCluster();
+  const lockName = singletonLockName("vega_prod");
+  const lost: string[] = [];
+  const lock = await MysqlSingletonLock.acquire(cluster.connect, lockName, "vega_prod", {
+    timeoutSeconds: 5,
+    keepaliveMs: 60_000,
+    onLost: (reason) => lost.push(reason),
+  });
+
+  // Simulate transient disconnect where nobody else acquired the lock.
+  cluster.connections[0].emit("error", new Error("ECONNRESET"));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(lost, [], "transient disconnect that re-acquires the lock does not trigger onLost");
+  assert.equal(cluster.locks.get(lockName), 2);
+
+  // Now simulate another holder taking the lock before keepalive check.
+  cluster.locks.set(lockName, 999);
+  await lock.check();
+  assert.equal(lost.length, 1);
+  assert.match(lost[0], /无法重新获取 MySQL 单活锁/);
+
+  // Subsequent checks do not double-fire onLost.
+  await lock.check();
+  assert.equal(lost.length, 1);
+  await lock.release();
 });

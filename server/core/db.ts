@@ -38,6 +38,8 @@ export const outsideTransaction = <T>(fn: () => T): T => current.exit(fn);
  */
 export abstract class Db {
   abstract readonly dialect: Dialect;
+  /** Called if a backend singleton lock is unexpectedly lost while the process is still running. */
+  onLockLost?: (reason: string) => void;
   protected writer = new Mutex();
   /** A statement outside any transaction. */
   protected abstract direct(op: Op, sql: string, params: unknown[]): Promise<any>;

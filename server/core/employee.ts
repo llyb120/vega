@@ -456,6 +456,14 @@ export type EmployeeRuntime = {
     checkName: (employeeId: string, name: string) => Promise<void>;
   };
 };
+export class TaskNotRunningError extends Error {
+  readonly code = "TASK_NOT_RUNNING";
+  constructor(readonly taskStatus: string) {
+    super(`Task is no longer running (${taskStatus})`);
+    this.name = "TaskNotRunningError";
+  }
+}
+
 export class Employee {
   busy = new Map<string, { computer: boolean; session: string; outlineDraft?: OutlineDraft }>();
   writers = new Map<string, WorkspaceWriter>();
@@ -714,17 +722,19 @@ export class Employee {
     if (!session.taskId || session.readOnly) return true;
     const key = await workspaceKey(session, directory);
     const task = this.task(await this.state(), session.taskId);
-    if (task.status !== "running") return false;
+    if (task.status !== "running") throw new TaskNotRunningError(task.status);
     const writers = (this.root || this).writers, owner = writers.get(key);
     if (workspaceBusy(writers, key, task.id)) {
+      let notRunning: string | undefined;
       await this.update(state => {
                 const current = this.task(state, task.id);
-                if (current.status !== "running") return;
+                if (current.status !== "running") { notRunning = current.status; return; }
                 current.status = "queued";
                 current.nextCheckAt = 0;
                 current.workspaceWait = { key, hold };
                 current.queueReason = "工作区正由另一任务写入，释放后自动续做；本步未执行，续做先核对最新文件，不重放已完成操作。";
               });
+      if (notRunning) throw new TaskNotRunningError(notRunning);
       return false;
     }
     let moved = false;

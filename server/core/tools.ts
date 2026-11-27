@@ -66,6 +66,16 @@ import {
 } from "./bash-jobs";
 import { agentTools, isAgentTool } from "./spawn-agent";
 import { BACKGROUND_GRACE_MS, type BackgroundResult } from "./background-result";
+import { TaskNotRunningError } from "./employee";
+
+const taskNotRunningOutcome = (status?: string): Outcome => ({
+  error: true,
+  stop: true,
+  value: {
+    status: "task_not_running",
+    error: `任务当前已不在运行中${status ? `（状态：${status}）` : ""}，本步未执行。`,
+  },
+});
 
 export type Outcome = {
   value: any;
@@ -527,7 +537,15 @@ export class Tools {
     if (employee) {
       const side = await this.engine.handoffs.commandSide(employee.employeeId, cli === "codex" ? "codex exec" : "agy --print");
       assert(!side || side === (agent ? "local" : "cloud"), "CLI 与任务执行位置不一致");
-      if (!await employee.claimWorkspace(this.session, true, null)) return { stop: true, error: true, value: { status: "queued", next: "等待工作区，CLI 尚未执行" } };
+      let claimed: boolean;
+      try {
+        claimed = await employee.claimWorkspace(this.session, true, null);
+      } catch (e: any) {
+        if (e instanceof TaskNotRunningError || e?.code === "TASK_NOT_RUNNING")
+          return taskNotRunningOutcome(e.taskStatus);
+        throw e;
+      }
+      if (!claimed) return { stop: true, error: true, value: { status: "queued", next: "等待工作区，CLI 尚未执行" } };
     }
     this.signal.throwIfAborted();
     const args = { command, timeout: 600 };
@@ -823,7 +841,15 @@ export class Tools {
       const employee = await this.engine.employeeFor(this.session);
       const paths = (this.session.localAgent ? this.agent()?.platform === "windows" : process.platform === "win32") ? win32 : posix;
       const directory = call.name === "bash" ? shellDirectory : paths.dirname(a.path);
-      if (!await employee.claimWorkspace(this.session, this.session.scene === "coding" || call.name !== "bash", directory ?? null)) return { value: { status: "queued", reason: (await employee.findTask(this.session.taskId))?.queueReason || "任务已暂停，本步未执行。", next: "System resumes the same task after the workspace is released; recheck current files before continuing, never replay completed operations." }, error: true, stop: true };
+      let claimed: boolean;
+      try {
+        claimed = await employee.claimWorkspace(this.session, this.session.scene === "coding" || call.name !== "bash", directory ?? null);
+      } catch (e: any) {
+        if (e instanceof TaskNotRunningError || e?.code === "TASK_NOT_RUNNING")
+          return taskNotRunningOutcome(e.taskStatus);
+        throw e;
+      }
+      if (!claimed) return { value: { status: "queued", reason: (await employee.findTask(this.session.taskId))?.queueReason || "工作区写入占用，任务已暂停，本步未执行。", next: "System resumes the same task after the workspace is released; recheck current files before continuing, never replay completed operations." }, error: true, stop: true };
       this.signal.throwIfAborted();
     }
     if (["write", "edit"].includes(call.name)) {
