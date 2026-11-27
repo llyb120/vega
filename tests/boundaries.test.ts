@@ -218,3 +218,18 @@ test("TaskNotRunningError from claimWorkspace returns task_not_running instead o
   assert.equal(res.value.status, "task_not_running");
   assert.match(res.value.error, /已不在运行中.*recovering/);
 });
+
+test("explicitShellDirectory scopes isolated /tmp download scripts without locking the whole device", () => {
+  assert.equal(
+    explicitShellDirectory("mkdir -p /tmp/tapd-imgs && curl -fsSL https://tapd.example/a.png -o /tmp/tapd-imgs/1.png", false),
+    "/tmp/tapd-imgs",
+  );
+  assert.equal(
+    explicitShellDirectory("mkdir -p /tmp/tapd-imgs && cp /workspace/secret /tmp/tapd-imgs/1.png", false),
+    null,
+  );
+  assert.equal(
+    explicitShellDirectory("mkdir -p /repo/sub && touch /repo/sub/a", false),
+    null,
+  );
+});

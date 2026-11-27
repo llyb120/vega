@@ -1614,6 +1614,9 @@ export class Employee {
                 if ((a.plan && JSON.stringify(t.plan || []) !== prevPlan) || a.stepOutput !== undefined) {
                   delete t.waitStreak;
                 }
+                if (!t.schedule?.repeat && t.checkpoint) {
+                  delete t.checkpoint;
+                }
                 const reviewHint = a.plan && !planUnresolved(t.plan).length && (t.outlineReviewRequired || unfinishedSteps(t.plan).length)
                   ? { outlineReviewRequired: true, changedSteps: outlineSteps(t) }
                   : {};
@@ -3139,6 +3142,7 @@ export class Employee {
           : task.status === "deferred" ? `已挂起，等待外部结果；${task.nextCheckAt ? `预计 ${beijingDateTime(task.nextCheckAt)} 自动复查` : "到期继续原任务"}。\n\n` + task.checkpoint
           : task.status === "recovering" ? "本轮未完成，将在原会话恢复。\n\n原因：" + task.recovery?.reason
           : task.status === "queued" && task.side === "computer" ? "已交接电脑会话，等待执行结果；主任务尚未完成。"
+          : task.status === "queued" && task.workspaceWait ? (task.queueReason || "工作区正由另一任务写入，释放后自动续做。")
           : result || task.checkpoint || "本轮已结束，任务尚未验证交付。";
         if (lastReply?.text !== conclusion) {
           await this.store.append(session, { role: "assistant", text: conclusion, error: !!error || task.status === "recovering" });

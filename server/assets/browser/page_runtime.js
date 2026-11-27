@@ -1124,6 +1124,12 @@
         blank: skel.blank,
         textChars: skel.textChars,
         skeletonNodes: skel.skeletonNodes,
+        ...(skel.media ? { media: true, contentType: skel.contentType } : {}),
+      };
+    } else if (skel.media) {
+      out.media = {
+        contentType: skel.contentType,
+        ...(skel.naturalWidth && skel.naturalHeight ? { naturalWidth: skel.naturalWidth, naturalHeight: skel.naturalHeight } : {}),
       };
     }
     if (window.visualViewport && window.visualViewport.scale > 1.001) {
@@ -1266,26 +1272,22 @@
   const SKELETON_SEL = '[class*="skeleton" i],[class*="shimmer" i],[aria-busy="true"],[role="progressbar"],.ant-spin-spinning,.el-loading-mask,.t-loading,.t-skeleton,.ant-skeleton,.el-skeleton';
 
   function detectSkeleton() {
+    const contentType = String(document.contentType || '').toLowerCase();
+    const isImageDoc = contentType.startsWith('image/');
+    const isMediaDoc = isImageDoc || contentType === 'application/pdf' || contentType.startsWith('video/') || contentType.startsWith('audio/');
     const root = document.body || document.documentElement;
     if (!root) {
-      return { readyState: document.readyState, textChars: 0, skeletonNodes: 0, skeleton: false, blank: true, stillLoading: true };
+      return {
+        readyState: document.readyState,
+        textChars: 0,
+        skeletonNodes: 0,
+        skeleton: false,
+        blank: true,
+        stillLoading: true,
+        ...(isMediaDoc ? { media: true, contentType } : {}),
+      };
     }
     const vw = innerWidth || 1280, vh = innerHeight || 800;
-    let textChars = 0, scanned = 0;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    for (let t; (t = walker.nextNode()) && scanned++ < 400 && textChars < 240;) {
-      const p = t.parentElement;
-      if (!p || isIgnored(p)) continue;
-      const pt = p.tagName;
-      if (pt === 'SCRIPT' || pt === 'STYLE' || pt === 'NOSCRIPT') continue;
-      const s = compact(t.nodeValue, 240);
-      if (!s) continue;
-      const cs = getComputedStyle(p);
-      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
-      const r = p.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) continue;
-      textChars += s.length;
-    }
 
     let skeletonNodes = 0, skeletonArea = 0, visibleSpinners = 0;
     const candidates = document.querySelectorAll(SKELETON_SEL);
@@ -1304,9 +1306,104 @@
         visibleSpinners++;
       }
     }
-
     const skeleton = skeletonArea >= 16000 || visibleSpinners > 0;
-    const blank = textChars < 40;
+
+    if (isMediaDoc) {
+      let mediaLoaded = document.readyState === 'complete';
+      let naturalWidth = 0, naturalHeight = 0;
+      if (isImageDoc) {
+        const imgs = document.querySelectorAll('img');
+        let hasImgLoaded = false;
+        for (let i = 0; i < imgs.length; i++) {
+          const im = imgs[i];
+          if (im && im.complete && im.naturalWidth > 0) {
+            hasImgLoaded = true;
+            naturalWidth = Math.round(im.naturalWidth);
+            naturalHeight = Math.round(im.naturalHeight || 0);
+            break;
+          }
+        }
+        if (!hasImgLoaded && document.documentElement?.tagName?.toLowerCase() === 'svg') {
+          const r = document.documentElement.getBoundingClientRect?.();
+          if (r && r.width > 0 && r.height > 0) {
+            hasImgLoaded = true;
+            naturalWidth = Math.round(r.width);
+            naturalHeight = Math.round(r.height);
+          }
+        }
+        mediaLoaded = mediaLoaded && hasImgLoaded;
+      }
+      const blank = !mediaLoaded;
+      const stillLoading = !mediaLoaded || skeleton;
+      return {
+        readyState: document.readyState,
+        textChars: 0,
+        skeletonNodes,
+        skeleton,
+        blank,
+        stillLoading,
+        media: true,
+        contentType,
+        ...(mediaLoaded && naturalWidth > 0 && naturalHeight > 0 ? { naturalWidth, naturalHeight } : {}),
+      };
+    }
+
+    let textChars = 0, scanned = 0;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let t; (t = walker.nextNode()) && scanned++ < 400 && textChars < 240;) {
+      const p = t.parentElement;
+      if (!p || isIgnored(p)) continue;
+      const pt = p.tagName;
+      if (pt === 'SCRIPT' || pt === 'STYLE' || pt === 'NOSCRIPT') continue;
+      const s = compact(t.nodeValue, 240);
+      if (!s) continue;
+      const cs = getComputedStyle(p);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+      const r = p.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      textChars += s.length;
+    }
+
+    let blank = textChars < 40;
+    if (blank && !skeleton && document.readyState === 'complete') {
+      const visibleArea = (el) => {
+        if (!el || isIgnored(el)) return 0;
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return 0;
+        const r = el.getBoundingClientRect();
+        const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+        const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+        return w * h;
+      };
+      const imgs = document.querySelectorAll('img');
+      for (let i = 0; i < imgs.length && i < 20; i++) {
+        const im = imgs[i];
+        if (im.complete && im.naturalWidth >= 160 && im.naturalHeight >= 160 && visibleArea(im) >= 40000) {
+          blank = false;
+          break;
+        }
+      }
+      if (blank) {
+        const canvases = document.querySelectorAll('canvas');
+        for (let i = 0; i < canvases.length && i < 20; i++) {
+          const cv = canvases[i];
+          if (cv.width >= 200 && cv.height >= 150 && visibleArea(cv) >= 40000) {
+            blank = false;
+            break;
+          }
+        }
+      }
+      if (blank) {
+        const videos = document.querySelectorAll('video');
+        for (let i = 0; i < videos.length && i < 10; i++) {
+          const vd = videos[i];
+          if (vd.readyState >= 2 && visibleArea(vd) >= 40000) {
+            blank = false;
+            break;
+          }
+        }
+      }
+    }
     const stillLoading = document.readyState !== 'complete' || blank || skeleton;
     return { readyState: document.readyState, textChars, skeletonNodes, skeleton, blank, stillLoading };
   }

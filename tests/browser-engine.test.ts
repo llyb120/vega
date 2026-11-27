@@ -1,5 +1,7 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import sharp from "sharp";
 import { WebSocket } from "ws";
 import { Chrome } from "../server/core/chrome";
@@ -491,4 +493,140 @@ test("formatView emits loadingHint for skeleton/blank pages and omits it when co
   });
   assert.match(String(skeletonOut.loadingHint || ""), /空骨架屏/);
   assert.match(String(skeletonOut.loadingHint || ""), /browser_debug\(kind="all"\)/);
+
+  const mediaOut = await chrome.formatView("owner", "C1-1", {
+    url: "https://example.test/file.png",
+    title: "file.png",
+    viewport: [1280, 800, 1],
+    scroll: [0, 0, 1280, 800],
+    items: [],
+    text: "",
+    loadingState: { readyState: "loading", skeleton: false, blank: true, textChars: 0, skeletonNodes: 0, media: true, contentType: "image/png" },
+  });
+  assert.match(String(mediaOut.loadingHint || ""), /媒体\/图片资源仍在加载中/);
+  assert.doesNotMatch(String(mediaOut.loadingHint || ""), /空骨架屏/);
+
+  const mediaReadyOut = await chrome.formatView("owner", "C1-1", {
+    url: "https://example.test/file.png",
+    title: "file.png (3758×2015)",
+    viewport: [1280, 800, 1],
+    scroll: [0, 0, 1280, 800],
+    items: [],
+    text: "",
+    media: { contentType: "image/png", naturalWidth: 3758, naturalHeight: 2015 },
+  });
+  assert.equal(mediaReadyOut.loadingHint, undefined);
+  assert.deepEqual(mediaReadyOut.mediaReady, { contentType: "image/png", naturalWidth: 3758, naturalHeight: 2015 });
+});
+
+test("page_runtime.js detectSkeleton handles standalone media docs and visual HTML pages, and stays synced with local/page_runtime.js", () => {
+  const serverSrc = readFileSync("server/assets/browser/page_runtime.js", "utf8");
+  const localSrc = readFileSync("local/page_runtime.js", "utf8");
+  assert.equal(serverSrc, localSrc, "server/assets/browser/page_runtime.js and local/page_runtime.js must stay byte-for-byte identical");
+
+  const runDetect = (opts: {
+    contentType: string;
+    readyState: string;
+    textNodes?: string[];
+    imgs?: { complete: boolean; naturalWidth: number; naturalHeight: number; rect?: { left: number; top: number; right: number; bottom: number } }[];
+    canvases?: { width: number; height: number; rect?: { left: number; top: number; right: number; bottom: number } }[];
+    svgRect?: { width: number; height: number };
+  }) => {
+    const textNodes = (opts.textNodes || []).map((nodeValue) => ({
+      nodeValue,
+      parentElement: {
+        nodeType: 1,
+        tagName: "P",
+        getBoundingClientRect: () => ({ width: 200, height: 20, left: 0, top: 0, right: 200, bottom: 20 }),
+      },
+    }));
+    const imgs = (opts.imgs || []).map((im) => ({
+      nodeType: 1,
+      ...im,
+      getBoundingClientRect: () => im.rect || { left: 0, top: 0, right: 800, bottom: 600 },
+    }));
+    const canvases = (opts.canvases || []).map((cv) => ({
+      nodeType: 1,
+      ...cv,
+      getBoundingClientRect: () => cv.rect || { left: 0, top: 0, right: 800, bottom: 600 },
+    }));
+    let cursor = 0;
+    const doc: any = {
+      contentType: opts.contentType,
+      readyState: opts.readyState,
+      body: { tagName: "BODY" },
+      documentElement: {
+        tagName: opts.svgRect ? "svg" : "HTML",
+        getBoundingClientRect: () => opts.svgRect || { width: 1280, height: 800 },
+      },
+      querySelectorAll(sel: string) {
+        if (sel === "img") return imgs;
+        if (sel === "canvas") return canvases;
+        return [];
+      },
+      createTreeWalker() {
+        return { nextNode: () => (cursor < textNodes.length ? textNodes[cursor++] : null) };
+      },
+    };
+    const win: any = { innerWidth: 1280, innerHeight: 800, devicePixelRatio: 1 };
+    win.top = win;
+    const scope: any = {
+      window: win,
+      document: doc,
+      innerWidth: 1280,
+      innerHeight: 800,
+      NodeFilter: { SHOW_TEXT: 4 },
+      getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+      performance: { now: () => 0 },
+      clearTimeout,
+      setTimeout,
+      clearInterval,
+      setInterval,
+    };
+    scope.globalThis = scope;
+    runInNewContext(serverSrc, scope);
+    return scope.__novaBrowser.detectSkeleton();
+  };
+
+  // 1. Loaded standalone image/png -> blank: false, stillLoading: false, natural dimensions reported
+  const loadedPng = runDetect({
+    contentType: "image/png",
+    readyState: "complete",
+    imgs: [{ complete: true, naturalWidth: 3758, naturalHeight: 2015 }],
+  });
+  assert.equal(loadedPng.blank, false);
+  assert.equal(loadedPng.stillLoading, false);
+  assert.equal(loadedPng.media, true);
+  assert.equal(loadedPng.naturalWidth, 3758);
+  assert.equal(loadedPng.naturalHeight, 2015);
+
+  // 2. Streaming/loading standalone image/png -> stillLoading: true, media: true
+  const loadingPng = runDetect({
+    contentType: "image/png",
+    readyState: "loading",
+    imgs: [{ complete: false, naturalWidth: 0, naturalHeight: 0 }],
+  });
+  assert.equal(loadingPng.blank, true);
+  assert.equal(loadingPng.stillLoading, true);
+  assert.equal(loadingPng.media, true);
+  assert.equal(loadingPng.contentType, "image/png");
+
+  // 3. Loaded standalone PDF -> blank: false, stillLoading: false
+  const loadedPdf = runDetect({ contentType: "application/pdf", readyState: "complete" });
+  assert.equal(loadedPdf.blank, false);
+  assert.equal(loadedPdf.stillLoading, false);
+
+  // 4. Blank HTML page -> blank: true, stillLoading: true
+  const blankHtml = runDetect({ contentType: "text/html", readyState: "complete" });
+  assert.equal(blankHtml.blank, true);
+  assert.equal(blankHtml.stillLoading, true);
+
+  // 5. Visual HTML page with large loaded img -> blank: false, stillLoading: false
+  const visualHtml = runDetect({
+    contentType: "text/html",
+    readyState: "complete",
+    imgs: [{ complete: true, naturalWidth: 1200, naturalHeight: 800, rect: { left: 0, top: 0, right: 600, bottom: 400 } }],
+  });
+  assert.equal(visualHtml.blank, false);
+  assert.equal(visualHtml.stillLoading, false);
 });

@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { agentPhases, phaseIndex } from '../web/src/agent-phases.js';
 import { codexActivity } from '../server/core/coding-cli';
-import { classifyPhaseStatus, cliEvidence, extractFinalPhaseText, extractPhaseEvidence, specialistSystemPrompt } from '../server/core/agent-phase';
-import { CHROME_RULES, IMAGE_MARKDOWN_RULES } from '../server/core/prompt';
+import { classifyPhaseStatus, cliEvidence, createBrowserLoopGuard, createToolLoopGuard, extractFinalPhaseText, extractPhaseEvidence, specialistSystemPrompt } from '../server/core/agent-phase';
+import { CHROME_RULES, EMPLOYEE_SCENE_RULES, IMAGE_MARKDOWN_RULES } from '../server/core/prompt';
 import { Redactor } from '../server/core/util';
 
 const phase = { name: 'browser_agent', seq: 1 };
@@ -177,4 +177,107 @@ test('browser_agent prompt and CHROME_RULES allow filling user-provided OTP/veri
   assert(prompt.includes('出现短信/邮箱验证码、访问码或 2FA/OTP 且本次委派尚未提供该验证码'));
   assert(CHROME_RULES.includes('若主控已转交用户刚提供的验证码，直接用 browser_act 填入并提交'));
   assert(CHROME_RULES.includes('未获用户提供短信/邮箱验证码或 2FA/OTP 时才立刻报告主控问用户'));
+});
+
+test('EMPLOYEE_SCENE_RULES and browser_agent prompt guide direct media downloads and anti-loop behavior', () => {
+  assert(EMPLOYEE_SCENE_RULES.includes('拿到图片、附件或静态文件直链'));
+  assert(EMPLOYEE_SCENE_RULES.includes('并发下载到 /tmp'));
+  assert(EMPLOYEE_SCENE_RULES.includes('并发 read 本地原图'));
+  assert(EMPLOYEE_SCENE_RULES.includes('仅当直链下载因鉴权'));
+  const prompt = specialistSystemPrompt('browser_agent');
+  assert(prompt.includes('打开纯图片或媒体直链时'));
+  assert(prompt.includes('严禁对当前上下文里已可见的截图重复调用 read'));
+  assert(prompt.includes('imagesOmitted'));
+  assert(!prompt.includes('截图路径'));
+  assert(!prompt.includes('url/path'));
+});
+
+test('createBrowserLoopGuard trips on stale navigation cycles, reloads, and wait-only loops while allowing genuine progress', () => {
+  // 1. 3-URL cycle A -> B -> C repeated trips on the 4th visit to A.
+  const cycleGuard = createBrowserLoopGuard(4);
+  const urls = ['https://example.test/1', 'https://example.test/2', 'https://example.test/3'];
+  for (let round = 0; round < 3; round++) {
+    for (const url of urls) {
+      assert.equal(cycleGuard.observe([{ name: 'browser_tabs', arguments: { action: 'goto', url } }], [{ value: { url } }]), null);
+    }
+  }
+  const cycleTripped = cycleGuard.observe([{ name: 'browser_tabs', arguments: { action: 'goto', url: urls[0] } }], [{ value: { url: urls[0] } }]);
+  assert.match(String(cycleTripped), /重复导航\/刷新同一目标 4 次/);
+
+  // 2. Repeated reload on the same target trips on 4th reload.
+  const reloadGuard = createBrowserLoopGuard(4);
+  for (let i = 0; i < 3; i++) {
+    assert.equal(reloadGuard.observe([{ name: 'browser_tabs', arguments: { action: 'reload', tab: 'C1' } }], [{ value: { url: 'https://example.test/img.png' } }]), null);
+  }
+  const reloadTripped = reloadGuard.observe([{ name: 'browser_tabs', arguments: { action: 'reload', tab: 'C1' } }], [{ value: { url: 'https://example.test/img.png' } }]);
+  assert.match(String(reloadTripped), /重复导航\/刷新同一目标 4 次/);
+
+  // 3. Consecutive wait-only turns trip on 4th wait-only turn.
+  const waitGuard = createBrowserLoopGuard(4);
+  for (let i = 0; i < 3; i++) {
+    assert.equal(waitGuard.observe([{ name: 'browser_act', arguments: { steps: [{ op: 'wait', ms: 3000 }] } }], [{ value: { ok: true } }]), null);
+  }
+  const waitTripped = waitGuard.observe([{ name: 'browser_act', arguments: { steps: [{ op: 'wait', ms: 3000 }] } }], [{ value: { ok: true } }]);
+  assert.match(String(waitTripped), /连续 4 轮仅等待/);
+
+  // 4. Successful interactive browser_act or browser_eval resets stale navigation counts.
+  const progressGuard = createBrowserLoopGuard(4);
+  for (let i = 0; i < 3; i++) {
+    assert.equal(progressGuard.observe([{ name: 'browser_tabs', arguments: { action: 'goto', url: 'https://example.test/app' } }], [{ value: { url: 'https://example.test/app' } }]), null);
+  }
+  assert.equal(progressGuard.observe([{ name: 'browser_act', arguments: { steps: [{ op: 'click', id: 1 }] } }], [{ value: { ok: true } }]), null);
+  assert.equal(progressGuard.observe([{ name: 'browser_tabs', arguments: { action: 'goto', url: 'https://example.test/app' } }], [{ value: { url: 'https://example.test/app' } }]), null);
+
+  assert.equal(progressGuard.observe([{ name: 'browser_eval', arguments: { code: 'document.title' } }], [{ value: { ok: true } }]), null);
+  for (let i = 0; i < 3; i++) {
+    assert.equal(progressGuard.observe([{ name: 'browser_tabs', arguments: { action: 'goto', url: 'https://example.test/app' } }], [{ value: { url: 'https://example.test/app' } }]), null);
+  }
+
+  // 5. Repeated browser_view with evolving content never trips, while frozen identical browser_view trips at passive cap (24).
+  const evolvingViewGuard = createBrowserLoopGuard(4);
+  for (let i = 0; i < 30; i++) {
+    assert.equal(evolvingViewGuard.observe([{ name: 'browser_view', arguments: { tab: 'C1', screenshot: false } }], [{ value: { url: 'https://example.test/app', text: `panel-${i}` } }]), null);
+  }
+  const frozenViewGuard = createBrowserLoopGuard(4);
+  for (let i = 0; i < 23; i++) {
+    assert.equal(frozenViewGuard.observe([{ name: 'browser_view', arguments: { tab: 'C1', screenshot: false } }], [{ value: { url: 'https://example.test/app', text: 'same' } }]), null);
+  }
+  assert.match(String(frozenViewGuard.observe([{ name: 'browser_view', arguments: { tab: 'C1', screenshot: false } }], [{ value: { url: 'https://example.test/app', text: 'same' } }])), /结果无变化/);
+});
+
+test('createToolLoopGuard catches goto+click cycles, non-nav periodic loops, repeated errors, and supports reset', () => {
+  // 1. Period-2 goto -> click -> goto -> click bypasses staleNavCounts.clear() but is caught by periodic cycle detector.
+  const gotoClick = createBrowserLoopGuard(4);
+  for (let round = 0; round < 2; round++) {
+    assert.equal(gotoClick.observe([{ name: 'browser_tabs', arguments: { action: 'goto', url: 'https://example.test/a', tab: 'C1' } }], [{ value: { url: 'https://example.test/a', text: 'same-a' } }]), null);
+    assert.equal(gotoClick.observe([{ name: 'browser_act', arguments: { tab: 'C1', steps: [{ op: 'click', id: 5 }] } }], [{ value: { ok: true, url: 'https://example.test/a', text: 'same-a' } }]), null);
+  }
+  assert.equal(gotoClick.observe([{ name: 'browser_tabs', arguments: { action: 'goto', url: 'https://example.test/a', tab: 'C1' } }], [{ value: { url: 'https://example.test/a', text: 'same-a' } }]), null);
+  const p2Tripped = gotoClick.observe([{ name: 'browser_act', arguments: { tab: 'C1', steps: [{ op: 'click', id: 5 }] } }], [{ value: { ok: true, url: 'https://example.test/a', text: 'same-a' } }]);
+  assert.match(String(p2Tripped), /陷入 2 步循环重复操作/);
+
+  // 2. Period-3 non-nav cycle (e.g. click A -> click B -> click C) trips on 3rd cycle when outcomes repeat.
+  const p3Guard = createToolLoopGuard({ threshold: 4 });
+  const ids = [1, 2, 3];
+  for (let round = 0; round < 2; round++) {
+    for (const id of ids) {
+      assert.equal(p3Guard.observe([{ name: 'browser_act', arguments: { steps: [{ op: 'click', id }] } }], [{ value: { ok: true, url: `https://example.test/${id}` } }]), null);
+    }
+  }
+  assert.equal(p3Guard.observe([{ name: 'browser_act', arguments: { steps: [{ op: 'click', id: 1 }] } }], [{ value: { ok: true, url: 'https://example.test/1' } }]), null);
+  assert.equal(p3Guard.observe([{ name: 'browser_act', arguments: { steps: [{ op: 'click', id: 2 }] } }], [{ value: { ok: true, url: 'https://example.test/2' } }]), null);
+  const p3Tripped = p3Guard.observe([{ name: 'browser_act', arguments: { steps: [{ op: 'click', id: 3 }] } }], [{ value: { ok: true, url: 'https://example.test/3' } }]);
+  assert.match(String(p3Tripped), /陷入 3 步循环重复操作/);
+
+  // 3. Consecutive identical tool errors trip even when arguments vary slightly.
+  const errGuard = createToolLoopGuard({ threshold: 4 });
+  for (let i = 0; i < 3; i++) {
+    assert.equal(errGuard.observe([{ name: 'bash', arguments: { command: `curl https://example.test/${i}` } }], [{ error: true, value: { error: 'Operation timed out' } }]), null);
+  }
+  const errTripped = errGuard.observe([{ name: 'bash', arguments: { command: 'curl https://example.test/3' } }], [{ error: true, value: { error: 'Operation timed out' } }]);
+  assert.match(String(errTripped), /触发相同工具错误/);
+
+  // 4. reset() clears rolling history cleanly.
+  errGuard.reset();
+  assert.equal(errGuard.observe([{ name: 'bash', arguments: { command: 'curl https://example.test/4' } }], [{ error: true, value: { error: 'Operation timed out' } }]), null);
 });

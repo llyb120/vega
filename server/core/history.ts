@@ -210,7 +210,7 @@ export function historyImages(
   input: Message[],
   options: { trimImages?: boolean } = {},
 ): Message[] {
-  const rows = [...input], tabs = new Map<string, { results: number; paths: Set<string> }>();
+  const rows = [...input], tabs = new Map<string, { results: number; paths: Set<string>; mediaUrls: Set<string> }>();
   let otherImages = 0;
   for (let i = rows.length - 1; i >= 0; i--) {
     const m = rows[i];
@@ -229,12 +229,24 @@ export function historyImages(
               (parsed?.value.windowId != null ? `win-${parsed.value.windowId}` : "desktop"),
           )}`;
       let tab = tabs.get(key);
-      if (!tab) tabs.set(key, tab = { results: 0, paths: new Set() });
-      const full = tab.results >= 2;
+      if (!tab) tabs.set(key, tab = { results: 0, paths: new Set(), mediaUrls: new Set() });
+      const mediaUrl =
+        chrome && parsed?.value?.mediaReady && typeof parsed.value.url === "string"
+          ? parsed.value.url.trim().replace(/#.*$/, "")
+          : "";
       const paths = m.images.map((image) => image.path);
-      paths.forEach((path, j) => { keep[j] = !full && !(path && tab.paths.has(path)); });
-      paths.forEach((path, j) => { if (keep[j] && path) tab.paths.add(path); });
-      if (keep.some(Boolean)) tab.results++;
+      if (mediaUrl) {
+        // Standalone media docs (e.g. multiple attached PNG URLs viewed in one tab) keep up to 6 distinct URLs without stealing webpage budget.
+        const allowMedia = !tab.mediaUrls.has(mediaUrl) && tab.mediaUrls.size < 6;
+        paths.forEach((path, j) => { keep[j] = allowMedia && !(path && tab.paths.has(path)); });
+        paths.forEach((path, j) => { if (keep[j] && path) tab.paths.add(path); });
+        if (keep.some(Boolean)) tab.mediaUrls.add(mediaUrl);
+      } else {
+        const full = tab.results >= 2;
+        paths.forEach((path, j) => { keep[j] = !full && !(path && tab.paths.has(path)); });
+        paths.forEach((path, j) => { if (keep[j] && path) tab.paths.add(path); });
+        if (keep.some(Boolean)) tab.results++;
+      }
     } else if (otherImages++ >= 2 && options.trimImages) keep.fill(false);
     if (keep.every(Boolean)) continue;
     const omitted = m.images.filter((_, j) => !keep[j]).map((image) => image.path).filter((path, j, all) => path && all.indexOf(path) === j);

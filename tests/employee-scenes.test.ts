@@ -1161,3 +1161,158 @@ test("complex browser_agent phase has no artificial turn limit and finishes mult
     assert.equal(browserTurn, 23, "browser_agent finishes all 22 tool turns plus concluding summary without forced truncation");
   } finally { await engine.close(); await store.close(); }
 });
+
+test("browser_agent loop guard trips after repeated stale navigation without short-circuiting unrelated sibling phases", async () => {
+  const { store, engine, add, segment } = await fixture();
+  let siblingExecuted = false;
+  (engine as any).chromeFor = async () => ({
+    execute: async (_owner: string, _cwd: string, args: any) => ({
+      tabTag: args.tab || "C4-loop",
+      tabs: [{ tag: args.tab || "C4-loop", url: args.url || "https://example.test/1", title: "img", active: true }],
+      url: args.url || "https://example.test/1",
+    }),
+  });
+  let coordTurn = 0;
+  const phaseTurns = new Map<string, number>();
+  const urls = ["https://example.test/img1.png", "https://example.test/img2.png", "https://example.test/img3.png"];
+
+  engine.providers.chat = async (model, _system, messages, definitions, _sig, _emit, sessionId) => {
+    if (model.selection === "p/light") {
+      coordTurn++;
+      if (coordTurn === 1) {
+        return {
+          role: "assistant",
+          calls: [
+            { id: "b-loop", name: "browser_agent", arguments: { task: "打开三张图片链接" } },
+            { id: "b-sibling", name: "browser_agent", arguments: { task: "检查另一个正常站点" } },
+          ],
+        };
+      }
+      if (coordTurn === 2) {
+        const loopReceipt = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-loop")!.text!);
+        const sibReceipt = JSON.parse(messages.findLast(m => m.role === "tool" && m.callId === "b-sibling")!.text!);
+        assert.equal(loopReceipt.status, "blocked");
+        assert.equal(loopReceipt.circuitBroken, true);
+        assert.match(loopReceipt.result, /\[BLOCKED\]/);
+        assert.equal(sibReceipt.status, "completed", "single-phase loop circuit break must not short-circuit sibling browser_agent");
+        assert.equal(sibReceipt.circuitBroken, undefined);
+        return verified();
+      }
+      return completed();
+    }
+
+    const promptText = String(messages.find(m => m.role === "user")?.text || "");
+    const t = (phaseTurns.get(sessionId!) || 0) + 1;
+    phaseTurns.set(sessionId!, t);
+
+    if (promptText.includes("正常站点")) {
+      if (t === 1) {
+        return { role: "assistant", calls: [{ id: "sib-open", name: "browser_tabs", arguments: { action: "open", url: "https://example.test/ok" } }] };
+      }
+      siblingExecuted = true;
+      return { role: "assistant", text: "正常站点已核实。" };
+    }
+
+    if (t <= 10) {
+      const url = urls[(t - 1) % urls.length];
+      return { role: "assistant", calls: [{ id: "loop-" + t, name: "browser_tabs", arguments: { action: t === 1 ? "open" : "goto", url, tab: t === 1 ? "" : "C4-loop" } }] };
+    }
+    assert.deepEqual(definitions, [], "loop guard must disable tools on forced wrap-up turn");
+    assert(JSON.stringify(messages).includes("[宿主熔断]"));
+    return { role: "assistant", text: "[BLOCKED] 重复导航未取得新进展，建议主控改用 bash 下载原图后 read。" };
+  };
+  try {
+    const job = await segment(await add("核实图片与站点"));
+    assert.equal(job.status, "done");
+    assert.equal(siblingExecuted, true);
+    const loopTurns = [...phaseTurns.values()].find(v => v > 2);
+    assert.equal(loopTurns, 11, "loop guard must trip on the 10th nav turn (4th visit to img1) and force wrap-up on turn 11");
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("code_agent loop guard trips on repeated identical failing tool calls and forces [BLOCKED] wrap-up", async () => {
+  const { store, engine, add, segment } = await fixture();
+  let coordTurn = 0, codeTurn = 0;
+  engine.providers.chat = async (model, _system, messages, definitions) => {
+    if (model.selection === "p/light") {
+      coordTurn++;
+      if (coordTurn === 1) return call("c-loop", "code_agent", { task: "排查并修复代码" });
+      if (coordTurn === 2) {
+        const receipt = JSON.parse(messages.findLast((m) => m.role === "tool" && m.callId === "c-loop")!.text!);
+        assert.equal(receipt.status, "blocked");
+        assert.equal(receipt.circuitBroken, true);
+        assert.match(receipt.result, /\[BLOCKED\]/);
+        return verified();
+      }
+      return completed();
+    }
+    codeTurn++;
+    if (codeTurn <= 4) {
+      return { role: "assistant", calls: [{ id: "cd-" + codeTurn, name: "bash", arguments: { command: "git status" } }] };
+    }
+    assert.deepEqual(definitions, [], "code_agent loop guard must disable tools on wrap-up turn");
+    assert(JSON.stringify(messages).includes("[宿主熔断]"));
+    return { role: "assistant", text: "[BLOCKED] bash 连续重复触发相同错误，交回主控。" };
+  };
+  try {
+    const job = await segment(await add("排查代码"));
+    assert.equal(job.status, "done");
+    assert.equal(codeTurn, 5);
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("coordinator loop guard nudges first and forces wrap-up if loop persists", async () => {
+  const { store, engine, add, segment } = await fixture();
+  let turn = 0, sawNudge = false;
+  engine.providers.chat = async (_model, _system, messages, definitions) => {
+    turn++;
+    const payload = JSON.stringify(messages);
+    if (payload.includes("[宿主循环提醒]")) sawNudge = true;
+    if (turn <= 10) {
+      return { role: "assistant", calls: [{ id: "b-" + turn, name: "bash", arguments: { command: "pwd" } }] };
+    }
+    assert.deepEqual(definitions, [], "coordinator 2nd loop trip must disable tools and force wrap-up");
+    assert(payload.includes("[宿主熔断]"));
+    return { role: "assistant", text: "检测到循环重复，已停止并汇报当前状态。" };
+  };
+  try {
+    const job = await segment(await add("执行命令"));
+    assert.equal(sawNudge, true, "1st coordinator trip must inject soft loop reminder before hard fuse");
+    assert.equal(turn, 11);
+    assert.equal(job.status, "recovering");
+    assert.match(job.result || "", /检测到循环重复/);
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("queued task after task_wait writes queueReason instead of stale checkpoint and task_progress clears stale checkpoint", async () => {
+  const { store, engine, employee, add, segment } = await fixture();
+  const blocker = await add("占用工作区的任务");
+  await employee.update((s) => { employee.task(s, blocker.id).status = "running"; });
+  const blockerSession = await store.newSession({ cwd: blocker.cwd, scene: "coding", employeeId: employee.employeeId, taskId: blocker.id });
+  assert.equal(await employee.claimWorkspace(blockerSession, true, blocker.cwd), true);
+
+  const job = await add("等待外部回复后修改工作区");
+  await employee.update((s) => {
+    const t = employee.task(s, job.id);
+    t.checkpoint = "旧等待检查点：TAPD 评论仍无回复";
+  });
+
+  let turn = 0;
+  engine.providers.chat = async () => {
+    turn++;
+    if (turn === 1) {
+      return { role: "assistant", calls: [{ id: "prog-1", name: "task_progress", arguments: { message: "已收到产品回复，准备修改代码" } }] };
+    }
+    return { role: "assistant", calls: [{ id: "mut-1", name: "bash", arguments: { command: "git status" } }] };
+  };
+
+  try {
+    const queued = await segment(job);
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.checkpoint, undefined, "task_progress on running task must clear stale checkpoint");
+    const lastMsg = (await store.messages(queued.workSession!)).at(-1)!;
+    assert.equal(lastMsg.role, "assistant");
+    assert.doesNotMatch(lastMsg.text || "", /旧等待检查点/);
+    assert.match(lastMsg.text || "", /工作区正由另一任务写入/);
+  } finally { await engine.close(); await store.close(); }
+});

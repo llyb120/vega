@@ -17,7 +17,7 @@ import { units, refName, archivedResult } from "./history";
 import { CHROME_TOOLS, STANDALONE_TOOLS } from "./public-tools";
 import { removeEmployeePreviews } from "./previews";
 import { EMPLOYEE_CHAT_RULES, EMPLOYEE_CONTINUITY_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, phaseDynamicPrompt, sessionPrompt, sessionStablePrompt, sessionDynamicPrompt, loadSkills, selectedSkillPrompt, steerPrompt, clampPromptCacheKey, BOOST } from "./prompt";
-import { classifyPhaseStatus, extractFinalPhaseText, extractPhaseEvidence, isChromeNetworkErrorOutcome, phaseReceiptNext, specialistSystemPrompt, type PhaseRole } from "./agent-phase";
+import { classifyPhaseStatus, createBrowserLoopGuard, createToolLoopGuard, extractFinalPhaseText, extractPhaseEvidence, isChromeNetworkErrorOutcome, phaseReceiptNext, specialistSystemPrompt, type PhaseRole } from "./agent-phase";
 import { SUBAGENT_GUIDE, CHILD_DYNAMIC_TAIL, isAgentTool, formatAgentHandoff, inheritView, withoutOpenTail, reserveAgent, beginAgent, finishAgent, interruptAgent, cancelSessionAgents, resumeSessionAgents, takeReadyAgents, hasPendingAgents, awaitPendingAgents, waitUntilAgentReady, type AgentChild } from "./spawn-agent";
 import { awaitPendingBash, backgroundBashResult, bashExecutionSessions, bashRunning, bashWorkspaceIdle, cancelSessionBash, hasPendingBash, pendingBash, pendingBashFinished, waitBashReady } from "./bash-jobs";
 import { BACKGROUND_GRACE_MS, backgroundResultText, type BackgroundResult, type TaskSuspension } from "./background-result";
@@ -148,7 +148,7 @@ type RunPhaseOptions = {
   parentRedact?: Redactor;
   notice?: string;
   onPause?: (reason: string) => void;
-  onCircuitBreak?: (reason: string) => void;
+  onCircuitBreak?: (reason: string, opts?: { shareAcrossBatch?: boolean }) => void;
 };
 export class Engine {
   events = new EventEmitter();
@@ -1281,9 +1281,16 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       tools.context.completedBefore =
         (await this.store.messages(key)).findLast((m) => m.role === "user")?.seq || 0;
       let forceWrapUpReason = "", consecutiveChromeNetErrors = 0;
+      let pendingLoopNotice = "", coordinatorLoopNudges = 0;
+      let phaseToolTurns = 0, phaseInputTokens = 0;
+      const loopGuard = session.phaseRole === "browser_agent"
+        ? createBrowserLoopGuard()
+        : session.phaseRole === "code_agent"
+          ? createToolLoopGuard({ browserNav: false, threshold: 4 })
+          : createToolLoopGuard({ browserNav: false, threshold: 5 });
       while (true) {
         control.signal.throwIfAborted();
-        const wrapUpTurn = !!session.phaseRole && !!forceWrapUpReason;
+        const wrapUpTurn = !!forceWrapUpReason;
         if (!session.phaseRole) await this.queuePendingSupplement(session, state.steer);
         for (const m of state.steer.splice(0)) {
           if (!(await this.admitWorkSteer(session, m))) continue;
@@ -1390,7 +1397,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         let model = await this.catalog.resolve(config, session.model);
         tools.config = latest;
         dynamic += await tools.rules(model, assigned?.text);
-        const phaseNotice = [phaseOpts?.notice, wrapUpTurn ? forceWrapUpReason : ""].filter(Boolean).join("\n");
+        const phaseNotice = [phaseOpts?.notice, pendingLoopNotice, wrapUpTurn ? forceWrapUpReason : ""].filter(Boolean).join("\n");
+        pendingLoopNotice = "";
         if (mainTask && frames.length && !session.agentChild) {
           const caller = frames.findLast((f) => f.resume), origin = frames[0];
           const returnHint = tools.specialist ? "直接回复阶段结果、不带工具调用" : "直接回复阶段结果、不带工具调用，或调用 task_complete";
@@ -1584,6 +1592,9 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         }
         assert(reply, "Provider retry exhausted");
         await tools.context.recordUsage(view, reply.usage || {}, canonicalView);
+        if (session.phaseRole && reply.usage) {
+          phaseInputTokens += (reply.usage.input || 0) + (reply.usage.cacheRead || 0) + (reply.usage.cacheWrite || 0);
+        }
         if (session.taskId && reply.text) reply.text = await this.store.files.resolveTaskScreenshots(session, reply.text);
         const savedReply = await this.store.append(key, { ...redactMessage(reply, redact), agentPhase: state.phase, ...(reply.calls?.length ? { toolScene: session.scene } : {}) });
         if (session.employeeId && !session.taskId && !session.groupId) this.employeeMessage(session.employeeId, key, savedReply);
@@ -1786,7 +1797,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
                 };
               }
               const res = await this.executeSinglePhase(session!, call, phase, latest, tools!, emit, redact, control, groupControl, () => steered, browserPhaseCount > 1);
-              if (phase.name === "browser_agent" && res.circuitBroken) browserCircuitBreakReason = res.circuitBreakReason || "连续网络/页面加载失败";
+              if (phase.name === "browser_agent" && res.circuitBroken && res.shareCircuitBreakAcrossBatch !== false) browserCircuitBreakReason = res.circuitBreakReason || "连续网络/页面加载失败";
               if (res.checkReturnModel) checkReturnModel = true;
               if (res.isCode && res.stageId) codeStages.push(res.stageId);
               return res.outcome;
@@ -1831,6 +1842,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             throw Error(`阶段结论已保存；无法返回轻量主控（场景「${session.scene || "lightweight"}」未配置模型）。恢复主控模型后继续，不重跑该阶段。`);
           }
         }
+        if (session.phaseRole) phaseToolTurns++;
         if (session.phaseRole === "browser_agent" && !forceWrapUpReason) {
           for (const [i, outcome] of outcomes.entries()) {
             const name = reply.calls[i].name;
@@ -1842,7 +1854,36 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
           if (consecutiveChromeNetErrors >= 2) {
             forceWrapUpReason = "[宿主熔断] 目标站点或代理连续 2 次网络/页面加载失败，宿主已熔断后续重试，本轮禁止再调用任何工具。请立刻以 `[BLOCKED]` 开头汇报已获取的真实事实与网络/代理报错并交回主控。";
-            phaseOpts?.onCircuitBreak?.(forceWrapUpReason);
+            phaseOpts?.onCircuitBreak?.(forceWrapUpReason, { shareAcrossBatch: true });
+          } else {
+            const stallReason = loopGuard.observe(reply.calls, outcomes);
+            if (stallReason) {
+              forceWrapUpReason = `[宿主熔断] 浏览器阶段${stallReason}，宿主已熔断后续重试，本轮禁止再调用任何工具。请立刻以 \`[BLOCKED]\` 开头汇报已获取的真实事实、当前状态与阻碍并交回主控；若目标是图片或静态文件直链，建议主控改用 bash 下载原文件后 read 查看。`;
+              phaseOpts?.onCircuitBreak?.(forceWrapUpReason, { shareAcrossBatch: false });
+            } else if (phaseToolTurns >= 120 || phaseInputTokens >= 25_000_000) {
+              forceWrapUpReason = `[宿主熔断] 浏览器阶段已达到安全护栏上限（${phaseToolTurns} 轮 / ~${Math.round(phaseInputTokens / 1000)}k tokens），本轮禁止再调用任何工具。请立刻以 \`[BLOCKED]\` 开头汇总当前已核实的事实、截图与未完成项交回主控。`;
+              phaseOpts?.onCircuitBreak?.(forceWrapUpReason, { shareAcrossBatch: false });
+            }
+          }
+        } else if (session.phaseRole === "code_agent" && !forceWrapUpReason) {
+          const stallReason = loopGuard.observe(reply.calls, outcomes);
+          if (stallReason) {
+            forceWrapUpReason = `[宿主熔断] 编码阶段${stallReason}，宿主已熔断后续重试，本轮禁止再调用任何工具。请立刻以 \`[BLOCKED]\` 开头汇报已完成改动、报错与阻塞原因并交回主控。`;
+            phaseOpts?.onCircuitBreak?.(forceWrapUpReason, { shareAcrossBatch: false });
+          } else if (phaseToolTurns >= 200 || phaseInputTokens >= 50_000_000) {
+            forceWrapUpReason = `[宿主熔断] 编码阶段已达到安全护栏上限（${phaseToolTurns} 轮 / ~${Math.round(phaseInputTokens / 1000)}k tokens），本轮禁止再调用任何工具。请立刻以 \`[BLOCKED]\` 开头汇报已完成改动、验证情况与未完成项交回主控。`;
+            phaseOpts?.onCircuitBreak?.(forceWrapUpReason, { shareAcrossBatch: false });
+          }
+        } else if (!session.phaseRole && !stop && !forceWrapUpReason) {
+          const stallReason = loopGuard.observe(reply.calls, outcomes);
+          if (stallReason) {
+            coordinatorLoopNudges++;
+            if (coordinatorLoopNudges === 1) {
+              pendingLoopNotice = `[宿主循环提醒] 检测到${stallReason}。请立即停止重复同一操作：改换排查/执行策略、汇总已有证据推进下一步，或调用 task_ask_user 向用户说明阻碍。`;
+              loopGuard.reset();
+            } else {
+              forceWrapUpReason = `[宿主熔断] 检测到持续循环重复（${stallReason}），本轮禁止继续调用工具。请直接总结当前已完成进度与卡点并回复用户。`;
+            }
           }
         }
         // Delivered: the session goes back to the scene the task left for computer, without another model turn.
@@ -1995,7 +2036,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     groupControl: AbortController,
     isSteered: () => boolean,
     concurrentBrowser = false,
-  ): Promise<{ outcome: Outcome; stop: boolean; pause?: string; checkReturnModel?: boolean; stageId?: string; isCode?: boolean; circuitBroken?: boolean; circuitBreakReason?: string }> {
+  ): Promise<{ outcome: Outcome; stop: boolean; pause?: string; checkReturnModel?: boolean; stageId?: string; isCode?: boolean; circuitBroken?: boolean; circuitBreakReason?: string; shareCircuitBreakAcrossBatch?: boolean }> {
     const specialist = phase.name;
     const targetScene = specialist === "code_agent" ? "coding" : "computer";
     const task = call.arguments?.task;
@@ -2037,7 +2078,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       // Model-mode code_agent claims workspace locks per-directory inside Tools.execute (write/edit/bash)
       // so read-only code probes and sibling Git worktrees run in parallel; CLI mode claims upfront inside runCodingCLI.
       const stage = await this.store.phaseStage(session, specialist, targetScene, target.selection, phase.seq);
-      let phasePause: string | undefined, circuitBroken = false, circuitBreakReason = "", runError: any;
+      let phasePause: string | undefined, circuitBroken = false, circuitBreakReason = "", shareCircuitBreakAcrossBatch = false, runError: any;
 
       emit("scene", { scene: targetScene, model: target.selection, phase: specialist, phaseSession: stage.id, callId: call.id });
       try {
@@ -2053,7 +2094,11 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               ? "[并发标签隔离] 当前有多个 browser_agent 并发共用同一浏览器，宿主已按会话强制隔离标签归属：请直接用 browser_tabs(action=\"open\") 新开独立标签并只操作自己打开的 tab，不要复用或关闭其他并发会话的标签。"
               : undefined,
             onPause: (reason) => { phasePause = reason; },
-            onCircuitBreak: (reason) => { circuitBroken = true; circuitBreakReason = reason; },
+            onCircuitBreak: (reason, opts) => {
+              circuitBroken = true;
+              circuitBreakReason = reason;
+              shareCircuitBreakAcrossBatch = opts?.shareAcrossBatch !== false;
+            },
           },
         );
       } catch (e: any) {
@@ -2118,7 +2163,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           : classifyPhaseStatus(specialist, finalText, evidence, { steered });
         const resultText = finalText || (
           steered ? "（因用户新补充提前中断，请结合 evidence 中已完成的真实操作决定下一步）"
-          : circuitBroken ? "[BLOCKED] 目标站点或代理连续 2 次网络/页面加载失败，宿主已熔断后续重试。"
+          : circuitBroken
+            ? (circuitBreakReason
+              ? (circuitBreakReason.startsWith("[BLOCKED]") ? circuitBreakReason : `[BLOCKED] ${circuitBreakReason}`)
+              : "[BLOCKED] 目标站点或代理连续 2 次网络/页面加载失败，宿主已熔断后续重试。")
           : "（阶段已结束，见 evidence）"
         );
         outcome = {
@@ -2142,7 +2190,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         checkReturnModel: !outcome.stop && !!session.taskId && !session.relayComputer,
         stageId: stage.id,
         isCode: specialist === "code_agent",
-        ...(circuitBroken ? { circuitBroken: true, circuitBreakReason } : {}),
+        ...(circuitBroken ? { circuitBroken: true, circuitBreakReason, shareCircuitBreakAcrossBatch } : {}),
       };
     } catch (e: any) {
       if (control.signal.aborted && !isSteered()) throw e;

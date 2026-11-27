@@ -1628,7 +1628,16 @@ export class Chrome {
     };
     if (scrollHint) out.scrollHint = scrollHint;
     if (raw?.loadingState && (raw.loadingState.skeleton || raw.loadingState.blank || raw.loadingState.readyState !== "complete")) {
-      out.loadingHint = `页面疑似仍处于加载中或空骨架屏（readyState=${raw.loadingState.readyState || "unknown"}，正文约 ${Number(raw.loadingState.textChars) || 0} 字）。可先用 browser_act(steps=[{op:"wait", ms:3000}]) 等待后观察，不要立刻 reload 打断加载；若等待后仍为空骨架，请先调用 browser_debug(kind="all") 开启网络与控制台捕获后再 reload 一次，核查是否有 401/SSO 登录失效、接口/JS 加载失败或代理超时。`;
+      out.loadingHint = raw.loadingState.media === true
+        ? `媒体/图片资源仍在加载中（contentType=${raw.loadingState.contentType || "media"}，readyState=${raw.loadingState.readyState || "loading"}）。请等待加载完成或交由主控用 bash 下载原文件后 read 查看，不要反复 goto/reload 打断传输。`
+        : `页面疑似仍处于加载中或空骨架屏（readyState=${raw.loadingState.readyState || "unknown"}，正文约 ${Number(raw.loadingState.textChars) || 0} 字）。可先用 browser_act(steps=[{op:"wait", ms:3000}]) 等待后观察，不要立刻 reload 打断加载；若等待后仍为空骨架，请先调用 browser_debug(kind="all") 开启网络与控制台捕获后再 reload 一次，核查是否有 401/SSO 登录失效、接口/JS 加载失败或代理超时。`;
+    } else if (raw?.media && typeof raw.media === "object") {
+      out.mediaReady = {
+        contentType: String(raw.media.contentType || "media"),
+        ...(Number(raw.media.naturalWidth) > 0 && Number(raw.media.naturalHeight) > 0
+          ? { naturalWidth: Math.round(Number(raw.media.naturalWidth)), naturalHeight: Math.round(Number(raw.media.naturalHeight)) }
+          : {}),
+      };
     }
     if (cursorImg) out.cursor = cursorImg;
     if (raw?.focused !== undefined && raw.focused !== null) out.focused = raw.focused;

@@ -26,6 +26,19 @@ export function explicitShellDirectory(command: string, windows: boolean): strin
     assert(path && absolute.test(path), error);
     return path;
   }
+  if (!windows) {
+    const tmpMkdir = /^mkdir[ \t]+-p[ \t]+(?:'([^']+)'|"([^"$`]+)"|([^\s;&|"'$`]+))[ \t]*(?:&&|;|\r?\n)/.exec(script);
+    const tmpDir = tmpMkdir && (tmpMkdir[1] || tmpMkdir[2] || tmpMkdir[3]);
+    if (tmpDir && /^\/tmp\/[^/\s]+/.test(tmpDir) && !/(?:^|[/\s'"])\.\.(?:$|[/\s'"])/.test(script)) {
+      const withoutUrls = script.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s'"`]+/gi, " ");
+      if (!/(?:^|[\s'"=<>])~(?:\/|[\s'"`]|$)/.test(withoutUrls)) {
+        const absRefs = [...withoutUrls.matchAll(/(?:^|[\s'"=<>])(\/[^\s'"`;|&)]+)/g)].map((m) => m[1]);
+        if (absRefs.length > 0 && absRefs.every((p) => p === "/tmp" || p.startsWith("/tmp/") || p === "/dev/null")) {
+          return tmpDir;
+        }
+      }
+    }
+  }
   return null;
 }
 

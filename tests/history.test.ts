@@ -131,3 +131,57 @@ test("promptHistory rolls off old browser elements/text and appuse controls/imag
   assert.equal(projected[11].images?.length, 1);
   assert.deepEqual(promptHistory(projected), projected);
 });
+
+test("historyImages retains up to 6 distinct mediaReady URLs in one tab while preserving 2-frame cap for regular pages", () => {
+  const rows: Message[] = [];
+  const pushMedia = (id: string, url: string) => {
+    rows.push(
+      { role: "assistant", calls: [{ id, name: "browser_tabs", arguments: { action: "goto", url } }] },
+      {
+        role: "tool",
+        name: "browser_tabs",
+        callId: id,
+        text: JSON.stringify({
+          tab: "C7",
+          url,
+          snapshotId: id,
+          mediaReady: { contentType: "image/png", naturalWidth: 1000, naturalHeight: 800 },
+          images: [{ path: `${id}.jpg`, frameStream: "C7:viewport" }],
+        }),
+        images: [{ mime: "image/jpeg", path: `${id}.jpg` }],
+      },
+    );
+  };
+  const pushPage = (id: string, url: string) => {
+    rows.push(
+      { role: "assistant", calls: [{ id, name: "browser_view", arguments: { tab: "C7" } }] },
+      {
+        role: "tool",
+        name: "browser_view",
+        callId: id,
+        text: JSON.stringify({
+          tab: "C7",
+          url,
+          snapshotId: id,
+          elements: `[1] button "${id}"`,
+          text: `page ${id}`,
+          images: [{ path: `${id}.jpg`, frameStream: "C7:viewport" }],
+        }),
+        images: [{ mime: "image/jpeg", path: `${id}.jpg` }],
+      },
+    );
+  };
+
+  pushMedia("m-dup-old", "https://example.test/1.png");
+  pushMedia("m-1", "https://example.test/1.png");
+  pushMedia("m-2", "https://example.test/2.png");
+  pushMedia("m-3", "https://example.test/3.png");
+  pushPage("p-1", "https://example.test/p1");
+  pushPage("p-2", "https://example.test/p2");
+  pushPage("p-3", "https://example.test/p3");
+
+  const projected = promptHistory(rows);
+  const kept = projected.flatMap((m) => (m.images || []).map((im) => im.path));
+  assert.deepEqual(kept, ["m-1.jpg", "m-2.jpg", "m-3.jpg", "p-2.jpg", "p-3.jpg"]);
+  assert.deepEqual(promptHistory(projected), projected);
+});
