@@ -66,6 +66,25 @@ export class Files {
       (e: NodeJS.ErrnoException) => e.code !== "ENOENT" && e.code !== "ENOTDIR")) return;
     return this.url(path) + (link?.[4] || "");
   }
+  /** Resolve a task-scoped screenshot/archive/blob image reference into a safe web URL, or undefined if invalid/external. */
+  async resolveTaskImageUrl(scope: Pick<Session, "employeeId" | "taskId">, raw: string): Promise<string | undefined> {
+    const value = String(raw || "").trim();
+    if (!value || /\s|[\u0000-\u001f\u007f]/.test(value) || value.includes("..")) return undefined;
+    const blob = /^(?:\/api\/blobs\/|sqlite:blob\/)(blob-[a-f\d]{32})$/i.exec(value);
+    if (blob) return "/api/blobs/" + blob[1];
+    if (scope.employeeId && scope.taskId) {
+      const resolved = await this.taskShotUrl(scope.employeeId, scope.taskId, value);
+      if (resolved) return resolved;
+    }
+    if (/^\/api\/files\/(?:[\w.%-]+\/)*[\w.%-]+\.(?:webp|png|jpe?g)$/i.test(value) && !/(^|\/)\.\.?(\/|$)/.test(value.slice(11))) {
+      return value;
+    }
+    const own = this.own(value);
+    if (own && this.mime(own) && await lstat(own).then((file) => file.isFile(), () => false)) {
+      return this.url(own);
+    }
+    return undefined;
+  }
   async resolveTaskScreenshots({ employeeId, taskId }: Pick<Session, "employeeId" | "taskId">, text: string) {
     if (!employeeId || !taskId || !text.includes("![")) return text;
     const urls = new Map<string, Promise<string | undefined>>();

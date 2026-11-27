@@ -5,8 +5,8 @@ import TaskDetail from "./TaskDetail.vue";
 import { taskLabel, taskTone, planProgress, shortTime, needsAttention } from "./task-status";
 import { chainEdgeLabel, chainTasks, groupTasksByChain } from "../../shared/task-chain";
 import { cleanTaskTitle } from "./conversation.js";
-const props = defineProps({ active: Array, attention: Array, history: Array, filter: String, focus: String, readonly: Boolean, act: Function, saveMemory: Function, employeeId: String, clients: Array, handoff: Function });
-const emit = defineEmits(["filter", "select", "inspect", "chat", "quote-task"]);
+const props = defineProps({ active: Array, attention: Array, history: Array, filter: String, focus: String, readonly: Boolean, act: Function, saveMemory: Function, employeeId: String, clients: Array, handoff: Function, canOpenBrowser: Boolean });
+const emit = defineEmits(["filter", "select", "inspect", "chat", "quote-task", "open-browser", "open-settings"]);
 const list = ref(null);
 const media = window.matchMedia("(min-width: 1024px)"), twoPane = ref(media.matches);
 const sync = () => { twoPane.value = media.matches; };
@@ -102,7 +102,7 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
       <p class="task-tip"><Icon name="zap" :size="13" />新任务先由轻量模型起步，涉及编码再在原会话升级。</p>
     </section>
     <section class="task-detail-pane" aria-label="任务详情">
-      <TaskDetail v-if="selected" :key="selected.id" :task="selected" :chain-tasks="selectedChainTasks" :employee-id="employeeId" :readonly="readonly" :back="!twoPane" :act="(action, answer) => act(selected, action, answer)" :clients="clients" :handoff="handoff ? (clientId) => handoff(selected, clientId) : undefined" :save-memory="saveMemory" @inspect="emit('inspect', $event)" @back="emit('select', '')" @select-task="emit('select', $event)" @quote-task="emit('quote-task', $event)" />
+      <TaskDetail v-if="selected" :key="selected.id" :task="selected" :chain-tasks="selectedChainTasks" :employee-id="employeeId" :readonly="readonly" :back="!twoPane" :act="(action, answer) => act(selected, action, answer)" :clients="clients" :handoff="handoff ? (clientId) => handoff(selected, clientId) : undefined" :save-memory="saveMemory" :can-open-browser="canOpenBrowser" @inspect="emit('inspect', $event)" @back="emit('select', '')" @select-task="emit('select', $event)" @quote-task="emit('quote-task', $event)" @open-browser="emit('open-browser', $event)" @open-settings="emit('open-settings', $event)" />
       <div v-else class="detail-empty"><Icon name="tasks" :size="32" /><p>选择左侧任务查看进度、计划与结果</p></div>
     </section>
   </div>

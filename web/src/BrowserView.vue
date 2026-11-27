@@ -1,8 +1,8 @@
 <script setup vapor>
 import Icon from "./Icon.vue";
 import { SseSocket } from "./sse-socket.js";
-import { computed, ref, onMounted, onBeforeUnmount } from "vue";
-const props = defineProps({ api: Function, employeeId: String, csrf: String });
+import { computed, ref, watch, onMounted, onBeforeUnmount } from "vue";
+const props = defineProps({ api: Function, employeeId: String, csrf: String, targetTab: Object, onReturnTask: Function, onCompleteAssist: Function, onDismissTarget: Function });
 const status = ref(null),
   tabs = ref([]),
   selected = ref(""),
@@ -342,21 +342,57 @@ async function stopBrowser() {
   } catch (e) { error.value = e.message; }
   finally { busy.value = false; }
 }
+function pickTargetTab(list) {
+  const hint = props.targetTab;
+  if (hint) {
+    const byTag = hint.tabTag ? list.find((t) => t.tag === hint.tabTag && viewable(t)) : null;
+    if (byTag) return { tab: byTag, matched: true };
+    if (hint.url) {
+      const exact = list.find((t) => t.url === hint.url && viewable(t));
+      if (exact) return { tab: exact, matched: true };
+      try {
+        const want = new URL(hint.url);
+        const byPath = list.find((t) => {
+          if (!viewable(t)) return false;
+          try { const u = new URL(t.url); return u.origin === want.origin && u.pathname === want.pathname; } catch { return false; }
+        });
+        if (byPath) return { tab: byPath, matched: true };
+        const byOrigin = list.find((t) => {
+          if (!viewable(t)) return false;
+          try { return new URL(t.url).origin === want.origin; } catch { return false; }
+        });
+        if (byOrigin) return { tab: byOrigin, matched: true };
+      } catch {}
+    }
+  }
+  const fallback =
+    list.find((t) => t.tag === selected.value && viewable(t)) ||
+    list.find((t) => t.active && viewable(t)) ||
+    list.find(viewable);
+  return { tab: fallback, matched: !hint };
+}
+function completeAssist() {
+  if (!props.targetTab?.taskId || busy.value) return;
+  const reply = props.targetTab.kind === "qr_login"
+    ? "我已完成扫码登录，请继续原任务"
+    : "我已在浏览器中完成操作，请继续原任务";
+  props.onCompleteAssist?.({ taskId: props.targetTab.taskId, reply });
+}
 async function refresh() {
   if (busy.value) return;
   const request = ++version;
   busy.value = true;
   error.value = "";
   let target;
+  let matched = true;
   try {
     const result = await props.api("/chrome/tabs");
     if (disposed || request !== version) return;
     status.value = result;
     tabs.value = result.tabs || [];
-    target =
-      tabs.value.find((t) => t.tag === selected.value && viewable(t)) ||
-      tabs.value.find((t) => t.active && viewable(t)) ||
-      tabs.value.find(viewable);
+    const picked = pickTargetTab(tabs.value);
+    target = picked.tab;
+    matched = picked.matched;
     if (!target) {
       selected.value = "";
       screenshot.value = null;
@@ -372,7 +408,15 @@ async function refresh() {
   } finally {
     if (!disposed && request === version) busy.value = false;
   }
-  if (!disposed && request === version && target) await capture(target);
+  if (!disposed && request === version && target) {
+    await capture(target);
+    if (!matched && !info.value) info.value = "未精确匹配到原标签页，已为你打开可用标签页，可手动切换。";
+  }
+}
+if (typeof watch === "function") {
+  watch(() => props.targetTab?.seq, (seq) => {
+    if (seq && status.value && !busy.value) void refresh();
+  });
 }
 function keyboard(event) {
   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -872,6 +916,18 @@ onBeforeUnmount(() => {
         <button v-if="employeeId" type="button" class="sm ghost" :disabled="busy" title="停止实例" @click="stopBrowser"><Icon name="stop" :size="13" /><span class="btn-label">停止实例</span></button>
       </div>
     </header>
+    <div v-if="targetTab?.taskId" class="assist-browser-banner" role="region" aria-label="任务协助引导">
+      <div class="assist-banner-text">
+        <Icon name="hand" :size="15" />
+        <span><strong>正在协助任务：</strong>{{ targetTab.taskTitle || '当前任务' }}</span>
+        <small>点下方「开始操作」即可点击或扫码，完成后点右侧按钮继续任务。</small>
+      </div>
+      <div class="assist-banner-actions">
+        <button type="button" class="primary sm" :disabled="busy" @click="completeAssist"><Icon name="check" :size="14" />操作完成，继续任务</button>
+        <button type="button" class="sm" :disabled="busy" @click="props.onReturnTask?.(targetTab.taskId)">返回任务</button>
+        <button type="button" class="icon sm" aria-label="收起提示" @click="props.onDismissTarget?.()"><Icon name="close" :size="14" /></button>
+      </div>
+    </div>
     <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span></p>
     <p v-if="info" class="banner notice remote-notice" role="status"><span>{{ info }}</span></p>
     <div id="browser-screenshot-panel" class="browser-panel" role="tabpanel" aria-label="所选标签页截图">
@@ -996,6 +1052,12 @@ onBeforeUnmount(() => {
 .conn { display: inline-flex; align-items: center; gap: 6px; padding: 0 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .conn.ok { color: var(--ok); }
 .browser-view > .banner { flex: none; }
+.assist-browser-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; flex: none; padding: 8px 12px; border-bottom: 1px solid var(--warn-border); background: var(--warn-soft); }
+.assist-banner-text { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; color: var(--text); font-size: 12.5px; }
+.assist-banner-text .icon-svg { color: var(--warn); }
+.assist-banner-text strong { color: var(--warn); }
+.assist-banner-text small { color: var(--text-2); font-size: 11.5px; }
+.assist-banner-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
 .browser-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .browser-address { display: flex; align-items: center; gap: 12px; flex: none; min-height: 48px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .address-text { display: grid; flex: 1; min-width: 0; }

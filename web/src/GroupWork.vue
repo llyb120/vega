@@ -8,7 +8,7 @@ import { chainEdgeLabel, chainTasks, groupTasksByChain } from "../../shared/task
 // The group's 工作面板: tasks started from this group, by member employee (GET /groups/:id/tasks, already ordered).
 // Task details stay beside the chat; owners can explicitly open their execution workspace.
 const props = defineProps({ members: Array, loading: Boolean, api: Function, groupId: String, focus: Object });
-const emit = defineEmits(["select", "exit", "title", "open", "inspect", "close", "changed", "quote-task"]);
+const emit = defineEmits(["select", "exit", "title", "open", "inspect", "close", "changed", "quote-task", "open-browser", "open-settings"]);
 const selectedKey = computed(() => props.focus || null), selected = ref(null), detailLoading = ref(false), error = ref(""), filter = ref("all");
 const owned = () => props.members?.some((member) => member.mine && member.id === selectedKey.value?.member);
 const requester = (task) => task.requester?.kind === "employee" ? `热心市民「${task.requester.name}」` : task.requester?.name || "";
@@ -106,7 +106,7 @@ onBeforeUnmount(() => { version++; });
       <p v-if="detailLoading && !selected" class="panel-empty">正在读取任务…</p>
       <template v-if="selected">
         <p class="panel-empty access-note"><Icon name="lock" :size="12" />{{ selected.canControl ? '你可以操作此任务' : '只读 · 仅任务发起人或热心市民的归属用户可操作' }}<button v-if="owned()" type="button" class="link" @click="emit('open', { employeeId: selectedKey.member, taskId: selectedKey.task })">打开任务会话</button></p>
-        <TaskDetail :key="selected.id" :task="selected" :chain-tasks="selectedChainTasks" :employee-id="selectedKey.member" :readonly="!selected.canControl" :act="control" @inspect="emit('inspect', $event)" @select-task="selectChainTask" @quote-task="emit('quote-task', { ...$event, memberId: selectedKey.member })" />
+        <TaskDetail :key="selected.id" :task="selected" :chain-tasks="selectedChainTasks" :employee-id="selectedKey.member" :readonly="!selected.canControl" :act="control" :can-open-browser="owned()" @inspect="emit('inspect', $event)" @select-task="selectChainTask" @quote-task="emit('quote-task', { ...$event, memberId: selectedKey.member })" @open-browser="emit('open-browser', { ...$event, employeeId: selectedKey.member })" @open-settings="emit('open-settings', $event)" />
       </template>
     </div>
     <div v-else class="panel-scroll">

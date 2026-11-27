@@ -18,7 +18,7 @@ import { markSeen, seenSeq } from "./seen.js";
 import PressMention from "./PressMention.vue";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
 const props = defineProps({ api: Function, user: Object, groupId: String, selectedTask: Object, myEmployees: Array, revision: Number });
-const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "inspect", "cancel", "read", "task-change"]);
+const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "inspect", "cancel", "read", "task-change", "open-browser", "open-settings"]);
 // Work panel: side-by-side from 768px (GroupWork stops overlaying); drawers stay closed until opened.
 const roomy = () => typeof matchMedia === "function" && matchMedia("(min-width: 768px)").matches;
 const group = ref(null), error = ref(""), sending = ref(false), panel = ref(false), work = ref(roomy()), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null);
@@ -452,7 +452,7 @@ onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); 
             <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天 · # 引用任务 · /new 用新任务执行' : '回复消息、@ 热心市民或 # 引用任务 · /new 用新任务执行' }} · Enter 发送 · Shift + Enter 换行</p>
           </form>
         </section>
-        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @exit="exitTask" @title="topicTitle = $event" @open="emit('open-task', $event)" @inspect="emit('inspect', $event)" @changed="run(loadWork)" @quote-task="quoteTask" @close="work = false" />
+        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @exit="exitTask" @title="topicTitle = $event" @open="emit('open-task', $event)" @inspect="emit('inspect', $event)" @changed="run(loadWork)" @quote-task="quoteTask" @open-browser="emit('open-browser', $event)" @open-settings="emit('open-settings', $event)" @close="work = false" />
         <aside v-if="panel && group" class="group-panel" aria-label="群成员与公告">
           <section>
             <h3>群公告</h3>

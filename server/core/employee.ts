@@ -25,6 +25,22 @@ import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
 import { sortChainTasks, type TaskChainFields, type TaskEdgeKind } from "../../shared/task-chain";
 import {
+  ASSIST_KINDS,
+  ASSIST_SETTINGS_ROUTES,
+  extractMarkdownImageUrls,
+  inferAssistFromText,
+  safeExternalUrl,
+  type BrowserAssistContext,
+  type TaskAssist,
+  type TaskAssistAction,
+  type TaskAssistBrowser,
+  type TaskAssistField,
+  type TaskAssistImage,
+  type TaskAssistKind,
+  type TaskAssistOption,
+  type TaskAssistSettingsRoute,
+} from "../../shared/task-assist";
+import {
   explicitScheduleEvent,
   nextDue,
   planIntake,
@@ -61,6 +77,7 @@ export type Task = Obj & TaskChainFields & {
   proactive?: boolean;
   seenEvents?: string[];
   seenEvidence?: string[];
+  waitingAssist?: TaskAssist;
   backgroundWait?: { token: string; session: string; ready?: boolean };
 };
 type LiveSuspension = { session: string; token: string; wait: TaskSuspension; ready?: { text?: string } };
@@ -159,6 +176,15 @@ const planUnresolved = (plan: Obj[] | undefined) =>
   );
 const SETTLE_CHOICE =
   "请选择：1) 接受当前已有结论作为最终交付；2) 说明仍需继续的具体步骤。回复前不会自动恢复执行。";
+const settleAssist = (title: string): TaskAssist => ({
+  kind: "choice",
+  title,
+  options: [
+    { label: "接受当前已有结论作为最终交付", value: "1", recommended: true },
+    { label: "继续完成剩余步骤（需补充说明）", value: "2", needsDetail: true },
+  ],
+  allowCustom: true,
+});
 const unfinishedSteps = (plan: Obj[] | undefined) => (plan || []).flatMap((step, index) =>
   step.status === "completed" ? [] : [{ index: index + 1, content: step.content }]);
 const unfinishedText = (steps: { index: number; content: string }[]) =>
@@ -741,6 +767,7 @@ export class Employee {
       t.nextCheckAt = 0;
       t.settlePreferred = true;
       t.waiting = `自动恢复已达上限（${expired ? "距首次中断已超过 30 分钟" : "恢复次数用尽"}）：${recovery.reason}\n` + unfinishedText(unfinishedSteps(t.plan)) + SETTLE_CHOICE;
+      t.waitingAssist = settleAssist("自动恢复已达上限，请选择处理方式");
       return;
     }
     t.status = "recovering";
@@ -1419,6 +1446,7 @@ export class Employee {
               delete t.deliverableNeeded;
               delete t.deliverableWarned;
               delete t.settleNudges;
+              delete t.waitingAssist;
 
               const candidates = extractMemoryCandidates({
                 summary: t.summary,
@@ -1658,8 +1686,13 @@ export class Employee {
                 this.note(s, t, "confirm", owner.name || "热心市民", content);
               }
               if (action === "help") {
+                const archive = { employeeId: this.employeeId, taskId: t.id };
+                const resolvedText = await this.store.files.resolveTaskScreenshots(archive, content);
                 t.status = "waiting";
-                t.waiting = content;
+                t.waiting = resolvedText;
+                const assist = await this.buildWaitingAssist(t, a.assist, resolvedText, now);
+                if (assist) t.waitingAssist = assist;
+                else delete t.waitingAssist;
                 this.note(s, t, "help", "热心市民", t.waiting);
               }
               if (action === "defer") {
@@ -1780,6 +1813,258 @@ export class Employee {
     }
     return { value, stop };
   }
+  /** Inspect current-turn browser observations/evidence so waitingAssist can show screenshots and tab links automatically. */
+  private async recentBrowserAssistContext(t: Task): Promise<BrowserAssistContext | undefined> {
+    const sessions = [...new Set([t.workSession, t.computerSession].filter((v): v is string => typeof v === "string" && !!v))];
+    let tabTag: string | undefined;
+    let url: string | undefined;
+    let title: string | undefined;
+    let screenshotUrl: string | undefined;
+    let capturedAt: number | undefined;
+    for (const sessionId of sessions) {
+      const rows = await this.store.messages(sessionId).catch(() => [] as Message[]);
+      const lastUserIdx = rows.findLastIndex((m) => m.role === "user" && m.runtime !== "dynamic");
+      const recent = lastUserIdx >= 0 ? rows.slice(lastUserIdx + 1) : rows;
+      for (const m of recent) {
+        if (m.role !== "tool") continue;
+        let parsed: Obj | undefined;
+        try {
+          const raw = JSON.parse(String(m.text || ""));
+          if (raw && typeof raw === "object") parsed = raw;
+        } catch {}
+        if (m.name === "browser_agent" && parsed?.evidence && typeof parsed.evidence === "object") {
+          const ev = parsed.evidence as Obj;
+          if (Array.isArray(ev.tabs) && ev.tabs.length) {
+            const lastTab = ev.tabs.at(-1) as Obj;
+            if (typeof lastTab?.tabTag === "string" && lastTab.tabTag) tabTag = lastTab.tabTag;
+            if (typeof lastTab?.url === "string" && lastTab.url) url = lastTab.url;
+            if (typeof lastTab?.title === "string" && lastTab.title) title = lastTab.title;
+          }
+          if (Array.isArray(ev.visitedUrls) && ev.visitedUrls.length) {
+            const lastVisited = ev.visitedUrls.at(-1) as Obj;
+            if (typeof lastVisited?.url === "string" && lastVisited.url) url = lastVisited.url;
+            if (typeof lastVisited?.title === "string" && lastVisited.title) title = lastVisited.title;
+          }
+          if (Array.isArray(ev.screenshots) && ev.screenshots.length) {
+            const shot = ev.screenshots.at(-1) as Obj;
+            const candidate = typeof shot?.url === "string" && shot.url ? shot.url : typeof shot?.path === "string" ? shot.path : "";
+            if (candidate) {
+              screenshotUrl = candidate;
+              capturedAt = typeof m.at === "number" ? m.at : capturedAt;
+            }
+          }
+          continue;
+        }
+        if (m.name && (m.name.startsWith("browser_") || m.name.startsWith("chrome_"))) {
+          if (typeof parsed?.tabTag === "string" && parsed.tabTag) tabTag = parsed.tabTag;
+          else if (typeof parsed?.tab === "string" && parsed.tab) tabTag = parsed.tab;
+          if (Array.isArray(parsed?.tabs)) {
+            const picked = parsed.tabs.find((item: Obj) => item?.tag === tabTag || item?.active) || parsed.tabs.at(-1);
+            if (picked) {
+              if (!tabTag && typeof picked.tag === "string" && picked.tag) tabTag = picked.tag;
+              if (typeof picked.url === "string" && picked.url) url = picked.url;
+              if (typeof picked.title === "string" && picked.title) title = picked.title;
+            }
+          }
+          if (typeof parsed?.url === "string" && parsed.url) url = parsed.url;
+          if (typeof parsed?.title === "string" && parsed.title) title = parsed.title;
+          if (Array.isArray(parsed?.pages) && parsed.pages[0]) {
+            const page = parsed.pages[0] as Obj;
+            if (typeof page.url === "string" && page.url) url = page.url;
+            if (typeof page.title === "string" && page.title) title = page.title;
+          }
+          const shot = (Array.isArray(parsed?.images) ? parsed.images.at(-1) : undefined) || m.images?.at(-1);
+          const candidate = typeof shot?.url === "string" && shot.url ? shot.url : typeof shot?.path === "string" ? shot.path : "";
+          if (candidate) {
+            screenshotUrl = candidate;
+            capturedAt = typeof m.at === "number" ? m.at : capturedAt;
+          }
+        }
+      }
+    }
+    if (!tabTag && !url && !title && !screenshotUrl) return undefined;
+    return { tabTag, url, title, screenshotUrl, capturedAt };
+  }
+
+  private async buildWaitingAssist(t: Task, rawAssist: unknown, resolvedQuestion: string, now: number): Promise<TaskAssist | undefined> {
+    const raw = rawAssist && typeof rawAssist === "object" && !Array.isArray(rawAssist) ? rawAssist as Obj : undefined;
+    const browserCtx = await this.recentBrowserAssistContext(t);
+    const inferred = inferAssistFromText(resolvedQuestion, browserCtx);
+    const kind = (typeof raw?.kind === "string" && (ASSIST_KINDS as readonly string[]).includes(raw.kind)
+      ? raw.kind
+      : inferred.kind) as TaskAssistKind | undefined;
+
+    const cleanStr = (v: unknown, max: number) => {
+      if (typeof v !== "string") return undefined;
+      const s = v.trim();
+      return s ? clip(s, max) : undefined;
+    };
+
+    const title = cleanStr(raw?.title, 80);
+    const hint = cleanStr(raw?.hint, 400);
+
+    const options: TaskAssistOption[] = [];
+    if (Array.isArray(raw?.options)) {
+      for (const item of raw.options.slice(0, 12)) {
+        if (!item || typeof item !== "object") continue;
+        const label = cleanStr(item.label, 120);
+        if (!label) continue;
+        const value = cleanStr(item.value, 200);
+        const description = cleanStr(item.description, 240);
+        const tone = ["default", "primary", "danger"].includes(item.tone) ? item.tone : undefined;
+        options.push({
+          label,
+          ...(value ? { value } : {}),
+          ...(description ? { description } : {}),
+          ...(item.recommended === true ? { recommended: true } : {}),
+          ...(tone ? { tone } : {}),
+          ...(item.needsDetail === true ? { needsDetail: true } : {}),
+        });
+      }
+    }
+
+    const fields: TaskAssistField[] = [];
+    if (Array.isArray(raw?.fields)) {
+      for (const item of raw.fields.slice(0, 8)) {
+        if (!item || typeof item !== "object") continue;
+        const key = cleanStr(item.key, 60);
+        const label = cleanStr(item.label, 80);
+        if (!key || !label) continue;
+        const type = ["text", "textarea", "code", "select", "checkbox"].includes(item.type) ? item.type : "text";
+        const placeholder = cleanStr(item.placeholder, 120);
+        const description = cleanStr(item.description, 200);
+        const fieldOptions = Array.isArray(item.options)
+          ? item.options.map((v: unknown) => cleanStr(v, 120)).filter((v: string | undefined): v is string => !!v).slice(0, 20)
+          : undefined;
+        const defaultValue = typeof item.defaultValue === "boolean" || typeof item.defaultValue === "string"
+          ? item.defaultValue
+          : undefined;
+        fields.push({
+          key,
+          label,
+          type,
+          ...(placeholder ? { placeholder } : {}),
+          ...(description ? { description } : {}),
+          ...(item.required === true ? { required: true } : {}),
+          ...(defaultValue !== undefined ? { defaultValue } : {}),
+          ...(fieldOptions?.length ? { options: fieldOptions } : {}),
+        });
+      }
+    }
+
+    const quickActions: TaskAssistAction[] = [];
+    if (Array.isArray(raw?.quickActions)) {
+      for (const item of raw.quickActions.slice(0, 4)) {
+        if (!item || typeof item !== "object") continue;
+        const label = cleanStr(item.label, 60);
+        const reply = cleanStr(item.reply, 500);
+        if (!label || !reply) continue;
+        const tone = ["primary", "default", "danger"].includes(item.tone) ? item.tone : undefined;
+        quickActions.push({ label, reply, ...(tone ? { tone } : {}) });
+      }
+    }
+
+    const archive = { employeeId: this.employeeId, taskId: t.id };
+    const images: TaskAssistImage[] = [];
+    const seenUrls = new Set<string>();
+    const addImage = async (rawUrl: unknown, caption?: string, volatile?: boolean, at = now) => {
+      if (images.length >= 4 || typeof rawUrl !== "string") return;
+      const resolved = await this.store.files.resolveTaskImageUrl(archive, rawUrl);
+      if (!resolved || seenUrls.has(resolved)) return;
+      seenUrls.add(resolved);
+      images.push({
+        url: resolved,
+        ...(caption ? { caption } : {}),
+        capturedAt: at,
+        ...(volatile ? { volatile: true } : {}),
+      });
+    };
+
+    if (Array.isArray(raw?.images)) {
+      for (const item of raw.images.slice(0, 4)) {
+        if (!item || typeof item !== "object") continue;
+        await addImage(item.url, cleanStr(item.caption, 120), item.volatile === true || kind === "qr_login", now);
+      }
+    }
+
+    const browserAssistNeeded = kind === "qr_login" || kind === "browser_action" || kind === "verification" || !!raw?.browser;
+    let browser: TaskAssistBrowser | undefined;
+    if (browserAssistNeeded) {
+      const rawBrowser = raw?.browser && typeof raw.browser === "object" ? raw.browser as Obj : undefined;
+      const tabTag = cleanStr(rawBrowser?.tabTag, 200) || browserCtx?.tabTag;
+      const rawUrl = cleanStr(rawBrowser?.url, 2048) || browserCtx?.url;
+      const safeUrl = rawUrl === "about:blank" ? "about:blank" : safeExternalUrl(rawUrl);
+      const bTitle = cleanStr(rawBrowser?.title, 200) || browserCtx?.title;
+      if (tabTag || safeUrl || bTitle) {
+        browser = {
+          ...(tabTag ? { tabTag } : {}),
+          ...(safeUrl ? { url: safeUrl } : {}),
+          ...(bTitle ? { title: bTitle } : {}),
+        };
+      }
+    }
+
+    if (!images.length && (kind === "qr_login" || kind === "browser_action" || kind === "verification")) {
+      if (browserCtx?.screenshotUrl) {
+        await addImage(
+          browserCtx.screenshotUrl,
+          kind === "qr_login" ? "当前页面二维码截图" : "当前浏览器页面截图",
+          kind === "qr_login",
+          browserCtx.capturedAt || now,
+        );
+      }
+      if (!images.length && kind === "qr_login") {
+        for (const mdUrl of extractMarkdownImageUrls(resolvedQuestion)) {
+          await addImage(mdUrl, "当前页面二维码截图", true, now);
+        }
+      }
+    }
+
+    let externalUrl: TaskAssist["externalUrl"];
+    if (raw?.externalUrl && typeof raw.externalUrl === "object") {
+      const safe = safeExternalUrl((raw.externalUrl as Obj).url);
+      if (safe) {
+        const label = cleanStr((raw.externalUrl as Obj).label, 80);
+        externalUrl = { url: safe, ...(label ? { label } : {}) };
+      }
+    }
+
+    const settingsRoute = (typeof raw?.settingsRoute === "string" && (ASSIST_SETTINGS_ROUTES as readonly string[]).includes(raw.settingsRoute)
+      ? raw.settingsRoute
+      : inferred.settingsRoute) as TaskAssistSettingsRoute | undefined;
+    const settingsLabel = cleanStr(raw?.settingsLabel, 80) || (settingsRoute === inferred.settingsRoute ? inferred.settingsLabel : undefined);
+
+    const hasContent =
+      (kind && kind !== "general") ||
+      !!title ||
+      !!hint ||
+      options.length > 0 ||
+      fields.length > 0 ||
+      images.length > 0 ||
+      !!browser ||
+      quickActions.length > 0 ||
+      !!externalUrl ||
+      !!settingsRoute;
+    if (!hasContent) return undefined;
+
+    return {
+      ...(kind ? { kind } : {}),
+      ...(title ? { title } : {}),
+      ...(hint ? { hint } : {}),
+      ...(options.length ? { options } : {}),
+      ...(typeof raw?.multiSelect === "boolean" ? { multiSelect: raw.multiSelect } : {}),
+      ...(typeof raw?.allowCustom === "boolean" ? { allowCustom: raw.allowCustom } : {}),
+      ...(fields.length ? { fields } : {}),
+      ...(images.length ? { images } : {}),
+      ...(browser ? { browser } : {}),
+      ...(quickActions.length ? { quickActions } : {}),
+      ...(externalUrl ? { externalUrl } : {}),
+      ...(settingsRoute ? { settingsRoute } : {}),
+      ...(settingsLabel ? { settingsLabel } : {}),
+      capturedAt: now,
+    };
+  }
+
   note(s: EmployeeState, t: Task, kind: string, who: string, text: string) {
     const run = [...s.runs].reverse().find((r) => r.taskId === t.id);
     if (run) {
@@ -1894,6 +2179,7 @@ export class Employee {
             t.status = "queued";
             t.nextCheckAt = 0;
             t.waiting = "";
+            delete t.waitingAssist;
             t.finishedAt = 0;
             return { ok: true, duplicate };
           }
@@ -1909,6 +2195,7 @@ export class Employee {
               t.status = "sealed";
               t.nextCheckAt = 0;
               t.waiting = "";
+              delete t.waitingAssist;
               t.approval = "";
               t.recovery = undefined;
               t.workspaceWait = undefined;
@@ -1926,6 +2213,7 @@ export class Employee {
               const wasActive = !ended(t.status);
               t.status = "stopped";
               t.nextCheckAt = 0;
+              delete t.waitingAssist;
               this.clearBackgroundWait(t);
               delete t.partialDelivery;
               delete t.approvedPartial;
@@ -1966,6 +2254,7 @@ export class Employee {
               t.answer = `你问：${t.waiting}\n${owner.name || "用户"}答：${clip(a.text, 8000)}`;
               t.lastSupplement = undefined;
               t.waiting = "";
+              delete t.waitingAssist;
               t.status = "queued";
               t.nextCheckAt = 0;
               this.note(s, t, "answer", owner.name || "用户", a.text);
@@ -2226,8 +2515,13 @@ export class Employee {
     task.status = status;
     task.nextCheckAt = nextCheckAt;
     task.finishedAt = 0;
-    if (status === "waiting") task.waiting = reason;
-    else if (status === "queued" || status === "deferred") task.waiting = "";
+    if (status === "waiting") {
+      task.waiting = reason;
+      delete task.waitingAssist;
+    } else if (status === "queued" || status === "deferred") {
+      task.waiting = "";
+      delete task.waitingAssist;
+    }
   }
   /** 当前步骤结束后才吸收。返回 true 表示同一条任务要再走一轮，这一轮不能当成做完。 */
   private absorbStep(task: Task) {
@@ -2251,10 +2545,12 @@ export class Employee {
     if (hold) {
       task.status = "waiting";
       task.waiting = hold.text;
+      delete task.waitingAssist;
       task.nextCheckAt = 0;
       return true;
     }
     task.status = "queued";
+    delete task.waitingAssist;
     task.nextCheckAt = 0;
     return true;
   }
@@ -2724,6 +3020,7 @@ export class Employee {
                     t.status = "waiting";
                     t.nextCheckAt = 0;
                     t.waiting = "任务尚未正式交付。\n" + unfinishedText(unfinishedSteps(t.plan)) + SETTLE_CHOICE;
+                    t.waitingAssist = settleAssist("任务尚未正式交付，请选择处理方式");
                   } else if (!computer && body && (t.settleNudges || 0) < 2) {
                     // A delivery body exists but the plan is not settled: point at it instead of pasting it back, so it is cited, not rewritten.
                     t.settleNudges = (t.settleNudges || 0) + 1;
@@ -2805,11 +3102,18 @@ export class Employee {
         const chars = [...String(full)];
         const body = (delivered && chars.length > 400 ? chars.slice(0, 400).join("") + "…" : String(full)) + (delivered && task.deliverable ? "\n\n完整交付物见任务详情。" : "");
         const quote = !task.group && task.chatSource?.session === state.chatSession && await this.store.message(state.chatSession!, task.chatSource.seq) ? await this.store.quote(state.chatSession!, task.chatSource.seq) : undefined;
+        const assistImages = !delivered && task.status === "waiting" && task.waitingAssist?.images?.length
+          ? task.waitingAssist.images
+              .filter((img) => img.url && !body.includes(img.url))
+              .slice(0, 2)
+              .map((img) => ({ mime: "image/jpeg", url: img.url }))
+          : [];
         const message: Message = {
           role: "assistant",
           text: "**" + heading + "**\n\n" + body,
           quote,
           delivery: true,
+          ...(assistImages.length ? { images: assistImages } : {}),
           ...(delivered && task.deliverableFiles?.length ? { files: task.deliverableFiles } : {}),
           ...(delivered && task.preview ? { preview: task.preview } : {}),
           tasks: [{ id: task.id, title: task.text.slice(0, 80), status: task.status }],

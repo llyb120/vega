@@ -50,6 +50,7 @@ const PATHS = {
   hand: "M8 13V5.5a1.5 1.5 0 0 1 3 0V11M11 10V4.5a1.5 1.5 0 0 1 3 0V11M14 10.5V6a1.5 1.5 0 0 1 3 0v8a6 6 0 0 1-6 6h-.5a6 6 0 0 1-5-2.7L3 14a1.6 1.6 0 0 1 2.6-1.8L8 15",
   layers: "M12 3 2 8l10 5 10-5ZM2 13l10 5 10-5",
   plug: "M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0ZM12 17v5",
+  qrcode: "M4 4h6v6H4ZM14 4h6v6h-6ZM4 14h6v6H4ZM7 7h.01M17 7h.01M7 17h.01M14 14h2v2h-2ZM18 14h2v2h-2ZM16 16h2v2h-2ZM14 18h2v2h-2ZM18 18h2v2h-2Z",
 };
 const props = defineProps({ name: String, size: { type: [Number, String], default: 18 } });
 const d = computed(() => PATHS[props.name] || "");

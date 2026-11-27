@@ -3,14 +3,36 @@ import { ref } from "vue";
 import Icon from "./Icon.vue";
 import { taskLabel, taskTone, planProgress, shortTime } from "./task-status";
 import { chainEdgeLabel } from "../../shared/task-chain";
-const props = defineProps({ attention: Array, active: Array, readonly: Boolean, act: Function, overlay: Boolean });
-const emit = defineEmits(["open", "all", "close"]);
+import { defaultQuickActions, defaultSettingsLabel } from "../../shared/task-assist";
+const props = defineProps({ attention: Array, active: Array, readonly: Boolean, act: Function, overlay: Boolean, canOpenBrowser: Boolean });
+const emit = defineEmits(["open", "all", "close", "open-browser", "open-settings"]);
 const answers = ref({}), busy = ref("");
-async function run(task, action) {
+async function run(task, action, replyText) {
   if (busy.value) return;
   busy.value = task.id;
-  try { if (await props.act(task, action, answers.value[task.id]) === true) answers.value[task.id] = ""; }
+  try {
+    const payload = replyText !== undefined ? replyText : answers.value[task.id];
+    if (await props.act(task, action, payload) === true && replyText === undefined) answers.value[task.id] = "";
+  }
   finally { busy.value = ""; }
+}
+function quickOptions(task) {
+  const assist = task?.waitingAssist;
+  if (!assist?.options?.length || assist.multiSelect || assist.fields?.length || assist.options.length > 4) return [];
+  if (assist.options.some((opt) => opt.needsDetail)) return [];
+  return assist.options;
+}
+function openBrowser(task) {
+  const browser = task?.waitingAssist?.browser;
+  if (!browser) return;
+  emit("open-browser", {
+    taskId: task.id,
+    taskTitle: task.text,
+    tabTag: browser.tabTag || "",
+    url: browser.url || "",
+    title: browser.title || "",
+    kind: task.waitingAssist?.kind || "browser_action",
+  });
 }
 const others = (list, attention) => list.filter((task) => !attention.includes(task));
 /** Panel cards stay scannable; full brief lives in the task/session detail. */
@@ -29,6 +51,22 @@ function brief(text, max = 72) {
           <button type="button" class="task-title" :title="task.text" @click="emit('open', task.id)">{{ brief(task.text) }}</button>
           <p class="attention-text" :title="task.status === 'approval' ? task.approval : task.waiting"><strong>{{ task.status === 'approval' ? '需要确认' : '需要补充' }}：</strong>{{ brief(task.status === 'approval' ? task.approval : task.waiting, 96) }}</p>
           <button type="button" class="link detail" @click="emit('open', task.id)">{{ task.partialDelivery ? '查看详情并决定部分交付' : '查看详情' }}</button>
+          <div v-if="task.status === 'waiting' && task.waitingAssist?.images?.length" class="assist-thumb-row">
+            <button type="button" class="assist-thumb-btn" title="查看详情大图" @click="emit('open', task.id)">
+              <img :src="task.waitingAssist.images[0].url" :alt="task.waitingAssist.images[0].caption || '协助截图'" loading="lazy" />
+            </button>
+            <span v-if="task.waitingAssist.kind === 'qr_login'" class="assist-thumb-note">因时效原因，如扫码失效可前往标签页操作</span>
+          </div>
+          <div v-if="task.status === 'waiting' && (task.waitingAssist?.browser || (task.waitingAssist?.settingsRoute && !readonly))" class="assist-panel-links">
+            <button v-if="task.waitingAssist?.browser && !task.execution?.localBrowser && canOpenBrowser" type="button" class="sm" :disabled="!!busy" @click="openBrowser(task)"><Icon name="external" :size="13" />前往标签页</button>
+            <button v-if="task.waitingAssist?.settingsRoute && !readonly" type="button" class="sm" :disabled="!!busy" @click="emit('open-settings', task.waitingAssist.settingsRoute)"><Icon name="settings" :size="13" />{{ task.waitingAssist.settingsLabel || defaultSettingsLabel(task.waitingAssist.settingsRoute) }}</button>
+          </div>
+          <div v-if="!readonly && task.status === 'waiting' && quickOptions(task).length" class="assist-panel-choices">
+            <button v-for="(opt, idx) in quickOptions(task)" :key="idx" type="button" class="sm" :class="{ primary: opt.recommended }" :disabled="!!busy" @click="run(task, 'answer', opt.value || opt.label)">{{ opt.label }}</button>
+          </div>
+          <div v-else-if="!readonly && task.status === 'waiting' && defaultQuickActions(task.waitingAssist).length" class="assist-panel-choices">
+            <button v-for="(actItem, idx) in defaultQuickActions(task.waitingAssist).slice(0, 2)" :key="idx" type="button" class="sm" :class="actItem.tone === 'primary' ? 'primary' : ''" :disabled="!!busy" @click="run(task, 'answer', actItem.reply)">{{ actItem.label }}</button>
+          </div>
           <div v-if="!readonly && task.status === 'approval' && !task.partialDelivery" class="actions"><button type="button" class="primary sm" :disabled="!!busy" @click="run(task, 'approve')"><Icon name="check" :size="14" />批准执行</button><button type="button" class="sm" :disabled="!!busy" @click="run(task, 'reject')">驳回</button></div>
           <form v-else-if="!readonly && task.status === 'waiting'" class="answer" @submit.prevent="run(task, 'answer')"><textarea v-model="answers[task.id]" rows="2" maxlength="8000" required :aria-label="'回复：' + task.text" placeholder="补充信息后，热心市民会继续处理原任务"></textarea><button class="primary sm" :disabled="!!busy || !answers[task.id]?.trim()">回复并继续</button></form>
         </article>
@@ -62,6 +100,12 @@ function brief(text, max = 72) {
 .attention-text { display: -webkit-box; overflow: hidden; color: var(--text-2); font-size: 12px; line-height: 1.55; white-space: normal; overflow-wrap: anywhere; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .attention-text strong { color: var(--warn); font-weight: 600; }
 .attention-card .detail { justify-self: start; margin: 0; padding: 0; font-size: 12px; }
+.assist-thumb-row { display: flex; align-items: center; gap: 8px; }
+.assist-thumb-btn { flex: none; height: auto; padding: 3px; border: 1px solid var(--border); border-radius: var(--r-sm); background: #fff; }
+.assist-thumb-btn img { display: block; width: 64px; height: 64px; object-fit: contain; }
+.assist-thumb-note { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.assist-panel-links, .assist-panel-choices { display: flex; flex-wrap: wrap; gap: 6px; }
+.assist-panel-choices button { white-space: normal; text-align: left; height: auto; padding-block: 4px; }
 .answer { display: grid; gap: 6px; }
 .answer textarea { width: 100%; font-size: 12px; }
 .answer button { justify-self: end; }

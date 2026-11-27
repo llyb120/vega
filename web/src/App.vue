@@ -287,6 +287,8 @@ const conversationTitle = computed(
 );
 
 const catalogModels = ref([]);
+const browserAssistTarget = ref(null);
+let browserAssistSeq = 0;
 async function loadModels() {
   if (!isAdmin.value) {
     catalogModels.value = [];
@@ -1286,6 +1288,62 @@ function openGroupEmployee(id) {
 async function employeeTabChanged(id) {
   employeeTab.value = id;
 }
+async function openAssistBrowser(payload) {
+  const targetEmployee = payload?.employeeId || selectedEmployee.value;
+  if (!targetEmployee) return;
+  if (targetEmployee !== selectedEmployee.value || view.value !== "employee") {
+    if (!employees.value.some((entry) => entry.id === targetEmployee)) {
+      toast("你没有权限查看这位热心市民的浏览器");
+      return;
+    }
+    await chooseEmployee(targetEmployee);
+    if (selectedEmployee.value !== targetEmployee) return;
+  }
+  browserAssistTarget.value = {
+    employeeId: targetEmployee,
+    taskId: payload?.taskId || "",
+    taskTitle: payload?.taskTitle || "",
+    tabTag: payload?.tabTag || "",
+    url: payload?.url || "",
+    title: payload?.title || "",
+    kind: payload?.kind || "browser_action",
+    seq: ++browserAssistSeq,
+  };
+  employeeSession.value = "";
+  workRailOpen.value = false;
+  view.value = "employee";
+  employeeTab.value = "browser";
+}
+function returnFromBrowserAssist(taskId) {
+  browserAssistTarget.value = null;
+  if (taskId) void openEmployeeTask(taskId);
+}
+async function completeAssistFromBrowser({ taskId, reply }) {
+  if (!taskId) return;
+  let task = employee.value.tasks?.find((entry) => entry.id === taskId);
+  if (!task) {
+    await refreshEmployee();
+    task = employee.value.tasks?.find((entry) => entry.id === taskId);
+  }
+  if (!task) {
+    browserAssistTarget.value = null;
+    toast("这条任务记录已不存在");
+    return;
+  }
+  const ok = await employeeTaskAction(task, "answer", reply);
+  if (ok) {
+    browserAssistTarget.value = null;
+    await openEmployeeTask(taskId);
+  }
+}
+function openAssistSettings(sub) {
+  if (sub === "scenes" && !isAdmin.value) {
+    toast("场景模型需由管理员在「设置 → 场景模型」中配置");
+    return;
+  }
+  view.value = "settings";
+  setPageTab(sub);
+}
 function openEmployee(session = "") {
   employeeSession.value = session;
   view.value = "employee";
@@ -1536,7 +1594,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
           </form>
         </div>
       </template>
-      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :selected-task="selectedGroupTask" :my-employees="myEmployees" :revision="groupRevision" @task-change="setGroupTask" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @inspect="openEmployee($event)" @read="unread.groupRead" />
+      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :selected-task="selectedGroupTask" :my-employees="myEmployees" :revision="groupRevision" @task-change="setGroupTask" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @open-browser="openAssistBrowser" @open-settings="openAssistSettings" @inspect="openEmployee($event)" @read="unread.groupRead" />
       <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
       <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" :tab="pageSub" :model="inspectedModel" @tab="setPageTab" />
       <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" :model="inspectedModel" @back="openEmployee()" @open="openEmployee($event)" />
@@ -1586,9 +1644,9 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
               <EmployeeChat :key="user.id + ':' + selectedEmployee" :api="api" :user-id="user.id" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" :tasks="employee.tasks" :remember="employee.canManage ? saveMemory : undefined" @task="openEmployeeTask" />
             </div>
             <button v-if="workPanelVisible && !wide" type="button" class="panel-backdrop" aria-label="关闭当前工作" tabindex="-1" @click="workRailOpen = false"></button>
-            <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
+            <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :can-open-browser="!!employee.canManage" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @open-browser="openAssistBrowser" @open-settings="openAssistSettings" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
           </div>
-          <div v-if="employeeTab === 'browser' && selectedEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" :csrf="csrfToken" /></div>
+          <div v-if="employeeTab === 'browser' && selectedEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" :csrf="csrfToken" :target-tab="browserAssistTarget?.employeeId === selectedEmployee ? browserAssistTarget : null" :on-return-task="returnFromBrowserAssist" :on-complete-assist="completeAssistFromBrowser" :on-dismiss-target="() => { browserAssistTarget = null; }" /></div>
           <EmployeeTasks
             v-if="employeeTab === 'tasks'"
             :key="selectedEmployee"
@@ -1602,12 +1660,15 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             :act="employeeTaskAction"
             :clients="employee.executionClients || []"
             :handoff="employee.canManage && canExecute ? handoffTask : undefined"
+            :can-open-browser="!!employee.canManage"
             :save-memory="saveMemory"
             @filter="employeeTaskFilter = $event"
             @select="employeeTaskFocus = $event"
             @inspect="openEmployee($event)"
             @chat="employeeTab = 'chat'"
             @quote-task="quoteTaskInChat"
+            @open-browser="openAssistBrowser"
+            @open-settings="openAssistSettings"
           />
           <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" :search="memorySearch" /></div>
           <EmployeeCapabilities v-if="employeeTab === 'capabilities'" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />

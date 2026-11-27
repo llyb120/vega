@@ -1,4 +1,5 @@
 import browserTools from "../../shared/browser-tools.json";
+import { ASSIST_KINDS, ASSIST_SETTINGS_ROUTES } from "../../shared/task-assist";
 import type { Tool } from "./provider";
 import type { Obj } from "./util";
 import { omittable } from "./tool-args";
@@ -192,8 +193,78 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       "请用户审批一项需要先确认或尚未授权的不可逆操作（支付、删除、对外发送、提交审批等）：request 写清是什么操作。任务挂起并立即结束本轮；批准后在原会话继续获批事项，驳回则任务取消。常规开发分支的提交和普通推送不需要审批；缺信息用 task_ask_user。必须单独调用。",
       { request: str("要审批的具体操作，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["request"]));
     out.push(tool("task_ask_user",
-      "向交代人要只有他能提供的信息，或必须他处理的阻碍（短信/邮箱验证码、访问码、2FA/OTP 等）：question 写清需要什么。滑块/拼图/旋转等视觉验证码先用 browser_act 拖拽，连续失败后再问，不要一上来就让用户代拖。任务挂起并立即结束本轮，回答后在原会话继续。能自己查到的不要问，低风险细节自行决定；要批准操作用 task_request_approval；等待已发出的外部作业或第三方回复用 task_wait 自动休眠并定时复查，不要仅因接口回执不含下游通知送达或已读证明就改用本工具让用户手动确认。必须单独调用。",
-      { question: str("要对方补充或处理的内容，1–8000 字", { minLength: 1, maxLength: 8000 }) }, ["question"]));
+      "向交代人要只有他能提供的信息，或必须他处理的阻碍（短信/邮箱验证码、访问码、2FA/OTP、扫码登录、手动浏览器操作、多选决策或结构化表单等）：question 写清需要什么。滑块/拼图/旋转等视觉验证码先用 browser_act 拖拽，连续失败后再问，不要一上来就让用户代拖。任务挂起并立即结束本轮，回答后在原会话继续。能自己查到的不要问，低风险细节自行决定；要批准操作用 task_request_approval；等待已发出的外部作业或第三方回复用 task_wait 自动休眠并定时复查，不要仅因接口回执不含下游通知送达或已读证明就改用本工具让用户手动确认。可按场景选填结构化协助字段以提供更好交互：kind（choice/qr_login/browser_action/verification/form/settings）、options（选项与推荐标记）、fields（结构化输入项）、images（二维码或当前页截图，系统也会自动补全）、browser（tabTag/url/title 以便一键跳到标签页）、quickActions（快捷回复按钮）、externalUrl 或 settingsRoute。必须单独调用。",
+      {
+        question: str("要对方补充或处理的内容，1–8000 字", { minLength: 1, maxLength: 8000 }),
+        kind: str("可选：协助类型，默认 general", { enum: [...ASSIST_KINDS] }),
+        title: str("可选：协助卡片标题，1–80 字", { minLength: 1, maxLength: 80 }),
+        hint: str("可选：额外操作提示或时效提醒，1–400 字", { minLength: 1, maxLength: 400 }),
+        options: {
+          type: "array",
+          minItems: 1,
+          maxItems: 12,
+          description: "可选：给用户的候选选项（适用于决策、多选或常见处理方式）",
+          items: obj({
+            label: str("选项标题，1–120 字", { minLength: 1, maxLength: 120 }),
+            value: str("可选：回传值，省略时使用 label，1–200 字", { minLength: 1, maxLength: 200 }),
+            description: str("可选：选项说明，1–240 字", { minLength: 1, maxLength: 240 }),
+            recommended: { type: "boolean", description: "true 表示推荐该项" },
+            tone: str("可选样式", { enum: ["default", "primary", "danger"] }),
+            needsDetail: { type: "boolean", description: "true 表示选此项时需补充说明" },
+          }, ["label"]),
+        },
+        multiSelect: { type: "boolean", description: "可选：options 是否允许复选，默认 false（单选）" },
+        allowCustom: { type: "boolean", description: "可选：有 options/fields 时是否允许附加自由输入，默认 true" },
+        fields: {
+          type: "array",
+          minItems: 1,
+          maxItems: 8,
+          description: "可选：结构化输入表单项",
+          items: obj({
+            key: str("字段键，1–60 字", { minLength: 1, maxLength: 60 }),
+            label: str("字段标签，1–80 字", { minLength: 1, maxLength: 80 }),
+            type: str("字段类型：text/textarea/code/select/checkbox", { enum: ["text", "textarea", "code", "select", "checkbox"] }),
+            placeholder: str("输入提示，1–120 字", { minLength: 1, maxLength: 120 }),
+            description: str("字段说明，1–200 字", { minLength: 1, maxLength: 200 }),
+            required: { type: "boolean" },
+            defaultValue: { type: ["string", "boolean"] },
+            options: { type: "array", minItems: 1, maxItems: 20, items: str("下拉选项", { minLength: 1, maxLength: 120 }) },
+          }, ["key", "label"]),
+        },
+        images: {
+          type: "array",
+          minItems: 1,
+          maxItems: 4,
+          description: "可选：展示给用户的二维码或页面截图（填浏览器工具返回的纯净图 url 或文件名）",
+          items: obj({
+            url: str("图片地址或当前任务截图文件名，1–500 字", { minLength: 1, maxLength: 500 }),
+            caption: str("可选：图片说明，1–120 字", { minLength: 1, maxLength: 120 }),
+            volatile: { type: "boolean", description: "true 表示有时效性（如二维码/动态验证码）" },
+          }, ["url"]),
+        },
+        browser: obj({
+          tabTag: str("标签页 tabTag，1–200 字", { minLength: 1, maxLength: 200 }),
+          url: str("页面 URL，1–2048 字", { minLength: 1, maxLength: 2048 }),
+          title: str("页面标题，1–200 字", { minLength: 1, maxLength: 200 }),
+        }, [], "可选：关联的浏览器标签页信息，便于用户一键跳转操作"),
+        quickActions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 4,
+          description: "可选：一键快捷回复按钮（如「我已扫码完成」「重新截图」）",
+          items: obj({
+            label: str("按钮文字，1–60 字", { minLength: 1, maxLength: 60 }),
+            reply: str("点击后提交的回复文本，1–500 字", { minLength: 1, maxLength: 500 }),
+            tone: str("可选样式", { enum: ["primary", "default", "danger"] }),
+          }, ["label", "reply"]),
+        },
+        externalUrl: obj({
+          url: str("外部 HTTP(S) 链接，1–2048 字", { minLength: 1, maxLength: 2048 }),
+          label: str("可选：按钮文案，1–80 字", { minLength: 1, maxLength: 80 }),
+        }, ["url"], "可选：引导用户打开的外部授权/操作链接"),
+        settingsRoute: str("可选：引导用户前往应用内设置页", { enum: [...ASSIST_SETTINGS_ROUTES] }),
+        settingsLabel: str("可选：设置跳转按钮文案，1–80 字", { minLength: 1, maxLength: 80 }),
+      }, ["question"]));
     out.push(tool("task_wait",
       "已提交的外部作业（构建、发布、导出等）或已发出的澄清请求需要等待结果时挂起当前任务：checkpoint 写作业编号或请求链接、已做的操作与回执、当前状态、检查方式和必要的升级处理（不含凭据）；resumeAt 和 delayMinutes 二选一，结合对方预计回复、工作时间及业务截止时间安排下次，不把等待时长当作任务完成期限。立即结束本轮并释放执行名额，到时在原会话续做，只检查原作业或回复，同一请求不要重发；无回复时按实际情况再次挂起，有部分回复先判断可独立继续的工作。按渠道或接口规范（含对应的对象/通知参数）提交成功并拿到回执或读回已落库，即视为已发出，应直接用本工具休眠等待定时复查，不得仅因回执未返回“对方已收到提醒/已读”等下游送达证明而改调 task_ask_user；仅当发送报错、提交结果不明或已有明确证据表明该渠道无法触达/无法触发真实提醒时才交由用户处理，持续无回复时在后续唤醒中再按 checkpoint 升级。有新疑点可发新一轮澄清并保存新回执。没有外部结果、只是把本任务改到以后做用 task_reschedule。必须单独调用。",
       { checkpoint: str("恢复点，1–8000 字", { minLength: 1, maxLength: 8000 }), resumeAt: beijing("续做时间"), delayMinutes: int("多少分钟后续做，1–10080", { minimum: 1, maximum: 10080 }) },
@@ -322,7 +393,24 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
       if (!ctx.taskId) throw new ArgumentError("task_reschedule 只能在任务会话中使用");
       return employee({ action: "update", id: ctx.taskId, ...when(a, "") });
     case "task_request_approval": return employee({ action: "ask", text: a.request });
-    case "task_ask_user": return employee({ action: "help", text: a.question });
+    case "task_ask_user": {
+      const assist = defined({
+        kind: a.kind,
+        title: a.title,
+        hint: a.hint,
+        options: a.options,
+        multiSelect: a.multiSelect,
+        allowCustom: a.allowCustom,
+        fields: a.fields,
+        images: a.images,
+        browser: a.browser,
+        quickActions: a.quickActions,
+        externalUrl: a.externalUrl,
+        settingsRoute: a.settingsRoute,
+        settingsLabel: a.settingsLabel,
+      });
+      return employee(defined({ action: "help", text: a.question, ...(Object.keys(assist).length ? { assist } : {}) }));
+    }
     case "task_wait": {
       if ((a.resumeAt === undefined) === (a.delayMinutes === undefined)) throw new ArgumentError("参数.resumeAt 和 参数.delayMinutes 必须恰好填一个");
       return employee(defined({ action: "defer", text: a.checkpoint, nextAt: a.resumeAt, nextCheckInMinutes: a.delayMinutes }));

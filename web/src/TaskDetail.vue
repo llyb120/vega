@@ -5,16 +5,17 @@ import MessageText from "./MessageText.vue";
 import StepOutput from "./StepOutput.vue";
 import FileCard from "./FileCard.vue";
 import PreviewCard from "./PreviewCard.vue";
+import TaskAssistCard from "./TaskAssistCard.vue";
 import TaskChainTree from "./TaskChainTree.vue";
 import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone, isEnded, planProgress } from "./task-status";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
-const props = defineProps({ task: Object, chainTasks: { type: Array, default: () => [] }, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function, employeeId: String, clients: Array, handoff: Function });
-const emit = defineEmits(["inspect", "back", "select-task", "quote-task"]);
-const busy = ref(false), answer = ref(""), exportOpen = ref(false), exportError = ref(""), settleSelected = ref([]), settling = ref(false), clientId = ref("");
+const props = defineProps({ task: Object, chainTasks: { type: Array, default: () => [] }, act: Function, readonly: Boolean, back: Boolean, saveMemory: Function, employeeId: String, clients: Array, handoff: Function, canOpenBrowser: Boolean });
+const emit = defineEmits(["inspect", "back", "select-task", "quote-task", "open-browser", "open-settings"]);
+const busy = ref(false), exportOpen = ref(false), exportError = ref(""), settleSelected = ref([]), settling = ref(false), clientId = ref("");
 const suggestions = computed(() => props.task.memorySuggestions || []);
-watch(() => props.task.id, () => { answer.value = ""; exportOpen.value = false; exportError.value = ""; clientId.value = ""; });
+watch(() => props.task.id, () => { exportOpen.value = false; exportError.value = ""; clientId.value = ""; });
 watch(suggestions, (rows) => { settleSelected.value = rows.map((item) => item.id); }, { immediate: true });
 function toggleSettle(id) {
   settleSelected.value = settleSelected.value.includes(id) ? settleSelected.value.filter((x) => x !== id) : [...settleSelected.value, id];
@@ -76,10 +77,16 @@ async function moveToClient() {
   try { await props.handoff(clientId.value); }
   finally { busy.value = false; }
 }
+async function submitAnswer(text) {
+  if (busy.value) return;
+  busy.value = true;
+  try { await props.act("answer", text); }
+  finally { busy.value = false; }
+}
 async function run(action) {
   if (busy.value) return;
   busy.value = true;
-  try { if (await props.act(action, answer.value) === true) answer.value = ""; }
+  try { await props.act(action); }
   finally { busy.value = false; }
 }
 </script>
@@ -109,11 +116,17 @@ async function run(action) {
       <MessageText :text="task.approval" />
       <div v-if="!readonly" class="actions"><button type="button" class="primary" :disabled="busy" @click="run('approve')"><Icon name="check" :size="16" />{{ task.partialDelivery ? '接受部分交付' : '批准执行' }}</button><button type="button" :disabled="busy" @click="run('reject')">{{ task.partialDelivery ? '继续原任务' : '驳回' }}</button></div>
     </section>
-    <form v-if="task.status === 'waiting'" class="attention-block" @submit.prevent="run('answer')">
-      <h3><Icon name="alert" :size="16" />需要补充信息</h3>
-      <MessageText :text="task.waiting" />
-      <template v-if="!readonly"><label class="sr-only" :for="'answer-' + task.id">你的回复</label><textarea :id="'answer-' + task.id" v-model="answer" rows="3" maxlength="8000" required placeholder="补充信息后，热心市民会继续处理原任务"></textarea><div class="actions end"><button class="primary" :disabled="busy || !answer.trim()">回复并继续</button></div></template>
-    </form>
+    <TaskAssistCard
+      v-if="task.status === 'waiting'"
+      :task="task"
+      :archive-base="archiveBase"
+      :readonly="readonly"
+      :busy="busy"
+      :can-open-browser="canOpenBrowser"
+      @submit="submitAnswer"
+      @open-browser="emit('open-browser', $event)"
+      @open-settings="emit('open-settings', $event)"
+    ><MessageText :text="task.waiting" :archive-base="archiveBase" /></TaskAssistCard>
 
     <section v-if="task.progress?.length" class="detail-section">
       <h3>最新进展</h3>
