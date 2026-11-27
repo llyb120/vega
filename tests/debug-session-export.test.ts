@@ -6,8 +6,9 @@ import vm from "node:vm";
 import { computed, ref } from "vue";
 
 const source = readFileSync("web/src/EmployeeSessionView.vue", "utf8");
-function mount(api: (path: string) => Promise<any>, debug = true, failure = "") {
-  const props = { api, debug, sessionId: "session-fixture", revision: 0 };
+const appSource = readFileSync("web/src/App.vue", "utf8");
+function mount(api: (path: string) => Promise<any>, debug = true, failure = "", admin = false) {
+  const props = { api, debug, admin, sessionId: "session-fixture", revision: 0 };
   const blobs: Blob[] = [], links: any[] = [], revoked: string[] = [], timers: (() => void)[] = [];
   const state = vm.runInNewContext(
     source.slice(source.indexOf("const props ="), source.indexOf("</script>")) +
@@ -141,7 +142,7 @@ test("exporting the same session before and after loading older pages returns th
   state.cleanup();
 });
 
-test("export is debug-only and disabled until the session is loaded", async () => {
+test("export is admin/debug-only and disabled until the session is loaded", async () => {
   const state = mount(async () => fixture());
   await state.exportSession();
   assert.equal(state.blobs.length, 0);
@@ -150,10 +151,39 @@ test("export is debug-only and disabled until the session is loaded", async () =
   await state.exportSession();
   state.busy.value = false;
   state.props.debug = false;
+  state.props.admin = false;
   await state.exportSession();
   assert.equal(state.blobs.length, 0);
-  assert.match(source, /<button v-if="debug"[^>]*:disabled="busy \|\| !record"[^>]*aria-label="导出会话（JSON）"[^>]*@click="exportSession"/);
-  assert(source.includes("分享前请脱敏；图片仅保留引用"));
+  assert.match(source, /<button v-if="debug \|\| admin"[^>]*:disabled="busy \|\| !record"[^>]*aria-label="导出会话（JSON）"[^>]*@click="exportSession"/);
+  assert.match(source, /<template v-if="debug \|\| admin">导出该会话截至导出时的全部原始消息、阶段索引、工具参数与本地路径，分享前请脱敏；图片仅保留引用。<\/template>/);
+  assert.match(appSource, /<EmployeeSessionView[^>]*:admin="isAdmin"/);
+});
+
+test("admin execution record view displays export via /debug/sessions while paging via /sessions", async () => {
+  const payload: any = fixture();
+  const phase = { seq: 2, name: "browser_agent" };
+  Object.assign(payload.messages[1], { calls: [{ id: "b1", name: phase.name, arguments: { task: "open pricing" } }] });
+  Object.assign(payload.messages[2], { role: "tool", agentPhase: phase, name: phase.name, callId: "b1", text: JSON.stringify({ status: "completed", executor: "model/p/vision", phaseSession: "phase-1", result: "ok", evidence: { visitedUrls: [{ url: "https://example.test" }], tabs: [], screenshots: [], documentPaths: [], errors: [] } }) });
+  payload.phaseTranscripts = { "phase-1": [{ seq: 1, role: "user", text: "open pricing" }, { seq: 2, role: "assistant", text: "ok" }] };
+  const paths: string[] = [];
+  const state = mount(async (path) => {
+    paths.push(path);
+    return path.includes("?limit=") ? { ...payload, messages: payload.messages.slice(-60), hasMore: true } : payload;
+  }, false, "", true);
+  await state.refresh();
+  assert.equal(state.messages.value.length, 60);
+  await state.exportSession();
+  assert.deepEqual(paths, ["/sessions/session-fixture?limit=60", "/debug/sessions/session-fixture"]);
+  assert.equal(state.messages.value.length, 60, "export does not alter displayed messages");
+  assert.equal(state.blobs.length, 1);
+  const exported = JSON.parse(await state.blobs[0].text());
+  assert.equal(exported.messages.length, payload.messages.length);
+  assert.equal(exported.agentPhases[0].phaseSession, "phase-1");
+  assert.equal(exported.phaseTranscripts["phase-1"].length, 2);
+  state.props.admin = false;
+  await state.exportSession();
+  assert.equal(state.blobs.length, 1, "non-admin execution record cannot export");
+  state.cleanup();
 });
 
 test("switching to a session that fails to load cannot export the previous session", async () => {
