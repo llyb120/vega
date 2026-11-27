@@ -1,7 +1,7 @@
 <script setup vapor>
 import { computed } from "vue";
 import { chainEdgeLabel, flattenChainTree, isBranchedChain } from "../../shared/task-chain";
-import { cleanTaskTitle } from "./conversation.js";
+import { taskDisplayTitle } from "./conversation.js";
 import { shortTime, taskLabel, taskTone } from "./task-status.js";
 const props = defineProps({ tasks: { type: Array, default: () => [] }, currentId: String });
 const emit = defineEmits(["select"]);
@@ -25,7 +25,7 @@ const edgeText = (node) => {
         <button v-if="!node.missing" type="button" class="chain-pill" :class="{ active: node.id === currentId, cancelled: node.task?.status === 'cancelled' }" :title="node.task?.text" @click="emit('select', node.id)">
           <span :class="['dot', taskTone(node.task?.status)]" aria-hidden="true"></span>
           <span v-if="node.task?.chainSeq" class="seq">#{{ node.task.chainSeq }}</span>
-          <span class="title">{{ cleanTaskTitle(node.task?.text) || node.id }}</span>
+          <span class="title">{{ taskDisplayTitle(node.task) || node.id }}</span>
           <span class="state">{{ taskLabel(node.task?.status) }}</span>
         </button>
         <span v-else class="chain-pill missing">已删除的前置任务</span>
@@ -40,7 +40,7 @@ const edgeText = (node) => {
           <span v-if="node.task?.chainSeq" class="seq">#{{ node.task.chainSeq }}</span>
           <span v-if="edgeText(node)" class="edge-badge" :class="node.edgeKind">{{ edgeText(node) }}</span>
           <span v-if="node.task?.branchLabel" class="branch-label">{{ node.task.branchLabel }}</span>
-          <span class="title">{{ cleanTaskTitle(node.task?.text) || node.id }}</span>
+          <span class="title">{{ taskDisplayTitle(node.task) || node.id }}</span>
           <span class="state">{{ taskLabel(node.task?.status) }}</span>
           <time v-if="node.task?.createdAt">{{ shortTime(node.task.createdAt) }}</time>
         </button>

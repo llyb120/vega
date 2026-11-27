@@ -4,6 +4,7 @@ import Icon from "./Icon.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import TaskDetail from "./TaskDetail.vue";
 import { taskLabel, taskTone, planProgress, shortTime, isEnded, needsAttention } from "./task-status";
+import { taskDisplayTitle } from "./conversation.js";
 import { chainEdgeLabel, chainTasks, groupTasksByChain } from "../../shared/task-chain";
 // The group's 工作面板: tasks started from this group, by member employee (GET /groups/:id/tasks, already ordered).
 // Task details stay beside the chat; owners can explicitly open their execution workspace.
@@ -13,12 +14,6 @@ const selectedKey = computed(() => props.focus || null), selected = ref(null), d
 const owned = () => props.members?.some((member) => member.mine && member.id === selectedKey.value?.member);
 const requester = (task) => task.requester?.kind === "employee" ? `热心市民「${task.requester.name}」` : task.requester?.name || "";
 const note = (task) => task.status === "waiting" ? task.waiting : task.status === "approval" ? task.approval : task.summary || task.progress?.at(-1)?.text || task.queueReason || "";
-/** Strip bare URLs in card previews so Tapd/link-heavy prompts stay readable; full text stays in tooltip & detail. */
-function cardTitle(text) {
-  const raw = String(text || "").replace(/\s+/g, " ").trim();
-  const cleaned = raw.replace(/https?:\/\/\S+/g, "").replace(/\s{2,}/g, " ").trim();
-  return cleaned.length >= 6 ? cleaned : raw;
-}
 const allTasks = computed(() => (props.members || []).flatMap((member) => member.tasks || []));
 const activeCount = computed(() => allTasks.value.filter((task) => !isEnded(task.status)).length);
 const endedCount = computed(() => allTasks.value.filter((task) => isEnded(task.status)).length);
@@ -49,7 +44,7 @@ const edgeText = (node) => {
 function selectChainTask(taskId) {
   const member = (props.members || []).find((m) => (m.tasks || []).some((t) => t.id === taskId));
   const target = member?.tasks?.find((t) => t.id === taskId);
-  open({ id: member?.id || selectedKey.value?.member }, { id: taskId, text: target?.text || selected.value?.text });
+  open({ id: member?.id || selectedKey.value?.member }, { id: taskId, title: taskDisplayTitle(target || selected.value), text: target?.text || selected.value?.text });
 }
 let version = 0;
 const taskPath = (key) => `/groups/${encodeURIComponent(props.groupId)}/tasks/${encodeURIComponent(key.member)}/${encodeURIComponent(key.task)}`;
@@ -60,7 +55,7 @@ async function loadDetail() {
   detailLoading.value = true; error.value = "";
   try {
     const task = await props.api(taskPath(key));
-    if (current()) { selected.value = task; emit("title", task.text); }
+    if (current()) { selected.value = task; emit("title", taskDisplayTitle(task)); }
   } catch (e) {
     if (current()) {
       selected.value = null; error.value = e.message;
@@ -70,7 +65,7 @@ async function loadDetail() {
   finally { if (current()) detailLoading.value = false; }
 }
 function open(member, task) {
-  emit("select", { employeeId: member.id, taskId: task.id, title: task.text });
+  emit("select", { employeeId: member.id, taskId: task.id, title: taskDisplayTitle(task) });
 }
 async function control(action, text) {
   const key = selectedKey.value;
@@ -127,7 +122,7 @@ onBeforeUnmount(() => { version++; });
                 <span class="task-state"><i class="state-dot" aria-hidden="true"></i>{{ taskLabel(group.task.status) }}</span>
                 <time>{{ shortTime(group.task.createdAt) }}</time>
               </span>
-              <strong>{{ cardTitle(group.task.text) }}</strong>
+              <strong>{{ taskDisplayTitle(group.task) }}</strong>
               <span v-if="note(group.task)" class="task-row-note">{{ note(group.task) }}</span>
               <span class="task-row-foot">
                 <span class="task-row-meta">{{ requester(group.task) }} 发起</span>
@@ -139,7 +134,7 @@ onBeforeUnmount(() => { version++; });
               <button type="button" class="group-chain-head" :aria-expanded="isExpanded(group)" @click="toggleChain(group.chainId, isExpanded(group))">
                 <span class="chain-head-title">
                   <span :class="['state-dot', taskTone(group.headTask.status)]" aria-hidden="true"></span>
-                  <strong>{{ cardTitle(group.headTask.text) }}</strong>
+                  <strong>{{ taskDisplayTitle(group.headTask) }}</strong>
                 </span>
                 <span class="chain-head-meta">
                   <span class="chain-pill-tag">任务链 · {{ group.count }} 节点<template v-if="group.branched"> · {{ group.branchCount }} 分支</template></span>
@@ -154,7 +149,7 @@ onBeforeUnmount(() => { version++; });
                     <span :class="['state-dot', taskTone(node.task.status)]" aria-hidden="true"></span>
                     <span v-if="node.task.chainSeq" class="chain-seq">#{{ node.task.chainSeq }}</span>
                     <span v-if="edgeText(node)" class="chain-edge" :class="node.edgeKind">{{ edgeText(node) }}</span>
-                    <span class="chain-node-title">{{ cardTitle(node.task.text) }}</span>
+                    <span class="chain-node-title">{{ taskDisplayTitle(node.task) }}</span>
                     <span class="chain-node-status">{{ taskLabel(node.task.status) }}</span>
                   </button>
                   <span v-else class="chain-missing-node">已删除的前置任务</span>

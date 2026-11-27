@@ -5,7 +5,7 @@ import vm from "node:vm";
 import { webcrypto } from "node:crypto";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
-import { employeeChatMessages, continuesPrevious, chatCardVisibility, messageTaskId, taskAccentColor, cleanTaskTitle } from "../web/src/conversation.js";
+import { employeeChatMessages, continuesPrevious, chatCardVisibility, messageTaskId, taskAccentColor, cleanTaskTitle, taskDisplayTitle } from "../web/src/conversation.js";
 import { attachmentPayload, isImage, useAttachmentInput } from "../web/src/attachments.js";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
@@ -245,6 +245,22 @@ test("consecutive messages from the same sender only show avatar and name once; 
   assert.equal(taskAccentColor("t1"), taskAccentColor("t1"));
   assert.match(taskAccentColor("t1"), /^#[0-9a-f]{6}$/i);
   assert.equal(cleanTaskTitle("检查 https://example.com/a/b/c Excel 下载问题"), "检查 Excel 下载问题");
+  assert.equal(
+    cleanTaskTitle("用户要求开发此 TAPD 需求：https://tapd.tencent.com/tapd_fe/20427644/story/detail/1020427644140527111。按当前工作原则完成 Databrain 情报子系统需求"),
+    "开发此 TAPD 需求 #1020427644140527111。按当前工作原则完成 Databrain 情报子系统需求",
+  );
+  assert.equal(
+    cleanTaskTitle("查看文档：https://doc.weixin.qq.com/sheet/e3_m_EUwZMEXWkqiH?scode=123。整理规范"),
+    "查看文档 doc.weixin.qq.com/e3_m_EUwZMEXWkqiH。整理规范",
+  );
+  assert.equal(
+    taskDisplayTitle({ id: "t1", title: "PC&Console 指标筛选埋点 (#1120427644140165979)", text: "长指令" }),
+    "PC&Console 指标筛选埋点 (#1120427644140165979)",
+  );
+  assert.equal(
+    taskDisplayTitle({ id: "t2", key: "tapd:1120427644140165979", text: "用户要求开发 Databrain 情报需求" }),
+    "开发 Databrain 情报需求 #1120427644140165979",
+  );
 });
 
 test("a delayed history response cannot clear a newer typing state", async () => {

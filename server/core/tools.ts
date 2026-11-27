@@ -1055,7 +1055,7 @@ export class Tools {
         }
       });
       const task = employee.task(await employee.state(), id);
-      return { id, title: task.text.slice(0, 80), status: task.status };
+      return { id, title: task.title || task.text.slice(0, 80), status: task.status };
     };
     if (internal.target === "task") assert(await employee.findTask(a.id), "taskId 不属于当前热心市民");
     const memberOnly = (action: string, kind?: string) => ["list", "resume", "answer", "stop", "vault_list", "vault_get"].includes(action) || (action === "add" && kind === "todo");

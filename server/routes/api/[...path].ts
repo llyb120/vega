@@ -393,7 +393,7 @@ export default defineEventHandler(async (event) => {
             const intent = item?.intent && ["follow_up", "retry", "fork"].includes(item.intent) ? item.intent : undefined;
             hydrated.push({
               id: task.id,
-              title: String(task.text || "").replace(/\s+/g, " ").trim().slice(0, 80),
+              title: task.title || String(task.text || "").replace(/\s+/g, " ").trim().slice(0, 80),
               status: task.status,
               ...(task.chainId ? { chainId: task.chainId } : {}),
               ...(typeof task.chainSeq === "number" ? { chainSeq: task.chainSeq } : {}),

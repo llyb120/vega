@@ -1,7 +1,7 @@
 <script setup vapor>
 import Icon from "./Icon.vue";
 import { taskTone } from "./task-status.js";
-import { cleanTaskTitle } from "./conversation.js";
+import { taskDisplayTitle } from "./conversation.js";
 defineProps({ refs: { type: Array, default: () => [] } });
 const emit = defineEmits(["open", "remove"]);
 const INTENT_LABEL = { follow_up: "继续交付", retry: "分支重做", fork: "开新分支" };
@@ -13,7 +13,7 @@ const INTENT_LABEL = { follow_up: "继续交付", retry: "分支重做", fork: "
         <span :class="['dot', taskTone(item.status)]" aria-hidden="true"></span>
         <span v-if="item.intent" class="intent-tag">{{ INTENT_LABEL[item.intent] || '引用' }}</span>
         <span v-if="item.chainSeq" class="seq-tag">#{{ item.chainSeq }}</span>
-        <span class="task-ref-title">{{ cleanTaskTitle(item.title) || item.id }}</span>
+        <span class="task-ref-title">{{ taskDisplayTitle(item) || item.id }}</span>
       </button>
       <button type="button" class="icon sm task-ref-remove" aria-label="移除引用任务" @click="emit('remove', item.id)"><Icon name="close" :size="12" /></button>
     </div>

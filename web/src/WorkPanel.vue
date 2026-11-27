@@ -2,6 +2,7 @@
 import { ref } from "vue";
 import Icon from "./Icon.vue";
 import { taskLabel, taskTone, planProgress, shortTime } from "./task-status";
+import { taskDisplayTitle } from "./conversation.js";
 import { chainEdgeLabel } from "../../shared/task-chain";
 import { defaultQuickActions, defaultSettingsLabel } from "../../shared/task-assist";
 const props = defineProps({ attention: Array, active: Array, readonly: Boolean, act: Function, overlay: Boolean, canOpenBrowser: Boolean });
@@ -27,7 +28,7 @@ function openBrowser(task) {
   if (!browser) return;
   emit("open-browser", {
     taskId: task.id,
-    taskTitle: task.text,
+    taskTitle: taskDisplayTitle(task),
     tabTag: browser.tabTag || "",
     url: browser.url || "",
     title: browser.title || "",
@@ -48,7 +49,7 @@ function brief(text, max = 72) {
       <section v-if="attention.length" class="panel-section">
         <h4><span class="dot warn" aria-hidden="true"></span>待你处理<span class="count warn">{{ attention.length }}</span></h4>
         <article v-for="task in attention" :key="task.id" class="attention-card" :aria-busy="busy === task.id">
-          <button type="button" class="task-title" :title="task.text" @click="emit('open', task.id)">{{ brief(task.text) }}</button>
+          <button type="button" class="task-title" :title="task.text" @click="emit('open', task.id)">{{ brief(taskDisplayTitle(task)) }}</button>
           <p class="attention-text" :title="task.status === 'approval' ? task.approval : task.waiting"><strong>{{ task.status === 'approval' ? '需要确认' : '需要补充' }}：</strong>{{ brief(task.status === 'approval' ? task.approval : task.waiting, 96) }}</p>
           <button type="button" class="link detail" @click="emit('open', task.id)">{{ task.partialDelivery ? '查看详情并决定部分交付' : '查看详情' }}</button>
           <div v-if="task.status === 'waiting' && task.waitingAssist?.images?.length" class="assist-thumb-row">
@@ -74,9 +75,9 @@ function brief(text, max = 72) {
       <section class="panel-section">
         <h4><span class="dot info" aria-hidden="true"></span>进行中<span class="count">{{ others(active, attention).length }}</span></h4>
         <p v-if="!others(active, attention).length" class="panel-empty"><Icon name="check" :size="16" />手头很清爽。交代一个目标，进度会更新在这里。</p>
-        <button v-for="task in others(active, attention).slice(0, 8)" :key="task.id" type="button" class="task-row" @click="emit('open', task.id)">
+        <button v-for="task in others(active, attention).slice(0, 8)" :key="task.id" type="button" class="task-row" :title="task.text" @click="emit('open', task.id)">
           <span class="task-row-head"><span class="task-row-badges"><span :class="['badge', taskTone(task.status)]">{{ taskLabel(task.status) }}</span><span v-if="task.chainSeq" class="chain-tag">#{{ task.chainSeq }}<template v-if="task.edgeKind"> {{ chainEdgeLabel(task.edgeKind) }}</template></span></span><time>{{ shortTime(task.createdAt) }}</time></span>
-          <strong>{{ task.text }}</strong>
+          <strong>{{ taskDisplayTitle(task) }}</strong>
           <span v-if="task.progress?.length || task.queueReason || task.checkpoint" class="task-row-note">{{ task.progress?.at(-1)?.text || task.queueReason || task.checkpoint }}</span>
           <span v-if="planProgress(task.plan)" class="mini-progress" :title="`计划 ${planProgress(task.plan).done}/${planProgress(task.plan).total}`"><span :style="{ width: planProgress(task.plan).percent + '%' }"></span></span>
         </button>

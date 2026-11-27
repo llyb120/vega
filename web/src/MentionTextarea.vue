@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import { caretOffset, filterMembers, filterTasks, insertMention, mentionQuery, moveActive, removeRange, taskHashQuery } from "./mention.js";
 import { withMention } from "./long-press.js";
 import { shortTime, taskLabel, taskTone } from "./task-status.js";
-import { cleanTaskTitle } from "./conversation.js";
+import { taskDisplayTitle } from "./conversation.js";
 // A textarea with an @member picker and a #task reference picker.
 // Keys the active picker does not use are re-emitted as `keydown` (e.g. Enter to send).
 const props = defineProps({
@@ -102,12 +102,13 @@ defineExpose({ focus: () => box.value?.focus(), mention: mentionMember });
     <ul v-if="open" :id="listId" class="mention-menu" :class="{ 'task-menu': trigger?.kind === 'task' }" role="listbox" :style="{ bottom: 'calc(100% + 4px)', left: Math.max(0, position.left) + 'px' }">
       <template v-if="trigger?.kind === 'task'">
         <li v-for="(t, index) in items" :id="listId + '-' + index" :key="t.id" role="option" :aria-selected="index === active"
-          :class="{ active: index === active }" @mousedown.prevent="pick(t)" @mouseenter="active = index">
+          :class="{ active: index === active }" :title="t.text" @mousedown.prevent="pick(t)" @mouseenter="active = index">
           <div class="task-option-head">
             <span :class="['dot', taskTone(t.status)]" aria-hidden="true"></span>
             <span v-if="t.chainSeq" class="seq-tag">#{{ t.chainSeq }}</span>
-            <strong class="truncate">{{ cleanTaskTitle(t.text) || t.id }}</strong>
+            <strong class="truncate">{{ taskDisplayTitle(t) || t.id }}</strong>
           </div>
+          <span v-if="t.progress?.length" class="task-option-note truncate">{{ t.progress.at(-1).text }}</span>
           <small>{{ taskLabel(t.status) }}<template v-if="t.employeeName"> · {{ t.employeeName }}</template><template v-if="t.createdAt"> · {{ shortTime(t.createdAt) }}</template></small>
         </li>
       </template>
@@ -130,5 +131,6 @@ defineExpose({ focus: () => box.value?.focus(), mention: mentionMember });
 .mention-menu strong { font-weight: 500; font-size: 13px; }
 .mention-menu small { color: var(--muted); font-size: 11px; font-weight: 400; }
 .task-option-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.task-option-note { color: var(--text-2); font-size: 11.5px; line-height: 1.4; }
 .seq-tag { flex: none; padding: 0 5px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
 </style>

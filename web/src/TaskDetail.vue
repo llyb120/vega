@@ -65,7 +65,7 @@ const canExport = computed(() => !!exportMarkdown.value);
 async function runExport(format) {
   exportError.value = "";
   try {
-    await exportResult(format, { title: exportTitleOf(props.task.text), request: props.task.text, markdown: exportMarkdown.value, archiveBase: archiveBase.value });
+    await exportResult(format, { title: exportTitleOf(props.task.title || props.task.text), request: props.task.text, markdown: exportMarkdown.value, archiveBase: archiveBase.value });
     exportOpen.value = false;
   } catch (error) {
     exportError.value = error?.message || String(error);
@@ -99,7 +99,8 @@ async function run(action) {
         <span v-if="task.execution" class="badge"><Icon :name="task.execution.localAgent || task.execution.localBrowser ? 'laptop' : 'server'" :size="12" />文件系统 {{ task.execution?.localAgent ? (task.execution.clientName || '已绑定设备') : '云端' }} · 浏览器 {{ task.execution?.localBrowser ? (task.execution.browserClientName || task.execution.clientName || '已绑定设备') : '云端' }}</span>
         <time class="detail-time">{{ formatBeijing(task.createdAt) }}</time>
       </div>
-      <h2 class="sr-only">任务详情</h2>
+      <h2 v-if="task.title" class="detail-title">{{ task.title }}</h2>
+      <h2 v-else class="sr-only">任务详情</h2>
       <MessageText :text="task.text" />
       <p v-if="task.status === 'queued' && task.queueReason" class="detail-note" role="status"><Icon name="clock" :size="14" />{{ task.queueReason }}</p>
       <p v-if="task.handoffState?.note || task.handoffState?.error" class="detail-note" role="status"><Icon :name="task.handoffState?.error ? 'alert' : 'server'" :size="14" />{{ task.handoffState?.error || task.handoffState.note }}</p>
@@ -215,6 +216,7 @@ async function run(action) {
 .task-detail { display: flex; flex-direction: column; gap: 16px; min-height: 100%; padding: 20px 24px; outline: none; overflow-wrap: anywhere; }
 .detail-back { align-self: flex-start; margin: -8px 0 -6px -8px; color: var(--text-2); }
 .detail-head { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.detail-title { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.4; }
 .detail-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .detail-time { margin-left: auto; color: var(--muted); font-size: 12px; }
 .detail-note { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }

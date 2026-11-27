@@ -55,6 +55,7 @@ export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId"
 export type Owner = { token: string; name: string };
 export type Task = Obj & TaskChainFields & {
   id: string;
+  title?: string;
   text: string;
   status: string;
   createdAt: number;
@@ -142,11 +143,18 @@ const excerpt = (value: unknown, n: number) => {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return [...text].length > n ? [...text].slice(0, n).join("") + "…" : text;
 };
+function cleanTaskTitleArg(value: unknown): string {
+  assert(typeof value === "string", "任务标题必须是字符串");
+  const title = value.replace(/\s+/g, " ").trim();
+  assert(title.length >= 1 && [...title].length <= 80, "任务标题需要 1–80 字");
+  return title;
+}
 const at = (ms: unknown) => (typeof ms === "number" && ms > 0 ? beijingDateTime(ms) : undefined);
 /** One line per task for employee_status: enough to spot duplicates and pick a taskId; the full record is one taskId away. */
 export const taskSummary = (t: Task) =>
   Object.fromEntries(Object.entries({
     id: t.id,
+    title: t.title || undefined,
     status: t.status,
     dedupeKey: t.key || undefined,
     chainId: t.chainId || undefined,
@@ -1229,6 +1237,7 @@ export class Employee {
               }
               const task: Task = {
                 id: id("t"),
+                ...(a.title !== undefined ? { title: cleanTaskTitleArg(a.title) } : {}),
                 text: content,
                 status: "queued",
                 createdAt: now,
@@ -1286,6 +1295,7 @@ export class Employee {
                   task.profile = value;
                 }
               }
+              if (a.title !== undefined) task.title = cleanTaskTitleArg(a.title);
               const at = requestedTime(a, now);
               if (at) {
                 assert(
@@ -1531,6 +1541,7 @@ export class Employee {
               if (action === "progress") {
                 const prevPlan = JSON.stringify(t.plan || []);
                 assert([...content].length <= 400, "task_progress.message is at most 400 chars");
+                if (a.title !== undefined) t.title = cleanTaskTitleArg(a.title);
                 if (a.plan) {
                   assert(
                     Array.isArray(a.plan) &&
@@ -1673,7 +1684,7 @@ export class Employee {
                     if (s.chatSession || t.group) {
                       const quote = !t.group && t.chatSource?.session === s.chatSession && await this.store.message(s.chatSession!, t.chatSource.seq) ? await this.store.quote(s.chatSession!, t.chatSource.seq) : undefined;
                       // The artifact and its source-chat card must commit together.
-                      await this.toChat(s.chatSession, t.group, { role: "assistant", text: content, quote, progress: true, stepOutput: artifact, tasks: [{ id: t.id, title: t.text.slice(0, 80), status: t.status }] }, false);
+                      await this.toChat(s.chatSession, t.group, { role: "assistant", text: content, quote, progress: true, stepOutput: artifact, tasks: [{ id: t.id, title: t.title || t.text.slice(0, 80), status: t.status }] }, false);
                     }
                   }
                   const previewHint = previewRef
@@ -3159,7 +3170,7 @@ export class Employee {
           ...(assistImages.length ? { images: assistImages } : {}),
           ...(delivered && task.deliverableFiles?.length ? { files: task.deliverableFiles } : {}),
           ...(delivered && task.preview ? { preview: task.preview } : {}),
-          tasks: [{ id: task.id, title: task.text.slice(0, 80), status: task.status }],
+          tasks: [{ id: task.id, title: task.title || task.text.slice(0, 80), status: task.status }],
         };
         // In a group, a result or a question goes back to whoever asked (see Groups.post).
         await this.toChat(state.chatSession, task.group, message, true);

@@ -139,6 +139,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
     "给当前热心市民派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写用户目标、范围、明确约束和可感知的交付效果，执行任务的会话会自己选择实现方式与工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），也不要替用户擅自预设未要求的底层实现或运维方案（例如未指定外部目标主机/平台时，不要把自起本地端口服务、常驻进程或启停脚本写进要求——平台已内置报告导出、文件快照下载和纯前端静态网页预览托管），需要提到操作时写要达成的效果。已完成（done）和已取消（cancelled）的任务不可原地重启或 resume；若要基于已完成交付物继续修改/追问，或对已取消/失败/停止任务开分支重做，传 parentTaskId 和 relation（follow_up 后续 / retry 重做 / fork 分叉）建任务链。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 有进行中任务时不新建；仅存在已结束任务且未传 parentTaskId 时不新建并返回原任务，派单前不必先查重。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。用户明确说出的时刻或重复周期由系统记在同一条任务上，到点只续做这一条，不要为定时另建一条" +
       (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : ctx.group ? "。群聊里只给按群公告归你的工作派单。其他热心市民负责的工作不要派单，直接在回复里 @ 对应成员。" : "。"),
     { instructions: instructions("任务目标、范围、明确约束和可感知的交付效果，保留用户原话；不写工具名/动作名，也不擅自预设未要求的底层实现或自起服务方案"),
+      title: str("可选：简短明确的任务标题（1–80 字），例如「PC&Console 指标筛选埋点 (#1120427644140165979)」，便于任务列表和 # 引用快速区分；省略时自动从指令提取", { minLength: 1, maxLength: 80 }),
       parentTaskId: str("可选：前置或来源任务 ID。对已完成任务做后续修改（follow_up）、对已取消/失败/停止任务重做（retry）或分叉探索（fork）时传入，将新任务纳入同一任务链", { minLength: 1 }),
       relation: str("可选：与 parentTaskId 的关系：follow_up 基于已完成交付继续、retry 重做（自动挂到其父节点下作兄弟分支）、fork 分叉探索；省略时按来源状态自动推断", { enum: ["follow_up", "retry", "fork"] }),
       branchLabel: str("可选：分支短标签（1–80 字），如“改用方案B”“取消后重做”", { minLength: 1, maxLength: 80 }),
@@ -149,7 +150,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
     const allowed = ctx.kind === "chat" ? (ctx.member ? ["resume", "answer", "stop"] : TASK_COMMANDS) : ["update", "set_instructions", "set_profile", "reschedule", "cancel"];
     out.push(tool("employee_task_manage",
       "管理一条指定任务（taskId），request.command 选一种：" + commands(allowed, [
-        ["update", "一次改多项：instructions、profile、runAt 或 delayMinutes 中至少给一项，一起生效（任一项不合法则全部不改；内容和场景只能改尚未开始的任务）"],
+        ["update", "一次改多项：instructions、title、profile、runAt 或 delayMinutes 中至少给一项，一起生效（任一项不合法则全部不改；内容和场景只能改尚未开始的任务）"],
         ["set_instructions", "改尚未开始的任务内容"],
         ["set_profile", "改尚未开始的任务的开局场景偏好"],
         ["reschedule", "改执行时间，runAt 或 delayMinutes 二选一"],
@@ -159,7 +160,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         ["stop", "真正停止执行：回执 executionStopped=true 才算已停，false 表示停止请求已发出、正在收尾"],
       ]) + "。",
       { taskId, request: request([
-        obj({ command: one("update"), instructions: instructions("新的任务内容"), profile, runAt: beijing("新的执行时间"), delayMinutes: delayMinutes("多久后执行") }, ["command"]),
+        obj({ command: one("update"), instructions: instructions("新的任务内容"), title: str("可选：新的简短任务标题（1–80 字）", { minLength: 1, maxLength: 80 }), profile, runAt: beijing("新的执行时间"), delayMinutes: delayMinutes("多久后执行") }, ["command"]),
         obj({ command: one("set_instructions"), instructions: instructions("新的任务内容") }, ["command", "instructions"]),
         obj({ command: one("set_profile"), profile }, ["command", "profile"]),
         obj({ command: one("reschedule"), runAt: beijing("新的执行时间"), delayMinutes: delayMinutes("多久后执行") }, ["command"]),
@@ -173,6 +174,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
     out.push(tool("task_progress",
       "保存当前任务进度与计划（message ≤400 字；plan 1–50 步，总计 ≤8000 字，整体替换旧计划）。简单一步任务可不建计划直接交付；多步骤或复杂任务用 plan 追踪，推进时保持已有步骤 content 不变、只改 status，真实验证成功才标 completed，受阻标 blocked，不把 task_complete 列入计划。stepOutput 仅用于需要单独导出的成果。不结束本轮；回执 outlineReviewRequired=true 时交付前逐项复核 changedSteps。",
       { message: str("当前进度，1–400 字", { minLength: 1, maxLength: 400 }),
+        title: str("可选：简短明确的任务标题（1–80 字），如在读取需求单/文档真实标题后补充或更新，方便任务列表与 # 引用区分", { minLength: 1, maxLength: 80 }),
         plan: { type: "array", minItems: 1, maxItems: 50, description: "完整计划，包括未来步骤", items: obj({
           content: str("步骤描述，1–500 字", { minLength: 1, maxLength: 500 }),
           status: str("", { enum: ["pending", "in_progress", "completed", "failed", "blocked", "cancelled"] }),
@@ -369,14 +371,14 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
 
     case "employee_status": return employee(defined({ action: "list", id: a.taskId, key: a.dedupeKey, status: a.status === "all" ? undefined : a.status, query: a.memoryQuery }));
     case "employee_task_create":
-      return employee(defined({ action: "add", kind: "todo", text: a.instructions, key: a.dedupeKey, parentTaskId: a.parentTaskId, relation: a.relation, branchLabel: a.branchLabel, ...when(a, "", false), profile: a.profile }));
+      return employee(defined({ action: "add", kind: "todo", text: a.instructions, title: a.title, key: a.dedupeKey, parentTaskId: a.parentTaskId, relation: a.relation, branchLabel: a.branchLabel, ...when(a, "", false), profile: a.profile }));
     case "employee_task_manage": {
       const r = a.request, id = a.taskId;
       switch (r.command) {
         case "update": {
           const at = r.runAt !== undefined || r.delayMinutes !== undefined ? when(r, ".request") : {};
-          const fields = defined({ text: r.instructions, profile: r.profile, ...at });
-          if (!Object.keys(fields).length) throw new ArgumentError("参数.request 的 update 至少要改一项：instructions、profile、runAt 或 delayMinutes");
+          const fields = defined({ text: r.instructions, title: r.title, profile: r.profile, ...at });
+          if (!Object.keys(fields).length) throw new ArgumentError("参数.request 的 update 至少要改一项：instructions、title、profile、runAt 或 delayMinutes");
           return employee({ action: "update", id, ...fields }, "task");
         }
         case "set_instructions": return employee({ action: "update", id, text: r.instructions }, "task");
@@ -388,7 +390,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
         default: return employee({ action: "stop", id }, "task");
       }
     }
-    case "task_progress": return employee(defined({ action: "progress", text: a.message, plan: a.plan, tellUser: a.tellUser, stepOutput: a.stepOutput }));
+    case "task_progress": return employee(defined({ action: "progress", text: a.message, title: a.title, plan: a.plan, tellUser: a.tellUser, stepOutput: a.stepOutput }));
     case "task_reschedule":
       if (!ctx.taskId) throw new ArgumentError("task_reschedule 只能在任务会话中使用");
       return employee({ action: "update", id: ctx.taskId, ...when(a, "") });

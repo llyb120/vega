@@ -49,11 +49,61 @@ export function taskAccentColor(taskId) {
   return TASK_ACCENTS[(hash >>> 0) % TASK_ACCENTS.length];
 }
 
-/** Single-line task title with bare URLs stripped when enough readable text remains. */
+function compactObjectUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const last = parts.at(-1);
+    if (last && last.length <= 28 && !/^[a-f\d]{24,}$/i.test(last)) return `${parsed.hostname}/${last}`;
+    return parsed.hostname;
+  } catch {
+    return "";
+  }
+}
+
+/** Single-line task title: keep ticket/PR IDs and compact object URLs instead of leaving bare colons. */
 export function cleanTaskTitle(text) {
   const raw = String(text || "").replace(/\s+/g, " ").trim();
-  const cleaned = raw.replace(/https?:\/\/\S+/g, "").replace(/\s{2,}/g, " ").trim();
+  if (!raw) return "";
+  let cleaned = raw.replace(
+    /(?:([:：])\s*)?(https?:\/\/[^\s"'<>。，；！？、）】》”’]+)(\s*(?=[。，；！？、）】》”’,.;]|$))?/gi,
+    (_, colon, url, trailing) => {
+      const suffix = trailing || "";
+      const ticket = /(?:story|bug|task|defect|iteration|workitem|issues?|pull|pulls|merge_requests|tickets?)(?:\/detail)?\/(\d{3,})/i.exec(url);
+      if (ticket) return ` #${ticket[1]}${suffix}`;
+      if (colon) {
+        const compact = compactObjectUrl(url);
+        if (compact) return ` ${compact}${suffix}`;
+      }
+      return suffix;
+    },
+  );
+  cleaned = cleaned
+    .replace(/[:：]\s*(?=[。，；！？,.]|$)/g, "")
+    .replace(/\s+([。，；！？、）】》”’])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  const unwrapped = cleaned.replace(/^用户(?:要求|希望|交代|让我|请)\s*/, "").trim();
+  if (unwrapped.length >= 6) cleaned = unwrapped;
   return cleaned.length >= 6 ? cleaned : raw;
+}
+
+/** Clear display title for a task object or string, preferring explicit title and appending key/ID when distinct. */
+export function taskDisplayTitle(taskOrText) {
+  if (!taskOrText) return "";
+  if (typeof taskOrText === "string") return cleanTaskTitle(taskOrText);
+  if (typeof taskOrText.title === "string" && taskOrText.title.trim()) return cleanTaskTitle(taskOrText.title);
+  const base = cleanTaskTitle(taskOrText.text || "");
+  const key = String(taskOrText.key || taskOrText.dedupeKey || "").trim();
+  if (key) {
+    const tail = key.split(/[:/]/).at(-1) || key;
+    const hasKey = base.includes(key) || (tail.length >= 4 && base.includes(tail));
+    if (!hasKey) {
+      const tag = /^\d+$/.test(tail) ? `#${tail}` : `(${key})`;
+      return base ? `${base} ${tag}` : tag;
+    }
+  }
+  return base || String(taskOrText.id || "");
 }
 
 /** Consecutive non-notice messages from the same sender and task group visually without repeating avatar and name. */

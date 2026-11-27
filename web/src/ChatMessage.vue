@@ -10,7 +10,7 @@ import PreviewCard from "./PreviewCard.vue";
 import StepOutput from "./StepOutput.vue";
 import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
-import { cleanTaskTitle } from "./conversation";
+import { cleanTaskTitle, taskDisplayTitle } from "./conversation";
 import { chainEdgeLabel } from "../../shared/task-chain";
 import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
@@ -116,7 +116,7 @@ async function runExport(format) {
         <button v-for="ref in message.taskRefs" :key="ref.id" type="button" class="chat-task-ref" @click="emit('task', ref.id)">
           <Icon name="tasks" :size="12" />
           <span v-if="ref.chainSeq" class="ref-seq">#{{ ref.chainSeq }}</span>
-          <span class="ref-title">{{ cleanTaskTitle(ref.title) || ref.id }}</span>
+          <span class="ref-title">{{ taskDisplayTitle(taskInfoOf(ref.id) || ref) || ref.id }}</span>
         </button>
       </div>
       <div class="chat-bubble" :class="{ failed: message.error, tinted: !!tint, 'has-topic': !!topicContext?.color && !message.error }" :style="bubbleStyle" :role="message.error ? 'alert' : undefined">
@@ -144,7 +144,7 @@ async function runExport(format) {
           <button v-for="task in footerTasks" :key="task.id" type="button" class="chat-bubble-link chat-task-link" :data-task-id="task.id" :disabled="statusOf(task) === 'deleted'" :aria-label="(statusOf(task) === 'deleted' ? '任务已删除：' : '查看任务：') + task.title" @click="emit('task', task.id)">
             <Icon name="tasks" :size="13" />
             <span v-if="taskInfoOf(task.id)?.chainSeq" class="chat-chain-tag">#{{ taskInfoOf(task.id).chainSeq }}<template v-if="taskInfoOf(task.id)?.edgeKind"> {{ chainEdgeLabel(taskInfoOf(task.id).edgeKind) }}</template></span>
-            <span class="chat-link-text">任务：{{ task.title }}</span>
+            <span class="chat-link-text">任务：{{ taskDisplayTitle(taskInfoOf(task.id) || task) }}</span>
             <span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span>
             <Icon v-if="statusOf(task) !== 'deleted'" name="right" :size="13" />
           </button>

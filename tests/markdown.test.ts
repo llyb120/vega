@@ -207,6 +207,25 @@ test("chat markdown escapes HTML and only links safe protocols", () => {
   assert(!/<[a-z]+ on\w+=/i.test(html));
 });
 
+test("bare HTTP(S) URLs auto-link to open in a new tab without eating trailing punctuation or code spans", () => {
+  const tapd = "https://tapd.tencent.com/tapd_fe/20427644/story/detail/1020427644140527111";
+  const withCjkPeriod = renderInline(`用户要求开发此 TAPD 需求：${tapd}。按当前工作原则执行`);
+  assert(withCjkPeriod.includes(`<a href="${tapd}" target="_blank" rel="noopener noreferrer">${tapd}</a>。按`), withCjkPeriod);
+
+  const query = renderInline("打开 https://example.com/search?a=1&b=2，查看结果。");
+  assert(query.includes('<a href="https://example.com/search?a=1&amp;b=2" target="_blank" rel="noopener noreferrer">https://example.com/search?a=1&amp;b=2</a>，查看'), query);
+
+  const balanced = renderInline("参考 https://en.wikipedia.org/wiki/Foo_(bar).");
+  assert(balanced.includes('<a href="https://en.wikipedia.org/wiki/Foo_(bar)" target="_blank" rel="noopener noreferrer">https://en.wikipedia.org/wiki/Foo_(bar)</a>.'), balanced);
+
+  const wrapped = renderInline("(see https://example.com/path)");
+  assert(wrapped.includes('(see <a href="https://example.com/path" target="_blank" rel="noopener noreferrer">https://example.com/path</a>)'), wrapped);
+
+  assert.equal(renderInline("`https://example.com/raw`"), "<code>https://example.com/raw</code>");
+  assert(!renderInline("https://user:secret@example.com/a").includes("<a "), "credential URLs must not auto-link");
+  assert(!renderInline("https://example.com/a\\b").includes("<a "), "backslash URLs must not auto-link");
+});
+
 test("chat markdown renders blocks, lists and copyable code", () => {
   const { html, codes } = renderMarkdown(
     "# 标题\n- 一\n- 二\n1. 第一\n> 引用\n```js\nconst a = '<b>';\n```\n尾部",

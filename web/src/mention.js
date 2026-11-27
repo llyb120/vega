@@ -53,19 +53,21 @@ export function taskHashQuery(text, caret) {
 
 const ENDED_SET = new Set(["done", "failed", "cancelled", "stopped", "sealed"]);
 
-/** Tasks matching the #query: exact id/#seq first, then prefix/substring on text, id, branchLabel, employeeName. */
+/** Tasks matching the #query: exact id/#seq first, then prefix/substring on title, text, key, id, branchLabel, employeeName. */
 export function filterTasks(tasks, query, limit = 8) {
   const raw = key(query), seqQuery = raw.replace(/^#/, "");
   const rank = (t) => {
     const id = key(t.id);
+    const explicit = key(t.title);
     const title = key(t.text);
+    const dedupe = key(t.key || t.dedupeKey);
     const label = key(t.branchLabel);
     const emp = key(t.employeeName);
     const seq = t.chainSeq != null ? String(t.chainSeq) : "";
     if (!raw) return ENDED_SET.has(t.status) ? 2 : 1;
     if (id === raw || (seq && seq === seqQuery)) return 0;
-    if (id.startsWith(raw) || title.startsWith(raw) || label.startsWith(raw)) return 1;
-    if (title.includes(raw) || id.includes(raw) || label.includes(raw) || emp.includes(raw) || key(t.status).includes(raw)) return 2;
+    if (id.startsWith(raw) || explicit.startsWith(raw) || title.startsWith(raw) || dedupe.startsWith(raw) || label.startsWith(raw)) return 1;
+    if (explicit.includes(raw) || title.includes(raw) || dedupe.includes(raw) || id.includes(raw) || label.includes(raw) || emp.includes(raw) || key(t.status).includes(raw)) return 2;
     return -1;
   };
   return (tasks || [])

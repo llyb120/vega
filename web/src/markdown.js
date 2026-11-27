@@ -83,6 +83,40 @@ function imgTag(url, alt = "存档图片") {
   return `<img src="${escape(url)}" alt="${escape(alt)}" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
 }
 
+function formatBold(value) {
+  return String(value).replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+}
+
+function parseBareUrl(escapedCandidate) {
+  let trimmed = escapedCandidate;
+  let suffix = "";
+  while (trimmed) {
+    const last = trimmed.slice(-1);
+    if (/[.,;:!?]/.test(last)) {
+      suffix = last + suffix;
+      trimmed = trimmed.slice(0, -1);
+    } else if (last === ")" || last === "]" || last === "}") {
+      const open = last === ")" ? "(" : last === "]" ? "[" : "{";
+      const opens = trimmed.split(open).length - 1;
+      const closes = trimmed.split(last).length - 1;
+      if (closes > opens) {
+        suffix = last + suffix;
+        trimmed = trimmed.slice(0, -1);
+      } else break;
+    } else break;
+  }
+  if (!trimmed) return null;
+  const rawUrl = trimmed.replace(/&amp;/g, "&");
+  if (rawUrl.includes("\\")) return null;
+  try {
+    const parsed = new URL(rawUrl);
+    if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password) return null;
+    return { href: trimmed, suffix };
+  } catch {
+    return null;
+  }
+}
+
 export function renderInline(text) {
   const fragments = [];
   const protect = (html, plain) => {
@@ -124,14 +158,26 @@ export function renderInline(text) {
       const { id, link } = mentionIds.get(name);
       return prefix + protect(link ? `<a class="mention" href="/employees/${encodeURIComponent(id)}" data-employee="${escape(id)}">@${escape(name)}</a>` : `<span class="mention">@${escape(name)}</span>`, "@" + name);
     });
-  const html = escape(source)
+  const escaped = escape(source)
     .replace(
       /\[([^\]\n]+)\]\((https?:\/\/[^\s)\u0000]+|\/preview\/pv-[a-f\d]{32}(?:\/[^\s)\u0000]*)?)\)/g,
-      (_, label, url) =>
-        `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`,
+      (_, label, url) => {
+        const renderedLabel = formatBold(label).replace(TOKEN, (_, i) => fragments[i].html);
+        return protect(`<a href="${url}" target="_blank" rel="noopener noreferrer">${renderedLabel}</a>`, label);
+      },
     )
-    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  return html.replace(TOKEN, (_, i) => fragments[i].html);
+    .replace(
+      /(^|[^\w/@=&])(https?:\/\/(?:&amp;|[^\s<>&"'\u0000。，；！？、）】》”’])+)/gi,
+      (match, prefix, candidate, offset, str) => {
+        const urlStart = offset + prefix.length;
+        const afterChar = str[offset + match.length];
+        if (str.slice(Math.max(0, urlStart - 2), urlStart) === "](" || afterChar === MARK) return match;
+        const parsed = parseBareUrl(candidate);
+        if (!parsed) return match;
+        return prefix + protect(`<a href="${parsed.href}" target="_blank" rel="noopener noreferrer">${parsed.href}</a>`, parsed.href) + parsed.suffix;
+      },
+    );
+  return formatBold(escaped).replace(TOKEN, (_, i) => fragments[i].html);
 }
 
 function tableRow(line) {

@@ -98,12 +98,14 @@ test("taskHashQuery detects #query before the caret and ignores URL anchors/newl
 test("filterTasks and removeRange match by id, seq, text and clean up the query", () => {
   const tasks = [
     { id: "t-old", text: "历史导出报告", status: "done", chainSeq: 1, createdAt: 100 },
-    { id: "t-mid", text: "修登录问题", status: "running", chainSeq: 2, createdAt: 200 },
+    { id: "t-mid", text: "修登录问题", title: "OAuth 回调修复", key: "tapd:998877", status: "running", chainSeq: 2, createdAt: 200 },
     { id: "t-new", text: "生成登录报告", status: "done", chainSeq: 3, createdAt: 300, branchLabel: "方案B" },
   ];
   assert.deepEqual(filterTasks(tasks, "").map((t: any) => t.id), ["t-mid", "t-new", "t-old"]);
   assert.deepEqual(filterTasks(tasks, "2").map((t: any) => t.id), ["t-mid"]);
   assert.deepEqual(filterTasks(tasks, "t-old").map((t: any) => t.id), ["t-old"]);
+  assert.deepEqual(filterTasks(tasks, "OAuth").map((t: any) => t.id), ["t-mid"]);
+  assert.deepEqual(filterTasks(tasks, "998877").map((t: any) => t.id), ["t-mid"]);
   assert.deepEqual(filterTasks(tasks, "方案B").map((t: any) => t.id), ["t-new"]);
   assert.deepEqual(removeRange("帮我把 #登录 改下", 4, 7), { text: "帮我把 改下", caret: 4 });
   assert.deepEqual(removeRange("#t-old", 0, 6), { text: "", caret: 0 });

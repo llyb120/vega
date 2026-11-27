@@ -4,7 +4,7 @@ import Icon from "./Icon.vue";
 import TaskDetail from "./TaskDetail.vue";
 import { taskLabel, taskTone, planProgress, shortTime, needsAttention } from "./task-status";
 import { chainEdgeLabel, chainTasks, groupTasksByChain } from "../../shared/task-chain";
-import { cleanTaskTitle } from "./conversation.js";
+import { taskDisplayTitle } from "./conversation.js";
 const props = defineProps({ active: Array, attention: Array, history: Array, filter: String, focus: String, readonly: Boolean, act: Function, saveMemory: Function, employeeId: String, clients: Array, handoff: Function, canOpenBrowser: Boolean });
 const emit = defineEmits(["filter", "select", "inspect", "chat", "quote-task", "open-browser", "open-settings"]);
 const list = ref(null);
@@ -53,7 +53,7 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
           <button v-if="group.kind === 'single'" type="button" role="listitem" class="task-item" :data-row="group.task.id" :class="{ selected: selected?.id === group.task.id, attention: needsAttention(group.task.status) }" :aria-current="selected?.id === group.task.id ? 'true' : undefined" @click="emit('select', group.task.id)">
             <span :class="['dot', taskTone(group.task.status), { pulse: group.task.status === 'running' }]" aria-hidden="true"></span>
             <span class="task-main">
-              <strong>{{ group.task.text }}</strong>
+              <strong>{{ taskDisplayTitle(group.task) }}</strong>
               <span class="task-meta"><span :class="['status-text', taskTone(group.task.status)]">{{ taskLabel(group.task.status) }}</span><span>{{ location(group.task) }}</span><time>{{ shortTime(group.task.createdAt) }}</time></span>
               <span v-if="needsAttention(group.task.status)" class="task-ask"><span class="clamp">{{ group.task.status === 'approval' ? group.task.approval : group.task.waiting }}</span></span>
               <span v-else-if="group.task.progress?.length" class="task-note">{{ group.task.progress.at(-1).text }}</span>
@@ -64,7 +64,7 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
             <button type="button" class="chain-group-head" :aria-expanded="isExpanded(group)" @click="toggleChain(group.chainId, isExpanded(group))">
               <span :class="['dot', taskTone(group.headTask.status), { pulse: group.headTask.status === 'running' }]" aria-hidden="true"></span>
               <span class="chain-group-main">
-                <strong>{{ cleanTaskTitle(group.headTask.text) || group.headTask.text }}</strong>
+                <strong>{{ taskDisplayTitle(group.headTask) || group.headTask.text }}</strong>
                 <span class="chain-group-meta">
                   <span class="chain-badge">任务链 · {{ group.count }} 节点<template v-if="group.branched"> · {{ group.branchCount }} 分支</template></span>
                   <span :class="['status-text', taskTone(group.headTask.status)]">{{ taskLabel(group.headTask.status) }}</span>
@@ -82,7 +82,7 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
                     <span class="chain-node-line">
                       <span v-if="node.task.chainSeq" class="chain-seq">#{{ node.task.chainSeq }}</span>
                       <span v-if="edgeText(node)" class="chain-edge" :class="node.edgeKind">{{ edgeText(node) }}</span>
-                      <strong>{{ cleanTaskTitle(node.task.text) || node.task.text }}</strong>
+                      <strong>{{ taskDisplayTitle(node.task) || node.task.text }}</strong>
                     </span>
                     <span class="task-meta"><span :class="['status-text', taskTone(node.task.status)]">{{ taskLabel(node.task.status) }}</span><span>{{ location(node.task) }}</span><time>{{ shortTime(node.task.createdAt) }}</time></span>
                   </span>
