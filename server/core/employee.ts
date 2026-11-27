@@ -78,6 +78,7 @@ export type Task = Obj & TaskChainFields & {
   seenEvents?: string[];
   seenEvidence?: string[];
   waitingAssist?: TaskAssist;
+  waitStreak?: number;
   backgroundWait?: { token: string; session: string; ready?: boolean };
 };
 type LiveSuspension = { session: string; token: string; wait: TaskSuspension; ready?: { text?: string } };
@@ -329,6 +330,11 @@ export const profile = (s: string = "lightweight") =>
   )[s] ||
   s ||
   "lightweight";
+export const TASK_WAIT_BACKOFF_MINUTES = [1, 5, 10, 15, 30, 60] as const;
+export function nextTaskWaitMinutes(streak = 0): number {
+  const index = Math.max(0, Math.min(Math.trunc(Number(streak) || 0), TASK_WAIT_BACKOFF_MINUTES.length - 1));
+  return TASK_WAIT_BACKOFF_MINUTES[index];
+}
 export function requestedTime(a: Obj, now = Date.now()) {
   if (a.nextAt !== undefined) {
     assert(
@@ -1277,6 +1283,7 @@ export class Employee {
                   "Duty-triggered tasks use task_wait rather than direct rescheduling",
                 );
                 task.nextCheckAt = at;
+                delete task.waitStreak;
                 if (caller) {
                   task.status = "deferred";
                   stop = true;
@@ -1447,6 +1454,7 @@ export class Employee {
               delete t.deliverableWarned;
               delete t.settleNudges;
               delete t.waitingAssist;
+              delete t.waitStreak;
 
               const candidates = extractMemoryCandidates({
                 summary: t.summary,
@@ -1511,6 +1519,7 @@ export class Employee {
               assert(t, "Action requires a running task");
               assert(content, "text required");
               if (action === "progress") {
+                const prevPlan = JSON.stringify(t.plan || []);
                 assert([...content].length <= 400, "task_progress.message is at most 400 chars");
                 if (a.plan) {
                   assert(
@@ -1581,6 +1590,9 @@ export class Employee {
                 t.progress ??= [];
                 t.progress.push({ at: now, text: content });
                 t.progress = t.progress.slice(-50);
+                if ((a.plan && JSON.stringify(t.plan || []) !== prevPlan) || a.stepOutput !== undefined) {
+                  delete t.waitStreak;
+                }
                 const reviewHint = a.plan && !planUnresolved(t.plan).length && (t.outlineReviewRequired || unfinishedSteps(t.plan).length)
                   ? { outlineReviewRequired: true, changedSteps: outlineSteps(t) }
                   : {};
@@ -1681,6 +1693,7 @@ export class Employee {
               }
               if (action === "ask") {
                 delete t.partialDelivery;
+                delete t.waitStreak;
                 t.status = "approval";
                 t.approval = content;
                 this.note(s, t, "confirm", owner.name || "热心市民", content);
@@ -1688,6 +1701,7 @@ export class Employee {
               if (action === "help") {
                 const archive = { employeeId: this.employeeId, taskId: t.id };
                 const resolvedText = await this.store.files.resolveTaskScreenshots(archive, content);
+                delete t.waitStreak;
                 t.status = "waiting";
                 t.waiting = resolvedText;
                 const assist = await this.buildWaitingAssist(t, a.assist, resolvedText, now);
@@ -1696,11 +1710,23 @@ export class Employee {
                 this.note(s, t, "help", "热心市民", t.waiting);
               }
               if (action === "defer") {
-                const at = requestedTime(a, now);
+                let waitMinutes: number | undefined;
+                const at = a.nextAt !== undefined
+                  ? requestedTime({ nextAt: a.nextAt }, now)
+                  : now + (waitMinutes = nextTaskWaitMinutes(t.waitStreak || 0)) * 60000;
                 assert(at, "task_wait requires a future resume time");
                 t.nextCheckAt = at;
                 t.checkpoint = content;
                 t.status = "deferred";
+                t.waitStreak = (t.waitStreak || 0) + 1;
+                stop = true;
+                return {
+                  ok: true,
+                  nextCheckAt: beijingDateTime(t.nextCheckAt),
+                  ...(waitMinutes !== undefined ? { delayMinutes: waitMinutes } : {}),
+                  waitStreak: t.waitStreak,
+                  next: "Saved; end this turn now. System resumes the same task/session; do not resubmit or poll.",
+                };
               }
               if (action === "relay") {
                 assert(false, "已停用 task_relay_computer：请同会话 switch_scene(scene=computer) 做网页操作，勿新开浏览器会话");
@@ -2165,6 +2191,7 @@ export class Employee {
               t.revision = (t.revision || 0) + 1;
               if (wantsSettle(t)) t.settlePreferred = true;
               t.lastSupplementSource = supplementSource;
+              delete t.waitStreak;
             }
             t.lastSupplement = text;
             if (t.backgroundWait && !t.backgroundWait.ready)
@@ -2196,6 +2223,7 @@ export class Employee {
               t.nextCheckAt = 0;
               t.waiting = "";
               delete t.waitingAssist;
+              delete t.waitStreak;
               t.approval = "";
               t.recovery = undefined;
               t.workspaceWait = undefined;
@@ -2214,6 +2242,7 @@ export class Employee {
               t.status = "stopped";
               t.nextCheckAt = 0;
               delete t.waitingAssist;
+              delete t.waitStreak;
               this.clearBackgroundWait(t);
               delete t.partialDelivery;
               delete t.approvedPartial;
@@ -2255,6 +2284,7 @@ export class Employee {
               t.lastSupplement = undefined;
               t.waiting = "";
               delete t.waitingAssist;
+              delete t.waitStreak;
               t.status = "queued";
               t.nextCheckAt = 0;
               this.note(s, t, "answer", owner.name || "用户", a.text);
@@ -2271,6 +2301,7 @@ export class Employee {
                 t.approval = "";
                 t.status = "queued";
                 t.nextCheckAt = 0;
+                delete t.waitStreak;
                 this.note(s, t, "approve", owner.name || "用户", t.answer);
                 chatReply = { text: "已批准执行", taskId: t.id };
               } else if (t.partialDelivery) {
@@ -2281,6 +2312,7 @@ export class Employee {
                 t.approval = "";
                 t.status = "queued";
                 t.nextCheckAt = 0;
+                delete t.waitStreak;
                 t.answer = "交代人拒绝部分交付；原任务仍需完成，将未完成步骤恢复为 pending 并继续，确实受阻才请求补充。";
                 this.note(s, t, "answer", owner.name || "用户", t.answer);
                 chatReply = { text: "不接受部分交付，请继续原任务", taskId: t.id };
@@ -2297,6 +2329,7 @@ export class Employee {
               t.status = "queued";
               t.nextCheckAt = 0;
               t.finishedAt = 0;
+              delete t.waitStreak;
               t.answer =
                 "同一任务续做，保留原计划与会话；核对已发生的操作，不重做。上次结果：\n" +
                 (t.result || "");
@@ -3082,7 +3115,7 @@ export class Employee {
           : task.status === "approval" ? "等待你确认：" + task.approval
           : task.status === "waiting" ? "需要你处理：" + task.waiting
           : task.status === "deferred" && repeatDelivered ? (task.summary || task.result || "本轮已完成。") + "\n\n" + task.checkpoint
-          : task.status === "deferred" ? "已挂起，等待外部结果；到期继续原任务。\n\n" + task.checkpoint
+          : task.status === "deferred" ? `已挂起，等待外部结果；${task.nextCheckAt ? `预计 ${beijingDateTime(task.nextCheckAt)} 自动复查` : "到期继续原任务"}。\n\n` + task.checkpoint
           : task.status === "recovering" ? "本轮未完成，将在原会话恢复。\n\n原因：" + task.recovery?.reason
           : task.status === "queued" && task.side === "computer" ? "已交接电脑会话，等待执行结果；主任务尚未完成。"
           : result || task.checkpoint || "本轮已结束，任务尚未验证交付。";

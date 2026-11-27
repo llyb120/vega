@@ -266,8 +266,8 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         settingsLabel: str("可选：设置跳转按钮文案，1–80 字", { minLength: 1, maxLength: 80 }),
       }, ["question"]));
     out.push(tool("task_wait",
-      "已提交的外部作业（构建、发布、导出等）或已发出的澄清请求需要等待结果时挂起当前任务：checkpoint 写作业编号或请求链接、已做的操作与回执、当前状态、检查方式和必要的升级处理（不含凭据）；resumeAt 和 delayMinutes 二选一，结合对方预计回复、工作时间及业务截止时间安排下次，不把等待时长当作任务完成期限。立即结束本轮并释放执行名额，到时在原会话续做，只检查原作业或回复，同一请求不要重发；无回复时按实际情况再次挂起，有部分回复先判断可独立继续的工作。按渠道或接口规范（含对应的对象/通知参数）提交成功并拿到回执或读回已落库，即视为已发出，应直接用本工具休眠等待定时复查，不得仅因回执未返回“对方已收到提醒/已读”等下游送达证明而改调 task_ask_user；仅当发送报错、提交结果不明或已有明确证据表明该渠道无法触达/无法触发真实提醒时才交由用户处理，持续无回复时在后续唤醒中再按 checkpoint 升级。有新疑点可发新一轮澄清并保存新回执。没有外部结果、只是把本任务改到以后做用 task_reschedule。必须单独调用。",
-      { checkpoint: str("恢复点，1–8000 字", { minLength: 1, maxLength: 8000 }), resumeAt: beijing("续做时间"), delayMinutes: int("多少分钟后续做，1–10080", { minimum: 1, maximum: 10080 }) },
+      "已提交的外部作业（构建、发布、导出等）或已发出的澄清请求需要等待结果时挂起当前任务：checkpoint 写作业编号或请求链接、已做的操作与回执、当前状态、检查方式和必要的升级处理（不含凭据）。常规等待请省略时间参数，系统自动按阶梯退避定时复查（1→5→10→15→30→60 分钟，上限 60 分钟；连续无结果逐步拉长，取得进展或人工介入后重置；即使传入 delayMinutes 也会按系统退避阶梯执行）；仅在明确约定具体未来时间点（如业务截止时间或对方约定时间）时传 resumeAt（与 delayMinutes 最多填一个）。立即结束本轮并释放执行名额，到时在原会话续做，只检查原作业或回复，同一请求不要重发；无回复时按实际情况再次挂起，有部分回复先判断可独立继续的工作。按渠道或接口规范（含对应的对象/通知参数）提交成功并拿到回执或读回已落库，即视为已发出，应直接用本工具休眠等待定时复查，不得仅因回执未返回“对方已收到提醒/已读”等下游送达证明而改调 task_ask_user；仅当发送报错、提交结果不明或已有明确证据表明该渠道无法触达/无法触发真实提醒时才交由用户处理，持续无回复时在后续唤醒中再按 checkpoint 升级。有新疑点可发新一轮澄清并保存新回执。没有外部结果、只是把本任务改到以后做用 task_reschedule。必须单独调用。",
+      { checkpoint: str("恢复点，1–8000 字", { minLength: 1, maxLength: 8000 }), resumeAt: beijing("可选：明确约定的北京时间；常规等待请省略以使用系统退避"), delayMinutes: int("可选/兼容参数：省略或传入均由系统按 1→5→10→15→30→60 分钟退避安排", { minimum: 1, maximum: 10080 }) },
       ["checkpoint"]));
     if (!ctx.computer) {
       // Browser work uses same-session switch_scene(scene=computer); isolated task_relay_computer is retired.
@@ -412,7 +412,7 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
       return employee(defined({ action: "help", text: a.question, ...(Object.keys(assist).length ? { assist } : {}) }));
     }
     case "task_wait": {
-      if ((a.resumeAt === undefined) === (a.delayMinutes === undefined)) throw new ArgumentError("参数.resumeAt 和 参数.delayMinutes 必须恰好填一个");
+      if (a.resumeAt !== undefined && a.delayMinutes !== undefined) throw new ArgumentError("参数.resumeAt 和 参数.delayMinutes 最多填一个");
       return employee(defined({ action: "defer", text: a.checkpoint, nextAt: a.resumeAt, nextCheckInMinutes: a.delayMinutes }));
     }
     case "task_relay_computer": return employee({ action: "relay", scene: "computer", text: a.handoff });

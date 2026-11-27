@@ -85,6 +85,8 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
     ["task_progress", { message: "m", plan: [{ content: "a", status: "completed" }] }, { action: "progress", text: "m", plan: [{ content: "a", status: "completed" }] }, task],
     ["task_request_approval", { request: "pay" }, { action: "ask", text: "pay" }, task],
     ["task_ask_user", { question: "code?" }, { action: "help", text: "code?" }, task],
+    ["task_wait", { checkpoint: "job 1" }, { action: "defer", text: "job 1" }, task],
+    ["task_wait", { checkpoint: "job 1", resumeAt: "2030-01-01 09:00" }, { action: "defer", text: "job 1", nextAt: "2030-01-01 09:00" }, task],
     ["task_wait", { checkpoint: "job 1", delayMinutes: 5 }, { action: "defer", text: "job 1", nextCheckInMinutes: 5 }, task],
         ["task_complete", { evidence: "ok", deliverableRefs: [] }, { action: "complete", text: "ok", deliverableRef: [] }, task],
     ["task_complete", { evidence: "ok", outlineReview: [{ requirement: "test", status: "met", evidence: "receipt" }] }, { action: "complete", text: "ok", outlineReview: [{ requirement: "test", status: "met", evidence: "receipt" }] }, task],
@@ -117,8 +119,7 @@ test("schema errors catch invalid browser arguments before any browser work", ()
   assert.throws(() => map("browser_view", { tab: "C1", zoom: { x: 0, y: 0, width: 0, height: 10 } }), /width 必须大于 0/);
   assert.throws(() => map("browser_view", { tab: "C1", scope: "invalid" }), /参数\.scope 只能是/);
   assert.throws(() => map("browser_view", { tab: "C1", unknown: true }), /不接受字段 unknown/);
-  assert.throws(() => map("task_wait", { checkpoint: "x" }, task), /resumeAt 和 参数\.delayMinutes 必须恰好填一个/);
-  assert.throws(() => map("task_wait", { checkpoint: "x", delayMinutes: 5, resumeAt: "2030-01-01 09:00" }, task), /恰好填一个/);
+  assert.throws(() => map("task_wait", { checkpoint: "x", delayMinutes: 5, resumeAt: "2030-01-01 09:00" }, task), /最多填一个/);
   assert.throws(() => map("employee_task_create", { instructions: "x", runAt: "tomorrow 9am" }), /runAt 至少 16 个字符|runAt 格式不对/);
   const self = { ...task, taskId: "self" };
   assert.throws(() => map("task_reschedule", {}, self), /runAt 和 参数\.delayMinutes 必须恰好填一个/);
@@ -286,6 +287,7 @@ test("task_wait vs task_ask_user guidance stays generic and prefers scheduled sl
     assert(!/未触达或不确定时如实告知/.test(text));
     assert(!/TAPD|notify=1/i.test(text));
   }
+  assert.match(waitDesc, /1→5→10→15→30→60/);
   assert.match(waitDesc, /发送报错、提交结果不明或已有明确证据/);
   assert.match(EMPLOYEE_TASK_RULES, /发送失败、提交结果不明或有明确证据/);
   assert.match(askDesc, /task_wait 自动休眠并定时复查/);
