@@ -21,7 +21,8 @@ import {
   ACTIVE_MEMORY_CAP,
   type MemoryRecord,
 } from "../server/core/employee";
-import { parseTags } from "../server/core/memory";
+import { formatMemoriesForPrompt, parseTags } from "../server/core/memory";
+import { EMPLOYEE_MEMORY_RULES } from "../server/core/prompt";
 import { employeeCall } from "./public-call";
 
 async function fixture() {
@@ -422,4 +423,24 @@ test("search ranks a tag hit above a memory that shares no wording", () => {
   const plain = proposeMemory(memories, { claim: "构建脚本固定用 vite", kind: "convention", source: "user", tags: ["构建"] });
   assert(tag.ok && plain.ok);
   assert.deepEqual(searchMemories(memories, "vue-router").map((m) => m.id)[0], tag.memory.id, "the tag holder outranks the incidental bigram overlap");
+});
+
+test("recalled memory block and rules treat historical environment/procedure clues as reference, not failure verdicts", () => {
+  const memories: MemoryRecord[] = [];
+  const env = proposeMemory(memories, { claim: "旧网页富文本输入 @ 仅保存纯文本", kind: "environment", source: "user" });
+  assert(env.ok);
+  const block = formatMemoriesForPrompt(memories);
+  assert.match(block, /可用记忆/);
+  assert.match(block, /历史参考/);
+  assert.match(block, /不得据此直接判定当前操作失败/);
+  assert.match(block, /以本轮工具实测为准/);
+  assert.match(block, /偏好\/约定\/纠错类在未被本轮要求覆盖时继续遵守/);
+  assert.match(EMPLOYEE_MEMORY_RULES, /环境\/流程\/人事类记忆仅作历史参考线索/);
+  assert.match(EMPLOYEE_MEMORY_RULES, /不得仅凭旧记忆直接判定当前失败/);
+  assert.match(EMPLOYEE_MEMORY_RULES, /跨通道\/跨入口否定本轮实时回执/);
+  assert.match(EMPLOYEE_MEMORY_RULES, /偏好\/约定\/纠错类在未被本轮要求覆盖时继续遵守/);
+  assert.match(EMPLOYEE_MEMORY_RULES, /memory_propose\(memoryId\) 或 memory_manage 修正\/归档/);
+  for (const text of [block, EMPLOYEE_MEMORY_RULES]) {
+    assert(!/TAPD|notify=1/i.test(text));
+  }
 });

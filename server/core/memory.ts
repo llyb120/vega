@@ -390,7 +390,7 @@ export function formatMemoriesForPrompt(memories: MemoryRecord[]) {
         })
         .join("\n");
   }
-  return `\n可用记忆（已按当前任务筛选）：\n${lines.join("\n")}${extra}`;
+  return `\n可用记忆（历史参考，非实时事实；环境/流程/人事类仅作线索，不得据此直接判定当前操作失败、跳过尝试或否定其他通道的实时回执，一切以本轮工具实测为准；偏好/约定/纠错类在未被本轮要求覆盖时继续遵守）：\n${lines.join("\n")}${extra}`;
 }
 
 export type RecallOptions = {
