@@ -16,6 +16,8 @@ export function chromiumArguments(profile, extension, sandbox = "0") {
     "--no-default-browser-check",
     "--window-size=1440,900",
     "--password-store=basic",
+    // Cloud/VPC smart DNS can resolve same-region COS/OSS domains to internal IPs, triggering Chromium LNA/PNA blocks on http:// pages in direct mode.
+    "--disable-features=LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests",
     // No debugging bar resizing the viewport on attach; only the Vega extension runs in this profile.
     "--silent-debugger-extension-api",
     `--user-data-dir=${profile}`,

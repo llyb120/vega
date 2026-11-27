@@ -1,3 +1,7 @@
 {
-  "PromptForDownloadLocation": false
+  "PromptForDownloadLocation": false,
+  "LocalNetworkAccessRestrictionsEnabled": false,
+  "LocalNetworkAccessRestrictionsTemporaryOptOut": true,
+  "LocalNetworkAccessAllowedForUrls": ["*"],
+  "InsecurePrivateNetworkRequestsAllowed": true
 }

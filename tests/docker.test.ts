@@ -20,6 +20,11 @@ test("container Chromium automatically loads the fixed extension in its private 
   assert(args.includes("--disable-extensions-except=/app/extension"));
   assert(args.includes("--silent-debugger-extension-api"));
   assert(
+    args.includes(
+      "--disable-features=LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests",
+    ),
+  );
+  assert(
     !args.some((arg: string) =>
       /no-sandbox|disable.*sandbox|remote-debugging|ignore-certificate|disable-web-security/.test(
         arg,
@@ -175,6 +180,10 @@ test("Docker image builds Linux-native artifacts, uses a restricted identity lau
   );
   const policy = JSON.parse(readFileSync("docker/chromium-policy.json", "utf8"));
   assert.equal(policy.PromptForDownloadLocation, false);
+  assert.equal(policy.LocalNetworkAccessRestrictionsEnabled, false);
+  assert.equal(policy.LocalNetworkAccessRestrictionsTemporaryOptOut, true);
+  assert.deepEqual(policy.LocalNetworkAccessAllowedForUrls, ["*"]);
+  assert.equal(policy.InsecurePrivateNetworkRequestsAllowed, true);
   assert.equal(policy.DownloadDirectory, undefined, "a machine-wide directory would override per-profile private paths");
 });
 

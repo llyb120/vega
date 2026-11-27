@@ -55,6 +55,8 @@ export function headlessArguments(profile: string, extension: string, network?: 
     "--disable-dev-shm-usage",
     "--disable-quic",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    // Cloud/VPC smart DNS can resolve same-region COS/OSS domains to internal IPs, triggering Chromium LNA/PNA blocks on http:// pages in direct mode.
+    "--disable-features=LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests",
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
