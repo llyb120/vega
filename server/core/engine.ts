@@ -877,13 +877,13 @@ export class Engine {
     if (session.localBrowser) {
       assert(session.browserClientId || session.clientId, "本机浏览器需要绑定一台在线客户端。");
       const browser = await this.localBrowsers.get(session, signal);
-      browser.protectTab = (tag) => this.taskTabs.used(undefined, tag);
+      browser.protectTab = (tag) => this.taskTabs.protect(tag);
       return browser;
     }
     const ownerId = await this.browserOwnerId(session);
     // Employee/task work and cloud sessions use the owner's shared private profile.
     const browser = session.employeeId || session.taskId || cloudFor(session) ? await this.browsers.get(this.browserProfileKey(ownerId)) : this.chrome;
-    browser.protectTab = (tag) => this.taskTabs.used(undefined, tag);
+    browser.protectTab = (tag) => this.taskTabs.protect(tag);
     return browser;
   }
   async compact(tools: Tools, model: Model, system: string, force = false, dynamic = "") {

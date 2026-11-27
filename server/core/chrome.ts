@@ -24,6 +24,9 @@ import {
 export type TabHooks = {
   used: (tag: string) => Promise<void>;
   opened: (tag: string) => Promise<void>;
+  blockedBy?: (tag: string) => Promise<string | undefined>;
+  blockedTags?: (tags: string[]) => Promise<Set<string>>;
+  closed?: (tag: string) => Promise<void>;
   /** When true, this owner holds exclusive runtime ownership of tabs it opens/uses until releaseTabs(owner). */
   exclusive?: boolean;
 };
@@ -149,14 +152,19 @@ export class Chrome {
     return gate;
   }
   private isHumanView(owner: string) {
-    return owner.startsWith("browser-view:");
+    return owner.startsWith("browser-view:") || owner.startsWith("employee-view:");
   }
-  claimTab(owner: string, tag: string, exclusive = false) {
+  async claimTab(owner: string, tag: string, exclusive = false, hooks?: TabHooks) {
     if (!tag || this.isHumanView(owner)) return;
     const holder = this.tabOwners.get(tag);
     assert(
       !holder || holder === owner,
       `标签 ${tag} 正由另一个并行会话占用，不能跨会话操作；请用 browser_tabs(action="open") 新开你自己的独立标签，或只操作你已打开的标签。`,
+    );
+    const taskHolder = await hooks?.blockedBy?.(tag);
+    assert(
+      !taskHolder,
+      `标签 ${tag} 正由另一个未完成/等待中的任务（${taskHolder}）占用，不能跨任务抢占；请用 browser_tabs(action="open") 新开你自己的独立标签，或只操作本任务已打开的标签。`,
     );
     if (exclusive) this.tabOwners.set(tag, owner);
   }
@@ -170,12 +178,18 @@ export class Chrome {
       this.bridge.hideCursor();
     }
   }
-  private visibleTabs(owner: string, tabs: Obj[] | undefined) {
+  private async visibleTabs(owner: string, tabs: Obj[] | undefined, hooks?: TabHooks) {
     if (!Array.isArray(tabs) || this.isHumanView(owner)) return tabs;
-    return tabs.filter((t) => {
+    const runtimeVisible = tabs.filter((t) => {
       const holder = typeof t?.tag === "string" ? this.tabOwners.get(t.tag) : undefined;
       return !holder || holder === owner;
     });
+    if (!hooks?.blockedTags || !runtimeVisible.length) return runtimeVisible;
+    const blocked = await hooks.blockedTags(
+      runtimeVisible.map((t) => String(t?.tag || "")).filter(Boolean),
+    );
+    if (!blocked.size) return runtimeVisible;
+    return runtimeVisible.filter((t) => typeof t?.tag !== "string" || !blocked.has(t.tag));
   }
   observations = new Map<string, Observation>();
   /** Held left-button drag across chrome_act calls (captcha sliders, etc.). */
@@ -1667,12 +1681,12 @@ export class Chrome {
         const viewOpts = { screenshot: withView };
         if (action === "list") {
           const res = await this.bridge.request("tabs", { incognito: args.incognito }, signal);
-          let tabs = this.visibleTabs(owner, res.tabs) || [];
+          let tabs = await this.visibleTabs(owner, res.tabs, hooks) || [];
           const q = typeof args.query === "string" ? args.query.trim().toLowerCase() : "";
           if (q) tabs = tabs.filter((t) => String(t.title || "").toLowerCase().includes(q) || String(t.url || "").toLowerCase().includes(q));
           if (q && tabs.length === 1 && tabs[0].controllable !== false) {
             const tag = String(tabs[0].tag);
-            this.claimTab(owner, tag, !!hooks?.exclusive);
+            await this.claimTab(owner, tag, !!hooks?.exclusive, hooks);
             if (hooks) await hooks.used(tag);
             this.activeTabs.set(owner, tag);
             const out: Obj = { tab: tag, tabs: compactBrowserTabs(tabs) };
@@ -1698,20 +1712,20 @@ export class Chrome {
               }, signal);
               openedTag = String(r.tabTag || r.tab || "");
               if (openedTag) {
-                this.claimTab(owner, openedTag, !!hooks?.exclusive);
+                await this.claimTab(owner, openedTag, !!hooks?.exclusive, hooks);
                 await recordOpened(hooks, openedTag);
                 this.activeTabs.set(owner, openedTag);
               }
               return r;
             }),
           );
-          const tabs = this.visibleTabs(owner, res.tabs) || [];
+          const tabs = await this.visibleTabs(owner, res.tabs, hooks) || [];
           const out: Obj = { tab: openedTag, tabs: compactBrowserTabs(tabs) };
           if (res.view) Object.assign(out, await this.formatView(owner, openedTag, res.view, true));
           return out;
         }
         const tag = this.resolveBoundTab(owner, args.tab);
-        this.claimTab(owner, tag, !!hooks?.exclusive);
+        await this.claimTab(owner, tag, !!hooks?.exclusive, hooks);
         if (hooks) await hooks.used(tag);
         return await this.tabGate(tag).run(async () => {
           const op = action === "switch" ? "select_tab" : action === "close" ? "close_tab" : action;
@@ -1723,12 +1737,13 @@ export class Chrome {
           if (action !== "close" && withView) payload.viewOpts = viewOpts;
           const runCmd = () => this.bridge.request(op, payload, signal);
           const res = op === "select_tab" ? await this.visualGate.run(runCmd) : await runCmd();
-          const tabs = this.visibleTabs(owner, res.tabs) || [];
+          const tabs = await this.visibleTabs(owner, res.tabs, hooks) || [];
           if (action === "close") {
             if (this.activeTabs.get(owner) === tag) this.activeTabs.delete(owner);
             this.snapshots.delete(`${owner}:${tag}`);
             for (const [key, obs] of this.observations) if (obs.tabTag === tag) this.observations.delete(key);
             if (this.tabOwners.get(tag) === owner) this.tabOwners.delete(tag);
+            await hooks?.closed?.(tag);
             return { closed: tag, tabs: compactBrowserTabs(tabs) };
           }
           this.activeTabs.set(owner, tag);
@@ -1740,7 +1755,7 @@ export class Chrome {
 
       if (toolName === "browser_view") {
         const tag = this.resolveBoundTab(owner, args.tab);
-        this.claimTab(owner, tag, !!hooks?.exclusive);
+        await this.claimTab(owner, tag, !!hooks?.exclusive, hooks);
         if (hooks) await hooks.used(tag);
         this.activeTabs.set(owner, tag);
         const snap = this.snapshots.get(`${owner}:${tag}`);
@@ -1778,7 +1793,7 @@ export class Chrome {
 
       if (toolName === "browser_act") {
         const tag = this.resolveBoundTab(owner, args.tab);
-        this.claimTab(owner, tag, !!hooks?.exclusive);
+        await this.claimTab(owner, tag, !!hooks?.exclusive, hooks);
         if (hooks) await hooks.used(tag);
         this.activeTabs.set(owner, tag);
         const prevSnap = this.snapshots.get(`${owner}:${tag}`);
@@ -1822,10 +1837,10 @@ export class Chrome {
         return await this.tabGate(tag).run(async () => {
           const viewOpts = { screenshot: args.screenshot !== false };
           const res = await this.bridge.request("act", { tabTag: tag, steps: mappedSteps, viewOpts }, signal);
-          const openedVisible = this.visibleTabs(owner, res.openedTabs || []) || [];
+          const openedVisible = await this.visibleTabs(owner, res.openedTabs || [], hooks) || [];
           for (const ot of openedVisible) {
             if (ot.tag) {
-              this.claimTab(owner, ot.tag, !!hooks?.exclusive);
+              await this.claimTab(owner, ot.tag, !!hooks?.exclusive, hooks);
               await recordOpened(hooks, ot.tag);
             }
           }
@@ -1868,7 +1883,7 @@ export class Chrome {
 
       if (toolName === "browser_eval") {
         const tag = this.resolveBoundTab(owner, args.tab);
-        this.claimTab(owner, tag, !!hooks?.exclusive);
+        await this.claimTab(owner, tag, !!hooks?.exclusive, hooks);
         if (hooks) await hooks.used(tag);
         this.activeTabs.set(owner, tag);
         await this.checkTabCredentialUrl(owner, tag, String(args.code || ""), credentials, signal);
@@ -1915,7 +1930,7 @@ export class Chrome {
           }, signal);
         }
         const tag = this.resolveBoundTab(owner, args.tab);
-        this.claimTab(owner, tag, !!hooks?.exclusive);
+        await this.claimTab(owner, tag, !!hooks?.exclusive, hooks);
         if (hooks) await hooks.used(tag);
         this.activeTabs.set(owner, tag);
         return await this.tabGate(tag).run(() =>
@@ -1979,10 +1994,10 @@ export class Chrome {
             const opened = await this.bridge.request(args.operation, { ...input, tabTag: target }, signal);
             tag = opened.tabTag || target || "";
             if (tag) {
-              this.claimTab(owner, tag, !!hooks?.exclusive);
+              await this.claimTab(owner, tag, !!hooks?.exclusive, hooks);
               await recordOpened(hooks, tag);
             }
-            if (opened?.tabs) opened.tabs = this.visibleTabs(owner, opened.tabs);
+            if (opened?.tabs) opened.tabs = await this.visibleTabs(owner, opened.tabs, hooks);
             return opened;
           }),
         );
@@ -1991,7 +2006,7 @@ export class Chrome {
           const tabs = await this.settleNavigation(tag, input.settleMs, signal);
           const out = {
             ...result,
-            ...(tabs && result.tabs ? { tabs: this.visibleTabs(owner, tabs) } : {}),
+            ...(tabs && result.tabs ? { tabs: await this.visibleTabs(owner, tabs, hooks) } : {}),
             ...(await this.feedback(owner, tag, input, input.observe || "inspect", signal)),
           };
           return notes === undefined ? out : { ...out, notes };
@@ -2000,7 +2015,7 @@ export class Chrome {
         if (this.cancelled.get(owner) === control) this.cancelled.delete(owner);
       }
     }
-    if (target) this.claimTab(owner, target, !!hooks?.exclusive);
+    if (target) await this.claimTab(owner, target, !!hooks?.exclusive, hooks);
     return await (target ? this.tabGate(target) : this.gate).run(async () => {
       if (target && hooks) await hooks.used(target);
       const control = new AbortController();
@@ -2077,14 +2092,14 @@ export class Chrome {
     if (op === "downloads") return this.downloads(a, signal);
     if (op === "tabs") {
       const result = await this.bridge.request("tabs", a, signal);
-      const visible = this.visibleTabs(owner, result.tabs) || [];
+      const visible = await this.visibleTabs(owner, result.tabs, hooks) || [];
       const query = String(a.query || "").toLowerCase();
       result.tabs = visible.filter(
         (t: Obj) =>
           !query || (t.title + " " + t.url).toLowerCase().includes(query),
       );
       if (result.tabs.length === 1) {
-        this.claimTab(owner, result.tabs[0].tag, !!hooks?.exclusive);
+        await this.claimTab(owner, result.tabs[0].tag, !!hooks?.exclusive, hooks);
         if (hooks) await hooks.used(result.tabs[0].tag);
         return {
           ...result,
@@ -2116,9 +2131,9 @@ export class Chrome {
         ? await this.visualGate.run(send)
         : await send();
       tag = result.tabTag || tag;
-      if (result?.tabs) result.tabs = this.visibleTabs(owner, result.tabs);
+      if (result?.tabs) result.tabs = await this.visibleTabs(owner, result.tabs, hooks);
       if ((op === "open" || op === "new_tab") && result.tabTag) {
-        this.claimTab(owner, result.tabTag, !!hooks?.exclusive);
+        await this.claimTab(owner, result.tabTag, !!hooks?.exclusive, hooks);
         await recordOpened(hooks, result.tabTag);
       }
       if (["close_tab", "goto", "back", "forward", "reload"].includes(op)) {
@@ -2128,6 +2143,7 @@ export class Chrome {
       }
       if (op === "close_tab") {
         if (tag && this.tabOwners.get(tag) === owner) this.tabOwners.delete(tag);
+        if (tag) await hooks?.closed?.(tag);
         return result;
       }
       if (a.observe === "none") return result;
@@ -2136,7 +2152,7 @@ export class Chrome {
         return {
           ...result,
           // The bridge listed tabs as the navigation started; report them as they are after settling.
-          ...(tabs && result.tabs ? { tabs: this.visibleTabs(owner, tabs) } : {}),
+          ...(tabs && result.tabs ? { tabs: await this.visibleTabs(owner, tabs, hooks) } : {}),
           ...(await this.feedback(
             owner,
             tag,
@@ -2228,15 +2244,14 @@ export class Chrome {
     let error: string | undefined, value: unknown, opened: Obj[] = [], tabDiscoveryError: string | undefined;
     const discover = async () => {
       const { tabs } = await this.bridge.request("tabs", {}, signal);
-      const found = tabs.filter((t: Obj) => {
-        if (t.openerTag !== tag || before.some((b: Obj) => b.tag === t.tag)) return false;
-        const holder = typeof t.tag === "string" ? this.tabOwners.get(t.tag) : undefined;
-        return !holder || holder === owner;
-      });
+      const candidates = tabs.filter((t: Obj) =>
+        t.openerTag === tag && !before.some((b: Obj) => b.tag === t.tag),
+      );
+      const found = await this.visibleTabs(owner, candidates, hooks) || [];
       if (found.length) {
         opened = found;
         for (const tab of found) {
-          this.claimTab(owner, tab.tag, !!hooks?.exclusive);
+          await this.claimTab(owner, tab.tag, !!hooks?.exclusive, hooks);
           await recordOpened(hooks, tab.tag);
         }
       }

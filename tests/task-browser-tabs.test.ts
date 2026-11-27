@@ -107,12 +107,29 @@ test("terminal tasks reclaim only their own new tabs; a paused task keeps them",
   assert(f.bridge.tabs.some((tab) => tab.tag === "user-tab"), "原有标签不能被回收");
 });
 
-test("another task or a person taking over a created tab protects it", async (t) => {
+test("active tasks isolate their tabs from other tasks, while human browser-view protects them without releasing task lock", async (t) => {
   const f = await fixture(t), first = await f.job(), second = await f.job();
   const shared = await f.open(first.tools), viewed = await f.open(first.tools), disposable = await f.open(first.tools);
-  await second.tools.execute({ id: "borrow", ...chromeCall({ operation: "goto", tabTag: shared, url: "https://task.test/shared", observe: "none" }) }, {} as any);
+  // While first is running, second cannot see or hijack first's tabs.
+  const listed = await second.tools.execute({ id: "list", ...chromeCall({ operation: "tabs", visual: "none" }) }, {} as any);
+  assert(!listed.value.tabs.some((tab: any) => [shared, viewed, disposable].includes(tab.tag)));
+  await assert.rejects(
+    second.tools.execute({ id: "steal", ...chromeCall({ operation: "goto", tabTag: shared, url: "https://task.test/steal", observe: "none" }) }, {} as any),
+    /正由另一个未完成\/等待中的任务/,
+  );
+
+  // Human live view (browser-view:*) is never blocked and marks the tab shared so cleanup preserves it,
+  // while still keeping first's cross-task lock intact until first ends.
   f.chrome.feedback = async () => ({ tabTag: viewed, pages: [{ title: "page", url: "https://task.test/" }], images: [{ url: "/image", pixelWidth: 10, pixelHeight: 10 }] }) as any;
   await browserScreenshot(f.chrome, "browser-view:alice", viewed);
+  await assert.rejects(
+    second.tools.execute({ id: "steal-viewed", ...chromeCall({ operation: "goto", tabTag: viewed, url: "https://task.test/steal-viewed", observe: "none" }) }, {} as any),
+    /正由另一个未完成\/等待中的任务/,
+  );
+
+  // Once first stops, second can take over `shared` (protecting it from cleanup if first later completes).
+  await f.employee.update((state) => { f.employee.task(state, first.id).status = "stopped"; });
+  await second.tools.execute({ id: "borrow", ...chromeCall({ operation: "goto", tabTag: shared, url: "https://task.test/shared", observe: "none" }) }, {} as any);
   await f.employee.update((state) => { f.employee.task(state, first.id).status = "done"; });
   await until(async () => !(await f.store.object("task-browser-tabs", first.id)));
   assert.deepEqual(f.bridge.closed, [disposable]);
@@ -120,11 +137,18 @@ test("another task or a person taking over a created tab protects it", async (t)
   assert(f.bridge.tabs.some((tab) => tab.tag === viewed));
 });
 
-test("a uniquely observed tab is protected when another task finds it through chrome_tabs", async (t) => {
+test("uniquely matched tabs of an active task stay hidden from other tasks' query, while ended tasks' tabs can be found and protected", async (t) => {
   const f = await fixture(t), first = await f.job(), second = await f.job(), created = await f.open(first.tools);
   f.bridge.tabs.find((tab) => tab.tag === created)!.url = "https://task.test/unique";
   f.chrome.feedback = async () => ({ pages: [] }) as any;
-  await second.tools.execute({ id: "find", ...chromeCall({ operation: "tabs", query: "/unique", visual: "none" }) }, {} as any);
+  const activeFind = await second.tools.execute({ id: "find-active", ...chromeCall({ operation: "tabs", query: "/unique", visual: "none" }) }, {} as any);
+  assert.deepEqual(activeFind.value.tabs, []);
+
+  // Once first stops (not running/sleeping/waiting), second can discover and take over the tab, protecting it from later done cleanup.
+  await f.employee.update((state) => { f.employee.task(state, first.id).status = "stopped"; });
+  const stoppedFind = await second.tools.execute({ id: "find-stopped", ...chromeCall({ operation: "tabs", query: "/unique", visual: "none" }) }, {} as any);
+  assert.equal(stoppedFind.value.tabs.length, 1);
+  assert.equal(stoppedFind.value.tabs[0].tag, created);
   await f.employee.update((state) => { f.employee.task(state, first.id).status = "done"; });
   await until(async () => !(await f.store.object("task-browser-tabs", first.id)));
   assert(!f.bridge.closed.includes(created));
@@ -326,6 +350,85 @@ test("runtime tab ownership isolates concurrent sessions, overlaps tab loading, 
   assert.equal(f.chrome.tabOwners.get(openA.tabTag), "session-B");
   f.chrome.releaseTabs("session-B");
   assert.equal(f.chrome.tabOwners.size, 0);
+});
+
+test("sleeping and waiting tasks keep exclusive tab isolation across sessions while same-task phases can reuse their tabs", async (t) => {
+  const f = await fixture(t), first = await f.job(), second = await f.job();
+  const created = await f.open(first.tools);
+  // Simulate phase end: runtime tabOwners is empty, only persistent TaskBrowserTabs ownership remains.
+  f.chrome.releaseTabs(first.session.id);
+  assert.equal(f.chrome.tabOwners.size, 0);
+
+  for (const status of ["deferred", "waiting", "approval", "queued", "recovering"]) {
+    await f.employee.update((state) => { f.employee.task(state, first.id).status = status; });
+    const listed = await second.tools.execute({ id: "list-" + status, name: "browser_tabs", arguments: { action: "list" } }, {} as any);
+    assert(!listed.value.tabs.some((tab: any) => tab.tag === created), `status=${status} must hide tab from second task`);
+    for (const [label, toolName, args] of [
+      ["goto", "browser_tabs", { action: "goto", tab: created, url: "https://evil.test/", view: false }],
+      ["view", "browser_view", { tab: created, screenshot: false }],
+      ["act", "browser_act", { tab: created, steps: [{ op: "wait", ms: 0 }], screenshot: false }],
+      ["close", "browser_tabs", { action: "close", tab: created }],
+    ] as [string, string, any][]) {
+      await assert.rejects(
+        second.tools.execute({ id: `${status}-${label}`, name: toolName, arguments: args }, {} as any),
+        /正由另一个未完成\/等待中的任务/,
+        `status=${status} op=${label} must be rejected`,
+      );
+    }
+  }
+
+  // A later browser_agent phase / session of the SAME task can still see and reuse `created`.
+  const sameTaskLater = await f.store.newSession({ ownerId: "alice", employeeId: f.employee.employeeId, taskId: first.id, scene: "computer" });
+  const sameTaskTools = await Tools.create(f.engine, sameTaskLater, { provider: {}, scenes: { computer: ["fixture/model"] } } as any, new AbortController().signal, () => {});
+  const sameListed = await sameTaskTools.execute({ id: "same-list", name: "browser_tabs", arguments: { action: "list" } }, {} as any);
+  assert(sameListed.value.tabs.some((tab: any) => tab.tag === created));
+  const reused = await sameTaskTools.execute({ id: "same-goto", ...chromeCall({ operation: "goto", tabTag: created, url: "https://task.test/resumed", observe: "none" }) }, {} as any);
+  assert.equal(reused.value.tab || reused.value.tabTag, created);
+});
+
+test("pre-existing user-tab used by a deferred task is protected from other tasks and never auto-closed on done", async (t) => {
+  const f = await fixture(t), first = await f.job(), second = await f.job();
+  await first.tools.execute({ id: "nav-user", ...chromeCall({ operation: "goto", tabTag: "user-tab", url: "https://existing.test/work", observe: "none" }) }, {} as any);
+  await f.employee.update((state) => { f.employee.task(state, first.id).status = "deferred"; });
+
+  const listed = await second.tools.execute({ id: "list-user", ...chromeCall({ operation: "tabs", visual: "none" }) }, {} as any);
+  assert(!listed.value.tabs.some((tab: any) => tab.tag === "user-tab"), "deferred task's pre-existing tab must be hidden from second task");
+  await assert.rejects(
+    second.tools.execute({ id: "steal-user", ...chromeCall({ operation: "goto", tabTag: "user-tab", url: "https://evil.test/", observe: "none" }) }, {} as any),
+    /正由另一个未完成\/等待中的任务/,
+  );
+
+  // Once first completes, user-tab must NOT be closed and becomes available to second again.
+  await f.employee.update((state) => { f.employee.task(state, first.id).status = "done"; });
+  await until(async () => !(await f.store.object("task-browser-tabs", first.id)));
+  assert(f.bridge.tabs.some((tab) => tab.tag === "user-tab"));
+  assert(!f.bridge.closed.includes("user-tab"));
+  const afterDone = await second.tools.execute({ id: "list-after", ...chromeCall({ operation: "tabs", visual: "none" }) }, {} as any);
+  assert(afterDone.value.tabs.some((tab: any) => tab.tag === "user-tab"));
+});
+
+test("explicit tab close releases task ownership, and plain sessions cannot hijack active task tabs while human views can", async (t) => {
+  const f = await fixture(t), first = await f.job();
+  const tabA = await f.open(first.tools);
+  const tabB = await f.open(first.tools);
+  await f.employee.update((state) => { f.employee.task(state, first.id).status = "waiting"; });
+
+  // Plain non-task session cannot hijack tabA while first is waiting.
+  const plainSession = await f.store.newSession({ ownerId: "alice", scene: "computer" });
+  const plainTools = await Tools.create(f.engine, plainSession, { provider: {}, scenes: { computer: ["fixture/model"] } } as any, new AbortController().signal, () => {});
+  await assert.rejects(
+    plainTools.execute({ id: "plain-steal", ...chromeCall({ operation: "goto", tabTag: tabA, url: "https://evil.test/", observe: "none" }) }, {} as any),
+    /正由另一个未完成\/等待中的任务/,
+  );
+
+  // Human views (employee-view:* and browser-view:*) remain unrestricted.
+  const empView = await f.chrome.execute("employee-view:alice", ".", { operation: "goto", tabTag: tabA, url: "https://human-emp.test/", observe: "none" });
+  assert.equal(empView.tabTag, tabA);
+
+  // Explicit close by owning task releases its ownership record immediately.
+  await first.tools.execute({ id: "close-b", name: "browser_tabs", arguments: { action: "close", tab: tabB } }, {} as any);
+  assert.equal(await f.store.object("task-browser-tab", tabB), undefined);
+  assert(await f.store.object("task-browser-tab", tabA));
 });
 
 test("real isolated Chrome closes a finished task's tab while preserving the user's existing page", { skip: process.env.VEGA_TEST_CHROME !== "1", timeout: 60000 }, async () => {

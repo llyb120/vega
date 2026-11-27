@@ -1143,8 +1143,11 @@ export class Tools {
       this.signal,
       this.credentials,
       {
-        used: (tag) => this.engine.taskTabs.used(this.session.taskId, tag),
+        used: (tag) => this.engine.taskTabs.used(this.session, tag),
         opened: (tag) => this.engine.taskTabs.opened(this.session, tag),
+        blockedBy: (tag) => this.engine.taskTabs.ownerOf?.(tag, this.session.taskId),
+        blockedTags: (tags) => this.engine.taskTabs.blockedTags?.(tags, this.session.taskId) ?? Promise.resolve(new Set()),
+        closed: (tag) => this.engine.taskTabs.closed?.(this.session.taskId, tag),
         exclusive: !!this.engine.active?.has(this.session.id),
       },
     );
