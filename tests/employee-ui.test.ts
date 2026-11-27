@@ -229,7 +229,7 @@ test("task handoff uses the selected client's id and is only offered to managers
 
 test("work panel attention cards summarize long briefs and leave full detail to the opened task", () => {
   const panel = readFileSync("web/src/WorkPanel.vue", "utf8");
-  assert(panel.includes("function brief(") && panel.includes("brief(task.text)"), "titles must be summarized");
+  assert(panel.includes("function brief(") && panel.includes("brief(taskDisplayTitle(task))"), "titles must be summarized");
   assert(panel.includes("brief(task.status === 'approval' ? task.approval : task.waiting"), "approval/waiting bodies must be summarized");
   assert(panel.includes('查看详情') && panel.includes("emit('open', task.id)"), "users open the task for the full brief");
   assert(panel.includes("-webkit-line-clamp: 2") && panel.includes("-webkit-line-clamp: 3"), "CSS clamps keep cards scannable");
@@ -259,4 +259,43 @@ test("ordinary users have no history/session dispatch navigation and task approv
     assert(task.includes("'approve')") && task.includes("'reject')"));
   }
   assert(readFileSync("web/src/TaskDetail.vue", "utf8").includes("task.execution?.localAgent"));
+});
+
+test("openEmployeeTask routes running, attention, waiting and ended tasks into mutually exclusive tabs", async () => {
+  const tasks = [
+    { id: "t-run", status: "running" },
+    { id: "t-rec", status: "recovering" },
+    { id: "t-wait", status: "waiting" },
+    { id: "t-app", status: "approval" },
+    { id: "t-q", status: "queued" },
+    { id: "t-def", status: "deferred" },
+    { id: "t-done", status: "done" },
+  ];
+  const context: any = {
+    view: ref("employee"),
+    selectedEmployee: ref("ea"),
+    employee: ref({ tasks }),
+    employeeTaskFilter: ref("active"),
+    employeeTaskFocus: ref(""),
+    employeeTab: ref("chat"),
+    ended: (status: string) => ["done", "failed", "stopped", "cancelled", "sealed"].includes(status),
+    refreshEmployee: async () => {},
+    toast() {},
+  };
+  const open = vm.runInNewContext(between("async function openEmployeeTask(", "async function employeeTabChanged(") + "\nopenEmployeeTask", context);
+  const expected = [
+    ["t-run", "active"],
+    ["t-rec", "active"],
+    ["t-wait", "attention"],
+    ["t-app", "attention"],
+    ["t-q", "waiting"],
+    ["t-def", "waiting"],
+    ["t-done", "history"],
+  ];
+  for (const [id, filter] of expected) {
+    await open(id);
+    assert.equal(context.employeeTaskFilter.value, filter, `${id} should open ${filter}`);
+    assert.equal(context.employeeTaskFocus.value, id);
+    assert.equal(context.employeeTab.value, "tasks");
+  }
 });

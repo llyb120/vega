@@ -5,16 +5,26 @@ import TaskDetail from "./TaskDetail.vue";
 import { taskLabel, taskTone, planProgress, shortTime, needsAttention } from "./task-status";
 import { chainEdgeLabel, chainTasks, groupTasksByChain } from "../../shared/task-chain";
 import { taskDisplayTitle } from "./conversation.js";
-const props = defineProps({ active: Array, attention: Array, history: Array, filter: String, focus: String, readonly: Boolean, act: Function, saveMemory: Function, employeeId: String, clients: Array, handoff: Function, canOpenBrowser: Boolean });
+const props = defineProps({ running: Array, attention: Array, waiting: Array, history: Array, filter: String, focus: String, readonly: Boolean, act: Function, saveMemory: Function, employeeId: String, clients: Array, handoff: Function, canOpenBrowser: Boolean });
 const emit = defineEmits(["filter", "select", "inspect", "chat", "quote-task", "open-browser", "open-settings"]);
 const list = ref(null);
 const media = window.matchMedia("(min-width: 1024px)"), twoPane = ref(media.matches);
 const sync = () => { twoPane.value = media.matches; };
 media.addEventListener("change", sync);
 onBeforeUnmount(() => media.removeEventListener("change", sync));
-const filters = computed(() => [["active", "进行中", props.active.length], ["attention", "待我处理", props.attention.length], ["history", "已结束", props.history.length]]);
-const visible = computed(() => props.filter === "history" ? props.history : props.filter === "attention" ? props.attention : props.active);
-const all = computed(() => [...props.active, ...props.history]);
+const filters = computed(() => [
+  ["active", "进行中", props.running.length],
+  ["attention", "待我处理", props.attention.length],
+  ["waiting", "等待中", props.waiting.length],
+  ["history", "已结束", props.history.length],
+]);
+const visible = computed(() =>
+  props.filter === "history" ? props.history
+    : props.filter === "attention" ? props.attention
+    : props.filter === "waiting" ? props.waiting
+    : props.running,
+);
+const all = computed(() => [...props.running, ...props.attention, ...props.waiting, ...props.history]);
 const grouped = computed(() => groupTasksByChain(visible.value, all.value));
 const selected = computed(() => props.focus ? all.value.find((task) => task.id === props.focus) : (twoPane.value ? visible.value[0] : null));
 const selectedChainTasks = computed(() => selected.value?.chainId ? chainTasks(all.value, selected.value.chainId) : []);
@@ -94,7 +104,7 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
         </template>
         <div v-if="!visible.length" class="empty-state">
           <Icon name="inbox" :size="28" />
-          <strong>{{ filter === 'attention' ? '没有需要你处理的事项' : filter === 'history' ? '还没有结束的任务' : '暂时没有进行中的任务' }}</strong>
+          <strong>{{ filter === 'attention' ? '没有需要你处理的事项' : filter === 'waiting' ? '没有等待中的任务' : filter === 'history' ? '还没有结束的任务' : '暂时没有进行中的任务' }}</strong>
           <span>在对话中交代工作。</span>
           <button v-if="filter !== 'history'" type="button" class="sm" @click="emit('chat')">去对话交代</button>
         </div>
@@ -112,7 +122,7 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
 .task-list-pane { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: var(--surface); }
 .task-toolbar { display: grid; gap: 10px; flex: none; padding: 12px; border-bottom: 1px solid var(--border); }
 .segmented { display: flex; }
-.segmented > button { flex: 1; }
+.segmented > button { flex: 1; min-width: 0; padding: 0 6px; gap: 3px; white-space: nowrap; }
 .task-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; scrollbar-width: thin; }
 .task-item { display: flex; align-items: flex-start; gap: 10px; width: 100%; height: auto; padding: 10px; border: 1px solid transparent; border-radius: var(--r-md); background: transparent; font-weight: 400; text-align: left; white-space: normal; }
 .task-item + .task-item { margin-top: 2px; }

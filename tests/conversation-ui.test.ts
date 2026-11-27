@@ -483,3 +483,30 @@ test("chat avatars never animate; sidebar and header avatars animate only while 
   const avatar = readFileSync("web/src/PixelAvatar.vue", "utf8");
   assert(avatar.includes("IntersectionObserver"), "off-screen avatars pause");
 });
+
+test("task status helpers partition active, attention, waiting and ended states mutually exclusively", async () => {
+  const { isEnded, needsAttention, isRunningTask, isWaitingTask, taskFilterOf } = await import("../web/src/task-status.js");
+  const cases = [
+    ["running", "active"],
+    ["recovering", "active"],
+    ["waiting", "attention"],
+    ["approval", "attention"],
+    ["queued", "waiting"],
+    ["deferred", "waiting"],
+    ["done", "history"],
+    ["failed", "history"],
+    ["cancelled", "history"],
+    ["stopped", "history"],
+    ["sealed", "history"],
+  ];
+  for (const [status, expected] of cases) {
+    assert.equal(taskFilterOf(status), expected, `${status} belongs to ${expected}`);
+    const buckets = [
+      isRunningTask(status),
+      needsAttention(status),
+      isWaitingTask(status),
+      isEnded(status),
+    ].filter(Boolean);
+    assert.equal(buckets.length, 1, `${status} matches exactly one mutually exclusive bucket`);
+  }
+});

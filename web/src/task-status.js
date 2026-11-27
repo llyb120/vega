@@ -29,6 +29,14 @@ export const taskLabel = (status) => TASK_LABELS[status] || status || "";
 export const isInProgress = (status) => taskTone(status) === "info";
 export const isEnded = (status) => ["done", "failed", "cancelled", "stopped", "sealed"].includes(status);
 export const needsAttention = (status) => ["waiting", "approval"].includes(status);
+export const isRunningTask = (status) => ["running", "recovering"].includes(status);
+export const isWaitingTask = (status) => !isEnded(status) && !needsAttention(status) && !isRunningTask(status);
+export function taskFilterOf(status) {
+  if (isEnded(status)) return "history";
+  if (needsAttention(status)) return "attention";
+  if (isRunningTask(status)) return "active";
+  return "waiting";
+}
 export function planProgress(plan) {
   if (!plan?.length) return null;
   const done = plan.filter((step) => step.status === "completed").length;

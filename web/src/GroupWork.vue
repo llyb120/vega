@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import TaskDetail from "./TaskDetail.vue";
-import { taskLabel, taskTone, planProgress, shortTime, isEnded, needsAttention } from "./task-status";
+import { taskLabel, taskTone, planProgress, shortTime, isEnded, needsAttention, isRunningTask, isWaitingTask } from "./task-status";
 import { taskDisplayTitle } from "./conversation.js";
 import { chainEdgeLabel, chainTasks, groupTasksByChain } from "../../shared/task-chain";
 // The group's 工作面板: tasks started from this group, by member employee (GET /groups/:id/tasks, already ordered).
@@ -15,11 +15,19 @@ const owned = () => props.members?.some((member) => member.mine && member.id ===
 const requester = (task) => task.requester?.kind === "employee" ? `热心市民「${task.requester.name}」` : task.requester?.name || "";
 const note = (task) => task.status === "waiting" ? task.waiting : task.status === "approval" ? task.approval : task.summary || task.progress?.at(-1)?.text || task.queueReason || "";
 const allTasks = computed(() => (props.members || []).flatMap((member) => member.tasks || []));
-const activeCount = computed(() => allTasks.value.filter((task) => !isEnded(task.status)).length);
+const runningCount = computed(() => allTasks.value.filter((task) => isRunningTask(task.status)).length);
+const attentionCount = computed(() => allTasks.value.filter((task) => needsAttention(task.status)).length);
+const waitingCount = computed(() => allTasks.value.filter((task) => isWaitingTask(task.status)).length);
 const endedCount = computed(() => allTasks.value.filter((task) => isEnded(task.status)).length);
 const filteredMembers = computed(() => (props.members || []).map((member) => {
   const all = member.tasks || [];
-  const visible = all.filter((task) => filter.value === "all" || (filter.value === "active" ? !isEnded(task.status) : isEnded(task.status)));
+  const visible = all.filter((task) =>
+    filter.value === "all"
+    || (filter.value === "active" && isRunningTask(task.status))
+    || (filter.value === "attention" && needsAttention(task.status))
+    || (filter.value === "waiting" && isWaitingTask(task.status))
+    || (filter.value === "ended" && isEnded(task.status)),
+  );
   return { ...member, tasks: visible, grouped: groupTasksByChain(visible, all) };
 }));
 const selectedChainTasks = computed(() => {
@@ -107,14 +115,16 @@ onBeforeUnmount(() => { version++; });
     <div v-else class="panel-scroll">
       <div v-if="allTasks.length" class="work-filters" role="tablist" aria-label="任务筛选">
         <button type="button" role="tab" :aria-selected="filter === 'all'" @click="filter = 'all'">全部<span>{{ allTasks.length }}</span></button>
-        <button type="button" role="tab" :aria-selected="filter === 'active'" @click="filter = 'active'">进行中<span>{{ activeCount }}</span></button>
+        <button type="button" role="tab" :aria-selected="filter === 'active'" @click="filter = 'active'">进行中<span>{{ runningCount }}</span></button>
+        <button type="button" role="tab" :aria-selected="filter === 'attention'" @click="filter = 'attention'">待我处理<span>{{ attentionCount }}</span></button>
+        <button type="button" role="tab" :aria-selected="filter === 'waiting'" @click="filter = 'waiting'">等待中<span>{{ waitingCount }}</span></button>
         <button type="button" role="tab" :aria-selected="filter === 'ended'" @click="filter = 'ended'">已结束<span>{{ endedCount }}</span></button>
       </div>
       <p v-if="loading && !members?.length" class="panel-empty"><span class="spinner" aria-hidden="true"></span>加载中…</p>
       <p v-else-if="!members?.length" class="panel-empty">群里还没有热心市民。</p>
       <section v-for="member in filteredMembers" :key="member.id" class="member-section">
         <h4><span class="member-avatar"><EmployeeAvatar :employee-id="member.id" :name="member.name" :avatar="member.avatar" /></span>{{ member.name }}<small v-if="member.mine">我的</small><span class="count">{{ member.tasks.length }}</span></h4>
-        <p v-if="!member.tasks.length" class="panel-empty">{{ filter === 'active' ? '当前没有进行中的任务。' : filter === 'ended' ? '还没有已结束的任务。' : '还没有群里发起的任务。' }}</p>
+        <p v-if="!member.tasks.length" class="panel-empty">{{ filter === 'active' ? '当前没有进行中的任务。' : filter === 'attention' ? '当前没有需要你处理的任务。' : filter === 'waiting' ? '当前没有等待中的任务。' : filter === 'ended' ? '还没有已结束的任务。' : '还没有群里发起的任务。' }}</p>
         <div v-else class="task-grid">
           <template v-for="group in member.grouped" :key="group.kind === 'single' ? group.task.id : group.chainId">
             <button v-if="group.kind === 'single'" type="button" class="task-row" :class="[taskTone(group.task.status), { ended: isEnded(group.task.status), attention: needsAttention(group.task.status) }]" :data-task-id="group.task.id" :title="group.task.text" @click="open(member, group.task)">
@@ -158,7 +168,7 @@ onBeforeUnmount(() => { version++; });
             </div>
           </template>
         </div>
-        <p v-if="filter !== 'active' && member.endedHidden" class="panel-empty">更早结束的 {{ member.endedHidden }} 个任务未显示。</p>
+        <p v-if="(filter === 'all' || filter === 'ended') && member.endedHidden" class="panel-empty">更早结束的 {{ member.endedHidden }} 个任务未显示。</p>
       </section>
     </div>
   </aside>
@@ -169,8 +179,8 @@ onBeforeUnmount(() => { version++; });
 .panel-head h3 { flex: 1; font-size: 13px; }
 .panel-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px 16px; scrollbar-width: thin; }
 .panel-scroll.detail { display: flex; flex-direction: column; padding: 0; }
-.work-filters { display: flex; align-items: center; gap: 4px; margin: 0 0 8px; padding: 3px; border-radius: var(--r-md); background: var(--surface-2); }
-.work-filters button { flex: 1; justify-content: center; gap: 5px; min-height: 26px; padding: 0 8px; border: 0; border-radius: calc(var(--r-md) - 2px); background: transparent; color: var(--muted); font-size: 12px; font-weight: 500; }
+.work-filters { display: flex; align-items: center; gap: 2px; margin: 0 0 8px; padding: 3px; border-radius: var(--r-md); background: var(--surface-2); }
+.work-filters button { flex: 1; min-width: 0; justify-content: center; gap: 3px; min-height: 26px; padding: 0 5px; border: 0; border-radius: calc(var(--r-md) - 2px); background: transparent; color: var(--muted); font-size: 12px; font-weight: 500; white-space: nowrap; }
 .work-filters button span { font-size: 11px; opacity: .75; font-variant-numeric: tabular-nums; }
 .work-filters button[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: var(--sh-sm); }
 .member-section h4 { display: flex; align-items: center; gap: 8px; margin: 10px 2px 8px; color: var(--text-2); font-size: 12px; }

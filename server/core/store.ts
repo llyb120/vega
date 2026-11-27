@@ -391,6 +391,18 @@ export class Store {
     const rows = await this.all("SELECT data FROM employee_tasks WHERE employee=? AND active=1", employee);
     return rows.filter((row: any) => JSON.parse(row.data).status === "running").length;
   }
+  async employeeTaskCounts(employee: string) {
+    const rows = await this.all("SELECT data FROM employee_tasks WHERE employee=? AND active=1", employee);
+    let runningTasks = 0, inProgressTasks = 0, attentionTasks = 0, waitingTasks = 0;
+    for (const row of rows as any[]) {
+      const status = JSON.parse(row.data).status;
+      if (status === "running") runningTasks++;
+      if (status === "running" || status === "recovering") inProgressTasks++;
+      else if (status === "waiting" || status === "approval") attentionTasks++;
+      else waitingTasks++;
+    }
+    return { activeTasks: rows.length, runningTasks, inProgressTasks, attentionTasks, waitingTasks };
+  }
   async employeeRuns(employee: string) {
     return (await this.all("SELECT id,data FROM employee_runs WHERE employee=? ORDER BY id", employee)) as { id: number; data: string }[];
   }

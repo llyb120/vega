@@ -26,8 +26,15 @@ const emit = defineEmits(["choose", "open-group", "create", "navigate", "logout"
 const clientOpen = ref(false);
 const roleLabel = { admin: "管理员", operator: "操作用户", viewer: "只读用户" };
 const adminNav = [["debug", "调试会话", "code"]];
-function employeeTone(entry) { return entry.attentionTasks ? "warn" : entry.activeTasks ? "info" : ""; }
-function employeeLine(entry) { return entry.attentionTasks ? `${entry.attentionTasks} 项待你处理` : entry.activeTasks ? `${entry.activeTasks} 项进行中` : "空闲"; }
+const runningOf = (entry) => entry.inProgressTasks ?? entry.runningTasks ?? 0;
+const waitingOf = (entry) => entry.waitingTasks ?? Math.max(0, (entry.activeTasks || 0) - (entry.attentionTasks || 0) - runningOf(entry));
+function employeeTone(entry) { return entry.attentionTasks ? "warn" : runningOf(entry) ? "info" : waitingOf(entry) ? "idle" : ""; }
+function employeeLine(entry) {
+  if (entry.attentionTasks) return `${entry.attentionTasks} 项待你处理`;
+  if (runningOf(entry)) return `${runningOf(entry)} 项进行中`;
+  if (waitingOf(entry)) return `${waitingOf(entry)} 项等待中`;
+  return "空闲";
+}
 const unreadLabel = (n) => n > 99 ? "99+" : String(n);
 </script>
 <template>
@@ -60,7 +67,8 @@ const unreadLabel = (n) => n > 99 ? "99+" : String(n);
           <span class="nav-text nav-label"><strong class="truncate">{{ entry.name }}</strong><small :class="employeeTone(entry)">{{ employeeLine(entry) }}</small></span>
           <span v-if="entry.unread" class="unread" :aria-label="entry.unread + ' 条未读消息'">{{ unreadLabel(entry.unread) }}</span>
           <span v-if="entry.attentionTasks" class="count warn nav-label">{{ entry.attentionTasks }}</span>
-          <span v-else-if="entry.activeTasks" class="count nav-label">{{ entry.activeTasks }}</span>
+          <span v-else-if="runningOf(entry)" class="count nav-label">{{ runningOf(entry) }}</span>
+          <span v-else-if="waitingOf(entry)" class="count nav-label">{{ waitingOf(entry) }}</span>
         </button>
       </template>
       <p v-if="!groups.length" class="sidebar-empty nav-label">还没有热心市民</p>

@@ -1008,9 +1008,9 @@ export class Employee {
   /** Best-effort notification; a failed count (e.g. during shutdown) is not an error for the caller. */
   async emitChanged() {
     const runtime = this.runtime, emit = runtime.emit; // the listener at the time of the change
-    let activeTasks: number, runningTasks: number;
-    try { [activeTasks, runningTasks] = await Promise.all([this.store.activeTaskCount(this.employeeId), this.store.runningTaskCount(this.employeeId)]); } catch { return; }
-    emit.call(runtime, "employee_changed", { employeeId: this.employeeId, activeTasks, runningTasks });
+    let counts: { activeTasks: number; runningTasks: number; inProgressTasks: number; attentionTasks: number; waitingTasks: number };
+    try { counts = await this.store.employeeTaskCounts(this.employeeId); } catch { return; }
+    emit.call(runtime, "employee_changed", { employeeId: this.employeeId, ...counts });
   }
   schedule() {
     if (this.closed) return;

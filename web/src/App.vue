@@ -7,6 +7,7 @@ import { SseSocket } from "./sse-socket.js";
 import ConversationTimeline from "./ConversationTimeline.vue";
 import ExperiencesView from "./ExperiencesView.vue";
 import { formatBeijing } from "../../shared/time";
+import { isRunningTask, isWaitingTask, needsAttention } from "./task-status";
 import EmployeeSessionView from "./EmployeeSessionView.vue";
 import EmployeeChat from "./EmployeeChat.vue";
 import { clearChatCache, pruneChatCache } from "./chat-cache.js";
@@ -322,19 +323,42 @@ const activeTasks = computed(() =>
 const historyTasks = computed(() =>
   (employee.value.tasks || []).filter((t) => ended(t.status)).toReversed(),
 );
-const attentionTasks = computed(() => activeTasks.value.filter((task) => ["waiting", "approval"].includes(task.status)));
-const visibleEmployeeTasks = computed(() => employeeTaskFilter.value === "history" ? historyTasks.value : employeeTaskFilter.value === "attention" ? attentionTasks.value : activeTasks.value);
-const employeeStatus = computed(() => attentionTasks.value.length ? "需要你处理" : activeTasks.value.some((task) => task.status === "running") ? "正在工作" : "随时待命");
+const attentionTasks = computed(() => activeTasks.value.filter((task) => needsAttention(task.status)));
+const runningTasks = computed(() => activeTasks.value.filter((task) => isRunningTask(task.status)));
+const waitingTasks = computed(() => activeTasks.value.filter((task) => isWaitingTask(task.status)));
+const visibleEmployeeTasks = computed(() =>
+  employeeTaskFilter.value === "history" ? historyTasks.value
+    : employeeTaskFilter.value === "attention" ? attentionTasks.value
+    : employeeTaskFilter.value === "waiting" ? waitingTasks.value
+    : runningTasks.value,
+);
+const employeeStatus = computed(() =>
+  attentionTasks.value.length ? "需要你处理"
+    : runningTasks.value.length ? "正在工作"
+    : waitingTasks.value.length ? "等待中"
+    : "随时待命",
+);
 const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['memories', '记忆'], ['capabilities', '技能 / MCP'], ...(employee.value.canManage ? [['settings', '设置']] : [])]);
-const employeeTone = computed(() => attentionTasks.value.length ? "warn" : activeTasks.value.some((task) => task.status === "running") ? "info" : "ok");
+const employeeTone = computed(() =>
+  attentionTasks.value.length ? "warn"
+    : runningTasks.value.length ? "info"
+    : waitingTasks.value.length ? "idle"
+    : "ok",
+);
 const employeeCounts = computed(() => ({ tasks: attentionTasks.value.length || activeTasks.value.length, attention: attentionTasks.value.length, memories: employee.value.memories?.length || 0 }));
 const workPanelVisible = computed(() => wide.value ? !workPanelHidden.value : workRailOpen.value);
 function toggleWorkPanel() {
   if (wide.value) workPanelHidden.value = !workPanelHidden.value;
   else workRailOpen.value = !workRailOpen.value;
 }
-function showTasks(filter = "active") {
-  employeeTaskFilter.value = filter;
+function defaultTaskFilter() {
+  if (runningTasks.value.length) return "active";
+  if (attentionTasks.value.length) return "attention";
+  if (waitingTasks.value.length) return "waiting";
+  return "active";
+}
+function showTasks(filter = "") {
+  employeeTaskFilter.value = filter || defaultTaskFilter();
   employeeTaskFocus.value = "";
   workRailOpen.value = false;
   employeeTab.value = "tasks";
@@ -1034,7 +1058,15 @@ function handleEvent(event) {
     if (typeof event.data?.activeTasks === "number") {
       // Keep the sidebar row live: its count and "working" avatar follow task status without a reload.
       const entry = employees.value.find((e) => e.id === event.data.employeeId);
-      if (entry) Object.assign(entry, { activeTasks: event.data.activeTasks, runningTasks: event.data.runningTasks ?? entry.runningTasks });
+      if (entry) {
+        Object.assign(entry, {
+          activeTasks: event.data.activeTasks,
+          runningTasks: event.data.runningTasks ?? entry.runningTasks,
+          inProgressTasks: event.data.inProgressTasks ?? entry.inProgressTasks,
+          attentionTasks: event.data.attentionTasks ?? entry.attentionTasks,
+          waitingTasks: event.data.waitingTasks ?? entry.waitingTasks,
+        });
+      }
       activeTaskCount.value = employees.value.reduce((count, e) => count + (e.activeTasks || 0), 0);
     }
     queueEmployeeRefresh();
@@ -1165,7 +1197,7 @@ async function chooseEmployee(id, taskId = "") {
   employeeEvent.value = null;
   employeeTab.value = taskId ? "tasks" : "chat";
   const task = taskId && employee.value.tasks?.find((entry) => entry.id === taskId);
-  employeeTaskFilter.value = task && ended(task.status) ? "history" : "active";
+  employeeTaskFilter.value = !task ? "active" : ended(task.status) ? "history" : ["waiting", "approval"].includes(task.status) ? "attention" : ["running", "recovering"].includes(task.status) ? "active" : "waiting";
   employeeTaskFocus.value = taskId;
   memoryID.value = "";
   taskText.value = "";
@@ -1269,7 +1301,7 @@ async function openEmployeeTask(id) {
     toast("这条任务记录已不存在");
     return;
   }
-  employeeTaskFilter.value = ended(task.status) ? "history" : "active";
+  employeeTaskFilter.value = ended(task.status) ? "history" : ["waiting", "approval"].includes(task.status) ? "attention" : ["running", "recovering"].includes(task.status) ? "active" : "waiting";
   employeeTaskFocus.value = id;
   employeeTab.value = "tasks";
 }
@@ -1287,6 +1319,14 @@ function openGroupEmployee(id) {
 }
 async function employeeTabChanged(id) {
   employeeTab.value = id;
+  if (id === "tasks" && !employeeTaskFocus.value) {
+    const current = employeeTaskFilter.value;
+    const empty =
+      (current === "active" && !runningTasks.value.length) ||
+      (current === "attention" && !attentionTasks.value.length) ||
+      (current === "waiting" && !waitingTasks.value.length);
+    if (empty) employeeTaskFilter.value = defaultTaskFilter();
+  }
 }
 async function openAssistBrowser(payload) {
   const targetEmployee = payload?.employeeId || selectedEmployee.value;
@@ -1644,15 +1684,16 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
               <EmployeeChat :key="user.id + ':' + selectedEmployee" :api="api" :user-id="user.id" :employee-id="selectedEmployee" :name="employee.name" :avatar="employee.avatar" :readonly="!canExecute" :composer="employeeComposers[selectedEmployee]" :revision="employeeSessionVersion" :event="employeeEvent" :tasks="employee.tasks" :remember="employee.canManage ? saveMemory : undefined" @task="openEmployeeTask" />
             </div>
             <button v-if="workPanelVisible && !wide" type="button" class="panel-backdrop" aria-label="关闭当前工作" tabindex="-1" @click="workRailOpen = false"></button>
-            <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :active="activeTasks" :readonly="!canExecute" :act="employeeTaskAction" :can-open-browser="!!employee.canManage" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @open-browser="openAssistBrowser" @open-settings="openAssistSettings" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
+            <WorkPanel v-if="workPanelVisible" :attention="attentionTasks" :running="runningTasks" :waiting="waitingTasks" :readonly="!canExecute" :act="employeeTaskAction" :can-open-browser="!!employee.canManage" :overlay="!wide" @open="(id) => { workRailOpen = false; openEmployeeTask(id); }" @all="showTasks" @open-browser="openAssistBrowser" @open-settings="openAssistSettings" @close="wide ? (workPanelHidden = true) : (workRailOpen = false)" />
           </div>
           <div v-if="employeeTab === 'browser' && selectedEmployee" class="employee-browser"><BrowserView :key="selectedEmployee" :api="employeeBrowserApi" :employee-id="selectedEmployee" :csrf="csrfToken" :target-tab="browserAssistTarget?.employeeId === selectedEmployee ? browserAssistTarget : null" :on-return-task="returnFromBrowserAssist" :on-complete-assist="completeAssistFromBrowser" :on-dismiss-target="() => { browserAssistTarget = null; }" /></div>
           <EmployeeTasks
             v-if="employeeTab === 'tasks'"
             :key="selectedEmployee"
             :employee-id="selectedEmployee"
-            :active="activeTasks"
+            :running="runningTasks"
             :attention="attentionTasks"
+            :waiting="waitingTasks"
             :history="historyTasks"
             :filter="employeeTaskFilter"
             :focus="employeeTaskFocus"

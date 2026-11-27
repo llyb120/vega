@@ -807,7 +807,7 @@ export class Engine {
       await this.store.files.remove(this.store.files.employee(key));
     } finally { employee.resetting = false; }
     await this.clearEmployeeChat(key);
-    employee.runtime.emit("employee_changed", { employeeId: key, reset: true, activeTasks: 0 });
+    employee.runtime.emit("employee_changed", { employeeId: key, reset: true, activeTasks: 0, runningTasks: 0, inProgressTasks: 0, attentionTasks: 0, waitingTasks: 0 });
     employee.schedule();
     return { ok: true };
   }
